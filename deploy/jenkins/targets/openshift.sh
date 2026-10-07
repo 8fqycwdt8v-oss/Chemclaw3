@@ -264,7 +264,7 @@ apply_helm() {
 # component. Neither `Chemclaw3_ui` nor any `Chemclaw3-mcp` server describes itself deployably, so a
 # release can change one's bytes and nothing else — it cannot create the Deployment, and it cannot
 # move a port, a probe, a resource limit or an env var. An operator creates it once by hand.
-# `docs/planning/DEFERRED.md` carries the trigger for closing that; this function carries the
+# `docs/planning/BACKLOG.md` carries the trigger for closing that; this function carries the
 # consequence, because the place an operator meets it is a failed release rather than a document.
 chartless_failure() {
   local deployment="$1"

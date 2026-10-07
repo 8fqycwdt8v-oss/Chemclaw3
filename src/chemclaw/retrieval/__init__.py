@@ -1,23 +1,13 @@
 """Reading the system's own data back out: the retrievers, and the report harness over them.
 
-Two halves joined by one contract. **Retrieval** is `retrievers` (graph substring, dense embedding,
-lexical FTS, structural similarity), `hybrid` (Reciprocal Rank Fusion across them) and
-`vector_index` (the derived dense + lexical index, in-memory or Postgres). **The report harness**
-(`harness`) is the deep-research pattern turned inward — decompose → fan-out → verify → cite →
-synthesize, over accumulated internal notes instead of the web, producing a sectioned, fully-cited
-draft that is written like every other agent-generated artifact: straight through, carrying its
-provenance, and corrected rather than pre-approved
-(D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
+**Retrieval** is `retrievers` (graph substring, dense, lexical FTS, structural similarity),
+`hybrid` (Reciprocal Rank Fusion) and `vector_index` (the derived dense + lexical index). **The
+report harness** (`harness`) is the deep-research pattern turned inward (decompose, fan out,
+verify, cite, synthesize) over internal notes, producing a fully cited draft written straight
+through with its provenance.
 
-`evidence` is what joins them: the harness core knows *only* the retriever contract and no concrete
-source (gate G6), and every `EvidenceChunk` carries a back-reference to its source note, so an
-unsupported claim is discarded rather than written. Sources are attached through
-`chemclaw.ingest.sources`, not by editing anything here — no new data store.
-
-The package was called `report` before D-148 and kept that docstring until D-156, which is why its
-name and its opening line disagreed for a while.
-
-**`chemclaw.memory` is next door and stays there.** This package answers "what do we have on this?";
-memory answers "what did past work teach us?" — campaign chains, failure modes, distilled playbooks.
-The two sound alike, which is exactly why the split is recorded rather than left to be re-derived.
+`evidence` joins them: the harness knows only the retriever contract, and every
+`EvidenceChunk` carries its source note, so an unsupported claim is discarded. Sources attach
+through `chemclaw.ingest.sources`. `chemclaw.memory` is separate: this package answers "what do
+we have on this?", memory "what did past work teach us?".
 """

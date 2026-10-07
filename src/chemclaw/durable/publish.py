@@ -1,24 +1,12 @@
-"""Shared workflow-side pieces of the durable note write (gate G4/DRY).
+"""Shared workflow-side retry and timeout discipline for durable activities.
 
-Why this exists: three workflows (QM job, BO campaign, development report) end by
-writing an agent note into the graph. The retry discipline is identical for
-all of them — run on the light background queue, bound the attempts so a broken
-git remote gives up instead of retrying forever, and (for best-effort publishes)
-never let a failed note write fail the completed scientific result. Before this
-module the block was copy-pasted per workflow and the copies drifted (the report
-publish shipped with no retry bound at all).
-
-`BAD_DATA_RETRY` is the same idea for ordinary activities: a `ValueError` means
-bad/corrupt data that will never succeed on retry, so fail fast (`ChemclawError`
-subclasses inherit from `ValueError` but Temporal matches non-retryable types by
-exact class name, so the concrete names are listed too). The queue bounds are the
-other shared discipline here: one place that says how long an activity may wait for a worker to pick
-it up, in three sizes because a wait means three different things. `queue_wait_timeout` is core's
-hour; `connector_queue_wait_timeout` is a bundle's, where a long wait is ordinary backpressure; and
-`light_write_queue_wait_timeout` is the tighter one the end-of-job writes take, because patience
-there is time a finished job has told nobody about. `calculation_retry` is the last piece —
-`BAD_DATA_RETRY` with a backoff sized to the thing that is now retryable, a shared calculation
-backend that is full.
+`BAD_DATA_RETRY` fails fast on bad data (Temporal matches non-retryable types by exact class
+name, so every bad-data class is listed) and bounds transient retries. The note and result
+publish helpers run on the light background queue and, for best-effort publishes, never fail a
+completed scientific result. The queue-wait bounds say how long an activity may sit unclaimed,
+in three sizes: `queue_wait_timeout` (core's hour), `connector_queue_wait_timeout` (a bundle's,
+where a wait is backpressure) and `light_write_queue_wait_timeout` (end-of-job writes).
+`calculation_retry` adds a backoff sized to a full calculation backend.
 """
 
 from datetime import timedelta
@@ -33,19 +21,14 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
 
-# Temporal matches `non_retryable_error_types` by exact class name (not isinstance),
-# so every bad-data name that can cross an activity boundary is listed explicitly.
-# `ValidationError` (pydantic) subclasses `ValueError` but has its own class name, so
-# a model-build failure on corrupt data would otherwise be treated as retryable.
-#
-# The completeness walk in `tests/test_publish.py` asserts every `ChemclawError` subclass is
-# either listed here or *declared* retryable below — a subclass in neither set is the drift the
-# walk exists to catch, while a silent exemption would be the walk defeated.
+# Temporal matches `non_retryable_error_types` by exact class name (not isinstance), so every
+# bad-data name that can cross an activity boundary is listed, including pydantic's
+# `ValidationError`. `tests/test_publish.py` asserts every `ChemclawError` subclass is either
+# listed here or declared retryable below.
 _DECLARED_RETRYABLE = frozenset(
     {
-        # `kg.git_submitter.GitRemoteError`: a dead remote, a timed-out git command, a contended
-        # submit lock. The transient half `GitWriteError` used to cover with one name — which
-        # made `note_write_max_attempts` dead for exactly the failures it was configured for.
+        # Not here: `kg.git_submitter.GitRemoteError` (dead remote, timeout, contended lock) is the
+        # retryable half of git write failures.
         "GitRemoteError",
     }
 )
@@ -56,170 +39,91 @@ _BAD_DATA_TYPES = [
     "ChemclawError",
     "InvalidSmilesError",
     "FingerprintError",
-    # The *argument* was not fingerprintable — a prose sentence where a reaction SMILES was
-    # expected, an OCR artefact in an impurity list (`science.fingerprints.store`). Listed beside
-    # its parent because Temporal matches by class *name*, so a subclass inherits nothing here, and
-    # `tests/test_publish.py` walks the hierarchy precisely so this cannot be forgotten. Retrying a
-    # string the parser has already refused finds the identical refusal.
+    # The argument was not fingerprintable; listed beside its parent because names, not the
+    # hierarchy, are matched.
     "FingerprintInputError",
     # A structure asked of a citation-only reaction (`ingest/eln/ord.py`): the source named a
     # species without its structure, and a retry finds the identical record.
     "StructureNotGiven",
-    # A fork of a session with no saved state (`agent/session_fork.py`). Bad data rather than
-    # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
-    # exactly the same absence — nothing about waiting makes a checkpoint appear.
+    # A fork of a session with no saved state; retrying finds the same absence.
     "SessionForkError",
-    # The proposal store finding neither an inserted row nor an existing one after its own
-    # insert-or-conflict (`agent/behaviour_proposals.py`). Unreachable by construction and listed
-    # anyway, because the walk in `tests/test_publish.py` asks about every subclass rather than
-    # about the ones that happen to cross an activity boundary today — and the answer here is the
-    # same one it would be if something durable ever did write a proposal: the statements are
-    # deterministic against the same rows, so a retry finds the identical impossibility.
+    # The proposal store's insert-or-conflict found no row; deterministic against the same rows.
     "ProposalStoreError",
-    # A document the personal skills tier will not keep (`agent/local_skills.py`) — a name already
-    # taken, a body over the cap, something that is not a `SKILL.md` at all. Bad data by the same
-    # argument as its neighbours: the admission rules are deterministic against the same bytes, so
-    # a retry finds the identical refusal. Listed although no activity writes a skill today,
-    # because `tests/test_publish.py` walks every subclass rather than the ones that cross an
-    # activity boundary at this commit.
+    # A document the personal skills tier will not keep; the admission rules are deterministic.
     "SkillRefused",
-    # A `reaction_records.conditions` payload that is not a JSON object at all
-    # (`ingest/eln/records.py`). Bad data rather than transient — no build of this ingest writes
-    # one, and retrying re-reads the same row. Distinct from the *extra field* a newer build
-    # writes, which is tolerated rather than raised.
+    # A `reaction_records.conditions` payload that is not a JSON object; retrying re-reads the same
+    # row.
     "UnreadableConditions",
     "ElnMappingError",
     "ElnFormatError",
     "OrdFormatError",
     "IngestError",
-    # An activity result over `activity_result_max_bytes` — the ceiling
-    # `durable/interceptor.py` refuses at so the broker does not refuse it invisibly. Bad data
-    # rather than transient, and this is the one entry in this list whose retryability was
-    # *measured*: unrefused, the worker retried a 6 MB result for ever against a gRPC
-    # `ResourceExhausted` while every attempt logged `completed`. The result is a deterministic
-    # function of the arguments, so the next attempt is the same number of bytes.
+    # An activity result over `activity_result_max_bytes` (`durable/interceptor.py`); the result is
+    # deterministic in the arguments, so a retry is the same size.
     "ActivityResultTooLarge",
     "MetricError",
     "PlaybookError",
-    # A campaign's recorded points and its decision space disagreeing, or a design space whose
-    # parameters cannot be expressed as factors (`protocols/from_bo.py`). Bad data by the same
-    # test as every entry here: all four refusals are permanent properties of the two documents —
-    # two parameter names slugging to one factor name, a parameter over 96 settings, runs naming
-    # or omitting a declared parameter, a campaign that has suggested nothing. Waiting changes
-    # none of them, and retrying finds the identical disagreement.
+    # A campaign's recorded points and its decision space disagreeing, or a design space that cannot
+    # be expressed as factors; permanent properties of the two documents.
     "BoTranslationError",
     "NoteError",
-    # A channel named in `CHEMCLAW_DELIVERY_CHANNELS` with no folder, or a `config:`
-    # block the driver's signature refuses (`chemclaw.deliver.registry`). Both are a
-    # deployment's declaration disagreeing with what is on disk, and a retry finds the
-    # same disagreement — the destination being *unreachable* is a different failure
-    # and raises from the driver, not from here.
+    # A delivery channel with no folder or a `config:` the driver refuses; an unreachable
+    # destination
+    # raises from the driver instead and stays retryable.
     "DeliveryChannelError",
     "EvalCaseError",
-    # A run scored against a baseline recorded on a *different* case-set
-    # (`chemclaw.evals.baseline`). Bad data by the same test as every entry here: the committed
-    # baseline file and the version the run declared are both facts, and the identical comparison
-    # stays impossible until a person refreshes one of them.
+    # A run scored against a baseline recorded on a different case-set; stays impossible until a
+    # person refreshes one of them.
     "CaseSetMismatchError",
-    # A tool that answered a template's `tool` step with `isError=True` rather than a result
-    # (`chemclaw.agent.tool_invocation`). Non-retryable because the server *answered*: it has made
-    # its verdict, and the identical call gets the identical refusal. The retryable neighbour is
-    # `CalcServerError`, which means nobody answered at all.
+    # A tool answered with `isError=True`: the server gave its verdict. `CalcServerError` (nobody
+    # answered) is the retryable neighbour.
     "ToolReturnedFailure",
-    # A tool call the model mis-serialised, refused by `agent/model_calls.refuse_unparsed_arguments`
-    # before the body runs. It is here because `tests/test_publish.py` walks the hierarchy and every
-    # `ChemclawError` must be classified, and it is *non*-retryable for the ordinary reason: the
-    # arguments are a fact about the emission, so an identical retry re-reads the identical
-    # unparseable document. It is also unreachable across an activity boundary, though **not** for
-    # the reason this comment first gave ("no activity invokes that chain" —
-    # `durable/template_activities.run_agent_step` is an `@activity.defn` that builds the agent and
-    # runs a whole turn through exactly that chain). The real reason is one middleware out:
-    # `surface_domain_errors` is outermost of `tool_call_middleware` and converts every
-    # `ChemclawError` into a `ToolMessage`, so this never leaves the graph as a raised exception
-    # whatever ran it. Either way the row is the classification rather than a live policy.
+    # A tool call the model mis-serialised; the arguments are fixed, so a retry re-reads the same
+    # document. In practice `surface_domain_errors` converts it to a `ToolMessage` before it can
+    # cross an activity boundary.
     "UnparsedArguments",
-    # A turn tried to change the skills tree (`chemclaw.agent.skill_backend`). An
-    # `AuthorizationError` subclass, and registered for the same reason every other one is: Temporal
-    # matches by class *name*, and `tests/test_publish.py` walks that hierarchy so a subclass cannot
-    # go unregistered unnoticed.
+    # A turn tried to change the skills tree; an `AuthorizationError` subclass, listed by name.
     "SkillsReadOnlyRefusal",
     "ConnectorJobError",
     "GitWriteError",
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
-    # Two ingest sources have transcribed the same entry id, so a citation naming it has two
-    # answers (`chemclaw.ingest.eln.records`). Non-retryable because the ambiguity is a fact about
-    # the corpus rather than about this attempt: the identical read finds the identical two rows
-    # until a person decides which source the citation meant.
+    # Two sources transcribed the same entry id; the ambiguity is a fact about the corpus.
     "AmbiguousReactionRecord",
-    # A derived label written for a reaction whose record phase was never stored
-    # (`chemclaw.science.labels.store`). Non-retryable because the missing row is a fact about the
-    # corpus, not about this attempt: the drain must record the reaction before it can label it,
-    # and retrying the same write finds the same absence.
+    # A label written for a reaction with no stored record phase; retrying finds the same absence.
     "LabelIndexError",
-    # The labelling server reached and refused: a reaction SMILES RDKit cannot parse, a species
-    # list that does not match the reaction (`chemclaw.ingest.labels.labeller`). Its retryable
-    # sibling is `LabelServerError`, which means nobody answered at all.
+    # The labelling server refused the input; `LabelServerError` (nobody answered) is the retryable
+    # sibling.
     "LabelToolError",
-    # The result-publication seam (D-2026-08-25). Both are bad data by the same test as every entry
-    # here: a sink whose manifest cannot be resolved, or a record a destination has *answered*
-    # about and refused, fails identically on every retry. Its retryable neighbour is
-    # `SinkUnavailableError`, which is a `ConnectionError` and deliberately absent from this list.
+    # An unresolvable sink manifest, or a record a destination answered and refused.
+    # `SinkUnavailableError` is a `ConnectionError` and stays retryable.
     "ResultSinkError",
     "SinkRejectedError",
     "SinkConnectionError",
     "ProjectionError",
     "UnknownPropertyError",
-    # An offboarding erasure the database refused, or one asked for on a blank actor
-    # (`chemclaw.agent.leaver`). Non-retryable for the same reason every entry here is: a missing
-    # `DELETE ON session_owners` grant and an empty actor id are both facts about the request or the
-    # deployment, and the identical call fails identically until a person changes something. Listed
-    # even though no workflow runs an erasure today — the list is keyed by *class name*, so an entry
-    # that is never matched costs nothing, while a missing one is a silent retry storm the day
-    # somebody schedules this.
+    # An offboarding erasure the database refused, or one on a blank actor; both facts about the
+    # request or the deployment.
     "ErasureError",
-    # A vector store that cannot be *built* as configured: the client package is not installed, or
-    # the provider names no adapter. Not `VectorStoreError`, which is the store being unreachable —
-    # that one is a `SubsystemUnavailableError` and must stay retryable, since the identical call
-    # succeeds once the store is back. No retry installs a package.
+    # A vector store that cannot be built as configured (missing package, unknown provider).
+    # `VectorStoreError` (unreachable) stays retryable.
     "VectorStoreConfigError",
-    # The prescriptive-design tier (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
-    # All three are facts about the request rather than about the attempt, so the identical call
-    # fails identically: a plate that cannot hold the arms holds no more of them on a retry, a
-    # design id nothing answers to answers to nothing on a retry, and a revision derived from a
-    # stale head is *still* stale — the fix there is a re-read and a re-apply by whoever wrote it,
-    # which is the one thing a retry does not do. `RevisionConflict` is the entry worth pausing on:
-    # a conflict looks transient and is not, because retrying it would resolve the race by
-    # discarding the revision it did not see, which is the whole thing the parent check prevents.
-    # Listed even though no workflow writes a design today — the list is keyed by class *name*, so
-    # an entry that never matches costs nothing while a missing one is a silent retry storm the day
-    # somebody schedules a drafting job.
-    #
-    # `StatusConflict` joins it on the same reasoning and for a sharper reason. A stale
-    # `expected_status` is stale on every attempt, and retrying would resolve the race by
-    # discarding the decision it did not see — which is exactly the sign-off the compare-and-set
-    # was added to protect. A retried `abandoned` that silently overwrites somebody's `approved`
-    # is the defect, not the recovery. It was briefly listed twice — once here and once in the
-    # ELN block above, each hunk arguing it alone, the earlier one calling itself "the one conflict
-    # in this list that a retry makes worse" four lines from the entry making the same case for
-    # `RevisionConflict`. Temporal matches by name and did not care; this list is also the register
-    # the suite walks, and a register that says a thing twice says it differently.
+    # The prescriptive-design tier: a plate that cannot hold the arms, an unknown design id, a
+    # revision
+    # derived from a stale head. `RevisionConflict` and `StatusConflict` look transient but are not:
+    # retrying would resolve the race by discarding the revision or decision it did not see.
     "LayoutError",
     "RevisionConflict",
     "StatusConflict",
     "UnstorableDocument",
     "UnknownDesign",
-    # An outcome naming an arm the stored revision does not have. Bad data in this list's exact
-    # sense: the arm id is wrong, so every attempt fails identically and a retry only delays the
-    # message that names the arms which do exist.
+    # An outcome naming an arm the stored revision does not have.
     "UnknownArm",
     # The latest values for one outcome in more than one unit. The stored rows decide it, so a
     # retry reads the same rows and refuses identically.
     "MixedUnits",
-    # An artefact write the store refuses (`chemclaw.exhibits.store`): a spec that does not fit its
-    # kind, a base revision somebody else moved, an id the session does not hold, a session at its
-    # cap. Each is decided by the stored rows and the request, so a retry is refused identically.
+    # An artefact write the store refuses; decided by the stored rows and the request.
     "InvalidExhibit",
     "StaleRevision",
     "UnknownExhibit",
@@ -230,77 +134,45 @@ _BAD_DATA_TYPES = [
     "ComposedWorkflowError",
     "UnresolvedReference",
     "ProfileError",
-    # A BoFire/botorch surrogate fit or acquisition step failed on the given observations
-    # (Science-4, `chemclaw.science.bo.engine`). Deterministic in the data: the same duplicate
-    # or degenerate points collapse the same kernel on a retry, so this is bad-data, not transient.
+    # A surrogate fit or acquisition step failed on the given observations; deterministic in the
+    # data.
     "SurrogateFitError",
-    # The five ways a declaratively-bound warehouse source fails (`chemclaw.ingest.eln.warehouse`),
-    # all of them deterministic in something a retry cannot change. `BindingError`/`PathSyntaxError`
-    # are a malformed binding — the manifest is the same file on the next attempt. `TransformError`
-    # is a row carrying a value the binding's vocabulary does not cover; `WarehouseQueryError` is a
-    # relation or column the site does not have. `PatternBudgetError` is a `regex` transform that
-    # spent its whole wall clock on one cell: the pattern and the page are both the same on the
-    # next attempt, so retrying it is the stall again — which is what it cost before the engine had
-    # a deadline to exceed. An unreachable warehouse is deliberately *not* here: the driver raises
-    # `ConnectionError` for that, precisely so it stays retryable.
+    # A declaratively-bound warehouse source failing deterministically: a malformed binding, a value
+    # outside the binding's vocabulary, a missing relation or column, or a `regex` transform that
+    # exhausted its time budget. An unreachable warehouse raises `ConnectionError` and stays
+    # retryable.
     "BindingError",
     "PathSyntaxError",
     "PatternBudgetError",
     "TransformError",
     "WarehouseQueryError",
-    # A vendored dataset that is absent, malformed, or does not match its manifest checksum
-    # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
-    # layer and reaches the same conclusion, and the fix is a rebuild.
+    # A vendored dataset that is absent, malformed or fails its checksum; the fix is a rebuild.
     "VendoredDatasetError",
-    # A mounted document share that cannot be read as declared (`chemclaw.ingest.documents`): a
-    # malformed binding, or a mount point that is not a directory. Both are the same on the next
-    # attempt — a volume that failed to mount does not mount itself because Temporal asked twice —
-    # and retrying only delays the log line naming which one it is.
+    # A mounted document share that cannot be read as declared (malformed binding, not a directory).
     "DocumentShareError",
-    # The calculation server was reached and refused (`chemclaw.connectors.calc.remote`): an
-    # unparameterised solvent, an atom index past the molecule, a SMILES outside a predictor's
-    # domain. Its sibling `CalcServerError` is deliberately **not** here — an unreachable server is
-    # a `SubsystemUnavailableError`, the one fault a retry actually fixes, and conflating the two
-    # is what would burn `activity_max_attempts` on a refusal that never changes.
+    # The calculation server was reached and refused. `CalcServerError` (unreachable) is a
+    # `SubsystemUnavailableError` and stays retryable.
     "CalcToolError",
-    # Its time-budget subclass (`connectors/calc/remote.py`): the server's inline clock stopped the
-    # calculation, and a retry runs the same work against the same clock — so it fails fast like
-    # its parent. Named because Temporal matches by name; the hierarchy alone would not reach it.
+    # The server's inline time budget stopped the calculation; a retry hits the same clock.
     "CalcTimeBudgetError",
-    # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
-    # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
-    # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an
-    # identical call is identical on the retry too, so retrying is the one thing that cannot help.
+    # A turn repeated an identical tool call too often; identical on retry too.
     "RepeatedCallRefusal",
-    # `AuthorizationError` (`chemclaw.agent.authz`) and its subclasses are NOT `ChemclawError`/
-    # `ValueError` — an authorization refusal is a policy decision, not bad data, and reparenting it
-    # would make `chemclaw.agent.tool_authz.surface_domain_errors` swallow it ahead of
-    # `surface_authorization_denials` (see the class docstring). They are listed here by their own
-    # exact names instead: `chemclaw.durable.template_activities.authorize_job_step` raises
-    # `AuthorizationError` crossing a real activity boundary, and a refusal never changes on retry,
-    # so it must still fail fast there. `tests/test_publish.py` walks this hierarchy the same way it
-    # walks `ChemclawError`'s so a future subclass cannot go unregistered unnoticed.
+    # `AuthorizationError` and its subclasses are not `ChemclawError`s (a refusal is policy, not bad
+    # data) but never change on retry, so they are listed by name; `authorize_job_step` raises one
+    # across a real activity boundary.
     "AuthorizationError",
     "DryRunRefusal",
     "PlanNotApprovedError",
-    # An `agent` step's model reached for a write the template did not declare
-    # (`chemclaw.agent.tool_authz`). It is caught and converted inside the turn, so it does not
-    # normally cross a boundary — but a template step *is* an activity, and what the step declares
-    # is pinned in the run's input, so the identical attempt is refused identically on every
-    # attempt. Listed for the same reason every entry here is listed: by class name, and a name
-    # that is never matched costs nothing.
+    # An agent step reached for a write its template did not declare; the declaration is pinned in
+    # the
+    # run's input.
     "UndeclaredWriteRefusal",
-    # NOT here, deliberately: `SubsystemUnavailableError` (`chemclaw.core.errors`). It reads like
-    # a sibling of the two entries above — a non-`ChemclawError` that crosses an activity boundary
-    # (a connector-job tool invoked inside `durable.template_activities`) — but it means the
-    # opposite thing. An unreachable broker is *retryable*: the identical call succeeds once the
-    # subsystem is back, so listing it would make a workflow give up on a broker restart it would
-    # otherwise ride out. `tests/test_publish.py` asserts its absence, with the reason.
+    # Deliberately absent: `SubsystemUnavailableError` means an unreachable subsystem, which a retry
+    # can ride out. `tests/test_publish.py` asserts its absence.
 ]
 
-# Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries
-# so an unclassified deterministic failure (e.g. a `KeyError`/`RuntimeError` bug, or a
-# git ref that can never be created) gives up instead of pinning a worker forever.
+# Bad data is non-retryable by type; `maximum_attempts` bounds transient retries so an
+# unclassified deterministic failure gives up instead of pinning a worker forever.
 BAD_DATA_RETRY = RetryPolicy(
     maximum_attempts=settings.activity_max_attempts,
     non_retryable_error_types=list(_BAD_DATA_TYPES),
@@ -310,13 +182,8 @@ BAD_DATA_RETRY = RetryPolicy(
 def note_publish_retry() -> RetryPolicy:
     """Bounded retries for a note write (config `note_write_max_attempts`).
 
-    Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`) or a structural
-    refusal (`GitWriteError` — a mis-pointed checkout, a note a human authored at that path)
-    fails fast instead of burning the transient-retry budget. `GitRemoteError` — a dead remote, a
-    timed-out command, a contended lock — is the retryable subclass: Temporal matches these names
-    exactly, so the subclass's different name is what makes `note_write_max_attempts` real. This
-    docstring used to promise that split while the code listed the one class that covered both,
-    so a 30-second network blip dropped a note from a synthesis batch on its first attempt.
+    Shares the bad-data list, so a bad note or a structural `GitWriteError` fails fast;
+    `GitRemoteError` (dead remote, timeout, contended lock) is the retryable subclass.
     """
     return RetryPolicy(
         maximum_attempts=settings.note_write_max_attempts,
@@ -327,28 +194,10 @@ def note_publish_retry() -> RetryPolicy:
 def agent_step_retry() -> RetryPolicy:
     """A narrow outer bound for the one activity whose retry is not free.
 
-    Config `agent_step_max_attempts`.
-
-    Every other activity is safe to retry: it recomputes, and recomputing costs time. A template's
-    **agent** step is not, because a Temporal retry replays the turn from the prompt — an activity
-    has no checkpointer behind it — so every tool the failed attempt already ran runs again with
-    its side effects. Measured: one provider 503 produced two note commits and two audit rows
-    for one logical note.
-
-    Same bad-data type list as every policy here, deliberately and without exception: an outer
-    bound is a bound on *transient* retries, and which failures are transient is one classification
-    that must not depend on which activity asked. In particular a provider 503 stays **retryable**
-    — `SubsystemUnavailableError` and the provider SDKs' own exception names are absent from
-    `_BAD_DATA_TYPES` on purpose (`tests/test_publish.py` asserts the absence). Filing a 503 as bad
-    data would be false in exactly the direction that list exists to keep straight, and Temporal
-    matches by bare class name, which `anthropic` and `openai` share. The right lever is how many
-    attempts, not what kind of failure it was.
-
-    **The accepted cost, named rather than discovered:** the retry that helps already happens
-    inside the SDK (`llm_max_retries=3` is 4 HTTP attempts), so a blip is still ridden out — but a
-    *long* provider outage now fails the step in ~4 attempts instead of riding it out over 20
-    (4 × `activity_max_attempts`). A cleanly failed run that a person re-runs costs less than
-    duplicate notes and duplicate audit rows that a person has to find and reconcile.
+    Config `agent_step_max_attempts`. A retry of a template's agent step replays the whole turn,
+    re-running every tool and its side effects (duplicate notes, duplicate audit rows), so attempts
+    are fewer. The bad-data list is unchanged: a provider 503 stays retryable, and the SDK already
+    retries a blip internally. A long provider outage fails the step sooner; a person re-runs it.
     """
     return RetryPolicy(
         maximum_attempts=settings.agent_step_max_attempts,
@@ -359,25 +208,10 @@ def agent_step_retry() -> RetryPolicy:
 def queue_wait_timeout() -> timedelta:
     """How long a core activity may sit unclaimed on its queue, as `schedule_to_start_timeout`.
 
-    **`start_to_close_timeout` is not a bound on a call, and reading it as one left every durable
-    job here able to hang forever.** It starts counting when a worker *picks the task up*, so a
-    queue nobody polls — the background fleet scaled to zero, a rolling update, a queue named in
-    config but served by no pod — is an activity that never times out and a workflow that never
-    ends. Most of these workflows are Temporal Schedules under `ScheduleOverlapPolicy.SKIP`, so one
-    wedged run then skips every subsequent fire of that job family, indefinitely, with no error
-    anywhere. `durable/notify.py` measured the shape on one call (a workflow still RUNNING after
-    75 s against a 30 s start-to-close); it is a property of the timeout rather than of that call,
-    which is why the bound is stated once here and passed at every call site.
-
-    **Schedule-to-start rather than schedule-to-close, and the difference was measured**: a
-    ScheduleToStart timeout is not retried (against the test server, `maximum_attempts=3` and a 10 s
-    bound on an unserved queue failed once, at 10.028 s), while `schedule_to_close_timeout` caps
-    every attempt *together* — generalising the two small writes' tighter bound would therefore
-    have deleted the retry budget at 31 call sites, silently. Those two keep a tighter bound of
-    their own; it is now `light_write_queue_wait_timeout` below rather than a schedule-to-close.
-
-    A function, not a module constant, so the setting is read when the workflow runs rather than
-    when the module is imported.
+    `start_to_close_timeout` starts only once a worker picks the task up, so on an unserved queue
+    it bounds nothing, and a Schedule under SKIP then skips every later fire. Schedule-to-start is
+    not retried and leaves the retry budget intact, unlike schedule-to-close, which caps all
+    attempts together. A function so the setting is read at run time, not import time.
 
     Returns:
         The `schedule_to_start_timeout` every core activity call passes.
@@ -388,44 +222,13 @@ def queue_wait_timeout() -> timedelta:
 def light_write_queue_wait_timeout() -> timedelta:
     """How long a *small* write may wait on the shared background queue, before it is a fault.
 
-    Every call that wants this rather than the hour above sits at the end of a job: the session
-    push-back (`durable/notify.py`), the durable job record written once by
-    `durable/connector_job.py` and once by `durable/template_job.py`, and the outbound copy
-    (`durable/deliver_message.py`). All are swallowed by their caller, and the connector wrapper's
-    record additionally sits *in front of* the message telling a chemist their job died — so an
-    hour of patience there is an hour in which a failed job is not reported
-    (`tests/test_durable_observability.py` holds exactly that).
+    For the end-of-job writes (session push-back, job record, outbound copy), which callers swallow;
+    an hour of patience there is an hour a finished or failed job reports nothing.
+    `tests/test_activity_queue_bound.py` holds every dispatch site to its bound.
 
-    **The count is not written here, and it used to be.** It said "three calls" and the fourth
-    arrived with `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` without touching
-    this line — in the same docstring that already carries "the third was found by a reviewer
-    rather than by this sentence, which is why the count is here at all". A count that has gone
-    stale twice is the argument against keeping one.
-
-    **The third was found by a reviewer rather than by this sentence, which is why the count is
-    here at all.** `template_job.py`'s record is the identical activity on the identical queue with
-    the identical numbers, and it kept the `schedule_to_close_timeout` the other two were moved off
-    — under a comment claiming it matched the connector wrapper "exactly and for its reason", true
-    when it was written and false the moment that pair was fixed. Two call sites named in prose is
-    a claim a third has to falsify by hand; the sentence above now says three, and what actually
-    holds the rule is `tests/test_activity_queue_bound.py`'s walk over every dispatch site.
-
-    **They were bounded by `schedule_to_close_timeout` at twice their own work budget — 60 s — and
-    that is a total rather than a wait, so it was spent almost entirely on a queue neither call
-    controls.** `background-jobs` carries 900 s template agent steps, 300 s report sections and the
-    hourly sweeps across eight slots. Measured on the real broker: a 50 ms activity behind a full
-    slate waited 41.6 s, and the shipped shape was dropped at 60.1 s with `Activity task timed
-    out`; at target load the expected wait for a slot is ~150 s, so essentially every push-back and
-    every `job_records` row was lost. Splitting the two quantities — this bounds the wait, the
-    caller's own `start_to_close_timeout` bounds the work — also gives those attempts their retry
-    budget back, since schedule-to-close had capped all of them together.
-
-    **The number is the longest single activity this queue runs**, `template_step_timeout_seconds`
-    (a whole LLM turn as one activity). That is the worst case one holder can put in front of a
-    small write, it is 6x the measured expected wait, and it is a twelfth of core's hour — which is
-    the bound this exists to be tighter than. Derived rather than configured for
-    `durable/heartbeat.py::_HEARTBEATS_PER_TIMEOUT`'s reason: a second knob is a second number to
-    keep in step with the first, and the relationship is what has to hold.
+    Equal to `template_step_timeout_seconds`, the longest single activity this queue runs and so
+    the worst a slot holder can put in front of a small write. Derived rather than configured so the
+    relationship holds. The caller's `start_to_close_timeout` bounds the work separately.
 
     Returns:
         The `schedule_to_start_timeout` every end-of-job write passes.
@@ -436,28 +239,10 @@ def light_write_queue_wait_timeout() -> timedelta:
 def fan_out_queue_wait_timeout() -> timedelta:
     """How long a **fan-out child's** activity may sit unclaimed before the child gives up.
 
-    The same construction as `connector_queue_wait_timeout` below, one level over, and it is here
-    for the same defect: `fan_out_child_timeout_seconds` is a wall-clock ceiling on the child, the
-    child's single activity passed core's flat `queue_wait_timeout()`, and the wait precedes the
-    work — so what the ceiling had to contain was `q + w` = 3,600 + 300 = 3,900 s against a 3,600 s
-    ceiling. The ceiling was *exactly equal* to the wait, which makes the child's own
-    `SCHEDULE_TO_START` expiry unreachable: the execution timeout always fires first, and an
-    execution timeout is not delivered to workflow code. Measured on the real broker scaled 1000:1,
-    a section whose queue nobody served came back as `ChildWorkflowError: Child Workflow execution
-    timed out` and was dropped by `fan_out`; with the ceiling clear of `q + w` the same run
-    produced `retrieval_failed:TimeoutError`, which is the degradation `ReportSectionWorkflow`'s
-    `except ActivityError` was written for and `activity_failure_reason` names the cause of.
-
-    Subtracting rather than taking a fraction, for the reason `connector_queue_wait_timeout` spells
-    out at length: a fraction makes `q` grow with the very ceiling it has to fit inside, so no
-    fraction makes the composite fit. What is left of the ceiling once one worst attempt and its
-    overhead are paid for is exactly the headroom a queued child may spend waiting, and the
-    composite is then at most `(C - w - a) + w = C - a` whatever the three numbers are.
-
-    At the shipped settings that is 3,600 - 300 - 30 = 3,270 s — still nine tenths of core's hour,
-    so nothing this bound rejects was passing before it. `longest_fan_out_activity` is `Settings`'
-    own max over the two children's budgets, read rather than restated, because two spellings of
-    that max is how `q + w` came apart on the connector side.
+    The wait precedes the work, so the child's ceiling `C` must contain wait plus work. This takes
+    the ceiling's headroom, `C - w - overhead`, where `w` is `longest_fan_out_activity`, so the
+    composite fits by construction and an unserved queue surfaces as a named activity timeout rather
+    than a child execution timeout no workflow code sees.
 
     Returns:
         The `schedule_to_start_timeout` a fan-out child's activity passes. Strictly positive by
@@ -473,59 +258,16 @@ def fan_out_queue_wait_timeout() -> timedelta:
 def connector_queue_wait_timeout() -> timedelta:
     """How long a **connector bundle's** activity may sit unclaimed on its own queue.
 
-    `queue_wait_timeout` above is core's, and it is deliberately not this one.
-    `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait` scoped that rule to `durable/`
-    and argued the exclusion: on a bundle queue a wait genuinely is backpressure, since a CREST
-    search holds its slot for hours and the next one behind it is working as designed. That
-    argument is still right, and it is *not* an argument for no bound at all — which is what the
-    three bundles shipped. Measured at 200 users, a queued connector job's only ceiling was the
-    child's `connector_job_timeout_seconds`, so a job that never got a slot told the chemist
-    "running" for the whole ceiling and then failed as a workflow execution timeout, which is
-    delivered to nobody and names neither the queue nor the reason.
+    On a bundle queue a long wait is ordinary backpressure, but an unbounded one makes "no worker is
+    serving `connector-calc`" indistinguishable from "every worker is busy" until the child's
+    execution timeout, which is delivered to nobody.
 
-    So the bound is the same mechanism at a different scale: generous enough that measured
-    backpressure passes through it, tight enough that "no worker is serving `connector-calc`" stops
-    being indistinguishable from "every worker is busy".
+    The bound is the ceiling's headroom, `C - w - overhead`, with `w` = `longest_bundle_activity`,
+    so wait plus one attempt always fits the parent's execution budget; a fraction of `C` cannot
+    guarantee that. A ScheduleToStart expiry is not retried: an unserved queue stays unserved.
 
-    **It is the ceiling's *headroom*, not a fraction of the ceiling, and that distinction is the
-    whole correctness argument.** The wait precedes the work, so what the parent's execution budget
-    has to contain is `q + w`, never `q` alone. A fraction made `q` grow with the very ceiling it
-    had to fit inside — half of 18,000 s is 9,000 s, and 9,000 + 15,000 = 24,000 against a ceiling
-    of 18,000, so a job that waited inside its wait bound and then ran inside its work bound died
-    at the ceiling as a bare `WorkflowExecutionTimedOut` delivered to nobody: precisely the failure
-    the bound was added to remove (reproduced on the real broker scaled 1000:1). Nor could a
-    smaller fraction fix it — `q + w < C` under `q = fC` needs `C > w / (1 - f)`, so raising the
-    ceiling raised the wait with it and the composite stayed over. Subtracting instead makes the
-    composite fit **by construction**: at most `(C - w - overhead) + w = C - overhead`, whatever
-    the three numbers are, with no cross-check anyone can forget.
-
-    `longest_bundle_activity` is `Settings`' own max over the activity budgets a bundle child can
-    spend — the same one `_the_job_ceiling_covers_the_activity_it_bounds` checks the ceiling
-    against, read rather than restated, because two spellings of that max is how `q + w` came apart
-    in the first place. The shortest job on a bundle queue therefore gets the same generous wait as
-    the longest, which is right: the wait is a property of the queue, and what has to fit is the
-    worst composite on it.
-
-    What the deployment must fund is stated in `connector_job_timeout_seconds`' own comment: at the
-    shipped 25,200 s the headroom is 10,170 s, ~1.4x the measured p95 backpressure (~7,128 s) and
-    ~2.7x the p50 (~3,744 s). A site that lowers the ceiling towards the validator's floor buys
-    itself a tighter queue bound, and finds out by having queued jobs fail promptly and by name
-    rather than by a silent execution timeout hours later.
-
-    Not retried, which is the behaviour wanted: a ScheduleToStart expiry means the queue is
-    unserved, and asking the same absent worker again finds the same absence (measured in
-    `tests/test_activity_queue_bound.py`).
-
-    **"By construction" is a claim about one activity, and this docstring used to make it about
-    every bundle child.** The composite that fits is `q + w`, singular — so a child that runs
-    activities *in sequence* gets `n × (q + w)` against the same ceiling, which this number funds
-    for `n = 2` and no more. Measured at the shipped settings: `q` = 10,170 s, a `bo` activity's
-    `w` = 300 s, composite 10,470 s; two fit inside 25,200 s and three do not.
-    `BoCampaignWorkflow` runs **six** for a one-round campaign — worst case 62,820 s, 2.5× its
-    ceiling — and the overrun arrives as a `WorkflowExecutionTimedOut`, which reaches no workflow
-    code and names neither the queue nor the reason. `remaining_queue_wait_timeout` below is what
-    such a child passes instead; this one is still exactly right for a child that dispatches once,
-    which `calc` and `results` both do.
+    This holds for one activity. A child dispatching a sequence (`BoCampaignWorkflow`) must use
+    `remaining_queue_wait_timeout` instead.
 
     Returns:
         The `schedule_to_start_timeout` a single-activity connector-bundle child passes. Strictly
@@ -539,19 +281,16 @@ def connector_queue_wait_timeout() -> timedelta:
 def _queue_wait_seconds(budget: float, activity_seconds: float) -> float:
     """What is left of `budget` for a queue wait once one attempt and its overhead are paid for.
 
-    The one arithmetic behind both bounds above and below, written once because the pair is a
-    *narrowing* — the sequential form is the same subtraction against what is left of the execution
-    budget rather than against all of it — and two spellings of one subtraction is how `q + w` came
-    apart on the connector side in the first place.
+    The one subtraction behind the bounds above and below.
 
     Args:
         budget: The execution budget this wait has to fit inside, in seconds.
         activity_seconds: The start-to-close budget of the attempt that follows the wait.
 
     Returns:
-        The wait in seconds. May be zero or negative, which the callers read differently: for the
-        deployment-wide ceiling `Settings` has already refused that case, and for a run partway
-        through its budget it means there is nothing left to fund another activity.
+        The wait in seconds. May be zero or negative: for the deployment-wide ceiling `Settings`
+        has already refused that case; for a run partway through its budget it means nothing is
+        left to fund another activity.
     """
     return budget - activity_seconds - settings.activity_timeout_seconds
 
@@ -559,29 +298,12 @@ def _queue_wait_seconds(budget: float, activity_seconds: float) -> float:
 def remaining_queue_wait_timeout(remaining: timedelta, activity_seconds: float) -> timedelta | None:
     """The queue wait a bundle child may still afford, given what is left of its execution budget.
 
-    **This is the bound a child that dispatches more than once needs, and there was none.** The
-    ceiling above is derived so that one wait plus one attempt fits the parent's execution timeout.
-    A child running a *sequence* spends that composite once per step, so the ceiling funds two steps
-    at the shipped settings and a campaign runs six for a single round. `continue_as_new` does not
-    help: `durable/connector_job.py` applies the ceiling as `execution_timeout`, which spans the
-    whole continue-as-new chain — only a *run* timeout resets, and the chain is precisely what the
-    ceiling is meant to bound.
-
-    So the budget is spent down rather than re-granted. Each dispatch asks what is left, and the
-    answer shrinks as the campaign runs. The composite is then `Σ(qᵢ + wᵢ) ≤ C - overhead` for any
-    number of steps, which is the property `connector_queue_wait_timeout` claims for one.
-
-    **`None` is an answer, not an error.** A run whose remaining budget cannot fund one more
-    attempt has no wait to offer, and the caller must stop with what it has rather than dispatch an
-    activity that the execution timeout will kill mid-flight — an ending delivered to nobody. It is
-    returned rather than raised because raising inside workflow code is a workflow *task* failure,
-    which Temporal retries forever against a condition that only gets worse.
-
-    `activity_seconds` is the caller's own start-to-close budget rather than
-    `longest_bundle_activity`, and that is a real difference: the fleet-wide maximum is
-    `xtb_job_timeout_seconds` at 15,000 s, which would exhaust a 25,200 s ceiling in one step for a
-    campaign whose activities are budgeted at 300. The queue-wide bound still applies — a caller
-    takes the *minimum* of the two, since both have to hold.
+    For a child that dispatches a sequence: the execution timeout spans the whole continue-as-new
+    chain, so the budget is spent down rather than re-granted, keeping the sum of waits and attempts
+    within the ceiling for any number of steps. `None` means the remaining budget cannot fund
+    another attempt, and the caller stops with what it has (raising in workflow code would retry
+    forever). `activity_seconds` is the caller's own budget; callers also apply the queue-wide
+    bound and take the minimum.
 
     Args:
         remaining: What is left of this run's execution budget.
@@ -595,56 +317,23 @@ def remaining_queue_wait_timeout(remaining: timedelta, activity_seconds: float) 
     return timedelta(seconds=seconds) if seconds > 0 else None
 
 
-# How far *down* the first capacity retry may be moved, as a fraction of it. A quarter, which
-# spreads a burst of jobs refused together across ~28 s at the shipped 112.5 s first interval —
-# comfortably wider than the pod's own refusal latency (measured 49-698 ms) and far short of
-# collapsing the schedule. Downward only; `calculation_retry` says why.
+# How far *down* the first capacity retry may be moved, as a fraction of it, to spread a burst of
+# jobs refused together. Downward only; `calculation_retry` says why.
 _CAPACITY_RETRY_JITTER = 0.25
 
 
 def calculation_retry() -> RetryPolicy:
     """The retry discipline for an activity that calls the shared calculation backend.
 
-    `BAD_DATA_RETRY`'s type list unchanged — a bad molecule must still fail fast — and its attempt
-    count unchanged. What differs is the *spacing*, and it exists because `CalcBusyError` made a
-    new kind of failure retryable: the backend refusing because every calculation slot is taken.
+    `BAD_DATA_RETRY`'s types and attempt count, with spacing sized for `CalcBusyError` (every slot
+    taken), where a slot frees only when a calculation finishes. The longest interval is
+    `calc_server_timeout_seconds`, the longest calculation waited for; the first is that cap divided
+    by the doublings the attempt budget allows. `tests/test_publish.py` asserts wait plus backoff
+    plus attempt fits the parent ceiling.
 
-    **Temporal's default backoff cannot serve that.** It starts at one second and doubles, so five
-    attempts are spent inside fifteen seconds — against a hold that is a whole calculation long (a
-    measured CREST search is ~19 minutes at 33 atoms, and the server's own ceiling is four hours).
-    Retrying a full pod five times in fifteen seconds is not backpressure, it is a small storm that
-    then fails anyway, which would have made the classification fix look like it did nothing.
-
-    **Both ends come from configured values, so the schedule cannot drift from what it is about.**
-    A slot frees when a calculation finishes, and the longest single calculation this client will
-    wait for is `calc_server_timeout_seconds` — so that is the cap on one interval, since sleeping
-    longer than the event being waited for is sleeping past it. The first interval is the cap
-    divided by the doublings the attempt budget allows, so raising `activity_max_attempts` buys
-    finer retries early rather than a longer tail alone. At the shipped defaults (900 s, 5
-    attempts) that is 112.5 s, 225 s, 450 s, 900 s — ~28 minutes of patience, which covers the
-    measured search, spent in four wakeups rather than in a spin.
-
-    **It fits inside the parent ceiling, and that is checked arithmetic rather than a hope.** A
-    saturation refusal costs milliseconds, so the retries add ~1,688 s to a job whose parent
-    execution budget (`connector_job_timeout_seconds`) carries 10,200 s over one full attempt
-    (`xtb_job_timeout_seconds`, 15,000 s) at the shipped defaults. That slack is not free space,
-    though — it is the same headroom `connector_queue_wait_timeout` spends on the wait — so the
-    composite a job can actually run up is *wait plus backoff plus attempt*, and it is that sum
-    `tests/test_publish.py` asserts against the ceiling at the measured p95 backpressure. If a
-    deployment narrows the slack the parent ceiling is still the backstop, and `Settings` already
-    refuses a ceiling that does not cover one attempt.
-
-    **The jitter is this function's, because Temporal has none — measured rather than assumed.**
-    `RetryPolicy` carries no jitter field, and driven against the real broker on 2026-09-05 an
-    activity with initial 1 s and coefficient 2 was retried at gaps of 1.016 / 2.013 / 4.015 /
-    8.021 s: the schedule is exact. That matters here because the arrival pattern this system is
-    sized against is a *burst* — a shared work rhythm, a Monday morning — so a slate of jobs refused
-    in the same instant would come back in the same instant, take four of them, and refuse the rest
-    again in lockstep. Freed slots then idle between pulses instead of being taken as they open.
-    `workflow.random()` is the SDK's per-run deterministic RNG, so a replay reproduces the schedule
-    the run already had while two runs get different ones, which is exactly the property wanted.
-    Outside a workflow there is no run to desynchronise and no determinism to keep, so the nominal
-    schedule is returned — the only caller there is a test reading it.
+    Temporal's retry schedule has no jitter, so the first interval is jittered with
+    `workflow.random()`: deterministic on replay, different between runs, so jobs refused together
+    do not retry in lockstep. Outside a workflow the nominal schedule is returned.
 
     Returns:
         The retry policy every activity that dispatches to the calculation backend passes.
@@ -655,9 +344,9 @@ def calculation_retry() -> RetryPolicy:
     doublings = 2 ** max(settings.activity_max_attempts - 2, 0)
     first = cap / doublings
     if workflow.in_workflow():
-        # Downward only: jittering upward would push the last interval past `maximum_interval`,
-        # where the cap silently swallows it and the spread disappears at exactly the attempt that
-        # waits longest.
+        # Downward only: upward jitter would push the last interval past `maximum_interval`, where
+        # the
+        # cap silently removes the spread.
         first *= workflow.random().uniform(1.0 - _CAPACITY_RETRY_JITTER, 1.0)
     return RetryPolicy(
         maximum_attempts=settings.activity_max_attempts,
@@ -671,17 +360,14 @@ def calculation_retry() -> RetryPolicy:
 def queued_tool_retry() -> RetryPolicy:
     """The retry discipline for a queued tool call: ask a full server again within seconds.
 
-    `calculation_retry` spaces a durable job's asks by minutes because its worker has no idea how
-    full the server is. A queued call's worker does — it is sized to the server's slots — so a
-    refusal there is a race with a slot about to free, and the chemist is usually still watching.
-    Unlimited attempts, bounded by the call's own `schedule_to_close`; the one non-retryable type is
-    a fault that already spent `queued_tool_fault_attempts` (`connectors/queued_call.py`).
+    A queued call's worker is sized to the server's slots, so a refusal is a race with a slot about
+    to free. Unlimited attempts, bounded by the call's own `schedule_to_close`; the one
+    non-retryable
+    type is a fault that already spent `queued_tool_fault_attempts` (`connectors/queued_call.py`).
     """
     cap = settings.queued_tool_retry_max_seconds
     return RetryPolicy(
-        # Never above the cap: the server refuses a policy whose first interval exceeds its
-        # maximum, and says so as a bad *schedule* — a deployment that tightened the cap below a
-        # second would have failed every queued call with a message naming neither.
+        # Never above the cap: the server refuses a policy whose first interval exceeds its maximum.
         initial_interval=timedelta(seconds=min(1.0, cap)),
         backoff_coefficient=1.5,
         maximum_interval=timedelta(seconds=cap),
@@ -693,19 +379,14 @@ def queued_tool_retry() -> RetryPolicy:
 def activity_failure_reason(exc: ActivityError) -> str:
     """A short reason for a *swallowed* activity failure, so one log line separates two states.
 
-    Both best-effort writes in this layer — the session push-back and the durable job record — end
-    in an `except ActivityError` that logs and carries on, and both logged the same sentence
-    whatever had happened. That is the wrong resolution for the failure they actually see under
-    load: a `SCHEDULE_TO_START` expiry is *nobody polling the queue*, which no redelivery and no
-    retry can help and which an operator fixes with a worker, while every other failure is the
-    write itself. Reported by type otherwise, which is strictly more than the line said before.
+    A `SCHEDULE_TO_START` expiry means nobody polls the queue (fixed by a worker, not a retry);
+    anything else is the write itself, reported by type.
 
     Args:
         exc: The swallowed activity error, whose `cause` carries what Temporal decided.
 
     Returns:
-        A sentence fragment for the caller's own log line. Never raises: a best-effort path must
-        not acquire a new way to fail while explaining one.
+        A sentence fragment for the caller's own log line. Never raises.
     """
     cause = exc.cause
     if isinstance(cause, TemporalTimeoutError):
@@ -738,15 +419,9 @@ async def publish_note(activity: Any, args: list[Any]) -> str:
 async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -> None:
     """Publish a note but never fail the caller: log-and-swallow a failed write.
 
-    For workflows whose real result is the calculation, not the note (QM, BO):
-    the science is done and cached, so a broken git remote must not fail the job.
-
-    Swallowing is right for the *job* and was wrong for the *knowledge*. A warning inside a
-    workflow log is not something anyone watches, and `chemclaw_notes_recorded_total` counts only
-    successes — so a dead git remote produced no notes and no signal, which is byte-for-byte
-    what an idle deployment produces. The counter below is the difference between those two states.
-    Guarded on `is_replaying` for the same reason Temporal's own workflow logger is: a replayed
-    history would otherwise re-count every failure the workflow has ever seen.
+    For workflows whose real result is the calculation: a broken git remote must not fail the job.
+    A failure is counted, so a dead remote is distinguishable from an idle deployment; guarded on
+    `is_replaying` so a replay does not re-count.
     """
     try:
         await publish_note(activity, args)
@@ -759,18 +434,9 @@ async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -
 async def publish_result_best_effort(activity: Any, args: list[Any], label: str) -> None:
     """Queue a finished run's result for the external results store, never failing the caller.
 
-    The same polarity as `publish_note_best_effort` one function up, and for the same reason: by
-    the time this runs the scientific result is already durable in `job_records`, so a results
-    store — or the local outbox — being unavailable must not fail a completed job and send an
-    expensive campaign back round the retry loop.
-
-    It is a *separate* function rather than a parameterization of the note publish, because the two
-    differ in every respect that matters: a different timeout (a local enqueue, not a git push), a
-    different counter, and a different meaning when it fails. Sharing them would mean one call site
-    passing three arguments to say which of two things it is.
-
-    Guarded on `is_replaying` for the counter, exactly as the note publish is: a replayed history
-    would otherwise re-count every failure the workflow has ever seen.
+    The result is already durable in `job_records`, so an unavailable outbox must not fail a
+    completed job. Separate from the note publish: different timeout, counter and meaning. The
+    counter is guarded on `is_replaying`.
     """
     try:
         await workflow.execute_activity(

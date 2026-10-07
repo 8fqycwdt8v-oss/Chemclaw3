@@ -1,36 +1,17 @@
 """The client for the reaction labeller: ask it what version it is, then ask it for the labels.
 
-The models that do the labelling — RXNMapper for the atom map, RDKit's reaction-role assignment,
-a curated agent dictionary for solvent/catalyst/ligand/base/additive, Rxn-INSIGHT's 527 curated
-SMIRKS for the name — live in `Chemclaw3-mcp`'s `servers/rxnlabel`, not here. That is the
-`D-2026-08-16-the-physics-leaves-the-cache-stays` split applied a second time and for the same
-reason: RXNMapper is a transformer, so keeping it in-process would put torch and transformers into
-every chat pod, and the labelling itself is a stateless primitive whose identity is derivable from
-its inputs. What stays here is the index, the drain and the search — the parts that are about *our*
-corpus rather than about chemistry.
+The labelling models (RXNMapper, RDKit role assignment, an agent dictionary, curated SMIRKS) run in
+`Chemclaw3-mcp`'s `servers/rxnlabel`, keeping torch out of every chat pod; the index, drain and
+search stay here.
 
-**Nothing here derives the labeller version.** It is asked for, and that is the point rather than
-an implementation detail: the version is half of what decides whether a row is stale, and it is
-built from a model checkpoint hash, a SMIRKS file and an agent dictionary that this process cannot
-see. A locally-derived one would be *well-formed* and would match nothing — every row would look
-stale forever, the drain would re-label the whole corpus on every pass, and nothing would raise.
-`connectors/calc/remote.py` records the same rule with the same reasoning.
+The labeller version is asked for, never derived: it depends on checkpoints and files this process
+cannot see, and a locally derived one would match nothing and re-label the corpus forever. This side
+folds in only `STANDARDIZATION_VERSION` (we normalised the SMILES sent) and `VOCABULARY_VERSION`
+(the stored role names are ours).
 
-What this side *does* fold in is the two versions the server cannot see: `STANDARDIZATION_VERSION`,
-because the species SMILES we send it were normalised by our rules, and `VOCABULARY_VERSION`,
-because the role names we store are ours. `remote_key` folds `CALCULATION_EPOCH` in on this side
-for exactly that reason.
-
-**The batch tools are the ones the drain calls.** A 13M-row corpus at one round trip per reaction
-is 13M round trips; at `label_batch_size` it is 65,000. The single-reaction tools exist on the
-server for a person asking about one reaction, and are not called from here.
-
-**Species are sent explicitly rather than parsed out of the reaction SMILES.** The record form is
-`reactants>agents>products`, and a stored species' `ordinal` comes from `OrdReaction.compounds()`
-(inputs then outcomes, agents wherever they sat among the inputs) — the two orders are not the
-same, so matching a returned role back onto a row by position would silently mislabel every
-reaction with a solvent. Sending the list makes the request unambiguous and the response
-positional against something we chose.
+The drain calls the batch tools. Species are sent explicitly rather than parsed from the reaction
+SMILES, because stored ordinals follow `OrdReaction.compounds()` order, which differs from the
+record SMILES; answers are then positional against the list we sent.
 """
 
 import logging
@@ -58,20 +39,17 @@ logger = logging.getLogger(__name__)
 class LabelServerError(SubsystemUnavailableError):
     """The labelling server could not be reached or fell over, so nothing was labelled.
 
-    Retryable — deliberately absent from `durable/publish.py`'s non-retryable list — because the
-    only thing that fixes an unreachable pod is trying again once it is back. The message is
-    written for whoever reads the drain's logs: labelling is a background service, so unlike a
-    calculation there is no chemist waiting on this particular call.
+    Retryable: only trying again once the pod is back fixes it. The message is written for the
+    drain's logs, since no chemist is waiting on this call.
     """
 
 
 class LabelToolError(ChemclawError):
     """The labelling server was reached and refused, or answered something unusable.
 
-    Bad data by the same test as every other `ChemclawError`: a reaction SMILES RDKit cannot parse,
-    a species list that does not match the reaction. The identical call fails identically, so it is
-    registered non-retryable in `durable/publish.py::_BAD_DATA_TYPES` and the drain drops that one
-    reaction rather than paying for the same refusal three more times.
+    Bad data (an unparseable SMILES, a mismatched species list): the identical call fails
+    identically, so it is non-retryable (`durable/publish.py::_BAD_DATA_TYPES`) and the drain drops
+    that one reaction.
     """
 
 
@@ -146,10 +124,8 @@ class ReactionNaming(BaseModel):
     method: str | None = Field(
         default=None, description="'smirks' for a rule match, 'model' for the fallback classifier."
     )
-    # The same pair, for the same reason, on the other half of an answer — see
-    # `ReactionRepresentation`. A classifier that ran and matched nothing is a real answer about the
-    # chemistry and leaves `degraded` empty; one that ran and *failed* is a fault in the pod, and
-    # only these two fields tell the two apart.
+    # As on `ReactionRepresentation`: these fields distinguish a classifier that matched nothing
+    # (empty `degraded`) from one that failed.
     version: str = Field(
         default="",
         description="The labeller that produced *this* answer; empty means the server sent none.",
@@ -163,14 +139,9 @@ class ReactionNaming(BaseModel):
 def stamped(remote: str) -> str:
     """One remote labeller version, plus the two versions the server cannot see.
 
-    A function rather than two f-strings, because there are now two places a stamp is built: the
-    pass-level one `plan_label_sync` reads off `labeller_version`, and the per-answer one
-    `enrich.label_stale` takes off a degraded row. A second spelling of the fold would be a row
-    that can never match a healthy pass — well-formed, re-labelled forever, and nothing raising —
-    which is the same failure this module's header refuses for the remote half.
-
-    `STANDARDIZATION_VERSION` rides along because the species SMILES sent for classification were
-    normalised by our rules, and `VOCABULARY_VERSION` because the role names stored are ours.
+    The one definition of the fold, used for both the pass-level and per-answer stamps, so they can
+    match. `STANDARDIZATION_VERSION` because we normalised the species SMILES sent;
+    `VOCABULARY_VERSION` because the stored role names are ours.
 
     Args:
         remote: The version string the labelling server reported, as it reported it.
@@ -182,11 +153,7 @@ def stamped(remote: str) -> str:
 class Labeller(Protocol):
     """What the drain needs of a labelling server: a version, representations, names.
 
-    A `Protocol` and not the class below, because there really are two implementations and the
-    second must not inherit the first: a test's fake answers from fixtures and has no session, no
-    credential and no transport to stub out. The same call `FingerprintStore` makes, and the
-    opposite of the one `LabelIndex` makes — there a Protocol would have bought structural typing
-    nobody uses.
+    A `Protocol` so a test fake needs no session, credential or transport.
     """
 
     async def version(self) -> str:
@@ -207,19 +174,14 @@ class Labeller(Protocol):
 class RxnLabelServer:
     """One drain's worth of calls to the labelling server, each in its own MCP session.
 
-    A session per call rather than one per process, for the reason `connectors.identity` records:
-    the MCP transport's tasks inherit the context of whoever opened the connection, so a shared
-    session misattributes concurrent callers to each other. The cost is a connect per batch, which
-    is noise against a batch of 200 atom mappings.
+    A session per call because the MCP transport's tasks inherit the opener's context, so a shared
+    session would misattribute concurrent callers. The connect cost is small against a batch.
     """
 
     async def version(self) -> str:
-        """The identity a row is stamped with — the server's, plus the two versions it cannot see.
+        """The identity a row is stamped with: the server's, plus the two versions it cannot see.
 
-        Our standardization version rides along because the species SMILES sent for classification
-        were normalised by our rules, and our vocabulary version because the role names stored are
-        ours: a change to either means the stored labels no longer mean what a fresh call would
-        return, which is precisely what "stale" has to catch.
+        A change to our standardization or vocabulary version also makes stored labels stale.
         """
         payload = await self._call("labeller_version", {})
         remote = str(payload.get("version") or "").strip()
@@ -238,31 +200,14 @@ class RxnLabelServer:
 
         Args:
             reactions: `(id, record_smiles, species_smiles)` per reaction. The species list is
-                positional and comes back in the same order — see the module docstring for why it
-                is sent rather than parsed out of the reaction.
+                positional and comes back in the same order.
 
         Returns:
-            One representation per id the server answered for. A reaction the server could not
-            represent is simply absent, so the caller can record what it did get; the drain treats
-            a missing entry as "not labelled this pass" rather than as an error.
-
-            **An answer whose species list is neither empty nor the length sent keeps everything
-            except that list**, which is what makes "positional" a contract rather than a hope.
-            `merge._species` reads `answered[index]`, and its `index < len(answered)` guard only
-            stops the read running off the end: an answer for 3 of 4 species shifts every role past
-            the gap onto a different molecule — a reactant stored as the solvent, the solvent as the
-            catalyst. `LabelToolError`'s own docstring already calls a species list that does not
-            match the reaction bad data; nothing checked it, and the server is versioned separately
-            from this repository, which is precisely why it has to be checked here.
-
-            **Blanked rather than dropped, because the rest of the answer is not positional.** The
-            representation also carries `mapped_smiles`, and dropping the whole object threw that
-            away too — permanently, not for one pass: `enrich.label_stale` stamps every stale row
-            with the current `labeller_version` whether or not the server answered, so the reaction
-            leaves `stale()` and nothing revisits it until that version changes. An empty list is
-            the shape `merge._species` already documents a floor for ("a short or absent answer
-            falls back to `species_role_from`"), so the roles degrade to the source's coarse map
-            while the atom map survives.
+            One representation per id the server answered for; a missing id means "not labelled this
+            pass". An answer whose species list is neither empty nor the length sent has that list
+            blanked: positional roles would otherwise shift onto the wrong molecules. The rest of
+                the
+            answer (e.g. `mapped_smiles`) is kept, and roles fall back to the source's coarse map.
         """
         sent = {rid: len(species) for rid, _smiles, species in reactions}
         payload = await self._call(
@@ -277,9 +222,7 @@ class RxnLabelServer:
         answers: dict[str, ReactionRepresentation] = {}
         for item in (ReactionRepresentation.model_validate(r) for r in _results(payload)):
             expected = sent.get(item.id)
-            # An id this batch never sent is left to `enrich._placed`, which already drops it with
-            # the warning that names it as unplaceable — two warnings for one answer would read as
-            # two problems.
+            # An id this batch never sent is left to `enrich._placed`, which warns about it once.
             mismatched = (
                 expected is not None and bool(item.species) and len(item.species) != expected
             )
@@ -316,23 +259,16 @@ class RxnLabelServer:
     async def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Open a session, invoke `tool`, and translate the failure into this service's vocabulary.
 
-        The transport, the timeout ordering, the credential-rejection walk and the internal-error
-        string are all `core.mcp_session`'s. What is decided here is the one thing that differs
-        between services: which failures a durable activity should retry.
+        Transport, timeouts and credential handling are `core.mcp_session`'s; this decides only
+        which failures a durable activity should retry.
         """
         try:
             async with open_session(
                 settings.rxnlabel_server_url,
                 token_env=settings.rxnlabel_server_token_env,
                 timeout_seconds=settings.rxnlabel_server_timeout_seconds,
-                # **The same stamp `connectors/calc/remote.py` puts on its leg**, since
-                # `D-2026-09-14-identity-stamping-is-cores-not-a-connectors` moved it to `core`.
-                # This used to be the one MCP leg in the system that went out anonymous: no actor,
-                # no session, no correlation id and no `traceparent`, for hours at a time inside a
-                # durable activity, because the hook lived in `connectors/identity.py` and
-                # `ingest -> connectors` is not an edge `tests/test_layering.py` permits. The hook
-                # is bound to this server's own origin and strips on a cross-origin redirect, so a
-                # labelling server answering `302` cannot harvest the trail.
+                # Stamp the caller's identity and trace context on the call. The hook is bound to
+                # this server's origin and strips on a cross-origin redirect.
                 request_hook=turn_identity_hook(settings.rxnlabel_server_url),
             ) as session:
                 payload = await invoke(session, tool, arguments)
@@ -363,8 +299,7 @@ class RxnLabelServer:
 def _results(payload: dict[str, Any]) -> list[Any]:
     """The `results` list of a batch answer, or a refusal naming what came back instead.
 
-    Checked rather than defaulted to empty, because an empty batch answer and a malformed one look
-    identical to the drain — it would record zero labels, report progress, and advance.
+    Checked rather than defaulted, since an empty and a malformed answer would otherwise look alike.
     """
     results = payload.get("results")
     if not isinstance(results, list):

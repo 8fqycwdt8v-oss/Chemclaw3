@@ -1,24 +1,13 @@
-"""Autonomy metrics over a scripted transcript (F9-T3) — did the *harness* behave?
+"""Autonomy metrics over a scripted transcript — did the *harness* behave?
 
-The ticket asks for plan quality, a plan-vs-single-shot A/B, and a runaway/abort rate. The backlog
-row framed this as "zero evaluation of agent behaviour", which overstates it:
-`tests/test_langgraph_agent.py` already drives a real compiled graph and pins the loop cap. What was
-actually missing is that none of it reaches the **eval layer** — so a prompt edit, a skill change or
-a middleware reorder could regress behaviour and `make eval` would say nothing, and no number
-entered `baseline.json` for the drift check to watch.
+Plan quality, plan-vs-single-shot utility, runaway rate and turn cost, registered as eval metrics so
+a prompt, skill or middleware change that regresses agent behaviour shows up in `make eval` and
+`baseline.json`.
 
-**What these metrics do and do not measure, because the names invite the wrong reading.** A case
-here carries a *scripted* transcript: the model's replies are pinned, so nothing about the model's
-judgment is under test. What is under test is the harness around it — that a plan is emitted at
-all, that its steps survive into the event stream, that a turn a guard cut off says so instead of
-looking finished, that the A/B arithmetic holds. **These do not supersede AG-13**, which is
-deferred on a live endpoint precisely because judging judgment needs one. `retrieval_recall` once
-carried a name that promised more than it scored, and the correction is cheaper written down than
-discovered.
-
-**The transcript is validated against the closed `Event` union**, not read as loose dicts. That is
-the union's whole value here: a case naming an event type the front door cannot emit is rejected at
-load rather than scored as an absent signal.
+The model's replies are scripted, so these test the harness, not the model's judgment: that a plan
+is emitted and survives into the event stream, that a turn a guard cut off says so, that the A/B
+arithmetic holds. Transcripts are validated against the closed `Event` union, so a case naming an
+event type the front door cannot emit is rejected at load.
 """
 
 from typing import Any
@@ -32,9 +21,8 @@ from chemclaw.evals.ab import TaskScores, compare_tool_utility
 from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.evals.metrics import precision_recall_f1
 
-# Error codes that mean the turn was cut off rather than finished: it ran out of wall clock, out
-# of budget, or out of loop iterations. The rest of the taxonomy describes failures that are not
-# runaways (a storage outage is not the agent looping).
+# Error codes meaning the turn was cut off rather than finished: out of wall clock, budget or loop
+# iterations. Other failures (e.g. a storage outage) are not runaways.
 _EXHAUSTION_CODES = frozenset(
     {"turn_timeout", "budget_exhausted", "loop_cap_reached", "spend_cap_reached"}
 )
@@ -45,9 +33,8 @@ _TRANSCRIPT = TypeAdapter(list[Event])
 def _transcript(raw: Any, field: str) -> list[Event]:
     """Parse one serialized transcript, naming the field when it is not one.
 
-    Validation is the point rather than a formality: these cases are hand-written, and a `type:`
-    the front door never emits would otherwise score as "the signal was absent" — which is exactly
-    how a metric reports a healthy system while measuring nothing.
+    Validation matters: an event `type:` the front door never emits would otherwise score as an
+    absent signal.
     """
     if not isinstance(raw, list) or not raw:
         raise MetricError(f"{field} must be a non-empty list of front-door events")
@@ -60,8 +47,7 @@ def _transcript(raw: Any, field: str) -> list[Event]:
 def _final_plan(transcript: list[Event]) -> PlanEvent | None:
     """The last plan the turn emitted, which is the plan it finished with.
 
-    `run_turn` emits a `PlanEvent` only when the plan *changes*, so the last one is the final state
-    rather than one sample of many.
+    `run_turn` emits a `PlanEvent` only when the plan changes, so the last one is the final state.
     """
     plans = [event for event in transcript if isinstance(event, PlanEvent)]
     return plans[-1] if plans else None
@@ -75,15 +61,9 @@ def _plan_steps(plan: PlanEvent) -> list[str]:
 def billed_tokens(turn: TurnCost) -> float:
     """One turn's cost in input-token equivalents.
 
-    Input and output are counted at face value and the two cache counters at their configured
-    weights, because a cached read is charged at a fraction of an input token and a cache write at
-    a premium. Collapsing four counters into one number is what lets the metric be a single float
-    without pretending the four are interchangeable.
-
-    **Public because there is a second real caller**, which is the bar this repository sets for an
-    abstraction existing at all: `evals/delegation_run.billed_by_session` needs exactly this
-    arithmetic over `turn_costs` rows, and a second copy of it would be two answers to "what did a
-    turn cost" — one of which would not follow `eval_cache_read_weight` when a deployment moved it.
+    Input and output at face value, the two cache counters at their configured weights (a cached
+    read is charged at a fraction, a cache write at a premium). Public because
+    `evals/delegation_run.billed_by_session` needs the same arithmetic.
     """
     return (
         turn.input_tokens
@@ -97,19 +77,10 @@ def billed_tokens(turn: TurnCost) -> float:
 def plan_quality(case: EvalCase) -> MetricResult:
     """F1 of the plan the turn ended with against the steps the case says it needed.
 
-    Reads `output.transcript` and `reference.expected_plan_steps`. Scored with the same
-    `precision_recall_f1` the retrieval metrics use, so "did it name the right things" has one
-    definition in this system rather than two.
-
-    **Order is deliberately not scored, and that is a decision rather than an inheritance.** The
-    shared computation is set-based, and for a plan that is the right call: two orderings of the
-    same steps are usually both correct — run the calculation before or after pulling the ELN
-    history — and penalising one would gate on a preference. What is genuinely wrong is naming a
-    step that should not be there or dropping one that should, which is what precision and recall
-    already say.
-
-    The gate is `eval_plan_quality_min` (0.8), below 1.0 on purpose: an extra defensible step is
-    not a regression, a missing required one is.
+    Reads `output.transcript` and `reference.expected_plan_steps`, scored with the shared
+    `precision_recall_f1`. Order is deliberately not scored: two orderings of the same steps are
+    usually both correct. Gated at `eval_plan_quality_min`, below 1.0 because an extra defensible
+    step is not a regression.
     """
     if case.reference is None:
         raise MetricError("plan_quality needs a reference with `expected_plan_steps`")
@@ -145,26 +116,11 @@ def plan_quality(case: EvalCase) -> MetricResult:
 def runaway_rate(case: EvalCase) -> MetricResult:
     """Share of the case's turns that a guard cut off instead of letting them finish.
 
-    Reads `output.transcripts` — a list of transcripts, because a rate over one turn is a coin flip
-    and the name would be a lie. A turn counts as a runaway when it carries an `ErrorEvent` whose
-    code is one of `_EXHAUSTION_CODES`: `turn_timeout` (out of wall clock), `budget_exhausted` (out
-    of budget), `loop_cap_reached` (out of loop iterations) or `spend_cap_reached` (out of tokens
-    inside the turn). One rule, and the transcript states
-    the outcome rather than the metric guessing at it.
-
-    **This used to infer the loop cap from residue — an answer sent while the plan still held
-    unchecked steps — and that scored correct turns as runaways.** The residue of a capped loop and
-    the residue of a *correctly deferred* one are the same thing: a step stays open precisely
-    because the work moved to a durable job, so "I've started the DFT run, job abc123" arrived as a
-    runaway and, at the 0.0 gate, as a failure. The evidence that would separate the two is not in
-    the transcript at all — `PlanEvent.todos` carries only rendered display strings — so no prefix
-    filter could have fixed it. The fix was to stop proxying: the loop no longer stops silently
-    (`chemclaw.agent.loop_cap.enforce_loop_cap` records the cap), the runner emits
-    `loop_cap_reached`, and this reads that. A metric
-    that measures less and means it beats one that gates at 0.0 on evidence it cannot interpret.
-
-    Gated at `eval_runaway_max` (0.0): the pinned turns are scripted to complete, so a runaway among
-    them is broken plumbing rather than a hard problem.
+    Reads `output.transcripts` (a list, since a rate over one turn is meaningless). A turn is a
+    runaway when it carries an `ErrorEvent` with a code in `_EXHAUSTION_CODES`: `turn_timeout`,
+    `budget_exhausted`, `loop_cap_reached` or `spend_cap_reached`. The transcript states the
+    outcome; the metric does not infer it from unchecked plan steps, which a correctly deferred step
+    also leaves. Gated at `eval_runaway_max` (0.0): the scripted turns are meant to complete.
     """
     raw = case.output.get("transcripts")
     if not isinstance(raw, list) or not raw:
@@ -197,19 +153,9 @@ def plan_execute_utility(case: EvalCase) -> MetricResult:
     """Share of tasks the planning path helped, against the single-shot baseline.
 
     Reads `output.tasks` (`task_id`, `baseline`, `augmented` per task) and
-    `output.higher_is_better`. The comparison itself is `evals.ab.compare_tool_utility`, which
-    already implemented this A/B and was simply never registered as a metric — so it ran under no
-    `make eval`, gated nothing, and put no number in `baseline.json`. Registering it is most of
-    what this row needed.
-
-    **The scalar is the helped *share*, not `net_delta`.** A metric's value is one float, and
-    `net_delta` is unbounded and denominated in whatever the task's own scale happens to be, so a
-    single task on a percent-yield scale would swamp four on a log-solubility scale and the drift
-    band would be meaningless. The share is bounded in [0, 1] and comparable across case sets; the
-    signed deltas stay in the provenance where a reader can see them.
-
-    Ungated (`passed=None`): "how often does planning help" is a progress number, and a threshold
-    on it would gate the eval suite on a research question rather than on a defect.
+    `output.higher_is_better`, compared by `evals.ab.compare_tool_utility`. The scalar is the helped
+    share, bounded in [0, 1], not `net_delta`, whose scale depends on the task; the signed deltas
+    stay in the provenance. Ungated: it is a progress number, not a defect check.
     """
     raw = case.output.get("tasks")
     if not isinstance(raw, list) or not raw:
@@ -240,43 +186,15 @@ def plan_execute_utility(case: EvalCase) -> MetricResult:
 def turn_cost_ratio(case: EvalCase) -> MetricResult:
     """What the case's turns cost, as a ratio against the same turns' recorded baseline.
 
-    Reads `output.turns` — a list of `TurnCost` records, the ledger's own shape — and
-    `reference.baseline_tokens`. Scored so a suite can answer the question HAL asked of every agent
-    benchmark and this one could not: **not "is it right" but "is it right for what it costs".**
-    That study ran 21,730 rollouts across nine models and nine benchmarks and found the most
-    expensive model on the accuracy/cost Pareto frontier in *one* of the nine — a result invisible
-    to any suite that scores only accuracy, which is what `make eval` was.
+    Reads `output.turns` (`TurnCost` records) and `reference.baseline_tokens`, so a suite can ask
+    whether an answer is right for what it costs. A ratio rather than money: bounded, comparable
+    across case sets, and moved only by changes to this system, not by provider prices. (The shipped
+    case commits literal turn records, so its score is constant.)
 
-    **The scalar is a ratio, not dollars, and that is the same argument `plan_execute_utility`
-    already settled.** A metric's value is one float, and money is unbounded, denominated in a
-    currency, and re-priced by a provider without anything in this repository changing. A ratio
-    against the case's own recorded baseline is bounded in practice, comparable across case sets,
-    and — the part that matters for a drift band — moves only when *this system* changes. The token
-    counts and the per-token arithmetic stay in the provenance, where a reader can see them.
-
-    **That property belongs to the metric and not yet to any case that uses it.** The one shipped
-    case, `autonomy-turn-cost`, carries literal turn records, so its score is a constant of
-    committed data and no change to the agent can move it. The case file says so; it is repeated
-    here because a reader arriving at the paragraph above would otherwise take "moves only when
-    this system changes" as a description of what the suite currently measures, which is how the
-    claim came to be written in the first place.
-
-    **Billed tokens, which is not the same as tokens sent.** `cache_read_tokens` are charged at a
-    fraction of the input rate and `cache_write_tokens` at a premium, so a change that adds a cache
-    breakpoint moves the sent count and the billed count in opposite directions. Scoring the sent
-    count would score a prompt-caching improvement as a regression. The weights are settings, not
-    constants here, because they are a provider's price list and this repository is not the place
-    it lives.
-
-    **Turns that never answered are counted.** `TurnCost.completed` is False for a turn torn down
-    before it produced an answer, and those spent real tokens — a ledger that kept only the tidy
-    ones would be wrong in exactly the direction that hides a runaway. The count of them is in the
-    provenance so a reader can tell an expensive answer from an expensive non-answer.
-
-    Ungated (`passed=None`), deliberately and for now. There is not yet enough history to say what
-    a cost regression looks like, and a threshold guessed today would gate the suite on a number
-    nobody measured — the same posture `plan_execute_utility` takes for the same reason. What this
-    buys immediately is a row in `baseline.json` that `make eval-baseline-check` watches for drift.
+    Billed tokens, not sent tokens: cache reads and writes are weighted, so a prompt-caching
+    improvement is not scored as a regression. Turns that never answered are counted, and their
+    number is in the provenance. Ungated until there is enough history to define a cost regression;
+    the row in `baseline.json` is watched for drift.
     """
     raw = case.output.get("turns")
     if not isinstance(raw, list) or not raw:
@@ -287,10 +205,7 @@ def turn_cost_ratio(case: EvalCase) -> MetricResult:
         raise MetricError(f"output.turns is not a list of turn costs: {exc}") from exc
 
     baseline = (case.reference or {}).get("baseline_tokens")
-    # Bools are refused ahead of the numeric test, for the reason `metrics._scalar` states one file
-    # over: YAML parses `yes`/`no` as bools, `bool` is a subclass of `int`, and `baseline_tokens:
-    # yes` therefore passed this check as a baseline of 1 — scoring a 1,100-token run at 1100.0 and
-    # writing that into the drift band `make eval-baseline-check` watches.
+    # Bools refused before the numeric test: YAML parses `yes` as a bool, and `bool` is an `int`.
     if isinstance(baseline, bool) or not isinstance(baseline, (int, float)) or baseline <= 0:
         raise MetricError("reference.baseline_tokens must be a positive number of billed tokens")
 

@@ -1,22 +1,10 @@
 """Publishing to a SQL database running the shipped schema.
 
-**Reuses the inbound warehouse seam's driver Protocol rather than defining a second one.**
-`ingest/eln/warehouse/driver.py`'s `Warehouse`/`WarehouseCursor` are already dialect-neutral —
-`execute(sql, params)` does not care whether the statement reads or writes, and `placeholder` is on
-the connection because parameter style is a dialect fact. The read-only-ness of that seam lives in
-its `sql.py`, not in the driver. So a driver written for the inbound seam is already shaped to
-write, and this one connects through the same Protocol.
-
-**The statements it sends are Postgres, though** (`dialect.py`) — the upserts are `ON CONFLICT`,
-which several warehouses spell `MERGE` instead. The seam is portable; the emitter is not yet.
-Reaching another engine is a `MERGE` emitter beside the current one, not a configuration change.
-
-**The `connection:` block is the driver's own signature**, here and on the inbound side alike
-(`D-2026-08-26-the-driver-s-signature-is-the-schema`). This module used to argue for the opposite —
-that the inbound seam's `ConnectionBinding` could not be reused because it enumerated one vendor's
-connection fields and had no host or port. It enumerates nothing now, and both seams resolve their
-driver through `chemclaw.core.connect`, which keeps the discipline that mattered: variables are
-*named*, read at connect time, and registered for log redaction first.
+Reuses the inbound warehouse seam's dialect-neutral `Warehouse`/`WarehouseCursor` Protocol
+(read-only-ness lives in that seam's `sql.py`, not the driver), connected through
+`chemclaw.core.connect` with the `connection:` block as the driver's own signature. The
+statements are Postgres (`ON CONFLICT`); another engine needs a `MERGE` emitter in
+`dialect.py`, not configuration.
 """
 
 import logging
@@ -46,12 +34,9 @@ logger = logging.getLogger(__name__)
 class SqlResultSink:
     """Writes published records into a SQL database running `schema/result-store/`.
 
-    **Writes down to the schema it finds.** A site may not grant DDL to the runtime principal — this
-    repository already splits its own migration DSN from its runtime DSN for that reason — so a
-    deployment can be running an older schema than this image expects. Rather than failing every
-    row, the sink probes `information_schema.columns` once and omits columns the site lacks,
-    logging which. The alternative, writing the full statement and letting each row fail, turns a
-    schema *lag* into a total publish outage, which is the worse failure.
+    Writes down to the schema it finds: a site may not grant DDL to the runtime principal, so the
+    sink probes `information_schema.columns` once per pass and omits optional columns the site
+    lacks, rather than turning a schema lag into a total outage.
     """
 
     def __init__(
@@ -67,41 +52,31 @@ class SqlResultSink:
         Args:
             name: The sink's manifest name, for log lines and errors.
             tenant_id: What this deployment calls itself on every publication row.
-            connection: The `connection:` block — a `module:callable` driver plus whatever that
-                driver's signature takes. Any key ending `_env` names an environment variable to
-                read at connect time; the value itself is never written in a manifest.
+            connection: The `connection:` block: a `module:callable` driver plus whatever that
+                driver's signature takes. Any key ending `_env` names an environment variable read
+                at connect time.
             writer_version: The ChemClaw release stamped on each row, so a consumer can tell an
-                absent measurement from an absent column. Defaults to this deployment's own
-                revision; a manifest sets it only to override that.
+                absent measurement from an absent column. Defaults to this deployment's revision.
         """
         self._name = name
         self._tenant_id = tenant_id
         self._connection_binding = dict(connection)
-        # **Defaulted to the deployment's revision rather than left empty.** Nothing in this tree
-        # computed a writer version and the shipped manifest declares none, so the column the DDL
-        # justifies with "without these, 'why is `in_domain` null for everything before March' is
-        # unanswerable" held `''` on every row a real deployment writes — recorded, and blank.
-        # `deployment_revision` is the same Git SHA the audit trail already stamps for exactly this
-        # question, so the two records of "which ChemClaw3 did this" agree by construction.
+        # The same Git SHA the audit trail stamps, so both records of "which ChemClaw3 did this"
+        # agree.
         self._writer_version = writer_version or settings.deployment_revision
-        # The schema the driver was given, so the column probe below can be qualified the way the
-        # writes are. Empty for a driver that spells its namespace differently, which leaves the
-        # probe unqualified — the behaviour every target had until now.
+        # Qualifies the column probe the way the writes resolve; empty leaves it unqualified.
         self._schema = str(self._connection_binding.get("schema") or "")
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
-        # Which optional columns this sink has already reported as absent, per table. Scoped to the
-        # sink's life, which is one drain pass — so a persistent lag is reported once a pass rather
-        # than once a row, and a site that applies the migration stops being reported at all.
+        # Optional columns already reported absent, per table, so a lag is reported once per pass.
         self._reported: dict[str, set[str]] = {}
 
     async def aclose(self) -> None:
         """Close the held connection and forget the probed schema.
 
-        The drain builds a sink per run, so without this each pass leaked one connection — see
-        `PostgresWarehouse.aclose`. The cached column set goes with it because the two are scoped
-        together: the probe is cached for the sink's lifetime precisely so a site that applies a
-        migration is picked up on the next pass rather than the next restart.
+        The drain builds a sink per run, so this prevents a connection leak per pass; the column
+        cache
+        goes with it so a newly applied migration is picked up next pass.
         """
         warehouse = self._warehouse
         self._warehouse = None
@@ -127,24 +102,16 @@ class SqlResultSink:
         return self._warehouse
 
     async def _known_columns(self, warehouse: Warehouse) -> dict[str, set[str]]:
-        """Which columns the site's schema actually has, probed once and cached.
-
-        Cached for the sink's lifetime rather than forever: the drain builds a sink per run, so a
-        DBA who adds a column sees it picked up on the next pass without a restart.
+        """Which columns the site's schema actually has, probed once and cached for the sink's
+        lifetime.
         """
         if self._columns is not None:
             return self._columns
-        # **Qualified by the same schema the writes resolve through.** The statements this class
-        # builds name no schema and are resolved by the connection's `search_path`, so a probe that
-        # asked by table *name* alone was answering about a different table the moment the target
-        # held a same-named relation anywhere else the role can see — an archive, a staging copy, a
-        # second tenant. The union then keeps a column the site's own table does not have and every
-        # row of that table is refused; the mirror case is a DDL applied off the search path, where
-        # the "the target has no ..." guard passes while every write fails.
-        #
-        # Split on commas, because `schema:` becomes a `search_path` and a search path may name
-        # several — matching the whole string would find nothing there and report every table
-        # missing, which is the failure this probe's `LOWER()` already exists to avoid.
+        # Qualified by the schemas on the search path the writes resolve through, so a same-named
+        # table
+        # elsewhere (an archive, another tenant) cannot answer for the target. Split on commas
+        # because
+        # `schema:` may name several.
         schemas = [part.strip().lower() for part in self._schema.split(",") if part.strip()]
         predicate = (
             " AND LOWER(table_schema) IN ("
@@ -156,11 +123,9 @@ class SqlResultSink:
         parameters: list[str] = [*TABLE_ORDER, *schemas]
         async with warehouse.cursor() as cursor:
             await cursor.execute(
-                # `LOWER(table_name)`, because `information_schema` is not case-agnostic: Postgres
-                # stores unquoted identifiers folded down and Snowflake and Oracle fold them up, so
-                # binding this module's lowercase literals against the raw column matched nothing at
-                # all on two of the three engines — and a probe that finds no tables reports every
-                # table missing, which reads exactly like a site that never ran the DDL.
+                # `LOWER(table_name)`: engines fold unquoted identifiers differently, and a probe
+                # that matched
+                # nothing would report every table missing.
                 "SELECT table_name, column_name FROM information_schema.columns "
                 "WHERE LOWER(table_name) IN ("
                 + ", ".join([warehouse.placeholder] * len(TABLE_ORDER))
@@ -182,10 +147,9 @@ class SqlResultSink:
                 f"result sink {self._name!r}: the target has no {', '.join(missing)}. "
                 "Run `python -m chemclaw.cli.sink_schema` and apply the printed DDL."
             )
-        # **A column that carries a measurement is checked here, with the tables.** See
-        # `dialect.REQUIRED_COLUMNS` for why a *lag* and a *hole* are not the same fault: the
-        # omission filter below is right for a provenance column a later release added, and was
-        # silently dropping the value itself.
+        # Columns that carry a measurement are required, like tables (see
+        # `dialect.REQUIRED_COLUMNS`);
+        # only the rest are omitted on a lag.
         for table, required in sorted(REQUIRED_COLUMNS.items()):
             absent = sorted(required - found[table])
             if absent:
@@ -202,22 +166,12 @@ class SqlResultSink:
     async def _refuse_an_unseeded_registry(self, warehouse: Warehouse) -> None:
         """Refuse a store whose `property_definition` is empty, before any row is written.
 
-        **The bootstrap is a loaded gun without this.** `schema/result-store/` is where CLAUDE.md
-        points a site — *"the schema ships in `schema/result-store/` and a site creates it"* — and
-        the directory holds the DDL and **no registry rows**; those come from
-        `sink_schema --seed`, which only `README.md` mentions. Applying the directory alone
-        therefore builds a store that accepts every spine row and refuses every fact row on a
-        foreign key, and the missing-*table* probe above cannot see it because every table is
-        there.
-
-        Measured on exactly that store: the delivery raised, and the far side kept
-        `calculation 1 / subject 1 / calculation_payload 1 / property_value 0` — a calculation row
-        with zero facts, which a `GROUP BY` over `property_value` reads as a calculation that
-        produced nothing. An orphan spine row is worse than absence, because it is counted.
-
-        Refused *before* the write rather than after it, which is the whole point: the write is
-        row-by-row on an autocommit connection with no transaction to roll back, so the only place
-        this fault can be caught without leaving residue is ahead of the first statement.
+        The DDL in `schema/result-store/` ships no registry rows (those come from `sink_schema
+        --seed`),
+        so an unseeded store accepts every spine row and refuses every fact row, leaving calculation
+        rows with zero facts that read as "produced nothing". Writes are autocommit with no
+        rollback, so
+        the only clean place to refuse is ahead of the first statement.
         """
         async with warehouse.cursor() as cursor:
             await cursor.execute("SELECT count(*) AS n FROM property_definition", [])
@@ -232,15 +186,10 @@ class SqlResultSink:
             )
 
     def _report_dropped(self, table: str, dropped: set[str]) -> None:
-        """Say once per table what this site's schema cannot hold — not once per row.
+        """Say once per table what this site's schema cannot hold, not once per row.
 
-        Two changes to a bare `logger.warning`, and both were measured problems. It fired **per
-        row**, so at `result_publish_batch_size=100` a site one migration behind produced a hundred
-        identical lines per table per pass; and it was a plain log line, so nothing counted it and
-        nothing alerted. `degraded()` is this tree's one answer for "we continued with less" — it
-        counts and then logs — and WARNING rather than the default ERROR because this arm is the
-        *sanctioned* case: an optional column absent on an older store, which the additive-migration
-        rule says reads correctly as "not recorded".
+        Reported through `degraded()` so it is counted as well as logged, at WARNING because an
+        optional column absent on an older store is the sanctioned case ("not recorded").
         """
         seen = self._reported.setdefault(table, set())
         if dropped <= seen:
@@ -261,32 +210,14 @@ class SqlResultSink:
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """Write every record's rows, in dependency order, idempotently.
 
-        One transaction per batch is *not* attempted: the warehouse Protocol exposes a cursor and no
-        transaction control, and every write here is an upsert onto a content-addressed key — so a
-        batch that fails halfway leaves a partial but *correct* state that the retry completes. That
-        is the property that makes the outbox's at-least-once delivery safe.
-
-        **One statement per `(table, column set)`, not one per row.** This was a
-        `cursor().execute()` inside a loop over rows inside a loop over `TABLE_ORDER` inside a
-        loop over up to `result_publish_batch_size` records, on an autocommit connection — so
-        every row was its own round trip *and* its own transaction. `_batches` regroups it into the
-        statements `upsert_statement` would have generated anyway, and `execute_many` sends each one
-        with all of its parameter sets, which psycopg runs in pipeline mode. Measured against a live
-        Postgres on the shipped `schema/result-store/`, a full drain pass of 100 solvent-comparison
-        records, three runs each: **1 500 round trips and 5.55-5.68 s row-at-a-time, 9 round trips
-        and 0.34-0.48 s batched** — 12-17x, and the round-trip count is the cause rather than a
-        proxy for it. Nine, not nine hundred, because the grouping is table-major across the whole
-        batch: see `_batches`. The stored rows are identical either way, which
-        `tests/test_publish_end_to_end.py` asserts beside the counts rather than leaving implied.
-
-        **A group is atomic and a row was not, which is a change and an improvement.** psycopg runs
-        `executemany` inside one implicit transaction even on an autocommit connection — driven,
-        a four-row set failing on its third left **none** of the four, and the connection usable.
-        So a refused group leaves nothing behind and `_row_at_a_time` writes its good rows for the
-        first time rather than re-applying them. The seam's own guarantee is untouched: what a
-        failed batch leaves is still partial and still correct, because every statement is an
-        upsert onto a content-addressed key. Only the grain of "partial" moved, from a row to a
-        statement.
+        No transaction spans the batch (the Protocol has no transaction control); every write is an
+        upsert onto a content-addressed key, so a half-failed batch leaves a partial but correct
+        state
+        the retry completes. Rows are grouped into one statement per `(table, column set)` (see
+        `_batches`) and sent with `execute_many`, so a pass costs a handful of round trips rather
+        than
+        one per row. psycopg makes each group atomic; `tests/test_publish_end_to_end.py` asserts the
+        stored rows match row-at-a-time writes.
         """
         if not records:
             return
@@ -294,22 +225,14 @@ class SqlResultSink:
             warehouse = self._connect()
             columns_by_table = await self._known_columns(warehouse)
         except SinkRejectedError:
-            # The site's schema is the problem — a missing table names its own remedy. Re-raised
-            # unchanged, ahead of the availability arm below, because it is the one connect-time
-            # failure a retry cannot fix.
+            # The site's schema is the problem and a retry cannot fix it; re-raised ahead of the
+            # availability arm.
             raise
         except Exception as exc:
-            # **Every other failure to reach the destination, not just
-            # `ConnectionError`/`OSError`.**
-            # The vendor driver's own exception types are not in this module's vocabulary and must
-            # not be: the seam's contract is that a *content* failure arrives as
-            # `WarehouseQueryError` (or, here, `SinkRejectedError`), so anything else at connect
-            # time is by definition the destination not working. Measured before this widening
-            # against a Postgres that was simply down: `psycopg.OperationalError` is neither a
-            # `ConnectionError` nor an `OSError`, so it escaped this handler entirely and reached
-            # `durable/publish_results._drain_one`'s generic arm — which treats a failure as a
-            # *poison record* and replays the batch one row at a time. A warehouse that was down
-            # therefore dead-lettered every record as though its content were bad.
+            # Any other connect-time failure is the destination not working: content failures arrive
+            # as
+            # `WarehouseQueryError` or `SinkRejectedError`, and a vendor error such as
+            # `psycopg.OperationalError` must be retried, not treated as a poison record.
             raise SinkUnavailableError(f"result sink {self._name!r} is unreachable: {exc}") from exc
 
         projected = [
@@ -325,23 +248,12 @@ class SqlResultSink:
                 async with warehouse.cursor() as cursor:
                     await execute_many(cursor, statement, [values for values, _ in rows])
             except WarehouseQueryError as exc:
-                # **A batch shares a failure, so the batch is replayed to find whose it is.** The
-                # per-row message this seam has always raised names the offending table *and*
-                # `calc_ref`, and that is what an operator acts on: a group that merely said "one
-                # of these 300 property_value rows" would move the diagnosis into somebody's SQL
-                # client. Replaying is safe because every statement here is an upsert onto a
-                # content-addressed key, so a row that did land is re-applied as a no-op — the same
-                # property `durable/publish_results._drain_one` relies on for its own per-record
-                # replay one level up. It is what makes the replay safe for *any* driver; on
-                # psycopg specifically nothing landed at all (see `deliver`), so the replay writes
-                # the group's good rows for the first time.
+                # A batch shares a failure, so it is replayed row by row to name the offending table
+                # and
+                # `calc_ref`. Safe because every statement is an idempotent upsert.
                 await self._row_at_a_time(warehouse, table, statement, rows, exc)
             except Exception as exc:
-                # The same widening as the connect arm, for the same reason: the driver's
-                # docstring says a server that goes away "passes through as itself, because
-                # that one genuinely is worth retrying" — and this handler was the place
-                # that turned the retry back off, because `psycopg.OperationalError` is
-                # neither of the two classes it named.
+                # Same widening as the connect arm: a server that went away stays retryable.
                 raise SinkUnavailableError(
                     f"result sink {self._name!r} became unreachable mid-batch: {exc}"
                 ) from exc
@@ -353,32 +265,20 @@ class SqlResultSink:
     ) -> dict[tuple[str, tuple[str, ...]], list[tuple[list[Any], str]]]:
         """Every row this batch will write, grouped into the statements that can carry them.
 
-        The key is `(table, column set)`, which is exactly what `upsert_statement` is a function of
-        — so one group is one statement and N parameter sets. The column set is per *row* rather
-        than per table because the omission filter below is: a site one migration behind drops a
-        column from the rows that carry it and not from the rows that do not.
-
-        **Table-major across the whole batch, where the writer was record-major.** `TABLE_ORDER` is
-        a dependency order, so walking it outermost still writes every parent before every child —
-        more strictly than before, in fact, since now no record's `calculation` row is written
-        before another record's `solvent` row. That is what lets 100 records share ~17 statements
-        instead of taking 17 of their own, and it costs nothing the seam was promising: a batch that
-        fails halfway already left a partial state, and every write is an idempotent upsert onto a
-        content-addressed key, so which half it left is not something a reader may depend on.
-
-        Insertion order is the iteration order of a `dict`, which is `TABLE_ORDER`'s here — relied
-        on deliberately, because the dependency order is the whole reason the grouping is safe.
+        Keyed on `(table, column set)`, which is what `upsert_statement` depends on; the column set
+        is
+        per row because the omission filter is. Table-major across the whole batch in `TABLE_ORDER`
+        (dict insertion order, relied on deliberately), so every parent is written before every
+        child.
         """
         batches: dict[tuple[str, tuple[str, ...]], list[tuple[list[Any], str]]] = {}
         for table in TABLE_ORDER:
             known = columns_by_table[table]
             for calc_ref, rows_by_table in projected:
                 for row in rows_by_table.get(table) or []:
-                    # Omit what the site does not have, rather than failing the row. A column added
-                    # by a later release is absent here, and absent reads correctly as "not
-                    # recorded" — which is what the additive-migration rule guarantees. The columns
-                    # for which that is *not* true were refused at the probe (`REQUIRED_COLUMNS`),
-                    # so everything reaching this line is genuinely optional.
+                    # Omit optional columns the site lacks (absent reads as "not recorded");
+                    # required ones were
+                    # refused at the probe.
                     usable = {key: value for key, value in row.items() if key in known}
                     dropped = set(row) - set(usable)
                     if dropped:
@@ -397,11 +297,8 @@ class SqlResultSink:
     ) -> None:
         """Re-send one group singly, so the refusal names the row that caused it.
 
-        Always raises when a row is refused — which is the point, and why the caller does not check
-        a return value. It returns normally only when every row is accepted on the replay, and that
-        is the honest answer rather than a swallowed error: the rows are then written, and raising
-        would book a delivery that demonstrably landed as failed. `degraded()` is what makes the
-        fast path having failed visible from a scrape instead of from this docstring.
+        Raises when a row is refused. Returns normally only when every row is accepted on replay, in
+        which case the rows are written and the delivery stands; `degraded()` records the fallback.
         """
         degraded(
             logger,

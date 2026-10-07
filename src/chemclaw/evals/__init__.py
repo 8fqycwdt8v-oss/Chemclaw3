@@ -1,8 +1,8 @@
-"""Evaluation & metric layer (plan Phase 2b).
+"""Evaluation & metric layer.
 
 Importing the package registers the seed metrics (via `chemclaw.evals.metrics`), so callers can
-resolve them by name straight away. Public surface: the metric interface + registry
-(`metric`), the eval harness (`harness`), and the tool-utility A/B (`ab`).
+resolve them by name straight away. Public surface: the metric interface + registry (`metric`), the
+eval harness (`harness`), and the tool-utility A/B (`ab`).
 """
 
 from chemclaw.evals import (

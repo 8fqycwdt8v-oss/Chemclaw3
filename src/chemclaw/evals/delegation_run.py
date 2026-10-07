@@ -1,50 +1,21 @@
 """The run half of the delegation experiment: drive each arm, observe what it did, record it.
 
-`evals/delegation.py` is the comparator and says in its own closing paragraph that nothing
-constructed an `ArmRun`, recorded `delegated`, or built the `no-helper` arm at all. This module is
-that half. It deliberately stays out of the comparator, whose whole claim to being testable without
-a gateway is that it runs no model — so the two halves meet at `ArmRun` and nowhere else.
+Kept separate from the comparator (`evals/delegation.py`), which runs no model; the two meet at
+`ArmRun`.
 
-**Every arm is a profile plus a server posture, and the second half is not something a client can
-supply.** A helper's model is `settings.model_routes["helper"]` and a peer roster is
-`settings.agent_peer_roster`; both are read by the process that *builds the agent*, so this runner
-cannot switch them by asking the front door differently. `ARMS` therefore records what each arm
-needs of the deployment, the report prints it, and an arm whose posture is absent produces exactly
-what intention-to-treat says it should: repeats that did not take the treatment, reported rather
-than dropped.
+Each arm is a profile plus a server posture (`model_routes["helper"]`, `agent_peer_roster`) that the
+process building the agent reads, so a client cannot switch it. `ARMS` records what each arm needs
+and the report prints it; an arm whose posture is absent yields undelegated repeats, which
+intention-to-treat reports rather than drops.
 
-**`delegated` is read off `audit_events`, which is the authoritative per-turn record of a tool
-call.** Three other things know about a `task` call and none of them is the record:
+`delegated` is read off `audit_events`, the authoritative per-call record: one row per tool call,
+drained before the answer event, carrying `agent` and `outcome`. A refused call never ran and is not
+a delegation; a call that ran and failed is. `billed_tokens` is the whole turn's bill from
+`turn_costs`, which covers both the helper's reading and the caller's.
 
-* the SSE stream's `tool_call` event is what the *browser* was told, assembled by
-  `api/graph_stream.py` — a view, and one whose contents have been wrong about a turn before
-  (`STREAM-1`, tool-call events carrying no arguments);
-* `turn_costs.tool_calls` is a **count**, so it cannot say *which* tool;
-* `ChemclawState` is in the checkpoint, keyed by thread, and holds no per-tool record at all.
-
-`agent/audit.py` wraps every registered tool from one place, writes one row per call with the tool's
-own name, and `api/runner.py` drains the sink before the turn's answer event — so the row is
-queryable the moment the stream ends. It also carries `agent`, so a helper's own calls are
-distinguishable from its caller's, and `outcome`, which is how a *refused* call is told from one
-that ran. That last distinction is the one this module makes: a call the plan gate or the
-authorization gate stopped never entered the helper's graph, so it is not a delegation; a call that
-entered and then failed **is** one that happened, and under ITT a failed delegation dilutes the
-effect toward zero, which is the conservative direction.
-
-**`billed_tokens` is read off `turn_costs`, and the quantity is the whole turn's bill.** That is the
-right quantity rather than a compromise: the cost claim for delegation is that the helper's reading
-is billed in the helper's own context while only its report is billed in the caller's, and both
-halves land on the same turn — so the turn total is exactly what "did delegation pay" asks about. An
-estimator would not do, for the reason `ArmRun.billed_tokens`' own comment gives.
-
-**The marker injection is for the scripted double and is derived, never configured.** Against
-`cli.mock_llm` a turn's behaviour is selected by a `[[name]]` marker in the message, so a run
-against the mock has to inject one or every arm gets the catalogue's default and the arms are the
-same arm. Whether to inject is asked of `settings.llm_base_url` against `MOCK_BASE_URL` — the same
-question `cli/live_probes._gateway_line` asks, and for the same reason: a transcribed address agrees
-with the default on the day it is written and cannot follow it. Against a real gateway nothing is
-injected and the arms differ by their profile alone. **A number this produces against the mock is
-evidence about this runner and about nothing else.**
+Against `cli.mock_llm`, arms differ only if a `[[name]]` marker is injected, so the runner injects
+one when `settings.llm_base_url` is `MOCK_BASE_URL`. A number produced against the mock is evidence
+about this runner only.
 """
 
 from __future__ import annotations
@@ -78,21 +49,15 @@ from chemclaw.evals.tool_utility import VERDICT_SCORES
 
 logger = logging.getLogger(__name__)
 
-#: The corpus this suite asks, inside `settings.live_probe_dir`. A filename beside a configured
-#: directory rather than a setting of its own, which is the shape `cli/live_probes._M12_SUITES`
-#: already uses and argues for: a suite whose file is missing then fails at a name a reader can
-#: search for instead of raising `FileNotFoundError` on a path nobody wrote down.
+# The corpus this suite asks, inside `settings.live_probe_dir`, so a missing file fails at a
+# searchable name.
 DELEGATION_PROBE_FILE = "delegation.yaml"
 
-#: Which act counts as this arm having taken its treatment.
-#:
-#: `helper` is a `task` call and `handoff` is a `transfer_to_…` call, because a helper reads and
-#: reports while a peer keeps the conversation — different acts, not two flavours of one
-#: (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`). `any` is the
-#: baseline's, and it is the union rather than `helper` for a reason that only bites once a peer arm
-#: exists: the arms share one front door, so a run that includes the peer arm has a peer roster
-#: bound for *every* arm, and a baseline that handed the conversation away is no more a baseline
-#: than one that spawned a helper.
+# Which act counts as this arm having taken its treatment.
+#
+# `helper` is a `task` call and `handoff` a `transfer_to_…` call — different acts. `any` is the
+# baseline's: with a peer arm in the run every arm has a peer roster bound, and a baseline that
+# handed off is no more a baseline than one that spawned a helper.
 TREATMENTS = ("helper", "handoff", "any")
 
 
@@ -120,11 +85,7 @@ class ArmSpec(BaseModel):
     mock_behaviour: str = Field(min_length=1)
 
 
-#: The four arms, in report order, baseline first.
-#:
-#: Four rather than three because the BACKLOG row added the peer arm after
-#: `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`, and it belongs on
-#: this row rather than on one of its own: a row per arm is what that row was four of.
+# The four arms, in report order, baseline first.
 ARMS: tuple[ArmSpec, ...] = (
     ArmSpec(
         arm=BASELINE_ARM,
@@ -161,9 +122,7 @@ def arm_by_name(name: str) -> ArmSpec:
     """The arm called `name`.
 
     Raises:
-        KeyError: No arm is called that. Named rather than silently skipped, because a typo in
-            `--arms` would otherwise produce a report over fewer arms than were asked for — the
-            coverage lie every exit code in this lane exists to prevent.
+        KeyError: No arm is called that; a typo in `--arms` must not silently shrink the report.
     """
     for spec in ARMS:
         if spec.arm == name:
@@ -174,13 +133,11 @@ def arm_by_name(name: str) -> ArmSpec:
 def load_delegation_probes(probe_dir: str | None = None) -> list[Probe]:
     """The delegation corpus, from its own file rather than the whole probe directory.
 
-    One file, for `_m12_probes`' reason: `data/evals/probes/` holds fifteen corpora and a
-    directory-wide read would put every other suite's questions through this protocol. The
-    directory as a whole is still id-checked by the corpus suite's own `load_probes`.
+    The directory holds every suite's corpora; this protocol must ask only its own.
 
     Raises:
-        FileNotFoundError: The corpus is absent. Named, because a suite that runs zero probes and
-            reports zero failures is the coverage lie this lane's exit codes exist to prevent.
+        FileNotFoundError: The corpus is absent, rather than a run of zero probes reporting zero
+            failures.
     """
     directory = Path(probe_dir if probe_dir is not None else settings.live_probe_dir)
     path = directory / DELEGATION_PROBE_FILE
@@ -192,13 +149,10 @@ def load_delegation_probes(probe_dir: str | None = None) -> list[Probe]:
 def treatment_tools(treatment: str, tools: Collection[str]) -> frozenset[str]:
     """Which of `tools` are the act `treatment` names.
 
-    Derived from the two producers rather than spelled here. `task` is read by building
-    `SubAgentMiddleware` (`agent/chemclaw_agent.subagent_tool_names`), because upstream writes the
-    name as a literal inside `_build_task_tool` and exports no constant; a handoff is recognised by
-    `agent/handoff.is_handoff_tool_name`, which asks the shape `handoff_tool_name` mints. A string
-    written here would be a third copy that an upstream rename or a profile name containing a
-    hyphen would leave silently stale, and silently stale is the whole failure mode of this
-    measurement: an arm whose treatment cannot be recognised reads as an arm that declined.
+    Derived from the producers rather than spelled here: `task` from building `SubAgentMiddleware`
+    (`agent/chemclaw_agent.subagent_tool_names`, since upstream exports no constant) and handoffs
+    via `agent/handoff.is_handoff_tool_name`. A stale literal would make an arm that delegated read
+    as one that declined.
 
     Raises:
         ValueError: `treatment` is not one of `TREATMENTS`.
@@ -230,12 +184,9 @@ _RAN_TOOLS = """
 async def tools_that_ran(session_ids: Sequence[str]) -> dict[str, frozenset[str]]:
     """Every tool each session actually ran, from the audit trail, excluding refusals.
 
-    A gate's refusal is excluded because it is the one outcome that means the tool body never ran —
-    `agent/audit.REFUSED` is the classification the producer makes, so this reads it rather than
-    guessing at a message. Every other outcome (`ok`, `error`, `returned_failure`, `cancelled`)
-    means the call was made: a `task` that entered the helper's graph and then failed is a
-    delegation that happened, and treating it as a non-delegation would be a selection on the
-    treatment's *success*, which is the shape `evals/delegation.py` took three tries to get out of.
+    `agent/audit.REFUSED` is the one outcome meaning the tool body never ran. Every other outcome
+    (`ok`, `error`, `returned_failure`, `cancelled`) is a call that was made; excluding failures
+    would select on the treatment's success.
 
     Returns:
         Session id → the tool names it ran. A session with no rows is absent rather than present
@@ -246,9 +197,8 @@ async def tools_that_ran(session_ids: Sequence[str]) -> dict[str, frozenset[str]
     if not session_ids:
         return {}
     ran: dict[str, set[str]] = {}
-    # `audit_events` lives where `PostgresAuditSink` writes it — `postgres_dsn`, never the session
-    # store's DSN. Reading it off `session_store_dsn` (as `turn_costs` rightly is, below) finds no
-    # rows the moment a deployment splits the two, and every repeat then reads as undelegated.
+    # `audit_events` lives on `postgres_dsn` (where `PostgresAuditSink` writes), not the session
+    # store's DSN; the two may be split.
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_RAN_TOOLS, (list(session_ids), REFUSED))
@@ -268,17 +218,12 @@ _TURN_COST = """
 async def billed_by_session(session_ids: Sequence[str]) -> dict[str, int]:
     """What the ledger says each session's turns cost, in billed token-equivalents.
 
-    Summed over the session's rows rather than read from one, because the quantity is what the
-    session *spent* and a repeat that was retried books two rows. The four counters are weighted by
-    `evals/autonomy.billed_tokens`, the one definition of this arithmetic in the tree — the two
-    cache weights are configured (`eval_cache_read_weight`, `eval_cache_write_weight`) because a
-    cached read is charged at a fraction of an input token and a cache write at a premium.
+    Summed over the session's rows, since a retried repeat books two. Weighted by
+    `evals/autonomy.billed_tokens`, the one definition of this arithmetic.
 
     Returns:
-        Session id → its bill. A session with no row is absent, never zero: a turn that failed
-        before billing legitimately records zero, and a row that has not been written is a hole in
-        the data. Reporting the second as the first would put a fabricated cost into a comparison
-        whose whole subject is cost.
+        Session id → its bill. A session with no row is absent, never zero: an unwritten row is a
+        hole in the data, not a free turn.
     """
     if not session_ids:
         return {}
@@ -302,15 +247,9 @@ async def billed_by_session(session_ids: Sequence[str]) -> dict[str, int]:
 async def billed_by_session_when_booked(session_ids: Sequence[str]) -> dict[str, int]:
     """`billed_by_session`, waited for — the ledger write is booked off the turn's hot path.
 
-    `agent/turn_cost.record_turn_cost` runs the write as its own task so a teardown cannot lose a
-    pending cancellation, which means a row is *eventually* consistent with the stream having
-    closed. A single read therefore races the flush and would record a hole for a turn that was
-    booked a moment later.
-
-    Bounded by `eval_delegation_ledger_wait_seconds` and polled ten times inside it: enough
-    attempts that a slow flush is caught, few enough that a genuinely unwritten row is a hole
-    within the bound rather than a run that hangs. The interval is derived from the bound rather
-    than set beside it, so there is one number and it is configured.
+    `record_turn_cost` writes in its own task, so the row is eventually consistent with the stream
+    closing. Polled ten times within `eval_delegation_ledger_wait_seconds`; a row still missing
+    after that is a hole.
     """
     wanted = set(session_ids)
     attempts = 10
@@ -356,9 +295,8 @@ class ArmRunSet(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runs: list[ArmRun] = Field(default_factory=list)
-    #: `<arm>/<task>#<repeat>` for each repeat the judge could not grade. An `ungraded` verdict is
-    #: the absence of a grade, never a bad one (`evals/live_judge.Verdict`), and `VERDICT_SCORES`
-    #: has no entry for it on purpose — so such a repeat cannot become an `ArmRun` and is a hole.
+    # `<arm>/<task>#<repeat>` for each repeat the judge could not grade. `ungraded` is the absence
+    # of a grade, never a bad one, so such a repeat cannot become an `ArmRun`.
     ungraded: list[str] = Field(default_factory=list)
     #: `<arm>/<task>#<repeat>` for each repeat with no `turn_costs` row — see `billed_by_session`.
     unbilled: list[str] = Field(default_factory=list)
@@ -380,9 +318,7 @@ def assemble_runs(
 
     Returns:
         The runs, and the repeats that could not become one. Nothing is dropped for an arm's
-        *behaviour*: `delegated=False` is recorded and the comparator reports it as compliance,
-        which is what makes this an intention-to-treat comparison rather than a selection on the
-        treatment.
+        behaviour: `delegated=False` is recorded and reported as compliance.
     """
     result = ArmRunSet()
     for repeat in repeats:
@@ -411,16 +347,10 @@ def assemble_runs(
 def load_recorded_runs(paths: Sequence[Path]) -> list[ArmRun]:
     """Every `ArmRun` in one or more recorded `runs.json` files, concatenated.
 
-    The same discipline `cli/live_probes --regrade` takes one axis over: a campaign's arms need not
-    have been driven in one process. Two passes of one arm, or a baseline recorded last week beside
-    a treatment recorded today, aggregate into one report here — and that is also the only way a
-    `(task, arm)` pair whose repeats *differ* in whether they delegated can be assembled at all,
-    which is the `partially_delegated` bucket.
+    Lets arms recorded in separate processes or on different days aggregate into one report.
 
     Raises:
-        ValueError: A file holds no runs. An empty aggregation reported as a comparison is what
-            `NoComparableTask` exists to refuse; a file that contributed nothing has to say so
-            before the comparator is asked.
+        ValueError: A file holds no runs.
     """
     runs: list[ArmRun] = []
     for path in paths:
@@ -435,9 +365,7 @@ def load_recorded_runs(paths: Sequence[Path]) -> list[ArmRun]:
 def _bucket_rows(report: DelegationReport) -> list[list[str]]:
     """The four compliance buckets plus `incomplete`, as rows — every one present even when empty.
 
-    Present-and-empty rather than omitted, which is this lane's standing rule
-    (`cli/live_probes._findings_report`): a bucket nothing landed in is a real result, and a reader
-    who cannot see the row cannot tell it from a bucket the report forgot to compute.
+    An empty bucket is a real result and must be distinguishable from one the report forgot.
     """
     return [
         [
@@ -476,9 +404,8 @@ def render_report(
 ) -> str:
     """One report per arm under test, with the compliance buckets and both cost axes beside quality.
 
-    Quality, tokens and wall clock are printed side by side and never folded into one figure, for
-    the reason `evals/delegation.py` opens with: "cheaper but worse" and "better but slower" are
-    different answers that a single number hides.
+    Quality, tokens and wall clock are never folded into one figure: "cheaper but worse" and "better
+    but slower" are different answers.
     """
     lines = ["# The delegation experiment — one report per arm", ""]
     lines.extend(f"- {line}" for line in provenance)
@@ -561,14 +488,12 @@ def compare_every_arm(
 ) -> tuple[dict[str, DelegationReport], dict[str, str]]:
     """One `DelegationReport` per non-baseline arm, plus the arms that could not be reported on.
 
-    Each arm is compared separately rather than folded together, because "delegation helped here and
-    hurt there" is the finding a single aggregate destroys — and across arms it is the finding
-    selective routing would need.
+    Each arm is compared separately so per-arm differences stay visible.
 
     Returns:
         `(reports, refused)` — the reports by arm, and arm → why no report exists for it. A
-        `NoComparableTask` is carried rather than raised: with four arms, one arm that nothing
-        compared must not cost the report on the other three.
+        `NoComparableTask` is carried rather than raised, so one empty arm does not cost the
+        others' reports.
     """
     reports: dict[str, DelegationReport] = {}
     refused: dict[str, str] = {}

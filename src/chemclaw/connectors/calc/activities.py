@@ -1,40 +1,17 @@
-"""The activity behind the `calc` connector's durable jobs (xTB plan X3/X4).
+"""The activity behind the `calc` connector's durable jobs.
 
-One activity, deliberately. Each task routed here is a single call into
-`connectors/calc/compose.py`, whose expensive parts — every optimization, every Hessian, every
-CREST search — are individually content-addressed in the calculation store. So a retry after a
-worker restart re-enters the same function and walks straight through the work it already did,
-which is the resumability a fan-out of per-species activities would buy at the cost of a
-decomposition the workflow would have to own.
+One activity: each task is a single call into `connectors/calc/compose.py`, whose expensive parts
+(optimizations, Hessians, CREST searches) are individually content-addressed in the calculation
+store, so a retry walks straight through work already done.
 
-**These are minute-scale, not second-scale.** On drug-sized molecules a multi-species reaction or a
-solvent screen runs for minutes, and after
-`D-2026-08-16-the-physics-leaves-the-cache-stays` every one of those minutes is spent inside a
-*remote* call: the physics is in `Chemclaw3-mcp`'s `servers/calc` and this side composes the parts
-and caches them.
+Runs are minute-scale and spent inside remote calls to `Chemclaw3-mcp`'s `servers/calc`, so every
+remote call is wrapped in `durable/heartbeat.py::beating`; without a heartbeat Temporal would
+declare the activity dead and retry it from zero. That wrapper guarantees no exit leaves the
+wrapped work running. Composites also report progress between units (species, solvent, scan point)
+through the `progress` callback: progress says how far, the heartbeat says alive.
 
-**Which is why every remote call here is wrapped in `durable/heartbeat.py::beating`.** A blocking
-call with no heartbeat is an activity Temporal declares dead: against
-`xtb_job_heartbeat_timeout_seconds` a longer run is retried from zero, up to `activity_max_attempts`
-times, each restarting from whatever the cache already holds — and before the split that cost
-roughly fifty minutes of saturated CPU to fail a CREST search that would have succeeded. That
-wrapper was extracted for exactly this shape ("one opaque call with nothing finer to report than
-*still running*") from the CREST subprocess and the BoFire fit; a remote computation
-is the fourth instance. Its guarantee — **no exit from the wrapper leaves the wrapped work
-running** — is what makes a dropped connection safe rather than a detached write.
-
-The composites still report progress *between* units of work (one species, one solvent, one scan
-point) through the `progress` callback, because that is a real boundary and "still running" is the
-weaker signal where a better one exists. The two are complementary: `progress` says how far, the
-heartbeat timer says alive.
-
-Non-determinism (the store, the wire, wall-clock cost) lives here and not in the workflow, which is
-the standard Temporal split the QM job already follows.
-
-It runs on the bundle's own worker (`chemclaw.connectors.calc.worker`), not core's, and is
-registered there explicitly rather than through `chemclaw.durable.registry` — that registry serves
-core's queue, and a connector's queue is the connector's own business. Core owns exactly one
-(D-006, and `durable/registry.py` says so ten files away); this said "two".
+Runs on the bundle's own worker (`chemclaw.connectors.calc.worker`); `chemclaw.durable.registry`
+serves core's single queue.
 """
 
 from collections.abc import Awaitable, Iterator, Sequence
@@ -89,10 +66,8 @@ _Result = TypeVar("_Result")
 async def _beating(awaitable: Awaitable[_Result], what: str) -> _Result:
     """Await one remote calculation while beating this activity's heartbeat.
 
-    The `RemoteRunner` a composite is handed on the durable path, and the only difference between
-    running one here and running one from an MCP tool. The beat interval is derived from the
-    configured `heartbeat_timeout` the workflow sets on this activity, so a deployment that shortens
-    one shortens the other and the two cannot drift apart.
+    The `RemoteRunner` composites get on the durable path. The beat interval derives from the
+    activity's configured `heartbeat_timeout`, so the two cannot drift apart.
     """
     return await beating(awaitable, what, settings.xtb_job_heartbeat_timeout_seconds)
 
@@ -100,21 +75,12 @@ async def _beating(awaitable: Awaitable[_Result], what: str) -> _Result:
 async def _subject(structure_id: str | None, smiles: str) -> Structure | None:
     """Resolve a geometry handle, checking it is a geometry *of the molecule that was named*.
 
-    Two failures, both silent without this, both reported as a value the caller can act on
-    (D-2026-08-21-a-geometry-is-an-address-not-a-payload):
-
-    - **An unresolvable handle.** `require_structure` says so and names what to re-run. Answering
-      by falling back to a fresh embedding would be the worst outcome available — the chemist chose
-      a conformer, and the calculation would silently be about a different one.
-    - **A handle for the wrong molecule.** A `structure_id` addresses a geometry, not a compound,
-      so nothing about the id itself says which molecule it is of; a scan's atom indices, a
-      reaction's balance and the note the result is filed under all assume `smiles`. The two are
-      compared canonically, so `CCO` and `OCC` agree and a genuinely different molecule does not.
-
-    A stored geometry with **no** SMILES is accepted rather than refused: `Structure.smiles` is
-    optional by construction and a structure that came from a route which did not record one is
-    still the geometry the caller asked for. That is a stated trade, not an oversight — the check
-    is on a disagreement, never on an absence.
+    An unresolvable handle is reported by `require_structure` (never replaced by a fresh embedding,
+    which would silently compute a different conformer). A handle whose stored SMILES canonically
+    disagrees with `smiles` is refused, since atom indices, reaction balance and the filed note all
+    assume `smiles`. A stored geometry with no SMILES is accepted: the check is on disagreement,
+    never
+    absence.
     """
     if structure_id is None:
         return None
@@ -133,29 +99,13 @@ async def _subject(structure_id: str | None, smiles: str) -> Structure | None:
 def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
     """Stamp the run's requester and correlation id ambient for the duration of the calculation.
 
-    A worker has no request context, so the two travel in this activity's arguments (off the run's
-    memo) and are bound here — the same shape `durable/template_activities.py::_acting_as` uses,
-    written out rather than shared because that one binds a `StepIdentity` including roles and a
-    session, and this path has neither: `ConnectorJobWorkflow`'s memo carries the actor and the
-    correlation id, and the conversation stays core's to join through `job_records`.
-
-    What reads it is the request hook `connectors/calc/remote.py::calc_session` hands
-    `core.mcp_session.open_session` — `connectors.identity.turn_identity_hook`, the same hook every
-    connector's own client carries, which reads exactly this ambient. The calculation server logged
-    `actor=- session=-` on every durable run, so the longest, most incident-prone calls in the
-    fleet were the ones nothing could trace back to a person. Off the durable path — a direct call,
-    a test — both are empty and nothing is stamped, which keeps "no identity" honest rather than
-    fabricated.
-
-    **`durable/interceptor.py` reads the same two arguments, and this bracket is still what stamps
-    a direct call.** The actor and the correlation id arrive here as bare arguments precisely
-    because `spec` is the model-authored payload whose digest is the cache key, and identity must
-    not be able to change it — and the interceptor's model walk skips plain strings for the same
-    reason, so it saw neither, and both of *its* records said `actor=-` about a run this bracket
-    was attributing correctly. It now also reads the two by parameter name off the activity's
-    signature, which is first-party Python and therefore still not something a payload can spell.
-    The two agree by construction, being the same two arguments; what this bracket adds is the
-    path with no interceptor on it — a direct call from the CLI or a test.
+    A worker has no request context, so both arrive as activity arguments (off the run's memo,
+    outside
+    `spec` so identity cannot change the cache key) and are bound here for
+    `connectors.identity.turn_identity_hook`, which `connectors/calc/remote.py::calc_session` hands
+    to `core.mcp_session.open_session`. The calc server's logs then name the person a durable run is
+    for. Off the durable path both are empty and nothing is stamped. `durable/interceptor.py` reads
+    the same two arguments; this bracket covers direct calls with no interceptor.
     """
     if not actor and not correlation_id:
         yield
@@ -178,19 +128,11 @@ async def run_xtb_calculation(
 ) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.
 
-    Dispatches on the spec's `kind`. The `summary` field is written here rather than by
-    the caller because this is where the numbers are: a completion push-back and a job
-    listing both want one readable line, and deriving it twice from the same result is
-    how the two drift apart.
-
-    `calc_refs` is collected around the whole dispatch rather than per branch, because every branch
-    wants it and the collector already de-duplicates: a solvent screen reaching the same relaxation
-    in five media cites it once.
-
-    `actor` and `correlation_id` are the run's, off its memo (see the workflow), and are stamped
-    ambient for the whole dispatch so every remote call this activity makes names the person it is
-    for. Both default to empty: an in-flight run started before they existed, and any direct
-    caller, still decode and simply stamp nothing.
+    Dispatches on the spec's `kind`. `summary` is written here, where the numbers are, as the one
+    line
+    completion push-backs and job listings share. `calc_refs` is collected around the whole dispatch
+    (the collector de-duplicates). `actor` and `correlation_id` come from the run's memo and are
+    stamped ambient for every remote call; both default to empty for direct callers.
     """
     with _acting_for(actor, correlation_id), collecting() as calc_refs:
         result = await _dispatch(spec)
@@ -293,10 +235,9 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         )
         return XtbJobResult(
             kind=spec.kind,
-            # The barrier and the lifetime it implies, in the one line a completion push-back and a
-            # job listing show. The band is in it rather than only in the payload for the reason
-            # `refine_ensemble` puts its coverage there: it is exactly the qualifier a reader would
-            # otherwise never see, and here a single half-life reads like a measurement.
+            # The barrier and the lifetime it implies; the band is in the summary because a single
+            # half-life
+            # otherwise reads like a measurement.
             summary=_rotation_summary(rotation),
             rotation=rotation,
         )
@@ -356,9 +297,9 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         )
         return XtbJobResult(
             kind=spec.kind,
-            # Named from the result, not the request: the pair is canonically ordered
-            # (`connectors/calc/compose.py::_ordered`) so that either direction is one cache entry,
-            # and the summary should describe the calculation that actually ran.
+            # Named from the result: the pair is canonically ordered (`compose.py::_ordered`), so
+            # the summary
+            # describes the calculation that actually ran.
             summary=(
                 f"{interaction.smiles_a} + {interaction.smiles_b}: interaction "
                 f"{interaction.interaction_energy_kcal:+.1f} kcal/mol over "
@@ -380,15 +321,14 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         lowest = refined.conformers[0]
         return XtbJobResult(
             kind=spec.kind,
-            # The coverage is in the one-line summary rather than only in the payload, because that
-            # line is what a completion push-back and a job listing show — and "G-weighted over 5 of
-            # 47" is exactly the qualifier a reader would otherwise never see.
+            # The coverage ("G-weighted over 5 of 47") is in the summary, the line readers actually
+            # see.
             summary=(
                 f"{spec.smiles}: {refined.refined_count} of {refined.total_found} conformers "
                 f"refined ({refined.refined_population_covered:.0%} of the population), "
-                # "lowest", not "dominant": `conformers[0]` is the lowest *free energy*, and with
-                # degeneracy weighting that need not be the most populated member — a two-rotamer
-                # conformer 0.3 kcal/mol up outranks it.
+                # "lowest", not "dominant": with degeneracy weighting the lowest free energy need
+                # not be the most
+                # populated member.
                 f"lowest free energy at {lowest.population:.0%}"
             ),
             refined=refined,
@@ -451,10 +391,9 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             progress=activity.heartbeat,
             run=_beating,
         )
-        # The summary is what a completion push-back and a job listing show, so it carries the one
-        # finding that changes what every downstream number is about: whether the major form is the
-        # same everywhere. "shifts" and "reorders" are different answers and a reader must not have
-        # to open the payload to tell which happened.
+        # The summary says whether the major form is the same everywhere — "shifts" versus
+        # "reorders" —
+        # since that changes what every downstream number is about.
         verdict = (
             "the dominant form changes with the medium"
             if screen.dominance_changes
@@ -505,11 +444,8 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
 def _not_computed(failed: Sequence[FailedMedium | FailedBond], what: str) -> str:
     """The clause a screen's summary carries when some of its items could not be computed.
 
-    The summary is the one line a completion push-back and a job listing show, so a screen that
-    lost items must say so there: "weakest of 5 bonds" over a survey asked for 7 is the silent drop
-    the per-item outcome exists to prevent, moved from the payload into the sentence people read.
-    A stop by the server's clock is named apart, because its remedy (a smaller calculation or a
-    larger budget) is not a refused input's.
+    A screen that lost items says so in its summary. A stop by the server's clock is named apart,
+    because its remedy (smaller calculation or larger budget) differs from a refused input's.
     """
     if not failed:
         return ""
@@ -546,8 +482,8 @@ def _rotation_summary(rotation: RotationProfile) -> str:
 def _readable(seconds: float) -> str:
     """A duration in the unit a chemist would say it in — seconds to years, one significant step.
 
-    A half-life from a barrier spans twenty orders of magnitude across the range this job covers, so
-    `4.36e+04 s` is technically the answer and "12 hours" is the one somebody can act on.
+    Half-lives from barriers span many orders of magnitude; "12 hours" is actionable, `4.36e+04 s`
+    is not.
     """
     for limit, divisor, unit in (
         (90.0, 1.0, "s"),

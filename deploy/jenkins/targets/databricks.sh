@@ -24,7 +24,7 @@
 # Nothing here invents a bundle. `.components[<name>].bundle` must point at a real directory holding
 # a `databricks.yml`; there is none in this repository yet, so this target refuses rather than
 # guesses. That refusal is the honest state of the Databricks half and is recorded as such in
-# `docs/decisions/` and `docs/planning/DEFERRED.md`.
+# `docs/decisions/` and `docs/planning/BACKLOG.md`.
 set -euo pipefail
 
 DESCRIPTOR="${1:?usage: databricks.sh <release-descriptor.json>}"

@@ -1,22 +1,14 @@
-"""A concrete adapter for a JSON-exporting ELN (plan step 4.3).
+"""A concrete adapter for a JSON-exporting ELN: one `*.json` file per entry in `eln_export_dir`.
 
-One real adapter, not a universal abstraction: many ELNs export each experiment as a JSON
-file, so this reads `*.json` from a directory (`settings.eln_export_dir`), one file per
-entry. **Structured** fields map deterministically, and that is the whole of what becomes a
-recorded condition: a headline setpoint the entry does not state is left absent rather than read
-out of the prose, because the first regex match in a procedure is the *addition* temperature far
-more often than the reaction's, and a transcription nobody reviews may not present a derived number
-as a recorded one (`D-2026-08-26-a-transcription-may-not-infer-a-setpoint`). Genuinely
-unstructured cases are escalated to the `eln-reaction-extraction` skill (per-field LLM), which is
-judgment and lives outside this deterministic adapter.
+Structured fields map deterministically, and only they become recorded conditions: a setpoint the
+entry does not state is left absent rather than read out of the prose, where the first match is
+usually the addition temperature (D-2026-08-26-a-transcription-may-not-infer-a-setpoint). Genuinely
+unstructured cases belong to the `eln-reaction-extraction` skill.
 
-A detailed development recipe is more than its headline conditions, so the free-text
-procedure is also **segmented into ordered steps** (`OrdReaction.steps`) and preserved
-verbatim (`procedure_text`). Segmentation is deterministic and lossless: it splits the
-prose on numbered markers or sentence boundaries, keeps each segment's exact text, and
-labels it with a coarse `StepKind` plus any per-step temperature/time the regex finds.
-Linking a SMILES to a step from prose alone would be a guess, so free-text steps carry no
-`components` — that (like any genuinely unstructured field) is the LLM skill's job.
+The free-text procedure is kept verbatim (`procedure_text`) and segmented losslessly into ordered
+steps (`OrdReaction.steps`), split on numbered markers or sentences, each labelled with a coarse
+`StepKind` and any temperature/time it states. Steps carry no `components`: linking a SMILES to a
+step from prose would be a guess.
 
 Expected entry shape (this ELN's format — known only here):
     {"id": "...", "timestamp": "ISO-8601", "modified": "ISO-8601", "retracted": "ISO-8601",
@@ -24,9 +16,8 @@ Expected entry shape (this ELN's format — known only here):
      "products":  [{"smiles": "...", "yield_percent": 85}, ...],
      "procedure": "free text", "operator": "..."}
 
-`retracted` is the source saying it withdrew the entry, and the file keeps being exported with it
-on — a withdrawal is an amendment, not a deletion. Removing the file instead says nothing: a fetch
-is a delta and an absence is what every already-ingested entry looks like.
+`retracted` is the source withdrawing the entry while still exporting it; a removed file says
+nothing, since a fetch is a delta.
 """
 
 import asyncio
@@ -64,48 +55,28 @@ from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
 
-# Deterministic free-text extractors for the two conditions an ELN reliably states in prose.
-# The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
-# whereas a space-less/degree-less "13C" (as in "13C NMR") or "pH 7 C" is not — demanding `°`
-# avoids fabricating a temperature from spectroscopy or label text. The lookbehind stops a
-# `-` preceded by a digit/dot from being read as a minus sign: in a range like "60-80 °C"
-# the dash is a separator, so the match is the upper bound 80, never a sign-flipped -80.
-# Extracting the upper bound is the deliberate (documented) reading of a range; a genuine
-# "-10 °C" still matches because nothing numeric precedes its sign.
-# **Every dash a real procedure uses as a minus sign, not only the ASCII one.** A cryogenic
-# temperature is typeset with U+2212 MINUS SIGN by ACS and RSC house style, and Word's autocorrect
-# turns a typed hyphen into U+2013 EN DASH. The sign used to be `-?`, which matches U+002D alone, so
-# the dash was simply not consumed and the number read bare: measured on this tree, seven of the
-# eight dash characters that occur in practice silently dropped the sign, and `−78 °C` — a
-# dry-ice/acetone lithiation, one of the most common cryogenic conditions there is — was ingested as
-# `+78 °C`. A 156-degree error in the wrong direction, rendered into the proposed note as
-# `temperature: -78 °C` on the step that says so, beside verbatim prose still reading `−78`.
+# Every dash a procedure may use as a minus sign: house styles typeset U+2212 and autocorrect
+# produces U+2013, and matching only ASCII `-` would read `−78 °C` as `+78 °C`.
 _MINUS_SIGNS = "-‐‑‒–—―−"
 
-# The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
-# whereas a space-less/degree-less "13C" (as in "13C NMR") or "pH 7 C" is not — demanding `°`
-# avoids fabricating a temperature from spectroscopy or label text. The lookbehind stops a dash
-# preceded by a digit/dot from being read as a minus sign: in a range like "60-80 °C" — or
-# "60–80 °C" — the dash is a separator, so the match is the upper bound 80, never a flipped -80.
-# Extracting the upper bound is the deliberate (documented) reading of a range; a genuine
-# "-10 °C" still matches because nothing numeric precedes its sign.
+# Requires the degree sign, so "13C NMR" or "pH 7 C" is never read as a temperature. The lookbehind
+# stops a dash after a digit from being a minus: in "60-80 °C" the match is the upper bound 80, the
+# deliberate reading of a range, while "-10 °C" keeps its sign.
 _TEMPERATURE = re.compile(rf"(?<![\d.])([{_MINUS_SIGNS}]?\d+(?:\.\d+)?)\s*°\s*C\b")
 
 # `str.translate` table mapping every one of them onto the ASCII hyphen-minus `float()` accepts.
 _TO_ASCII_MINUS = str.maketrans(dict.fromkeys(_MINUS_SIGNS, "-"))
 _TIME_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b")
 
-# Procedure segmentation. A numbered marker ("1.", "2)", "Step 3:") is the strongest signal
-# of an author-intended step boundary; absent numbering, fall back to sentence boundaries.
-# `\d+[.)]` needs whitespace after it so a decimal ("0.5 h") or amount ("2.0 g") is never a
-# split point — only a genuine list marker is.
+# Procedure segmentation: a numbered marker ("1.", "2)", "Step 3:") is the strongest step boundary,
+# with sentence boundaries as fallback. Whitespace after `\d+[.)]` keeps "0.5 h" or "2.0 g" from
+# being split points.
 _STEP_MARKER = re.compile(r"(?:^|\s)(?:step\s*)?\d+[.)]\s+", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"(?<=[.;])\s+")
 
-# Coarse step labels, checked in this priority order. Distinctive terminal operations
-# (purification, workup) win over the ubiquitous "add"; the verbatim text is always kept on
-# the step, so a mislabel loses nothing. Substring match (not word) tolerates inflections
-# ("crystallized", "washing"). Lowercased before matching.
+# Coarse step labels in priority order: terminal operations (purification, workup) win over the
+# ubiquitous "add", and the verbatim text is kept, so a mislabel loses nothing. Lowercased substring
+# match tolerates inflections.
 _STEP_KEYWORDS: tuple[tuple[StepKind, tuple[str, ...]], ...] = (
     (StepKind.PURIFICATION, ("crystalli", "chromatograph", "triturat", "distil", "slurr")),
     (
@@ -143,11 +114,9 @@ class JsonExportAdapter:
     def __init__(self, export_dir: str | None = None, name: str | None = None) -> None:
         """Read from the given directory, or the configured `eln_export_dir`.
 
-        `name` is the data source this adapter *is*, passed by the registry from the manifest
-        (`ingest/sources/registry.py::_build_ingest_half`). It names every WARNING below — which
-        are the only signal an admin gets that a specific export file was dropped — and is the
-        rejection ledger's `source`, so two JSON drop directories are two ledgers rather than one
-        bucket each evicting the other's rows.
+        `name` is the data source this adapter is, passed by the registry from the manifest. It
+        names every WARNING below and is the rejection ledger's `source`, so two JSON drop
+        directories keep separate ledgers.
         """
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
         self._source = name or "eln-json"
@@ -157,63 +126,26 @@ class JsonExportAdapter:
     ) -> list[RawEntry]:
         """Return entries whose `timestamp` is at or after `since`, oldest first.
 
-        A file that cannot be read or parsed at all (I/O error, corrupt JSON, non-object
-        payload, missing/bad timestamp) is skipped, not raised: one broken export file
-        must not abort the whole fetch (same skip-and-continue stance as
-        `chemclaw.kg.graph.load_notes`). Such a file cannot become a `RawEntry`, so it never reaches
-        the sync report — it is logged at WARNING here *and* written to the rejection ledger, on
-        the argument `D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask` makes: nothing
-        downstream can know the file existed, so a chemist asking about the entry it held would
-        otherwise get "I have no such record" rather than the reason.
+        A file that cannot be read or parsed is skipped, logged at WARNING and written to the
+        rejection ledger, since nothing downstream could otherwise know it existed. A late arrival
+        (payload behind `since`, file arriving after it) is reported in one aggregated WARNING and
+        filed the same way. The directory read runs in a thread, off the worker's event loop, which
+        also carries Temporal heartbeats and the health endpoints.
 
-        A file whose payload predates `since` but which *arrived* after it is a late arrival: it
-        is filtered out here and on every later run, so it is collected and reported in one
-        aggregated WARNING (`warn_late_arrivals`) and filed under the same rule, instead of
-        vanishing silently.
-
-        **The directory read runs off the event loop**, which is the rule the rest of this seam
-        already follows — `ingest/eln/warehouse/databricks.py` crosses `asyncio.to_thread` on every
-        blocking vendor call and says so in its module docstring, `ingest/documents/sync.py` and
-        `agent/attachments.py` do the same. This one did not, and it is the shipped default source
-        (`data_sources = "graph,eln-json"`). It is awaited from `durable/eln_sync.py`, an activity
-        on the background worker, whose single event loop also carries that activity's Temporal
-        heartbeat and `/healthz`, `/readyz` and `/metrics` (`core/worker_http.py`) — so the glob,
-        every `read_text` and every `json.loads` ran as one uninterrupted block across all of them.
-        Measured 2026-09-06 with a 1 ms heartbeat on the same loop, real-shaped exports: 53.8 ms at
-        2,000 files, 346.9 ms at 10,000, **1,899.8 ms at 50,000 — the worst gap equal to the whole
-        scan** — so a corpus large enough to exceed `eln_sync_heartbeat_timeout_seconds` starves
-        the heartbeat the sync depends on and Temporal redelivers an activity that blocks again.
-
-        **`limit` is accepted and deliberately ignored, and that is the honest answer here rather
-        than a missing feature.** The protocol now carries the chunk size so a source can push the
-        bound into its own read — the warehouse adapter turns it into a `LIMIT`, which is what
-        stops a chunked drain re-reading a table per chunk. A file drop cannot: this scan is
-        ordered by *filename* and an entry's window lives inside the payload, so breaking the scan
-        at `limit` files returns an arbitrary subset of the outstanding entries rather than the
-        oldest ones. The cursor then advances past every entry the break discarded whose window was
-        earlier, and no later fetch offers those files again — the same permanent, silent loss
-        `_BoundedIngest`'s own docstring measured at 50 of 150 when its cap read the wrong
-        timestamp. A bounded *read* here needs an index this directory does not have.
-
-        So the residual is stated rather than deferred: a chunked drain re-scans the whole
-        directory per chunk, which is O(corpus²/batch) in file reads. Measured on real-shaped
-        exports with the batch at 100 — 1,000 files, 10 chunks, 0.31 s; 3,000 files, 30 chunks,
-        2.55 s. One scan is 62 ms per 3,000 files (11 ms glob, 28 ms read, 14 ms parse, 9 ms
-        model), so the per-chunk cost is small and the *product* is what grows. A site whose drop
-        directory is large enough for that to matter wants the warehouse adapter, which is bounded,
-        rather than a faster scan of a directory that has to be read whole.
+        `limit` is accepted and ignored: the scan is ordered by filename while an entry's window is
+        in its payload, so stopping early would return a non-prefix subset and the cursor would skip
+        entries for good. A chunked drain therefore re-scans the directory per chunk; a source large
+        enough for that to matter wants the bounded warehouse adapter.
 
         Args:
             since: The window floor; entries at or after it are returned.
             limit: Accepted for the protocol and unused — see above.
-            report_late_arrivals: Whether `since` is the *run's* floor, so a file behind it
-                that arrived after it may be reported as one no scheduled run will fetch.
-                False on a continuation chunk — see `is_late_arrival`.
+            report_late_arrivals: Whether `since` is the run's floor, so a late-arriving file behind
+            it may be reported. False on a continuation chunk — see `is_late_arrival`.
         """
         entries, late, refused = await asyncio.to_thread(self._scan, since, report_late_arrivals)
-        # The source, not the format: this is the one line reporting files that are silently never
-        # ingested, and a deployment running two JSON drop directories got two identical lines
-        # naming neither.
+        # Named by the source, not the format, so two JSON drop directories log distinguishable
+        # lines.
         warn_late_arrivals(logger, self._source, late)
         await record_refusals(self._source, refused)
         return entries
@@ -224,25 +156,20 @@ class JsonExportAdapter:
         """The whole blocking read, in one synchronous function so one thread can hold it.
 
         Args:
-            report_late_arrivals: whether `since` is the *run's* floor, so a file behind it
-                that arrived after it is one no scheduled run will fetch. False on a continuation
-                chunk, whose floor has already moved past files this same drain ingested — see
-                `is_late_arrival`.
+            report_late_arrivals: whether `since` is the run's floor — see `is_late_arrival`.
             since: the window floor; entries at or after it are returned.
 
         Returns:
-            The entries in the window oldest first, the names of the late arrivals, and the
-            refusals to file — the three things the caller has to do something asynchronous with.
+            The entries in the window oldest first, the names of the late arrivals, and the refusals
+            to file.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
-        # entry id -> why it was refused. A dict, because one file is refused once per fetch and
-        # the ledger is keyed the same way. The file stem is the only id there is for a payload
-        # that never parsed, so nothing in it can be trusted to name the entry.
+        # entry id -> why it was refused; for a payload that never parsed the file stem is the only
+        # id.
         refused: dict[str, str] = {}
-        # Every id this directory claims, and the files claiming it — `refuse_colliding_ids`
-        # decides what to do when one id has two files, and it is collected over the whole
-        # directory rather than over the window for the reason stated there.
+        # Every id this directory claims and the files claiming it, over the whole directory, for
+        # `refuse_colliding_ids`.
         files_by_id: dict[str, list[str]] = {}
         for path in sorted(self._dir.glob("*.json")):
             try:
@@ -257,26 +184,14 @@ class JsonExportAdapter:
                 # An in-place amendment keeps `timestamp` and moves this one, so filtering on
                 # creation alone would never re-fetch a corrected entry.
                 modified = _optional_timestamp(payload.get("modified"), path)
-                # The source's own withdrawal, when it reports one. An *explicit* field, never a
-                # file's disappearance: a fetch is a delta, so "not exported this run" is the
-                # normal state of every entry ever ingested and can never mean a retraction
-                # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`). It joins the fetch
-                # window below for the reason `entry_window` gives — an export that stamps this
-                # without touching `modified` would otherwise never be fetched again, so the
-                # tombstone would be written at the source and read by nobody.
+                # The source's own withdrawal, an explicit field, never a file's disappearance. It
+                # joins the fetch window (`entry_window`) so a withdrawal stamped without touching
+                # `modified` is still fetched.
                 retracted = _optional_timestamp(payload.get("retracted"), path)
                 entry_id = entry_id_or_stem(payload.get("id"), path, "id")
-            # `UnicodeDecodeError` is listed explicitly and nothing else here covers it: it derives
-            # from `ValueError`, so it is a *sibling* of `json.JSONDecodeError` rather than a child,
-            # and it is not an `OSError` — the file opens and reads fine, the bytes are simply not
-            # UTF-8. Driven before it was listed: three exports in one directory, the middle one
-            # latin-1, aborted `fetch_new_entries` outright and returned neither of the two
-            # well-formed files, against this method's own skip-and-continue contract, with nothing
-            # in the rejection ledger because this handler never ran. `ord_adapter` had already
-            # been fixed for exactly this; the shipped-default source had not.
-            # `ElnMappingError` rather than `ElnFormatError`: the parent is what a scan-time mapping
-            # refusal is, and `entry_id_or_stem` raises the parent so one rule can serve both
-            # file-drop adapters.
+            # `UnicodeDecodeError` must be listed: it is a `ValueError`, neither a `JSONDecodeError`
+            # nor an `OSError`, and a non-UTF-8 file would otherwise abort the whole fetch.
+            # `ElnMappingError` covers `entry_id_or_stem`'s refusal.
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ElnMappingError) as exc:
                 logger.warning("%s: skipping ELN export %s: %s", self._source, path.name, exc)
                 refused[path.stem] = f"refused ELN export {path.name}: {exc}"
@@ -308,11 +223,8 @@ class JsonExportAdapter:
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one JSON entry to a canonical `OrdReaction` (structured + free-text).
 
-        Any mapping failure — a missing field, an unknown role, a schema violation
-        (e.g. a reactant tagged as a product), or a field of the wrong shape (a nested
-        object where a number belongs raises `TypeError` from `float`) — becomes an
-        `ElnFormatError`, so the sync's reject-and-continue handler treats one bad entry
-        as a rejection, not a crash (G4).
+        Any mapping failure (missing field, unknown role, schema violation, wrong-shaped value)
+        becomes an `ElnFormatError`, so the sync rejects the entry rather than crashing.
         """
         try:
             return self._build(raw)
@@ -333,32 +245,23 @@ class JsonExportAdapter:
             reaction_id=raw.entry_id,
             inputs=inputs,
             outcomes=outcomes,
-            # **The structured field or nothing.** These two are the run's setpoints, they are
-            # stored in typed columns a chemist compares runs on, and there is no longer a reviewer
-            # between them and the corpus — so a number this module *derived* may not be written
-            # where a recorded one goes. See `_number`, and `_segment_steps` for where a prose
-            # number does belong.
+            # The structured field or nothing: these are typed setpoint columns, so a number derived
+            # from prose may not be written here. See `_number`; prose numbers go on the steps.
             temperature_c=_number(payload, "temperature_c"),
             time_h=_number(payload, "time_h"),
             yield_percent=_product_number(payload, "yield_percent"),
             purity_percent=_product_number(payload, "purity_percent"),
             impurities=_impurities(payload),
-            # **No `performed_at`, deliberately.** This export carries no experiment date — its one
-            # date field is the entry timestamp — and this adapter used to map that onto the record
-            # itself, which filled the field with the right value under the wrong claim: the stamp
-            # stayed at its `"stated"` default, so `memory/progression.py::Progression.entry_dated`
-            # saw nothing
-            # to weaken and the campaign note asserted "Runs in the order they were performed" over
-            # an afternoon of transcription. `adapter.DatedIngest` supplies the same date *and* the
-            # `date_source="entry"` that says where it came from, at the one construction point
-            # every production reader resolves through.
+            # No `performed_at`: this export has no experiment date. `adapter.DatedIngest` supplies
+            # the entry date with `date_source="entry"`, so the record does not claim a
+            # chemist-stated date.
             outcome_class=_outcome_class(payload),
             failure_reason=payload.get("failure_reason"),
             provenance=_provenance(payload, raw),
             project=payload.get("project"),
-            # What the run was testing, when the entry records it (D-162). Read from the entry's
-            # own field rather than guessed out of the procedure prose: a hypothesis extracted by
-            # pattern-matching would be indistinguishable, downstream, from one the chemist wrote.
+            # What the run was testing, only from the entry's own field: a hypothesis
+            # pattern-matched from prose would be indistinguishable downstream from one the chemist
+            # wrote.
             hypothesis=payload.get("hypothesis"),
             steps=_segment_steps(procedure),
             procedure_text=procedure or None,
@@ -368,9 +271,8 @@ class JsonExportAdapter:
 def _segment_steps(procedure: str) -> list[ReactionStep]:
     """Split a free-text procedure into ordered, coarsely-labeled steps (lossless).
 
-    Each returned step keeps its source segment verbatim and carries any temperature/time
-    the regex can read from that segment; species are left unlinked (see the module
-    docstring). An empty or whitespace-only procedure yields no steps.
+    Each step keeps its segment verbatim plus any temperature/time read from it; species are left
+    unlinked. An empty procedure yields no steps.
     """
     return [
         ReactionStep(
@@ -405,10 +307,8 @@ def _classify(segment: str) -> StepKind:
 def _search(pattern: re.Pattern[str], text: str) -> float | None:
     """First numeric group the pattern matches in `text`, as a float, else `None`.
 
-    Typographic dashes are normalised to the ASCII hyphen-minus first: `_TEMPERATURE` now *matches*
-    the whole minus family (see `_MINUS_SIGNS`), and `float("−78")` raises `ValueError` on every one
-    of them but U+002D. Normalising here rather than in the pattern keeps the matched text faithful
-    to the source prose, which is what a chemist reads beside the number in `procedure_text`.
+    Typographic minus signs are normalised to ASCII for `float()`, here rather than in the text, so
+    `procedure_text` stays faithful to the source.
     """
     match = pattern.search(text)
     return float(match.group(1).translate(_TO_ASCII_MINUS)) if match else None
@@ -443,22 +343,10 @@ def _component(item: Any, default_role: Role) -> Component:
 def _number(payload: dict[str, Any], key: str) -> float | None:
     """A recorded condition: the structured field, or `None` when the entry does not state one.
 
-    `None` and not a regex over the procedure — a correction, not a simplification. The fallback
-    took the **first** match in the whole prose, which is the *addition* temperature and the
-    *addition* time in every procedure that starts by charging a vessel, so an entry reading
-    "cool to 0 °C … add dropwise over 0.5 h … warm to 80 °C and stir for 12 h" was recorded as a
-    reaction run at 0 °C for 0.5 h. Deterministic, and wrong; and since D-2026-08-25 removed the
-    PR-gate from this path on the grounds that the transcription infers nothing, nobody saw it
-    before it was queryable. A missing number a chemist can read out of `procedure_text` is a
-    smaller harm than a wrong one stored as recorded fact, which is what a `since`/`until`
-    comparison, `condense_protocols` and a cited campaign note all read.
-
-    The prose is not discarded: it is kept verbatim in `procedure_text`, and each segment carries
-    the temperature and time *it* states on its own `ReactionStep`, which is the scope those numbers
-    actually have. `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` records the decision.
-
-    A structured `0` is a real value — an ice-bath 0 °C — so the check is `is not None`, never
-    truthiness.
+    Never a regex over the procedure, whose first match is typically the addition temperature or
+    time rather than the reaction's; a missing number is a smaller harm than a wrong one stored as
+    fact (D-2026-08-26-a-transcription-may-not-infer-a-setpoint). Prose numbers are kept on each
+    `ReactionStep`. A structured `0` is real, so the check is `is not None`.
     """
     value = payload.get(key)
     return float(value) if value is not None else None
@@ -467,10 +355,8 @@ def _number(payload: dict[str, Any], key: str) -> float | None:
 def _product_number(payload: dict[str, Any], field: str) -> float | None:
     """Take a numeric outcome field from the first product (per-product in this ELN).
 
-    Generalized from the yield-only reader so purity rides the identical path (DRY): both are
-    per-product outcome numbers and must fail the same way. `_build` already guarantees
-    `products` is a non-empty list, but not that its items are objects — a bare string here must
-    be a mapping error, not an AttributeError.
+    Yield and purity share this path so they fail the same way. A non-object product item is a
+    mapping error, not an `AttributeError`.
     """
     first = _require_list(payload, "products")[0]
     if not isinstance(first, dict):
@@ -480,11 +366,10 @@ def _product_number(payload: dict[str, Any], field: str) -> float | None:
 
 
 def _outcome_class(payload: dict[str, Any]) -> OutcomeClass | None:
-    """Read the entry's outcome, or `None` when the entry does not state one (gap KNW-3).
+    """Read the entry's outcome, or `None` when the entry does not state one.
 
-    Silence is passed through as silence rather than read as success: this export format has an
-    `outcome` key or it does not, and an entry without one has told us nothing about how the run
-    turned out. See `OrdReaction.outcome_class` for why that is not the same as INCONCLUSIVE.
+    Silence stays silence rather than success; see `OrdReaction.outcome_class` for why that differs
+    from INCONCLUSIVE.
     """
     raw = payload.get("outcome")
     if raw is None:
@@ -498,10 +383,8 @@ def _outcome_class(payload: dict[str, Any]) -> OutcomeClass | None:
 def _impurities(payload: dict[str, Any]) -> list[Impurity]:
     """Map the first product's impurity profile, skipping entries that identify nothing.
 
-    An impurity row with neither a name nor a structure records nothing an chemist could act on,
-    so it is dropped rather than rejected: one unusable row must not cost the whole reaction, and
-    the surrounding rows are still real data (the reject-and-continue discipline, applied within
-    an entry).
+    A row with no name, structure or positive RRT is dropped rather than rejected, so one unusable
+    row does not cost the reaction.
     """
     first = _require_list(payload, "products")[0]
     if not isinstance(first, dict):
@@ -515,21 +398,16 @@ def _impurities(payload: dict[str, Any]) -> list[Impurity]:
             raise ElnFormatError(f"impurity is not an object: {row!r}")
         name, smiles = row.get("name"), row.get("smiles")
         area = row.get("area_percent")
-        # RRT reads the same way area% does, and for the reason `Impurity.rrt` gives: it is how a
-        # chemist names an unresolved peak, so a row that carries one and loses it here is a row
-        # that can no longer say *which* impurity it is about.
+        # RRT is how a chemist names an unresolved peak (`Impurity.rrt`), so it is read like area%.
         rrt = float(row["rrt"]) if row.get("rrt") is not None else None
-        # An RRT-only row *is* identified — by where it eluted — so it is named rather than dropped,
-        # which is the remedy `Impurity._identifiable` prescribes and this adapter did not take. The
-        # drop test is read after the RRT rather than before it: it used to sit two lines above the
-        # line that reads `rrt`, so the largest peak in a profile could be the one lost.
+        # An RRT-only row is identified by where it eluted, so it is named (as
+        # `Impurity._identifiable` prescribes) rather than dropped; the drop test therefore runs
+        # after the RRT is read.
         if not name and not smiles and rrt is not None and rrt > 0.0:
             name = unresolved_peak_name(rrt)
         if not name and not smiles:
-            # Still nothing: no name, no structure, and no positive retention time either — a row
-            # that identifies nothing and asserts nothing, which is a blank line in an analytics
-            # table rather than a peak. Dropped rather than rejected, so one such row cannot cost
-            # the reaction its record.
+            # No name, structure or positive RRT: a blank row rather than a peak. Dropped, not
+            # rejected.
             logger.warning("skipped an impurity row with neither name nor smiles: %r", row)
             continue
         profile.append(
@@ -546,15 +424,9 @@ def _impurities(payload: dict[str, Any]) -> list[Impurity]:
 def _provenance(payload: dict[str, Any], raw: RawEntry) -> str:
     """Where this record came from: the source system, its entry id, and who ran it.
 
-    It used to be `eln:<operator>` — a person's name and nothing else. With two ELN sources
-    enabled, two entries whose `entry_id`s collide produce the same note id `reaction-<id>` and the
-    second silently loses to the already-merged check, with nothing in either record to say they
-    came from different systems. Naming the source is what makes that visible, and it is also the
-    first thing an auditor asks of a piece of evidence: which system, which record.
-
-    `eln-json` is the *format* this adapter reads rather than an instance name, which is as much as
-    a file-drop adapter can honestly claim — it is handed a directory, not a tenant. A connector
-    that talks to a real ELN knows its instance and should say so here.
+    Naming the source makes colliding entry ids from two systems visible and answers an auditor's
+    first question. `eln-json` is the format, which is all a file-drop adapter can honestly claim; a
+    connector to a real ELN should name its instance.
     """
     operator = payload.get("operator") or "unknown"
     return f"eln-json:{raw.entry_id}:{operator}"
@@ -563,9 +435,8 @@ def _provenance(payload: dict[str, Any], raw: RawEntry) -> str:
 def _optional_timestamp(value: Any, path: Path) -> datetime | None:
     """Parse an optional amendment timestamp; `None` when absent, `ElnFormatError` when malformed.
 
-    Absent is the normal case and means "this source does not report amendments" — not "never
-    amended". A *present but unparseable* value is bad data and is raised, because silently
-    treating it as absent would reinstate the exact silence this field exists to break.
+    Absent means "not reported", not "never amended". A present but unparseable value is raised
+    rather than treated as absent.
     """
     return None if value is None else _parse_timestamp(value, path)
 
@@ -573,9 +444,7 @@ def _optional_timestamp(value: Any, path: Path) -> datetime | None:
 def _parse_timestamp(value: Any, path: Path) -> datetime:
     """Parse an ISO-8601 timestamp (accepting a trailing 'Z'), else `ElnFormatError`.
 
-    A naive timestamp (no UTC offset) is read as UTC: exports from tools that omit the
-    offset are common, UTC is the least-surprising reading, and a naive datetime would
-    later raise `TypeError` when compared against the sync's offset-aware cursor.
+    A naive timestamp is read as UTC, so it compares with the sync's aware cursor.
     """
     if not isinstance(value, str):
         raise ElnFormatError(f"{path.name}: missing 'timestamp'")

@@ -1,19 +1,12 @@
 """The inbox and the answer: HTTP routes over the durable wait (`durable/awaiting.py`).
 
-**These are routes and not agent tools, and that is the whole control.** A signal is unsigned —
-anyone who can reach the broker can send one — so `AwaitAnswerWorkflow` treats `answered_by` as
-attribution and never as authorization
-(`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`). Deciding *who may answer*
-therefore has to happen on this side of the wire, before the signal is sent, exactly as
-`POST /sessions/{id}/plan/decision` is a route for the reason that a model must never authorize its
-own work. `POST /proposals/{id}/decision` stood beside it in this sentence until the PR-gate was
-deleted (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
+Routes, not agent tools: a Temporal signal is unsigned, so `AwaitAnswerWorkflow` treats
+`answered_by` as attribution only, and who may answer must be decided here, before the signal is
+sent — a model must never authorize its own work.
 
-**`asked_of` is routing and `_may_answer` is the gate, and they are deliberately not the same
-thing.** A request routed to nobody in particular is answerable by any authenticated caller; one
-routed to a named actor or an entitlement is answerable by that actor, by a holder of that
-entitlement, and by nobody else. The requester is not automatically permitted: "I asked the QA lead
-to approve this" must not mean "and I may approve it myself".
+`asked_of` is routing; `_may_answer` is the gate. An unrouted request is answerable by any
+authenticated caller; a routed one only by the named actor or a holder of the named entitlement.
+Asking does not entitle the requester to answer.
 """
 
 import logging
@@ -31,36 +24,22 @@ from chemclaw.kg.premise import count_refusals, premise_breaks
 logger = logging.getLogger(__name__)
 
 
-#: Request kinds where the requester may never be the answerer, whatever the routing says.
-#:
-#: **Separation of duties, and it is a rule about the kind rather than about the routing.** An
-#: `approval` is the human gate on an irreversible external change: filing a deviation, releasing a
-#: batch, writing to somebody else's system of record. The whole content of that control is that a
-#: *second* person looked. Routing alone did not deliver it — the first version of this seam left
-#: `asked_of` unset on every approval it raised, which took the "anyone authenticated" branch below
-#: and let the requester approve their own unrecoverable change. Routing is now set at the launch
-#: site and an unrouted one is refused outright, so this is the third layer rather than the only
-#: one; it is here because it holds even when a deployment routes an approval to a group the
-#: requester happens to belong to.
-#:
-#: Not applied to every kind: a `measurement` or a `question` routed to a team the requester is on
-#: is ordinary work, and refusing it would stop a chemist answering their own lab's request.
+# Request kinds where the requester may never be the answerer, whatever the routing says.
+#
+# Separation of duties: an `approval` gates an irreversible external change, and its whole point is
+# that a second person looked — even when routed to a group the requester belongs to. Approvals must
+# also be routed at launch. Other kinds (`measurement`, `question`) may be answered within the
+# requester's own team.
 SECOND_PERSON_KINDS = frozenset({"approval"})
 
 
 def _may_answer(principal: Principal, stored: pending_store.PendingRequest) -> bool:
     """Whether this caller may answer this request.
 
-    Two questions, and the order matters. First, separation of duties: for a kind in
-    `SECOND_PERSON_KINDS` the requester is refused before routing is consulted at all, so an
-    approval routed to a group cannot be self-signed by a member of it who asked for it.
-
-    Then routing. Empty routing means anyone authenticated: the request is open to whoever is
-    entitled to reach this service at all, which is the same posture every read here has. A named
-    routing matches the caller's object id, their user principal name, or an entitlement they hold —
-    the last spelled both bare and with `GROUP_ROLE_PREFIX`, because a security group reaches the
-    role set through that prefix and an app role does not, and a deployment routes to whichever it
-    has.
+    First separation of duties: for a kind in `SECOND_PERSON_KINDS` the requester is refused before
+    routing is consulted. Then routing: empty means any authenticated caller; otherwise the caller's
+    oid, user principal name, or an entitlement they hold, matched bare and with `GROUP_ROLE_PREFIX`
+    (security groups carry the prefix, app roles do not).
     """
     if stored.kind in SECOND_PERSON_KINDS and stored.requested_by == principal.oid:
         return False
@@ -75,13 +54,8 @@ def _may_answer(principal: Principal, stored: pending_store.PendingRequest) -> b
 def _routing_identities(principal: Principal) -> list[str]:
     """Every string a request's `asked_of` could name to reach this caller, besides their oid.
 
-    The mirror of `_may_answer`'s routing branch, and deliberately built from the same three
-    sources: the user principal name, the roles held bare, and the same roles with
-    `GROUP_ROLE_PREFIX` stripped — a security group arrives prefixed and a deployment may route to
-    the unprefixed group name. Anything `_may_answer` would accept must appear here, or a request
-    is answerable and invisible. The converse is not this function's job and cannot be: separation
-    of duties turns on the *kind* and the requester, which no routing query can express, so
-    `list_pending` runs the gate itself over what this widens to.
+    Mirrors `_may_answer`'s routing branch, so anything answerable is visible. Separation of duties
+    cannot be expressed as a routing query, so `list_pending` applies the gate itself.
     """
     identities = [principal.upn, *principal.roles]
     identities += [
@@ -95,42 +69,23 @@ def _routing_identities(principal: Principal) -> list[str]:
 async def list_pending(principal: CurrentUser, limit: int = 50) -> PendingRequestsOut:
     """One page of what is waiting on you — the open requests you may actually answer.
 
-    The cross-conversation read, for the reason `GET /plans/pending` exists: a question raised in a
-    turn the asker has closed lives only inside that turn otherwise, and the person who has to
-    answer it is usually not the person who asked.
-
-    **It has always been a page and nothing said so.** Measured against a real database, 35 waiting
-    rows rendered as 20 with no marker anywhere in the response — the same silence `GET /sessions`
-    was fixed for ("it always bounded the answer, and nothing said so"), on the surface where the
-    consequence is a raised question that ages out because it appeared in nobody's inbox.
-    `total_routed_to_you` and `truncated` say what the page is; `limit` is how a client asks for
-    the rest, bounded by the store.
-
-    A cursor rather than a limit would be the `GET /sessions` answer in full, and it is deliberately
-    not taken here: this list is ordered by *deadline*, so it does not reorder under the reader the
-    way a recency-ordered conversation list does, and the store's own bound is 200 against an inbox
-    a person is expected to empty. What was missing was the statement, not the pagination.
+    The cross-conversation read: the person who must answer is usually not the one who asked.
+    `total_routed_to_you` and `truncated` say what the page holds; `limit` asks for more, bounded by
+    the store. No cursor: the list is ordered by deadline, so it does not reorder under the reader.
     """
-    # The caller's whole routing surface, not just their object id: `_may_answer` accepts a upn and
-    # an entitlement, so an inbox that matched only the oid hid every team-routed request from the
-    # team it was routed to.
+    # The caller's whole routing surface (oid, upn, entitlements), so team-routed requests appear.
     page = await pending_store.open_requests(
         asked_of=principal.oid, identities=_routing_identities(principal), limit=limit
     )
-    # **Through the gate, not merely through the routing.** `_routing_identities` is the mirror of
-    # one branch of `_may_answer` and the store knows nothing of the other: separation of duties
-    # refuses an `approval` its own requester *before* routing is consulted, so an approval Alice
-    # raised and routed to a group Alice is in sat in Alice's inbox and answered 403 when she
-    # clicked it. Filtering on the same predicate the answer route applies is what stops the two
-    # drifting — an inbox whose rows are unactionable is the failure an inbox exists to prevent.
+    # Filtered through `_may_answer` itself, so the inbox never lists a request (such as one's own
+    # approval) that the answer route would refuse.
     answerable = [request for request in page.requests if _may_answer(principal, request)]
     return PendingRequestsOut(
         requests=[PendingRequestOut(**request.model_dump()) for request in answerable],
         count=len(answerable),
         total_routed_to_you=page.total_waiting,
-        # The store's own truncation, which is the only one that hides a row: the gate below
-        # removes rows the caller cannot act on, and those are shown as a difference rather than
-        # as a cut. Conflating the two would tell a chemist to page for rows that are not theirs.
+        # Only the store's truncation hides rows; rows the gate removes are not the caller's to page
+        # for.
         truncated=page.truncated,
     )
 
@@ -140,31 +95,20 @@ async def answer_pending(
 ) -> Response:
     """Answer one held-open question, releasing whatever is waiting on it.
 
-    Five refusals, each a different fact and each with its own status:
+    Refusals, each a different fact:
 
-    - **404** — no such request. Also what an already-settled request returns from the *store*
-      check below, but not the same case, so they are separated.
+    - **404** — no such request.
     - **403** — the caller is not who this was routed to.
-    - **409** — it is no longer waiting. An answered, expired or cancelled request is a decided
-      one, and a second answer must be told rather than silently ignored. The workflow ignores a
-      duplicate signal because a signal has no reply channel; this route is where a caller can
-      actually be told.
-    - **409, again, and a different fact** — the knowledge the question rests on has been
-      superseded or refuted while it waited. The request is still `waiting`, so this is not the
-      settled case above; it is an answer that would be applied to a premise that has gone. A wait
-      can stand open for `awaiting_max_days` (90), so this is not a rare window.
-    - **503** — the broker is unreachable, so the answer was not delivered. Deliberately not
-      written to the store first: a row saying `answered` with nothing released is worse than a
-      failed request, because the thing waiting would wait forever while the inbox looked clean.
+    - **409** — it is no longer waiting (answered, expired or cancelled); a signal has no reply
+      channel, so this route is where a second answer is told.
+    - **409** — the knowledge it rests on was superseded or refuted while it waited. The request
+      stays `waiting`: it can still be answered by someone who re-reads it, or expire.
+    - **503** — the broker is unreachable and nothing was delivered. The store is not written first,
+      so a row never says `answered` while the waiter still waits.
 
-    **The premise check is here rather than in the workflow**, and that placement is the whole
-    reason it cost one column and no replay risk. A workflow cannot read the corpus — it is
-    deterministic and replayed — so checking there would mean a new activity, which changes the
-    command sequence and needs a `workflow.patched` guard, and a new outcome state, which the
-    `pending_requests_state_known` CHECK would have to be widened to admit. This route already has
-    the authenticated caller, the stored row, permission to do I/O and a reply channel to refuse on.
-    The wait is left `waiting`: the premise moving is not an ending, and the question can still be
-    answered by somebody who re-reads it, or expire on its own deadline.
+    The premise check lives here, not in the workflow: a workflow cannot do I/O without a new
+    activity
+    and a replay guard, and this route already has the caller, the row and a way to refuse.
     """
     stored = await pending_store.get_request(request_id)
     if stored is None:
@@ -173,21 +117,11 @@ async def answer_pending(
         raise HTTPException(status_code=403, detail="this request is not routed to you")
     if stored.state != "waiting":
         raise HTTPException(status_code=409, detail=f"this request is already {stored.state}")
-    # `blocks_an_answer` rather than every break: an `absent` note cannot be told apart from a
-    # checkout this replica has not caught up with, and refusing a chemist on that is both the
-    # wrong failure direction and unappealable — there is no override on this route. See the
-    # method's own docstring for the measurement.
-    #
-    # **A `review` is exempt, because for it the check runs backwards.** Every other kind asks
-    # somebody to *apply* knowledge, so a retired premise means the answer would be applied to
-    # something that no longer holds. A review asks somebody to judge an answer the checks could
-    # not ground — so its premise is the thing under review, and the most natural act after
-    # reading it is to supersede or refute the note it rested on. That act would then lock the
-    # reviewer out of recording the review, on a route with no override and no cancel, leaving the
-    # wait only able to expire. The escalation also opens these automatically from claim text that
-    # routinely carries citations, so it can open one whose premise was *already* broken — and the
-    # 409 would then say the knowledge "has changed since it was asked" when nothing changed,
-    # which is the one thing `request_external_input`'s ask-time refusal exists to make true.
+    # Only breaks that `blocks_an_answer`: an `absent` note may just be a checkout behind, and this
+    # route
+    # has no override. A `review` is exempt: its premise is what is under review, and superseding
+    # that
+    # note is the natural outcome of reading it.
     breaks = await premise_breaks(stored.premise_note_ids) if stored.kind != "review" else []
     broken = [item for item in breaks if item.blocks_an_answer()]
     if broken:
@@ -204,9 +138,7 @@ async def answer_pending(
     try:
         client = await connect()
         handle = client.get_workflow_handle(request_id)
-        # The signal carries the *authenticated* actor, never anything the body supplied: the
-        # workflow records it, and a body-supplied name would be a caller writing their own
-        # attribution into an audit-bearing record.
+        # The authenticated actor, never a body-supplied name, goes into the audit-bearing record.
         await handle.signal("provide", {"answered_by": principal.oid, "payload": body.payload})
     except Exception as exc:
         logger.warning("pending.signal_failed: %s: %s", request_id, exc)
@@ -220,8 +152,7 @@ async def answer_pending(
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    On the app's own decorators rather than an `APIRouter`, for the reasons
-    `chemclaw.api.routes.plan.register` states in full.
+    App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
     # Not under `/sessions/…`: a question about all of them, asked by someone who holds no session
     # id — the same shape, and the same reason, as `GET /plans/pending`.

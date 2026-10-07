@@ -1,26 +1,14 @@
 """Run every enabled local connector in one process — the dev loop for the connector topology.
 
-In a cluster each connector is its own Deployment on its own port, which is the point: independent
-scaling, independent failure, independent dependency sets. On a laptop that same topology means N
-terminals and N ports, which is friction with no benefit while writing code — so this mounts each
-enabled bundle's FastAPI app under `/<name>` of one uvicorn process.
+In a cluster each connector is its own Deployment and port; locally this mounts each enabled
+bundle's FastAPI app under `/<name>` of one uvicorn process. Core reaches it through
+`CHEMCLAW_CONNECTOR_URLS` — the same override a cluster uses — and the runner prints the JSON to
+set. Bundles without a local app (third-party endpoints) are skipped.
 
-The addresses stay honest either way: a bundle's manifest ships its own per-connector loopback URL,
-and this runner is reached by pointing `CHEMCLAW_CONNECTOR_URLS` at the composite instead — the same
-override a cluster uses for its Service addresses, so the dev path exercises the production
-indirection rather than a special case. The runner prints the exact JSON to set.
-
-Only bundles with a *local* app are mounted: a connector whose server we do not own (a third-party
-MCP endpoint) has nothing to run here, and one is skipped rather than reported as broken.
-
-**The credentials are minted here, and that is not a convenience.** Every locally-served bundle now
-declares `auth: mode: bearer`, so its `/mcp` refuses an unauthenticated request — which is the
-point, and which would also make `make connectors` 401 every call unless both sides of a loopback
-pair agree on a secret. `ensure_dev_tokens` mints one per bundle where the environment does not
-already carry it, and `--export-env` prints them as shell exports so a caller that starts core in a
-*different* process (`infra/live/processes.sh`) can put the same values in both environments. There
-is deliberately no default token: a fixed dev credential in the tree is the thing that eventually
-turns up in a deployment.
+Every locally served bundle declares `auth: mode: bearer`, so `ensure_dev_tokens` mints a random
+token per bundle the environment does not set, and `--export-env` prints them as shell exports so a
+core process started elsewhere (`infra/live/processes.sh`) can use the same values. There is no
+default token: a fixed dev credential in the tree eventually reaches a deployment.
 """
 
 import argparse
@@ -44,9 +32,7 @@ from chemclaw.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
-# Where the composite listens. A dev-only affordance, so it is a module constant rather than a
-# config field: nothing in a deployment reads it, and inventing a setting for it would be config for
-# its own sake (the "config, never magic numbers" rule is about values a *deployment* varies).
+# Where the composite listens; a dev-only constant, since no deployment varies it.
 DEV_HOST = "127.0.0.1"
 DEV_PORT = 8810
 
@@ -67,15 +53,9 @@ def _local_app(name: str) -> FastAPI | None:
 def bearer_token_envs() -> dict[str, str]:
     """The `/mcp` credential variable of every bundle *this runner serves*, keyed by connector name.
 
-    Read off the manifests rather than listed here, so a bundle that gains or drops a credential is
-    covered the day its manifest changes — the same rule `expensive_actions()` follows for the
-    trigger gate, and the reason neither has a list in core to keep up to date.
-
-    **Locally-served bundles only, which is the whole reason this filters.** `chem` and `safety`
-    also declare a bearer, and that credential belongs to `Chemclaw3-mcp` — minting a random value
-    for it would replace a clear `MissingConnectorCredential` naming the unset variable with a 401
-    from a server that has never heard of the token. A secret is only ours to invent when both ends
-    of the call are.
+    Read off the manifests, so it follows them. Only locally served bundles: `chem` and `safety`
+    credentials belong to `Chemclaw3-mcp`, and inventing one would turn a clear
+    `MissingConnectorCredential` into an opaque 401.
     """
     return {
         manifest.name: manifest.endpoint.auth.token_env
@@ -89,18 +69,10 @@ def bearer_token_envs() -> dict[str, str]:
 def ensure_dev_tokens() -> tuple[dict[str, str], frozenset[str]]:
     """Fill in a random token for every credential variable the environment does not already set.
 
-    Minted, never defaulted. A constant would be a credential committed to the tree, and the one
-    thing worse than an unauthenticated dev server is an authenticated one whose password is public
-    — the second looks like a control.
-
-    Existing values are left exactly as they are, which is what lets a caller (a live lane, a
-    compose file, an operator) decide the secret and have both processes agree on it.
-
-    **Which ones were already there is returned, not inferred.** It cannot be re-derived afterwards,
-    because this function writes every value into `os.environ` — so by the time a caller looks, a
-    minted token and an operator's are indistinguishable. That is exactly how a real
-    `CHEMCLAW_*_MCP_TOKEN` ended up echoed verbatim in the serving banner, which in any wrapped or
-    CI invocation is a log.
+    Minted, never defaulted: a constant would be a public password that looks like a control.
+    Existing values are kept, so a caller can choose the secret for both processes. Which were
+    already set is returned, because after this writes `os.environ` a minted token and an operator's
+    are indistinguishable, and operator tokens must not be echoed.
 
     Returns:
         Every credential variable and its value, and the subset that was already set.
@@ -131,10 +103,8 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
     async def lifespan(_composite: FastAPI) -> AsyncIterator[None]:
         """Run every mounted app's own lifespan for the composite's lifetime.
 
-        Starlette does **not** run a mounted sub-app's lifespan, and a connector app's lifespan is
-        what starts its MCP session manager — so without this the composite would accept connections
-        and then fail every MCP handshake. Entering them here is the whole reason this function
-        returns an app rather than just mounting onto a bare `FastAPI`.
+        Starlette does not run a mounted sub-app's lifespan, and a connector app's lifespan starts
+        its MCP session manager; without this every MCP handshake would fail.
         """
         async with AsyncExitStack() as stack:
             for app in mounted:
@@ -157,26 +127,17 @@ def _export_lines(
 ) -> list[str]:
     """Everything a *separate* core process needs in order to reach and authenticate to these apps.
 
-    One function so the human-readable banner and the `eval`-able output cannot disagree about what
-    core needs — the failure mode of two copies here is a lane that starts and 401s every tool call,
-    which reads as a broken connector rather than a missing variable.
-
-    `preexisting` names the credentials the operator supplied, and their *values* are replaced with
-    a placeholder. Printing a token this process minted is the point — it is random, ephemeral, and
-    a second process needs it. Printing one the operator already exported tells them nothing they
-    do not have and writes a real credential into whatever captured this output. The default is
-    empty, so `--export-env` — which a caller `eval`s and which therefore needs every real value —
-    keeps printing them all by simply not passing the argument.
+    One function, so the banner and the `eval`-able output cannot disagree. `preexisting` names
+    operator-supplied credentials, whose values are masked: only tokens this process minted are
+    printed. `--export-env` passes none, so it prints every real value.
     """
     shown = {
         name: "<already set in your environment>" if name in preexisting else value
         for name, value in tokens.items()
     }
     values = {"CHEMCLAW_CONNECTOR_URLS": json.dumps(urls, separators=(",", ":")), **shown}
-    # `shlex.quote`, not hand-written quotes. A minted token is base64url and could never need it,
-    # but an operator-supplied one is an arbitrary string, and a value carrying a quote would end
-    # the assignment early — turning the rest of a *credential* into shell words that the caller
-    # then `eval`s. The mechanical escape costs nothing and removes the question.
+    # `shlex.quote`: an operator-supplied value may contain a quote, which would split the
+    # credential into shell words the caller then `eval`s.
     return [f"export {name}={shlex.quote(value)}" for name, value in sorted(values.items())]
 
 
@@ -195,9 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     tokens, preexisting = ensure_dev_tokens()
     composite, urls = build_composite()
     if args.export_env:
-        # Nothing on stdout but the exports, and no `configure_logging()`: this output is `eval`ed.
-        # The composite is built and discarded rather than short-cut, so the URL map printed here
-        # is the same object the serving path prints — one reader, no second copy of the pattern.
+        # Only the exports on stdout and no `configure_logging()`: this output is `eval`ed. The
+        # composite is built so the URL map is the same object the serving path prints.
         print("\n".join(_export_lines(urls, tokens)))
         return 0
 

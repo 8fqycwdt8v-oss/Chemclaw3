@@ -1,16 +1,10 @@
 """`python -m chemclaw.cli.hypothesis_recovery` — what a tournament's ranking is worth.
 
-Prints the table `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate` quotes, so the ADR's
-numbers are reproducible by a command rather than by reading a test. That ADR asks for exactly this
-of itself — "make the trigger executable where you can" — and the figure it turns on, that a
-plausible judge leaves the leader wrong more often than right, is the one a reader is most likely
-to want to check.
-
-**Needs no credential and no model.** The judge is simulated at a stated accuracy, which is what
-makes the ground truth constructed and the null controllable. It measures the *instrument* — Swiss
-pairing plus the Bradley-Terry fit — and says nothing about whether a language model judging real
-chemistry is accurate. `evals.hypothesis_tournament.backtest_shape` states the measurement that
-would settle that, and records that it has never run.
+Prints the recovery table its ADR (`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`)
+quotes, so the numbers are reproducible by command. Needs no credential or model: the judge is
+simulated at a stated accuracy, so this measures the instrument (Swiss pairing plus the
+Bradley-Terry fit), not whether a model judges real chemistry accurately
+(`evals.hypothesis_tournament.backtest_shape` describes that measurement).
 """
 
 from __future__ import annotations

@@ -1,43 +1,15 @@
-"""Process metrics in Prometheus text format (gap DEP-4).
+"""Process metrics in Prometheus text format.
 
-Observability was structured logs plus opt-in OTel *traces*. There was no metrics surface at all,
-which left three things invisible in operations and one thing actively mis-tuned:
+Counts what logs and traces cannot answer for an operator or autoscaler: load shedding (admission
+503s, budget 429s), lost audit records, saturation (in-flight turns against the admission cap, the
+signal the HPA should scale on rather than CPU), and latency percentiles, which sampled per-request
+traces cannot give.
 
-- **Load shedding is silent.** Admission control (AG-15) sheds excess turns with a 503 and the
-  budget guard refuses with a 429. Both are working as designed and neither is countable, so
-  "the service is at capacity" looks identical to "the service is fine" from outside.
-- **Lost audit records are silent.** `chemclaw.agent.audit` deliberately swallows a sink
-failure to
-  keep tool calls working (SEC-3) and logs an ERROR marker — but nothing counts it, so an audit
-  trail can be quietly incomplete for a long time.
-- **The HPA scales on the wrong signal.** `values.yaml` autoscales the front door on CPU at 70%,
-  which for an SSE-streaming, LLM-latency-dominated service is close to noise: a pod blocked on
-  the model uses almost no CPU while being completely full. In-flight turns against the admission
-  cap is the signal that actually describes saturation.
+No `prometheus_client` dependency: the exposition format is a small, stable text protocol and this
+module is the only place that knows it. Metrics are process-wide (one registry per pod, the scope a
+scrape targets), stdlib-only, and used by every process kind, hence kernel material.
 
-**No new dependency.** `prometheus_client` would be one more package to install, scan, and pin for
-what is ~80 lines of text formatting. The exposition format is a stable, trivially-generated text
-protocol, and this module is the only place that knows it.
-
-Metrics are process-wide (one registry per pod), because that is the scope a scrape targets — and
-that is why this is kernel material rather than front-door material. It imports only the standard
-library, *every* process has something to count (the front door, the background worker, each
-connector worker), and each of those reads it through `core/worker_http.py` or `core/logging.py`'s
-neighbours rather than through anything in `chemclaw.api`. It lived in `chemclaw.api` until the R2
-layering move, which is what forced `core/metrics_bridge.py` and `core/worker_http.py` to import it
-lazily; both are ordinary imports now.
-
-**This is not the eval layer's metrics, and there are three files in that family.**
-`evals/metric.py` is the `@metric` decorator and registry for scored eval criteria;
-`evals/metrics.py` holds the seed criteria themselves. This one counts turns, tokens, jobs and
-refusals for an operator, and shares nothing with them but a word.
-
-This module used to say histograms belonged in the OTel trace pipeline rather than here. That was
-wrong twice over: `api/app.py` never called `configure_telemetry`, so `CHEMCLAW_OTEL_ENABLED`
-did nothing at the front door and there was no latency signal at all; and traces are sampled and
-per-request, so they cannot answer "what is p95 right now" for an alert or an autoscaler. A load
-test had to derive turn latency from the client side because the server exposed none. So there are
-now two histograms, and the trace pipeline keeps the per-request detail they deliberately drop.
+Not related to `evals/metric.py` / `evals/metrics.py`, which score eval criteria.
 """
 
 import logging
@@ -51,9 +23,8 @@ log = logging.getLogger(__name__)
 def _escape(value: str) -> str:
     r"""Escape a label value for the exposition format.
 
-    Prometheus requires `\\`, `"` and newline escaped inside a label value. A profile name will
-    never contain one, which is exactly why it is done here rather than trusted: the escape is a
-    property of the format, and the next label to be declared may not be so well behaved.
+    The format requires `\\`, `"` and newline escaped; done unconditionally because it is a property
+    of the format, not of today's label values.
     """
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
@@ -61,38 +32,11 @@ def _escape(value: str) -> str:
 def _sample(value: float) -> str:
     """Render one sample *value* in the Prometheus text format.
 
-    Every numeric emission in `render` goes through here, because `:g` — which every one of them
-    used to use — is wrong in two independent ways and only one of them is visible.
-
-    The loud way: `f"{float('inf'):g}"` is `inf` and `f"{float('nan'):g}"` is `nan`, where the
-    format requires `+Inf` and `NaN`. A bound gauge whose source computes a ratio with a zero
-    denominator therefore emitted a token Prometheus rejects, and a rejected sample does not fail
-    alone — it fails the *scrape*, so one unreadable gauge loses every metric this pod has. The
-    histogram path already spelled `le="+Inf"` correctly, which is what made this look like a
-    convention rather than the inconsistency inside one renderer that it was.
-
-    The quiet way, and the reason this function exists rather than three `if` arms: **`:g` carries
-    six significant digits.** A counter at 1,234,567 rendered as `1.23457e+06` — a number
-    Prometheus accepts, stores, and graphs, wrong by three. Every counter in this process was
-    exact until its millionth observation and silently rounded afterwards, which is the point at
-    which a long-running pod's numbers stop being worth reading. `chemclaw_tool_calls_total` on the
-    shipped fleet crosses that in days. Histogram `_sum` and `_count` had the same defect.
-
-    `repr` is the fix, because it is the shortest string that round-trips a float exactly.
-
-    **The coercion on the first line is load-bearing and this function shipped without it.** It
-    opened with `if isinstance(value, int): return str(value)`, whose comment claimed bool "renders
-    0/1 — correct here". It does not: `bool` is an `int`, so `str(True)` is `True`, and a gauge
-    that ever handed this a flag would emit `chemclaw_x True` and take the whole scrape with it —
-    the same total loss the `inf` paragraph above is about. The branch was also dead: instrumented
-    across every emission site, `render` hands this `float` and nothing else, because `_counts` is
-    seeded `0.0`, labelled series start at `0.0`, histogram slots are `[0.0] * n` and both gauge
-    paths already call `float(...)`. So it defended nothing and risked everything.
-
-    Coercing is not a narrowing, either, which is why the "exact int" claim went with it rather
-    than being repaired: a Prometheus sample **is** a float64, so an integer past 2**53 cannot be
-    stored by the server whatever this function prints. Rendering what Prometheus can hold is the
-    honest answer, and it is what `prometheus_client` does.
+    `:g` is wrong twice: it renders `inf`/`nan` where the format needs `+Inf`/`NaN` (one rejected
+    sample fails the whole scrape), and it keeps only six significant digits, silently rounding any
+    counter past a million. `repr` is the shortest exact round-trip. The value is coerced to `float`
+    first because a sample is a float64 anyway, and `str(True)` would emit `True` and break the
+    scrape.
     """
     value = float(value)
     if value != value:  # NaN is the only value unequal to itself
@@ -109,10 +53,8 @@ def _sample(value: float) -> str:
 _COUNTERS: dict[str, str] = {
     "chemclaw_turns_started_total": "Turns admitted and started.",
     "chemclaw_egress_refused_total": "Outbound connections the in-process egress guard refused.",
-    # Per-source evidence accounting (M10). A leg that returns nothing on one query is normal; a
-    # leg that returns nothing on *every* query is a broken deployment, and before this there was
-    # no way to tell those apart from outside — which is exactly the blind spot
-    # D-2026-08-01-a-cap-that-starves-a-source was found in, late and by hand.
+    # Per-source evidence accounting: a leg returning nothing on every query is a broken deployment,
+    # not an empty corpus.
     "chemclaw_evidence_source_chunks_total": "Chunks each evidence source contributed to a sweep.",
     "chemclaw_evidence_source_failures_total": (
         "Evidence sources that raised during a sweep, by source — labelled so it can be read "
@@ -125,15 +67,12 @@ _COUNTERS: dict[str, str] = {
         "answer and a failure. The third channel D-2026-08-01's class needed: without it a leg "
         "that always declines is indistinguishable from a healthy leg that never matches."
     ),
-    # "emitted", not "ended in": a turn stopped by the harness loop's iteration cap emits an error
-    # event and then still delivers its partial answer, so it is counted here and, more precisely,
-    # by `chemclaw_turn_loop_caps_total` below.
+    # "emitted", not "ended in": a turn stopped by the loop cap emits an error and still delivers
+    # its partial answer; `chemclaw_turn_loop_caps_total` counts that case precisely.
     "chemclaw_turns_failed_total": "Turns that emitted an error event.",
-    # The two halves of a contended front door, and they mean different things: queueing is the
-    # system absorbing a burst, shedding is it declining one. A rising queue rate with a flat shed
-    # rate is capacity being used; both rising together is capacity being exceeded. Since D-166
-    # both are reported on the turn's own stream, so neither has an HTTP status left to be counted
-    # by at the load balancer.
+    # Queueing is the system absorbing a burst; shedding is declining one. Rising queue with flat
+    # shed is capacity in use; both rising is capacity exceeded. Both are reported on the turn's own
+    # stream, so no HTTP status counts them at the load balancer.
     "chemclaw_turns_queued_total": (
         "Turns that had to wait for an admission permit (a `queued` event was streamed)."
     ),
@@ -142,72 +81,47 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
-    # Its own counter rather than the budget's, because the budget's drives an alert whose remedy
-    # is the token window: a conversation at `session_max_thread_bytes` is cleared by a new session
-    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`).
+    # Separate from the budget refusal, whose alert's remedy is the token window: a conversation at
+    # `session_max_thread_bytes` is cleared by a new session.
     "chemclaw_turns_refused_thread_size_total": (
         "Turns refused because their session's stored conversation reached "
         "session_max_thread_bytes."
     ),
-    # Deliberately unlabelled, and `actor` is the label that must never be added: `/metrics` is
-    # unauthenticated, and an `oid` is an unbounded *caller-chosen* key — minting oids is the way
-    # around a per-principal limit, so the series cap would silence this counter exactly when it
-    # matters. The identity is in the WARNING beside the increment. Not folded into
-    # `chemclaw_turns_conflict_total{scope=…}` either: that counter's population is turns that
-    # found one session busy and wait in its line, and this one's is a 429 across sessions — two
-    # populations under one denominator nobody can interpret.
+    # Unlabelled: `/metrics` is unauthenticated and an `oid` is an unbounded caller-chosen key, so
+    # an `actor` label would hit the series cap exactly when it matters. The identity is in the
+    # WARNING. Separate from `chemclaw_turns_conflict_total`, which counts turns waiting in one
+    # session's line.
     "chemclaw_turns_refused_actor_cap_total": (
         "Turns refused with 429 because the actor already held "
         "`service_max_concurrent_turns_per_actor` concurrent turns on this process."
     ),
-    # The revision loop over a flagged answer. Two series rather than one, because "how often
-    # does the verifier reject an answer" and "how often does rejecting it fail to help" are
-    # different questions and only the second is a defect: a deployment whose revisions always
-    # exhaust is paying double for every flagged turn and getting nothing.
+    # Revision passes over a flagged answer. Separate from exhaustion because only "rejecting it
+    # failed to help" is a defect: always-exhausting revisions pay double for nothing.
     "chemclaw_answer_revisions_total": "Revision passes run over an answer the verifier flagged.",
-    # The denominator the ratio above needs, and the reason it is a third series rather than a
-    # reuse: `chemclaw_answer_revisions_total` counts *passes* and the exhaustion counter counts
-    # *turns*, so dividing them compared two units. Measured with every flagged turn exhausting,
-    # the ratio read 1.00 at `answer_review_max_rounds=1` and 0.20 at 5 — the alert going silent
-    # at total failure, and its own advice (raise the rounds) pushing it further below threshold.
+    # The denominator for the exhaustion ratio: revisions count passes, exhaustion counts turns, and
+    # dividing passes into turns makes the alert go silent at total failure.
     "chemclaw_answer_review_turns_total": ("Turns whose flagged answer entered the revision loop."),
     "chemclaw_answer_review_exhausted_total": (
         "Turns whose answer was still unsupported after every allowed revision, and went out "
         "marked for review."
     ),
-    # **What happened to the person the escalation was supposed to reach**, which the counter above
-    # cannot say: it counts turns that went out flagged, and every one of the escalation's five
-    # outcomes looks identical from it. Four of them reached an operator as a log line only — and
-    # one, `joined`, is the outcome a busy deployment spends most of its time in, because the dedup
-    # subject is the *conversation*: every later exhausted turn of a thread already under review
-    # joins the open wait and asks nobody anything new. A deployment where `joined` dominates
-    # `opened` is one where reviews are piling into a handful of threads; one where `no_actor`
-    # dominates is running unauthenticated and escalating to nothing at all; `unavailable` is the
-    # broker, and is the only one that is also a `degraded` call.
+    # What happened to the escalation, by outcome. `joined` (a later exhausted turn joining an open
+    # review of the same conversation) dominating `opened` means reviews pile into few threads;
+    # `no_actor` dominating means an unauthenticated deployment escalating to nobody; `unavailable`
+    # is the broker and is also a `degraded` call.
     "chemclaw_answer_review_escalations_total": (
         "Attempts to ask a person to read an answer the revision rounds could not clear, by what "
         "became of the request."
     ),
-    # Questions refused because the knowledge they rest on moved. Two ends and three reasons, both
-    # labelled, because they are acted on differently and were previously indistinguishable: an
-    # `ask` refusal is a model being told to rewrite its own citation, an `answer` refusal is a
-    # chemist being turned away with no override. A series that climbs at the `answer` end is the
-    # signal that this guard is refusing work it should be admitting.
+    # Questions refused because the knowledge they rest on moved, by end and reason: an `ask`
+    # refusal tells a model to rewrite its citation, an `answer` refusal turns a chemist away with
+    # no override. A climbing `answer` end means the guard refuses work it should admit.
     "chemclaw_premise_refusals_total": (
         "Questions refused because a note they cite was retired, not yet valid, or absent."
     ),
-    # The other half of the sweep's story: a run that stopped before reaching everybody. Spending
-    # the run budget is bounded under-delivery of the very notice the sweep exists to send, and it
-    # reached an operator only as a log line — a sweep silently telling half the fleet looks
-    # exactly like a sweep with nothing to say, which is the state this feature was built to end.
-    #
-    # **Runs, not requesters, and the first attempt at this counted requesters.** How many were
-    # missed is not knowable without another query — the common deferral is a run that finishes its
-    # current page and stops because a *later* page exists, where the requesters-remaining figure
-    # is exactly 0. A counter that reads zero on the ordinary case of the thing it exists to
-    # report is worse than none. "This run stopped short" is exact, always moves when it happens,
-    # and is the alertable fact. (A requester whose page was *truncated* is not a deferral: they
-    # were reached, and the notice names what it left out in the text they read.)
+    # Check-in sweep runs that stopped before reaching everybody, counted per run rather than per
+    # requester: the common deferral stops at a page boundary with zero requesters known to be left,
+    # so a requester count would read zero on the case it exists to report.
     "chemclaw_work_check_in_deferrals_total": (
         "Check-in runs that stopped before reaching every blocked requester."
     ),
@@ -215,21 +129,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_work_check_ins_total": (
         "Check-ins delivered to a requester about questions of theirs still waiting."
     ),
-    # The lead time the refusal above does not give. A 429 tells an operator about a budget on the
-    # turn that was lost to it; this says so while there is still room, at `budget_warn_fraction` of
-    # any cap. Unlabelled on purpose: the scope it names is a session id or an Entra `oid`, and
-    # `033_cost_attribution.sql` rules those out as label values for the cardinality reason the
-    # 64-series cap (D-152) exists to enforce. The log line beside it carries the identity — which
-    # it did not when this comment was first written, three documents said it did, and `_warn` was
-    # passed the scope *kind* instead.
+    # Lead time before a 429, at `budget_warn_fraction` of any cap. Unlabelled because the scope is
+    # a session id or `oid`, which may never be a label value; the log line carries the identity.
     "chemclaw_budget_warnings_total": (
         "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
     ),
-    # **No longer a refusal** (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): a
-    # message that finds its session busy joins the session's line and waits its turn. `scope` says
-    # what it found busy — this process's slot, another replica's durable claim, or a line already
-    # holding somebody — so the population is unchanged (a turn that could not start at once) and
-    # only its outcome moved; the refusals that remain are the two below.
+    # Not a refusal: a message finding its session busy waits in the session's line. `scope` says
+    # what was busy: this process's slot, another replica's durable claim, or an occupied line.
     "chemclaw_turns_conflict_total": (
         "Turns that found their session busy and joined its line (previously refused 409)."
     ),
@@ -251,50 +157,33 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turn_readers_lagged_total": (
         "Views of a running turn cut off because their reader fell a full buffer behind."
     ),
-    # The holder's poll for requests other replicas address to its turns
-    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). A failing poll
-    # is what turns a Stop sent to another replica into a 503 and a reattach there into a wait.
+    # The holder's poll for requests other replicas address to its turns. A failing poll turns a
+    # Stop sent to another replica into a 503 and a reattach there into a wait.
     "chemclaw_turn_relay_poll_failures_total": (
         "Polls for requests addressed to this process's turns by other replicas that failed."
     ),
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
-    # A separate series from the one above, and deliberately so: this counts turns cut because the
-    # *client* stopped reading (`service_sse_send_timeout_seconds`), not because the turn ran long.
-    # Two populations in one counter is a denominator nobody can interpret.
+    # Separate from the timeout above: this counts turns cut because the client stopped reading
+    # (`service_sse_send_timeout_seconds`), not because the turn ran long.
     "chemclaw_turn_send_timeouts_total": (
         "Turn streams closed because a client stopped reading past the SSE send timeout."
     ),
-    # The wall-clock timeout's sibling, and the reason it needed one: a turn stopped by the
-    # harness loop's iteration cap used to return normally and emit nothing, so the runaway guard
-    # firing was invisible to everything outside the process. A rising rate here is an agent that
-    # keeps planning more work than a turn can close — a prompt or skill problem, not an outage.
+    # A rising rate is an agent planning more work than a turn can close: a prompt or skill problem,
+    # not an outage.
     "chemclaw_turn_loop_caps_total": "Turns stopped by the harness loop's iteration cap.",
-    # The same guard in the unit that costs money. The iteration cap above bounds how many times a
-    # turn thinks; this bounds what it bills, and the two move independently — a turn that fans out
-    # wide over large results reaches this one inside a handful of iterations, and a turn that
-    # plans in circles reaches that one having billed almost nothing. A rising rate here is a
-    # deployment whose turns are too expensive rather than too long, which is a retrieval or
-    # tool-result-size problem; flat at zero while `turn_costs` shows large turns means turns are
-    # staying under the cap — or that a deployment set `agent_max_turn_billed_tokens` to 0, which
-    # is how it is switched off. It is **not** 0 by default, and this comment said the opposite
-    # long enough to invert an operator's reading of a flat series. A series that moves at all
-    # wants the cap checked against this deployment's `turn_costs` rows: the shipped value is a
-    # runaway backstop derived from what the loop cap and the context budget already authorise, so
-    # a backstop that bites is one somebody set too low.
+    # The billed-token counterpart of the iteration cap; the two move independently. A rising rate
+    # means turns are too expensive (retrieval or tool-result size). On by default; `0` for
+    # `agent_max_turn_billed_tokens` disables it. The shipped value is a runaway backstop, so any
+    # movement warrants checking the cap against this deployment's `turn_costs` rows.
     "chemclaw_turn_spend_caps_total": "Turns stopped by the per-turn billed-token cap.",
-    # The detach/stop split (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). A disconnect no
-    # longer cancels a turn, so these two are what tell an operator how often clients drop away
-    # mid-turn (the turn completed unwatched, billed whole) versus how often someone actually
-    # pressed Stop. A rising detach rate with a flat stop rate is a flaky network or a tab-closing
-    # habit, not dissatisfaction with answers.
+    # A disconnect detaches a turn rather than stopping it, so these separate clients dropping away
+    # mid-turn (turn completes, billed whole) from someone pressing Stop.
     "chemclaw_turns_detached_total": (
         "Turns whose client disconnected mid-run and that continued to completion detached."
     ),
     "chemclaw_turns_stopped_total": "Turns cancelled by the explicit stop route.",
     # An unloading page's stop waits out `service_turn_unload_grace_seconds` for a reload to
-    # reattach (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). Deferred = resumed + expired +
-    # the turn ending on its own inside the window, so a resumed rate near the deferred rate says
-    # those unloads were reloads, and an expired rate near it says chemists really left.
+    # reattach. Deferred = resumed + expired + turns ending on their own inside the window.
     "chemclaw_turns_stop_deferred_total": (
         "Unload stops that were deferred for a reload to reattach rather than applied at once."
     ),
@@ -304,35 +193,21 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turns_stop_expired_total": (
         "Deferred unload stops that cancelled the turn because nobody reattached in the window."
     ),
-    # A plan that could not be read at all, as distinct from a session proposing none. Alertable
-    # because it is the one state in which a one-shot approval is left unspent (`agent/plan_gate.py`
-    # says what that would cost if it passed silently as "no plan").
-    # Distinct from the cap above, and the distinction is the point: a capped turn *has* an answer
-    # and is marked partial, while this one produced no prose at all. Counted because the shape is
-    # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
-    # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
+    # Distinct from the loop cap: a capped turn has a partial answer, while this one produced no
+    # prose at all — a shape invisible in every other signal.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
-    # **The two records of one conversation, and how often they part company.** The transcript
-    # (`session_messages`, what a chemist sees on reload) is written once after the answer exists;
-    # the checkpoint (what the *model* is built from next turn) is written incrementally by the
-    # graph on an autocommit pool and is never rolled back. A teardown between the two leaves the
-    # model holding an exchange the chemist cannot see. Measured on a real cancelled turn at
-    # `checkpoints: 8, session_messages: 0` — with the runner logging "the committed turn is kept"
-    # and two docstrings claiming this outcome did not exist.
-    #
-    # It counts the one branch that *knowingly* keeps such a turn, not the whole class: the same
-    # divergence arrives on the gateway-failure path and after a cancellation mid-tool, and neither
-    # is counted here. So a rising series is real and a flat one is not proof of agreement.
+    # The transcript (`session_messages`, what a chemist sees on reload) is written once after the
+    # answer; the checkpoint (what the model sees next turn) is written incrementally and never
+    # rolled back, so a teardown between them leaves the model holding an exchange the chemist
+    # cannot see. Only the branch that knowingly keeps such a turn is counted; other paths can
+    # diverge too, so a flat series is not proof of agreement.
     "chemclaw_transcript_thread_divergence_total": (
         "Turns whose exchange was kept in the checkpointer while the transcript never got it, so "
         "the chemist's view of that session is one turn behind the model's."
     ),
-    # The result-publication path (D-2026-08-25). Three counters and a gauge, because the three
-    # failure modes are genuinely different and one series carrying all of them would be
-    # unactionable: a record that could not be *queued* is a local database problem, a record that
-    # could not be *delivered* is the external store's, and a queue that is growing is neither
-    # failing nor working. `chemclaw_results_queued_total` against
-    # `chemclaw_results_published_total` is what says whether the drain is keeping up.
+    # Result publication: a record that could not be queued is a local database problem, one that
+    # could not be delivered is the external store's, and a growing queue is neither. Queued against
+    # published says whether the drain keeps up.
     "chemclaw_results_queued_total": (
         "Computed results projected and queued for an external results store."
     ),
@@ -342,151 +217,91 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_result_publish_failures_total": (
         "Result publications that could not be queued or delivered."
     ),
-    # The fourth, and it is a different question from the three above: those are about a
-    # *destination* (down, slow, refusing), this one is about this release's own code. A projector
-    # that raises does so for every payload of that shape, forever, until someone changes the
-    # projection — so folding it into the counter above made a permanent gap read as a transient
-    # publish failure. Measured: `_microstate_pka` emitted three properties the registry did not
-    # define, so `to_canonical` raised on **every** microstate pKa (two CREST metadynamics
-    # searches, minutes to hours) and every one of them was dropped at the enqueue behind a series
-    # that also rises when a warehouse is busy.
+    # A projector that raises does so for every payload of that shape until the code changes, so it
+    # is kept apart from destination failures, which are transient.
     "chemclaw_result_projection_failures_total": (
         "Stored payloads this release could not project into a record (a code gap, not an outage)."
     ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."
     ),
-    # Separate from the series above, and the separation is the point: that one says the database
-    # refused a batch, this one says the database could not keep up with the producer and the
-    # oldest buffered rows were shed to bound memory. Pooled, they would read as one incident with
-    # two remedies — reachability against throughput — and the shed case has no exception to log.
+    # Separate from refused batches: this counts the oldest buffered rows shed because the database
+    # could not keep up. Reachability and throughput have different remedies.
     "chemclaw_audit_events_shed_total": (
         "Audit records dropped from the write buffer because it reached its bound."
     ),
-    # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
-    # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
-    # it reads `tool.is_connected` over connector tools and never names Temporal, so a broker
-    # outage produced no server-side signal at all at the shipped log level.
-    # **Turns, not requests, and Temporal, not "a subsystem".** Both halves were briefly untrue: a
-    # second increment sat in `api/middleware._subsystem_unavailable`, which fires per *HTTP
-    # request* for any `SubsystemUnavailableError` — a family that includes `DocumentIndexError`,
-    # i.e. a pgvector failure with no Temporal in it. One series carried two populations with two
-    # different denominators, and `ChemclawDurableUnreachable` alerted on their sum while its
-    # summary said "Temporal is not answering its health probe". The request-path population has
-    # its own counter below; `tests/test_metric_declarations.py` holds this one to its one site.
+    # Turns that could not reach Temporal. Turns only, Temporal only: request-path
+    # `SubsystemUnavailableError`s (which include non-Temporal failures) have their own counter
+    # below. `tests/test_metric_declarations.py` holds this to its one increment site.
     "chemclaw_durable_unreachable_total": (
         "Turns whose durable-subsystem health probe failed (Temporal did not answer)."
     ),
-    # The request-path counterpart, and the sibling of `chemclaw_db_unavailable_total` — the same
-    # shape for the same reason: one counter per shedding handler, counting the requests that
-    # handler shed. Which subsystem was unavailable is in the `shedding` log line the handler
-    # writes; it is not a label, because the value would be an exception class name and a bounded
-    # label set that nobody enumerates is the cardinality trap `chemclaw_degraded_total` needed a
-    # dedicated test to stay out of.
+    # Requests a handler shed for `SubsystemUnavailableError`, like `chemclaw_db_unavailable_total`.
+    # Which subsystem is in the `shedding` log line, not a label, to keep the label set bounded.
     "chemclaw_subsystem_unavailable_total": (
         "HTTP requests shed with 503 because a subsystem they needed was unavailable."
     ),
-    # Non-zero means the provider reported usage this process could not parse, so those turns were
-    # metered at zero. The budget guard meters what this reports, so a non-zero rate here means the
-    # runaway-cost refusal is not binding — while every dashboard shows a deployment costing
-    # nothing. Distinct from "no usage reported at all", which is legitimate and counts nothing.
+    # Non-zero means provider usage could not be parsed and those turns were metered at zero, so the
+    # budget guard is not binding. Absent usage is legitimate and not counted.
     "chemclaw_usage_unreadable_total": (
         "Streamed usage contents that carried no readable token count (the turn metered zero)."
     ),
-    # Non-zero means answers are being scored by the citation gate rather than the LLM judge. The
-    # two measure different things (resolvability vs faithfulness), so this is not a slow path — it
-    # is a weaker verdict, and without a counter a judge outage looked identical to a healthy
-    # deployment on every dashboard.
+    # Non-zero means answers are scored by the citation gate instead of the LLM judge: a weaker
+    # verdict (resolvability rather than faithfulness), not a slow path.
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
-    # The review band's cost, made checkable rather than believed (D-2026-08-27): each extra judge
-    # roll a verdict at the margin triggered is one increment, so band-rolls over answers-verified
-    # is the measured fraction of turns actually paying the band.
+    # Extra judge rolls at the review-band margin; over answers verified, the fraction of turns
+    # paying for the band.
     "chemclaw_verifier_band_rerolls_total": (
         "Extra judge rolls taken because a verdict landed inside the review band."
     ),
-    # One row per protocol the condenser was handed, labelled by what happened to it:
-    # `extracted` (its prose was read), `degraded` (the extraction failed or timed out, and the
-    # row kept its recorded figures), `oversized` (too large for one call, refused by name and
-    # never split). Labelled rather than three series because the three are one question — how
-    # much of what a turn asked to condense actually got condensed — and a reader who cannot
-    # divide them cannot answer it.
+    # Protocols handed to the condenser, by outcome: `extracted`, `degraded` (kept recorded figures)
+    # or `oversized` (refused, never split). One labelled series because the question is the ratio.
     "chemclaw_protocol_digests_total": (
         "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
     ),
-    # **This and `turn_costs.jobs_started` count different things under one name**, and both
-    # placements are individually right. This one increments the moment `start_workflow` returns,
-    # because a workflow did start; the row's field is fed by `JobStartedEvent`, which
-    # `connectors/jobs.py` announces only when the run is *still going* after the inline wait —
-    # deliberately, because an announcement for a finished run draws a surface row that no
-    # `job_completed` will ever clear. Measured 2026-09-06: a job that finished inside the turn
-    # moved this by 1 and the row by 0; a rejoined run still running moved the row by 1 and this
-    # by 0. Five of the seven declared jobs carry `inline_wait_seconds`, so on a calc-heavy
-    # deployment the first case is the common one and this counter climbs while every cost row
-    # reads `jobs_started = 0`. Read this as launches and the row as *jobs a turn left running*.
+    # Launches, counted when `start_workflow` returns. `turn_costs.jobs_started` counts something
+    # different: jobs a turn left running past the inline wait (`connectors/jobs.py`). A job
+    # finishing inside the turn moves this and not the row.
     "chemclaw_jobs_started_total": (
         "Durable jobs launched by an agent tool — every start, whether or not the run outlived "
         "the turn. Not the same population as `turn_costs.jobs_started`, which counts the jobs a "
         "turn left still running; a job that finishes inside its turn is in this one only."
     ),
-    # The job→session mailbox's failure signal. `notify_session_best_effort` swallows a failed
-    # push-back by design (the science is the result; the notification is not), which made a
-    # fleet-wide outage of the channel — a dead background queue, a full mailbox table —
-    # invisible: every job finished, nobody was ever told. This is the only aggregate that says so.
+    # `notify_session_best_effort` swallows a failed push-back by design; this is the only aggregate
+    # that shows the job-to-session channel failing.
     "chemclaw_pushback_dropped_total": (
         "Job push-back notifications that could not be recorded and were dropped."
     ),
-    # The rejoin path's quiet failure. An identical job launch rejoins the running workflow, and
-    # whether that rejoin is *announced* turns on one `describe()` call whose failure is a DEBUG
-    # line — a broker that consistently refuses it silently reverts the announcement fix.
+    # Whether a rejoin is announced turns on one `describe()` call whose failure is only a DEBUG
+    # line.
     "chemclaw_rejoin_describe_failed_total": (
         "Rejoined durable runs whose describe() failed, so the rejoin went unannounced."
     ),
-    # The counter above counts *launches*, which on the most expensive thing this system does is the
-    # least informative number available: a two-second xTB call and a six-hour DFT run increment it
-    # identically. This is the consumption counterpart — accumulated seconds, so `rate()` reads as
-    # "compute-seconds per second", the same shape as the token counters and the standard way spend
-    # is expressed. A histogram would be the wrong instrument twice over: the shared bucket set tops
-    # out at 300 s, which is noise for an hours-long search, and the question is how much was
-    # consumed rather
-    # than how the durations were distributed. Not node-hours — parallelism belongs to the launcher
-    # and none reports it back yet — but runtime is the factor node-hours multiplies.
+    # Consumption rather than launches: accumulated job seconds, so `rate()` reads as
+    # compute-seconds per second. A counter, not a histogram, because the question is how much was
+    # consumed and the shared buckets top out far below long searches. Not node-hours: parallelism
+    # is not reported back.
     "chemclaw_job_runtime_seconds_total": (
         "Wall-clock seconds accumulated by finished durable jobs, by connector."
     ),
     "chemclaw_notes_recorded_total": "Notes written into the knowledge graph.",
-    # A note the indexer cannot parse is dropped from the graph so one bad file cannot block every
-    # query — which is right, and was silent. `kg-validate` reports these in CI, over the
-    # repository; nothing reported them over the tree a pod is actually serving, where a partial
-    # sync or a truncated write leaves the deployment retrieving less than it should. A non-zero
-    # rate here is a corpus problem, not a traffic problem, so it is a counter rather than a log
-    # line alone.
+    # Unparseable notes are dropped from the graph so one bad file cannot block queries; this makes
+    # that visible on the tree a pod actually serves (`kg-validate` only covers the repository).
     "chemclaw_notes_unparseable_total": (
         "Note files skipped by the indexer because they failed to parse; they are not retrievable."
     ),
-    # The same defect wearing a different disguise, and the one that used to leave no trace at all:
-    # two files claiming one note id. The indexer keeps the first in path order and drops the
-    # second, so one of two curated notes is unreachable by every query — previously decided by
-    # which directory sorted last, and reported nowhere. Like the counter above this is a corpus
-    # problem rather than a traffic one, and it names the state an rsync that lands a renamed note
-    # before removing the old one leaves behind.
+    # Two files claiming one note id: the indexer keeps the first in path order and the second
+    # becomes unreachable. A corpus problem, typically a sync landing a renamed note before removing
+    # the old one.
     "chemclaw_notes_duplicate_id_total": (
         "Note files skipped by the indexer because another file already claimed their id; "
         "one of the two is not retrievable."
     ),
-    # The counterpart to the line above, and the reason it could not stand alone: a best-effort
-    # publish that fails is logged inside a workflow and swallowed, because the science is already
-    # durable and a dead git remote must not fail a completed job. That is the right call about the
-    # *job* and the wrong shape for the *knowledge* — with only a success counter, a total git
-    # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
-    # make the difference visible and give the alert a ratio to fire on.
-    # **The hypothesis tournament degrades silently at every stage, by design.** Angle drafting,
-    # generation, critique, judging and check derivation all catch, log a warning and continue, so
-    # a run where every judge call failed still returns a ranked table — from the prior, honestly
-    # labelled "unrated (never compared)" — and nothing fleet-wide could tell it from a healthy
-    # run. That is the shape `chemclaw_notes_publish_failures_total` below exists for: a dead
-    # dependency producing output byte-for-byte indistinguishable from an idle deployment.
+    # Every tournament stage degrades silently by design (a run where every judge failed still
+    # returns a ranked table from the prior), so outcomes are counted to tell a broken run from a
+    # healthy one.
     "chemclaw_hypothesis_tournaments_total": (
         "Hypothesis tournaments that finished, by what they were able to produce."
     ),
@@ -495,10 +310,8 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_hypothesis_screen_rejections_total": (
         "Hypotheses removed before the tournament, by which mechanical rule removed them."
     ),
-    # A deployment whose checks never run looks identical from outside to one whose questions all
-    # need a laboratory. The code says which: a corpus whose compounds carry no structures, an
-    # actor with no role for an expensive trigger and a model naming a field the job does not
-    # declare are three different repairs.
+    # Why hypothesis checks were refused, by reason: missing structures, a missing role for an
+    # expensive trigger, and an undeclared field are three different repairs.
     "chemclaw_hypothesis_check_refusals_total": (
         "Discriminating checks that were not run, by the grounding rule that refused them."
     ),
@@ -506,27 +319,16 @@ _COUNTERS: dict[str, str] = {
         "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
     # A fan-out child that exhausted its retries and was dropped (`durable/orchestrator.py`).
-    # Isolate-and-drop is the right policy — one poison input must not restart its siblings — but
-    # until this counter existed the drop's only trace was a `workflow.logger.warning`, so the
-    # parent completed *successfully* with a short list and every operator-visible signal said
-    # healthy. Measured: a live fan-out returned two results from four inputs with nothing but log
-    # lines to show for it.
-    #
-    # The failure this makes visible: the notes repo's git credential expires, every
-    # `PublishNoteWorkflow` child fails, and all three memory-synthesis jobs complete green
-    # returning `[]` every night — `/schedules` showing `runs_total` climbing and no failures — for
-    # as long as it takes someone to notice that nothing has been recorded in months.
-    # `chemclaw_notes_publish_failures_total` above does not cover it: that one is incremented by
-    # `publish_note_best_effort`, which the memory fan-out does not use.
+    # Isolate-and-drop is right, but the parent then completes successfully with a short list, so
+    # without this a failing child (for example every `PublishNoteWorkflow` on an expired git
+    # credential) is invisible.
     "chemclaw_fan_out_children_dropped_total": (
         "Fan-out children that failed their retries and were dropped; their work is missing from "
         "an otherwise successful parent."
     ),
-    # A turn whose connectors did not come up still answers — from whatever tools remained. That is
-    # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
-    # from a good one in the transcript, and `open_reachable` returned the list to four callers that
-    # all discarded it (REV-6). Counted per unreachable connector rather than per degraded turn, so
-    # "one connector is dark" and "the fleet is dark" are different rates.
+    # A turn whose connectors did not come up still answers from the remaining tools,
+    # indistinguishably in the transcript. Counted per unreachable connector so one dark connector
+    # and a dark fleet differ.
     "chemclaw_connectors_unreachable_total": (
         "Connectors that failed to come up when a turn or template step opened them, by connector; "
         "their tools were absent from that turn."
@@ -534,31 +336,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
-    # The push-back stream's own send timeout, and a separate series from
-    # `chemclaw_turn_send_timeouts_total` because that declaration's comment forbids exactly this
-    # merge: two populations in one counter is a denominator nobody can interpret. A turn stream cut
-    # for a stalled reader and a push-back stream cut for one are different streams with different
-    # lifetimes — the push-back stream is long-lived and holds a per-user slot, so a half-open
-    # connection parks it invisibly until the kernel gives up on the socket.
+    # The push-back stream's own send timeout, separate from the turn stream's: the push-back stream
+    # is long-lived and holds a per-user slot, so a half-open connection parks it invisibly.
     "chemclaw_event_stream_send_timeouts_total": (
         "Push-back event streams closed because a client stopped reading past the SSE send timeout."
     ),
-    # A pooled checkout that times out is indistinguishable, from the route's point of view, from
-    # an unreachable database — both arrive as `ConnectionError` and both are retryable. The load
-    # run turned 16 of them into HTTP 500s because no route caught them, and the pool they came
-    # from was not even exhausted: it never grew past 13 of 64 connections and opened zero new
-    # ones. Counted separately from the admission shed so "the loop could not schedule a handoff"
-    # is not read as "the LLM endpoint is full".
-    # A token whose group memberships did not fit in it. Entra replaces `groups` with
-    # `_claim_names` past roughly 150 memberships, and there is no fix at request time — resolving
-    # the overage needs a Graph call, which D-089 does not permit. So the user with the *most*
-    # access silently arrives with the *fewest* group-derived entitlements, and until this counter
-    # existed the only trace was a WARNING line: a chemist quietly loses a gated document share and
-    # nothing an operator watches moves. Counting it is what makes the condition alertable rather
-    # than greppable, which is this repository's own standing rule about measurement.
-    #
-    # Unlabelled, deliberately: the interesting series is "is this happening at all", and a label
-    # carrying the `oid` would key an unauthenticated exposition on user identity.
+    # Entra replaces `groups` with `_claim_names` past roughly 150 memberships, and resolving that
+    # needs a Graph call this system does not make, so the user silently loses group-derived
+    # entitlements. Unlabelled: an `oid` label would key an unauthenticated exposition on user
+    # identity.
     "chemclaw_group_claim_overage_total": (
         "Validated tokens that carried a group-claim overage (`_claim_names`) instead of `groups`, "
         "so no group-derived entitlement could be read for that user."
@@ -566,81 +352,60 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),
-    # The upload cap's own shed, counted separately from the turn admission because the resource
-    # is different: parse slots meter CPU in worker threads, permits meter LLM turns. A pod
-    # refusing every upload and a pod being sent none look identical without this.
+    # The upload cap's own shed, separate from turn admission: parse slots meter worker-thread CPU,
+    # permits meter LLM turns.
     "chemclaw_attachment_parses_shed_total": (
         "Uploads refused with 503 because every parse slot was still busy after "
         "`attachment_parse_queue_seconds`."
     ),
-    # The other half of that story, and the one that used to be invisible *and* permanent: a parse
-    # that outran its deadline. Before `ingest/documents/isolate.py` such a parse kept its slot for
-    # the life of the process, so this series rising and `..._shed_total` rising with it is the
-    # signature of a pod losing parse capacity — which is now bounded and recovers, but is still
-    # what an operator wants to see before the shed rate tells them.
-    # The two agent-writable tables that had no bound until 2026-09-12, counted apart because the
-    # decisions differ: a memory is a file a turn authored, a preference is how one person works.
-    # An eviction is a chemist losing something they were told was remembered, so it is a WARNING
-    # in the log *and* a series here — a cap that is silently binding is a cap nobody knows about.
+    # Evictions from the two bounded agent-writable tables, counted apart because a memory is a file
+    # a turn authored and a preference is how one person works. An eviction is a chemist losing
+    # something they were told was remembered, so it is a WARNING and a series.
     "chemclaw_memory_evictions_total": (
         "Durable memory files dropped because a namespace was over `agent_memory_max_files`."
     ),
     "chemclaw_preference_evictions_total": (
         "Preferences dropped because one owner was over `preferences_max_per_owner`."
     ),
-    # A helper's scratch file cut on its way into the caller's checkpointed state. Its own series
-    # rather than the tool-result truncation counter because it bounds a different resource — that
-    # one is context, this is what a checkpoint costs — and an operator reading a rising rate here
-    # is being told a helper is writing more than the channel budget allows, which is a prompt
-    # problem rather than a storage one.
+    # A helper's file cut on its way into the caller's checkpointed state; separate from tool-result
+    # truncation because it bounds checkpoint size, not context.
     "chemclaw_subagent_file_truncations_total": (
         "Files a helper wrote that were cut on their way into its caller's state."
     ),
     "chemclaw_document_parse_kills_total": (
         "Document parses whose reader process was killed for outrunning its deadline."
     ),
-    # The two refusals that happen *before* a turn exists, and so were invisible to every counter
-    # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
-    # would key a metric on user identity, which `/metrics` is unauthenticated and must not carry
-    # (D-152's allowlist). The rate is what an operator alerts on; who hit it is in the log.
+    # Refusals before a turn exists, per request. Unlabelled: a per-principal series would key the
+    # unauthenticated `/metrics` on user identity; who hit it is in the log.
     "chemclaw_requests_rate_limited_total": (
         "Requests refused with 429 by the per-principal request budget."
     ),
     "chemclaw_requests_too_large_total": (
         "Requests refused with 413 because the body exceeded service_max_request_bytes."
     ),
-    # Same principle as the watermark counter above: the cross-process turn guard (D-121) is a
-    # lease, so it holds only while its holder keeps refreshing. A refresh that fails is the guard
-    # narrowing, and it must not be something only a log line knows.
+    # The cross-process turn guard is a lease that holds only while refreshed; a failed refresh is
+    # the guard narrowing.
     "chemclaw_turn_claim_refresh_failures_total": (
         "Failed refreshes of a running turn's session claim (D-121): the claim may lapse and "
         "another worker start a turn on the same session."
     ),
-    # The counter above is the *warning*; this is the event it warns about, and until the
-    # 2026-08-05 review nothing could see it. A refresh that matches no row raises nothing — the
-    # takeover has simply already happened — so the failure counter stayed at zero through the one
-    # outcome it exists to predict.
+    # The event the refresh-failure counter warns about: a refresh matching no row raises nothing,
+    # since the takeover has already happened.
     "chemclaw_turn_claims_lost_total": (
         "Running turns whose session claim was taken over by another worker (D-121): the lease "
         "lapsed while the turn was still going, so two workers may have run on one session."
     ),
-    # A live run looped `find_past_jobs` seven times in one turn, and the only trace was a turn
-    # three times slower than the archived comparison. This is what a deployment alerts on when
-    # the loop comes back — the refusal itself is invisible, since the turn still answers.
+    # Repeated identical tool calls refused within a turn; the turn still answers, so only this
+    # shows a looping agent.
     "chemclaw_repeated_tool_calls_total": (
         "Tool calls refused because the turn had already made the identical one "
         "`max_identical_tool_calls` times, labelled by tool."
     ),
-    # The budget guard (service.budget) already meters spend, but only to *refuse* a turn, and its
-    # counters are per-process and unexported. This is the same number as an observable rate, so
-    # "what is this deployment costing per hour" stops being a question only the provider's bill
-    # can answer.
+    # Spend as an observable rate; the budget guard's own metering only refuses turns.
     "chemclaw_tokens_total": "Model tokens reported across all turns (prompt + completion).",
-    # The same spend, split along the dimensions it is *priced* along (REV-10). One undifferentiated
-    # total cannot answer "what is this costing", because input, output and cache-read carry
-    # different prices — cache-read is roughly an order of magnitude cheaper than a fresh input
-    # token, so a deployment that caches well and one that does not look identical in the total
-    # while their bills do not. The provider already reports all four; nothing read past the sum.
+    # Spend split along the dimensions it is priced along: input, output and cache-read tokens
+    # differ in price (cache reads are much cheaper), so one total cannot answer what a deployment
+    # costs.
     "chemclaw_input_tokens_total": "Prompt tokens sent to the model, excluding cache reads.",
     "chemclaw_output_tokens_total": "Completion tokens generated by the model.",
     "chemclaw_cache_read_tokens_total": (
@@ -655,23 +420,11 @@ _COUNTERS: dict[str, str] = {
         "(REV-9). Kept because the column and the counter are what would show a gateway that does "
         "report one."
     ),
-    # **What the gateway billed and never reported**, published beside the four it did rather than
-    # summed into them. `stream_options.include_usage` puts a request's usage on the terminal chunk
-    # only, so a turn the client abandons mid-message is billed by the provider and reported by
-    # nobody: `agent/turn_usage.InFlightPrompts` estimates it, `turn_costs.estimated_tokens` records
-    # it and `api/budget.py` is charged for it — and until 2026-09-06 **no series carried it**, so
-    # the fleet-wide answer to "what is this deployment costing per hour" under-reported by the
-    # whole prompt of every abandoned turn. Measured: two identical turns, one completed and one
-    # killed at 4 s, moved `chemclaw_tokens_total` by 42,481 and **0** against a gateway that
-    # billed 42,448 both times.
-    #
-    # **A separate counter rather than a label, which is what the argument against it actually
-    # asked for.** `api/runner._book_turn_spend` declined this on the grounds that "a distinction a
-    # declared counter's label set cannot carry belongs in a structured record" — true of a label,
-    # and the reason the four measured series must not absorb an inferred number: a
-    # `chemclaw_tokens_total` that silently mixed the two would make every existing panel a
-    # different question. Two series answer it exactly, and a panel can then show measured and
-    # inferred spend side by side, which is the reading the record was standing in for.
+    # What the gateway billed and never reported: usage arrives only on the terminal stream chunk,
+    # so an abandoned turn's prompt is estimated (`agent/turn_usage.InFlightPrompts`), charged to
+    # the budget and recorded in `turn_costs.estimated_tokens`. A separate counter rather than a
+    # label or a sum, so measured series stay measured and panels can show inferred spend beside
+    # them.
     "chemclaw_estimated_tokens_total": (
         "Model tokens a turn was billed for that the provider never reported — the estimated "
         "prompt of every request still in flight when a turn was torn down (a disconnect, the "
@@ -679,42 +432,18 @@ _COUNTERS: dict[str, str] = {
         "`chemclaw_tokens_total`, never added into it without saying so. A flat zero means every "
         "turn reached its terminal usage frame, which is the healthy reading."
     ),
-    # Whether the context policy is running, and what it is buying. Two counters because they
-    # answer two operator questions and neither answers the other: the first says the mechanism
-    # fired at all, the second says whether the budget is set anywhere near the traffic. Both exist
-    # because the defect they close was a compaction policy that *appeared* to run — three settings
-    # with no reader, a config comment, and a sentence in the system prompt — for as long as nobody
-    # had a number (`agent/compaction.py`). A counter is what makes "it is compacting" checkable
-    # instead of believed.
-    #
-    # A model call that needed no reduction increments neither, so a flat zero means "never over
-    # budget" and an absent series means "not wired" — the distinction the previous state of this
-    # subsystem could not express.
-    # **Outbound delivery, which shipped with no signal of any kind.** `chemclaw.deliver.registry`
-    # held no
-    # logger and no metric, `deliver()` swallowed every per-channel failure with a comment saying
-    # the caller would log it, and the one caller discarded the return value — so "every digest was
-    # dropped" and "every digest was delivered" produced identical observations. A seam built
-    # because a project leader could not be reached on a Monday morning could fail totally and
-    # silently, which is the same failure one layer in.
-    #
-    # Two counters rather than one, because a ratio is the question an operator actually has: a
-    # channel that takes nothing while another takes everything is a broken webhook, and both
-    # failing is an outage.
+    # Outbound delivery, by channel: accepted against failed. A channel taking nothing while another
+    # takes everything is a broken webhook; both failing is an outage.
     "chemclaw_deliveries_total": ("Messages a delivery channel accepted, by channel."),
-    # Refused records the ledger's per-source growth bound deleted. `ingest/rejections._EVICT`
-    # keeps the newest `_MAX_ROWS_PER_SOURCE` rows per source on the argument that a source
-    # refusing more than that has one systematic defect its newest thousand rows describe as well
-    # as a million would. That is an assumption about the *distribution* of a source's refusals: a
-    # source with more distinct one-off refusals than the cap loses its oldest permanently, and
-    # `refusals_matching` then reports those records as never refused — the record is gone, not
-    # merely unread. This counter is what turns the assumption into a checked invariant.
+    # Refused records deleted by the ledger's per-source growth bound (`ingest/rejections._EVICT`
+    # keeps the newest `_MAX_ROWS_PER_SOURCE`). Keeping only the newest assumes a source's refusals
+    # are one systematic defect; an evicted record then reads as never refused, so this checks the
+    # assumption.
     "chemclaw_ingest_rejections_evicted_total": (
         "Refused records deleted by the per-source growth bound of the ingest rejection ledger."
     ),
     # Uploads dropped from a live session past `attachment_max_per_session` or
-    # `attachment_store_max_bytes`. Silent until wave 13: a chemist's file left the store and
-    # `read_attachment` then said it had never been sent.
+    # `attachment_store_max_bytes`; `read_attachment` then reports the file as never sent.
     "chemclaw_attachment_evictions_total": (
         "Uploads dropped from a session past its per-session count or byte bound."
     ),
@@ -729,83 +458,41 @@ _COUNTERS: dict[str, str] = {
         "Estimated prompt tokens reclaimed by context compaction (char/4 estimate, not billed "
         "tokens — the billed figure is chemclaw_input_tokens_total)."
     ),
-    # **The series the two above could not express, and the paragraph they used to end with was
-    # wrong.** It said a flat zero on the compaction counter means "never over budget". Measured
-    # through a compiled graph: a thread of 100,081 estimated tokens — over both triggers, ~224,000
-    # billed — moved *neither* counter and emitted no event, because both edits ran and reclaimed
-    # nothing. `ClearToolUsesEdit` had exactly `keep` candidates and the window edit cannot cut past
-    # the newest group, so the one turn that is about to fail at the provider's context limit was
-    # indistinguishable from a quiet one.
-    #
-    # So a flat zero on the two counters above means "never *reduced*", and this is what separates
-    # the two readings of that.
-    #
-    # **What it is a leading indicator *of*, and this line has now been wrong in both directions.**
-    # The comparison is the thread against `agent_context_token_budget` as
-    # `context_budget.effective_trigger` converts it, and that conversion charges the request's own
-    # prefix — instructions, the skills listing, every bound tool schema, measured at 43,175
-    # estimated tokens on `default` on 2026-09-04. It used to charge it only where
-    # `llm_context_window_tokens` was declared, and no deployment declares one, so this counter was
-    # comparing a thread against a number the prefix had never met: measured through a compiled
-    # graph, the edits left 90,030 estimated thread tokens beside that prefix, 137,301 went at a
-    # 128k model, and this counter stayed **flat**. The line here then said so, which was the
-    # correct reading of a broken arithmetic rather than of a broken counter.
-    #
-    # The prefix is charged unconditionally now, so a tick is a request the policy could not bring
-    # inside the configured *request* budget — in every configuration, with or without a declared
-    # window. Measured on the same fixture: the cut goes to 45,015 and the counter is silent
-    # because the request now fits, and a thread the policy genuinely cannot cut that far ticks it
-    # where the old arithmetic read clean — 0 -> 1 at the shipped budget with no window declared,
-    # which `test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window` holds.
-    # A flat zero is therefore evidence that every request stayed inside
-    # `agent_context_token_budget`; whether that is the provider's real limit is what
-    # `llm_context_window_tokens` still decides, and declaring it makes this the leading indicator
-    # of a context-length failure rather than of a spend overrun.
+    # A flat zero on the compaction counters means "never reduced", not "never over budget": both
+    # edits can run and reclaim nothing. This counts requests the policy could not bring inside
+    # `agent_context_token_budget` as `context_budget.effective_trigger` converts it, charging the
+    # request's own prefix unconditionally. A flat zero is evidence every request stayed inside the
+    # budget; declaring `llm_context_window_tokens` makes this a leading indicator of context-length
+    # failures rather than spend overruns.
     "chemclaw_context_unreducible_total": (
         "Model calls whose whole request — this call's prefix plus the thread — stayed over "
         "agent_context_token_budget after the context policy had reduced all it could. Where "
         "llm_context_window_tokens is declared the budget is additionally capped by what the model "
         "can hold, so a tick is the leading indicator of a context-length failure at the provider."
     ),
-    # Counted rather than only logged because the *rate* is the signal: one truncated result is a
-    # tool answering a broad question, and a tool that truncates on every call is one whose own
-    # ceiling is set wrong for what a model can read.
+    # The rate is the signal: a tool that truncates on every call has a ceiling set wrong for what a
+    # model can read.
     "chemclaw_tool_results_truncated_total": (
         "Tool results cut to agent_max_tool_result_chars before the model read them, by tool."
     ),
-    # The same cut one seam over, and a **separate** counter because the fix is different. A
-    # truncated tool *result* is a tool answering too broadly, and the remedy is that tool's own
-    # ceiling. A truncated template *prompt* is a `${steps.<id>.result}` reference interpolating
-    # more than a model can read, and the remedy is the template — a narrower step, or a field
-    # path instead of the whole result. Folding them into one series would ask an operator to tell
-    # those two apart from a label that names neither.
+    # Separate from tool-result truncation because the fix differs: a truncated template prompt is a
+    # `${steps.<id>.result}` reference interpolating too much, fixed in the template.
     "chemclaw_template_prompt_truncated_total": (
         "Template agent-step prompts cut to agent_max_tool_result_chars before the step's model "
         "read them, by template. A rate above zero means a step is interpolating a result too "
         "large to read: narrow the step, or reference a field of the result rather than all of it."
     ),
-    # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
-    # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
-    # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
-    # `durable/publish.py`, `kg/graph.py`) — so a preference store that had stopped writing, a cost
-    # ledger losing every row and a redaction filter that never resolved its token names all read
-    # from outside exactly like a healthy service. Each is individually right to swallow — the
-    # alternative is failing a chemist's turn over telemetry — which is precisely why the swallow
-    # has to leave a number behind.
-    #
-    # One counter with a `subsystem` label rather than one counter per site: the operator question
-    # is "is anything degraded, and what", which is `sum by (subsystem)` over a single series
-    # family, and a per-site counter would make that a union of a dozen metric names that has to be
-    # edited every time a site is added. `agent/audit.py`'s dedicated
-    # `chemclaw_audit_sink_failures_total` stays as it is — a lost audit record is a named
-    # regulatory fact with its own alert, not a member of a general family.
+    # Everything done deliberately and invisibly: catch, log a warning, continue with less. Each
+    # swallow is right (telemetry must not fail a turn), which is why it must leave a number. One
+    # counter with a `subsystem` label so "is anything degraded, and what" is one `sum by
+    # (subsystem)`. A lost audit record keeps its own `chemclaw_audit_sink_failures_total` with its
+    # own alert.
     "chemclaw_degraded_total": (
         "Operations that failed and were continued past with reduced function, by subsystem."
     ),
     # --- the registry's own health -------------------------------------------------------------
-    # Both of these count a failure *of the metrics surface*, which nothing could see before: a
-    # bound gauge that raises, and a label set refused at the cardinality cap. Each used to leave
-    # only a log line, and a log line about telemetry is the one nobody greps for.
+    # Failures of the metrics surface itself: a bound gauge that raises, and a label set refused at
+    # the cardinality cap.
     "chemclaw_gauge_read_failures_total": (
         "Gauge reads that raised and were omitted from a scrape, by metric — the reading is "
         "missing, and without this the omission is indistinguishable from an unbound gauge."
@@ -815,15 +502,11 @@ _COUNTERS: dict[str, str] = {
         "that metric is undercounting from this point on."
     ),
     # --- the HTTP surface ----------------------------------------------------------------------
-    # There was no request-level metric of any kind: 23 routes and no way to answer "which route
-    # is throwing 5xx", "what is p95 on /jobs", or "is this slowness the model or the database".
     # `route` is the *template*, never the raw path.
     "chemclaw_http_requests_total": "HTTP requests served, by route template and status class.",
-    # Two refusals that happen before any handler and were therefore invisible to every counter
-    # above, and one that happens inside `deps.py` and was invisible because it is deliberately a
-    # 404. An authorization refusal returning 404-not-403 is right (it leaks no existence), and it
-    # means the server-side record is the *only* place the distinction can survive — so a session
-    # enumeration scan was indistinguishable from ordinary 404 traffic.
+    # Refusals before any handler, plus the authorization refusal `deps.py` deliberately returns as
+    # 404 (so existence does not leak); this record is the only place a session-enumeration scan
+    # shows.
     "chemclaw_authz_refusals_total": (
         "Requests refused because the caller does not own the resource, by resource kind "
         "(answered 404 to avoid an existence leak, so this counter is the only trace)."
@@ -839,25 +522,10 @@ _COUNTERS: dict[str, str] = {
         "or counted these, so a client looping on a malformed body looked exactly like silence."
     ),
     # --- the model call ------------------------------------------------------------------------
-    # The provider seam recorded nothing at all: a deployment retrying every call three times
-    # inside the SDK looked identical to one retrying none, a provider rate-limiting us had no
-    # counter distinct from the front door's own limiter, and `RunnableWithFallbacks` absorbing
-    # 100% of traffic onto the fallback endpoint produced no log line and no metric.
-    # **Graph model calls, which is not every provider call**, and the HELP text below says so
-    # because the name cannot. `_observe` is reached only from `RecordModelCalls`, a
-    # `wrap_model_call` middleware, so a call that is not a graph node is invisible to both this
-    # and the duration histogram: the verifier's judge and its band rerolls, and every call
-    # `agent/condense.py` makes from inside a tool body. Measured 2026-09-06 — a plain turn made 2
-    # provider calls and counted 2; a verified turn made 3 and counted 2; a turn with a model call
-    # in a tool body made 3 and counted 2.
-    #
-    # **Qualified rather than widened.** The alternative is moving the observation onto the
-    # callback seam the token meters use, and it does not reduce to a smaller change: `outcome` and
-    # duration come from wrapping the call, so a callback implementation is a second pairing of
-    # start and end per run id — and attaching it to the off-graph call site alone would produce a
-    # third population (graph calls plus the judge, still without the tool-body calls), which is a
-    # worse boundary than a clean one that is written down. The token counters already answer "what
-    # did every call cost"; this one answers "how is the graph's own model traffic behaving".
+    # Graph model calls only, as the HELP text says: observed by the `RecordModelCalls` middleware,
+    # so calls outside graph nodes (the verifier's judge and band rerolls, `agent/condense.py`
+    # inside tool bodies) are not counted here. The token counters answer what every call cost; this
+    # answers how the graph's own model traffic behaves.
     "chemclaw_model_calls_total": (
         "Model calls **made from a graph node**, by outcome (ok / rate_limited / context_length / "
         "timeout / transport / auth / error) — `auth` is the gateway refusing the credential "
@@ -873,12 +541,8 @@ _COUNTERS: dict[str, str] = {
         "makes endpoint failover something an operator knows about rather than infers."
     ),
     # --- the tool chain ------------------------------------------------------------------------
-    # A refusal and a crash were one `outcome='error'` and one identically-worded log line, so
-    # "why did the agent not do the thing" required a LIKE scan of an unindexed free-text column.
-    # Four outcomes, not three. `cancelled` is here because the alternative is under-counting
-    # attempted calls: a turn abandoned mid-tool still made the call, and dropping it would make
-    # this counter disagree with `audit_events`, which has recorded a `cancelled` outcome since
-    # long before this metric existed.
+    # Four outcomes, separating a refusal from a crash. `cancelled` is included so this agrees with
+    # `audit_events`: a turn abandoned mid-tool still made the call.
     "chemclaw_tool_calls_total": (
         "Tool invocations, by tool and outcome (ok / refused / error / cancelled)."
     ),
@@ -961,9 +625,8 @@ _COUNTERS: dict[str, str] = {
         "process died mid-turn, counted by whichever process noticed it."
     ),
     # --- the durable tier ----------------------------------------------------------------------
-    # Measured on a live broker: a successful job emitted zero log lines and a failed job emitted
-    # zero first-party lines and moved no metric. `chemclaw_jobs_started_total` had no counterpart
-    # of any kind, so a connector whose every job failed was indistinguishable from an idle one.
+    # Completions by outcome, the counterpart to `chemclaw_jobs_started_total`, so a connector whose
+    # every job fails is distinguishable from an idle one.
     "chemclaw_jobs_finished_total": (
         "Durable jobs that ended, by connector and outcome (completed / failed / cancelled) — the "
         "counterpart `chemclaw_jobs_started_total` never had."
@@ -977,20 +640,15 @@ _COUNTERS: dict[str, str] = {
         "lost — Temporal redelivers — but paid for twice, which is the cost `durable/serve.py` "
         "names and nothing measured."
     ),
-    # --- the calculation cache -----------------------------------------------------------------
-    # D-011 ("a persisted result is never recomputed") is the largest cost lever in the system and
-    # `science/calc/store.py` has promised this counter to "the metrics layer (Phase 2b)" since it
-    # was written. Until now the only way to see the cache working was DEBUG on a hot path.
+    # --- the calculation cache ----------------------------------------------------------------- "A
+    # persisted result is never recomputed" is the largest cost lever in the system; this shows it
+    # working.
     "chemclaw_calc_cache_total": (
         "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
         "miss on one key that `cached_compute` single-flighted onto another caller's computation."
     ),
-    # **The count is not the value, and for a long time it was all there was.** A thousand avoided
-    # millisecond lookups and one avoided nineteen-minute CREST search moved the counter above by
-    # 1,000 and 1. `StoredResult.compute_seconds` is on the row and was read on every hit and
-    # discarded, so "is the cache earning its keep" was answerable in lookups and not in the unit
-    # the lever is measured in. Measured 2026-09-06: 8 concurrent misses plus 3 reads on one 0.30 s
-    # key reported `miss=1, shared=7, hit=3` and no series said 3 seconds.
+    # The value, not the count: compute seconds avoided, read from `StoredResult.compute_seconds` on
+    # each hit. One avoided CREST search outweighs a thousand avoided lookups.
     "chemclaw_calc_cache_seconds_saved_total": (
         "Calculator wall-clock seconds a cache lookup did not have to spend — the "
         "`compute_seconds` of the stored result on a hit, and of the computation a `shared` "
@@ -998,26 +656,20 @@ _COUNTERS: dict[str, str] = {
         "a fabricated zero. Read beside `chemclaw_calc_cache_total`: that one says how often the "
         "cache answered, this one says what it was worth."
     ),
-    # The backend refusing for *capacity* rather than for bad data — the third category
-    # `durable/publish.py` gained when a pod-full refusal stopped being classified as a permanent
-    # error. It is counted separately from `chemclaw_degraded_total` deliberately: a busy backend is
-    # ordinary operation, and folding it into the degradation signal would fire an outage alert on
-    # a working system. It is the saturation signal for the calculation tier — one pod, four slots,
-    # and a CREST search charged all four — so a rising rate here is the fleet asking for more calc
-    # capacity, and it is the only place that asks.
+    # The backend refusing for capacity rather than bad data. Kept out of `chemclaw_degraded_total`
+    # because a busy backend is ordinary operation; this is the calculation tier's saturation
+    # signal.
     "chemclaw_calc_backend_at_capacity_total": (
         "Calculation-backend calls refused because every slot was busy, by tool. Retried with "
         "backoff rather than failed; a sustained rate means the backend is under-provisioned."
     ),
-    # How many tool calls went through a connector's interactive queue rather than straight to the
-    # server (`connectors/queued.py`). By tool — bounded by the manifests' `queued:` lists — so a
-    # dashboard beside the queue's own backlog can say which capability the waiting is for.
+    # Tool calls routed through a connector's interactive queue (`connectors/queued.py`), by tool
+    # (bounded by the manifests' `queued:` lists).
     "chemclaw_queued_tool_calls_total": (
         "Tool calls a turn sent through a connector's interactive queue, by tool."
     ),
-    # The fallback's own count: a queued tool called directly because its run could not be started
-    # (the broker unreachable). Non-zero means the queue is not doing its job and every burst is
-    # being met by refusals again.
+    # A queued tool called directly because its run could not be started (broker unreachable).
+    # Non-zero means bursts are met by refusals again.
     "chemclaw_queued_tool_calls_direct_total": (
         "Queued tool calls sent straight to the server because the queue was unreachable, by tool."
     ),
@@ -1058,21 +710,14 @@ _COUNTERS: dict[str, str] = {
     ),
 }
 
-# Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the
-# unit that explains a slow turn. Anything finer is what the trace pipeline is for.
-# **Two sets, not one, and the single set was measurably wrong for both populations.** A turn and
-# a tool call are different distributions — a turn is tens of seconds, a tool call is milliseconds
-# to hours — and one shared set could only be a compromise that resolved neither.
+# Latency histogram buckets, in seconds. A turn (what a chemist waits on) and a tool call (what
+# explains a slow turn) are different distributions, so each has its own set; finer detail is the
+# trace pipeline's. Not a `Settings` field: buckets are part of a histogram's identity, so varying
+# them per deployment breaks aggregation and history.
 #
-# The old set topped out at 300 s while `service_turn_timeout_seconds` defaults to 600, so every
-# turn between the two reported as 300 s: `histogram_quantile` cannot interpolate into `+Inf` and
-# returns the highest finite boundary, which means p95 *saturated* precisely as turns got slow.
-# Measured on the old set with samples at 450 s and 599 s, both landed in `+Inf`. The load test's
-# p50 of 37 s at 50 users also sat in the 30-60 bucket with a 5x hole above it, so the busiest
-# part of the range was the coarsest.
-#
-# `_TURN_BUCKETS` brackets the timeout on both sides, so a saturating deployment is visible as
-# mass moving into the 600 bucket rather than as a quantile that stops moving.
+# `histogram_quantile` cannot interpolate into `+Inf`, so the top finite bucket must exceed
+# `service_turn_timeout_seconds`. `_TURN_BUCKETS` brackets the timeout so saturation shows as mass
+# moving into the timeout bucket rather than a quantile that stops moving.
 _TURN_BUCKETS: tuple[float, ...] = (
     1.0,
     2.5,
@@ -1090,9 +735,8 @@ _TURN_BUCKETS: tuple[float, ...] = (
     600.0,
     900.0,
 )
-# `_TOOL_BUCKETS` spans six orders of magnitude because the tool surface genuinely does: a
-# `load_skill` is sub-millisecond, `inline_wait_seconds` is 20, and a graph step reaching the calc
-# server is bounded by `calc_server_timeout_seconds` at 900.
+# Six orders of magnitude, as the tool surface spans: sub-millisecond skill loads up to
+# `calc_server_timeout_seconds`.
 _TOOL_BUCKETS: tuple[float, ...] = (
     0.01,
     0.025,
@@ -1111,21 +755,9 @@ _TOOL_BUCKETS: tuple[float, ...] = (
     300.0,
     900.0,
 )
-# `_JOB_BUCKETS` is the same argument as `_TURN_BUCKETS` one tier up, and this histogram shipped
-# making exactly the mistake that paragraph diagnoses: it was bound to `_TOOL_BUCKETS`, whose top
-# finite boundary is **900 s**, while `connector_job_timeout_seconds` defaults to 18,000 and
-# `xtb_job_timeout_seconds` to 15,000. `histogram_quantile` cannot interpolate into `+Inf` and
-# returns the highest finite boundary, so every job over fifteen minutes landed in `+Inf` and the
-# p95 pinned at exactly 900 s precisely as jobs got expensive — on the series whose own HELP text
-# says it exists "so a p95 exists for the most expensive work in the system".
-#
-# Bracketed on both sides of the ceiling (21600 below, 28800 above) so a deployment saturating its
-# own job timeout is visible as mass moving into the 25200 bucket rather than as a quantile that
-# stops moving. The low end stays fine-grained because a re-run that hits the D-011 cache returns
-# in seconds and belongs in a bucket of its own rather than pooled with a CREST search. The top
-# three boundaries moved with the ceiling when it went to 25,200 s to fund a bundle's queue wait
-# out of its own headroom; `tests/test_durable_observability.py` asserts the bracket against the
-# setting rather than against these literals, which is what made that a caught knock-on.
+# The same argument one tier up: brackets the job timeout ceiling on both sides so a deployment
+# saturating it is visible as mass in the top bucket, while the low end stays fine-grained for
+# cache-hit re-runs. `tests/test_durable_observability.py` asserts the bracket against the setting.
 _JOB_BUCKETS: tuple[float, ...] = (
     1.0,
     5.0,
@@ -1164,13 +796,9 @@ _CALL_BUCKETS: tuple[float, ...] = (
 )
 
 _HISTOGRAMS: dict[str, str] = {
-    # **The only in-run proxy for judge quality this feature has.** It is measured on every run and
-    # was, until this series existed, written into a note body and nowhere else. It matters because
-    # the ranking is only as good as the judge: the simulation in `evals/hypothesis_tournament.py`
-    # puts top-1 recovery under 40% at a 75%-accurate judge, so a gateway model swap that made the
-    # judge prefer whichever side it saw first would quietly turn the whole feature into noise
-    # while every other signal stayed green. 0.0 is no order effect; 1.0 is the order deciding
-    # every pair.
+    # The only in-run proxy for judge quality: a judge preferring whichever side it saw first turns
+    # the ranking into noise while every other signal stays green. 0.0 is no order effect; 1.0 is
+    # the order deciding every pair.
     "chemclaw_hypothesis_position_bias": (
         "How far a tournament's judge preferred whichever hypothesis it was shown first."
     ),
@@ -1200,22 +828,15 @@ _HISTOGRAMS: dict[str, str] = {
         "most expensive work in the system."
     ),
     "chemclaw_sink_delivery_seconds": "Wall-clock duration of one delivery to a result sink.",
-    # The other half of the gauge above: how long a turn actually waited. The gauge says a queue
-    # exists right now, this says what it cost — and it is the only bound there is, because
-    # `asyncio.Lock` has no timeout, so `checkpointer._translating` (which exists to turn a
-    # checkpointer stall into a retryable error) never fires: nothing raises. Measured at 612 ms
-    # with eight turns and a zero-latency model.
+    # How long a turn waited on the checkpointer lock. `asyncio.Lock` has no timeout, so this is the
+    # only bound on that wait; nothing raises.
     "chemclaw_checkpointer_lock_wait_seconds": (
         "Wall-clock time one checkpointer statement spent waiting for the saver's lock."
     ),
 }
 
-# Per-histogram bucket boundaries. A histogram's buckets are part of its Prometheus identity, so
-# this is a property of the declaration exactly as the HELP text is — see `_TURN_BUCKETS` above for
-# why one shared set was wrong.
-#: Position bias is a fraction on [0, 1], not a duration, so it gets its own linear buckets. The
-#: interesting region is the top: 0.0 is a judge that ignores order and 1.0 is one that is decided
-#: by it, and an operator wants to see the distribution creep upward rather than a mean move.
+# Position bias is a fraction on [0, 1], so it gets linear buckets; the interesting region is the
+# top, where the order decides the judgement.
 _FRACTION_BUCKETS: tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
 
 _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
@@ -1232,20 +853,10 @@ _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
     "chemclaw_sink_delivery_seconds": _CALL_BUCKETS,
 }
 
-# Histograms that carry labels, and the label names each accepts — the same declaration in both
-# directions that `_COUNTER_LABELS` is, and enforced by the same code path.
-#
-# **`observe` took no labels at all until this existed**, which was the single most consequential
-# limitation in this registry. `chemclaw_tool_duration_seconds` pooled an xTB call through the calc
-# connector and a `read_attachment` into one distribution, so "why is this turn slow" could not be
-# attributed to a tool — the one question the histogram's own docstring says it was added to
-# answer. The same absence blocked per-route request latency, per-source retrieval latency and
-# per-sink delivery latency, each of which is a separate finding elsewhere.
-#
-# Every label here is bounded by configuration or by a source literal, never by a caller's string,
-# which is the same rule `_COUNTER_LABELS` documents at length. `route` is the FastAPI *route
-# template* (`/sessions/{session_id}/messages`), enumerable from `app.routes` — never the raw path,
-# which is attacker-controlled and is a cardinality bomb.
+# Histograms that carry labels, and the label names each accepts, enforced like `_COUNTER_LABELS`.
+# Labels let latency be attributed per tool, route, source and sink. Every label is bounded by
+# configuration or a source literal, never a caller's string; `route` is the FastAPI route template,
+# never the raw path.
 _HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_tool_duration_seconds": ("tool",),
     "chemclaw_http_request_duration_seconds": ("route",),
@@ -1255,36 +866,15 @@ _HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_sink_delivery_seconds": ("sink",),
 }
 
-# Bucket boundaries, in seconds. Not a `Settings` field on purpose: Prometheus treats the bucket
-# set as part of a histogram's identity, so changing it per deployment breaks aggregation across
-# pods and invalidates recorded history — it is a property of the metric's definition, like its
-# HELP text, not a deployment knob. The range is chosen for this service's measured shape: a stub
-# model puts a turn near 1 s, the load test's p50 at 50 users was 37 s, and the wall-clock turn
-# timeout is 600 s, so the buckets have to span three orders of magnitude and still resolve the
-# sub-second tool calls that dominate the count.
-# Counters that carry labels, and the label names each accepts. A counter absent from this map is
-# unlabelled and behaves exactly as before — pre-seeded to zero and rendered as one bare line.
+# Counters that carry labels, and the label names each accepts. A counter absent here is unlabelled,
+# pre-seeded to zero and rendered as one bare line. An undeclared label name raises, since a typo
+# would otherwise create a silent second series.
 #
-# **Declared, not free-form** (REV-10). An undeclared label name raises exactly as an undeclared
-# metric already does, because the failure mode of a label typo is not a crash but a second, silent
-# time series that no dashboard queries and nobody notices.
-#
-# **Only `profile`, and deliberately not `model`.** The rule was written when per-model attribution
-# was already emitted with richer labels than this registry could cheaply provide — the previous
-# framework's chat-client instrumentation recorded `gen_ai.client.token.usage` with the request
-# model, the response model, the provider and the token type. That instrumentation went with the
-# framework and the LangChain stack ships no equivalent (`core/logging.py` records the measurement),
-# so the axis is genuinely absent rather than emitted elsewhere. It is *still* not added here: the
-# ledger `turn_costs` carries model attribution per turn (D-2026-08-01-spend-is-a-ledger-not-a-label
-# decided exactly that question), and a second, lossier answer as a counter label would be the two
-# systems to reconcile that this comment always warned about. What a *profile* costs is the gap this
-# registry fills, because nothing else has ever heard of one.
+# Only `profile`, not `model`: per-turn model attribution lives in the `turn_costs` ledger, and a
+# second, lossier answer as a label would be another system to reconcile.
 _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
-    # `completed` (a ranked, separated field), `unseparated` (ranked but inside its own
-    # uncertainty — a real answer, and the common one), `unrated` (no comparison survived, so the
-    # ranking is the prior) and `empty` (nothing survived the screen). Four states rather than
-    # success/failure, because three of them are legitimate outcomes a chemist should see and only
-    # one of them means the judge never answered.
+    # `completed`, `unseparated` (ranked inside its own uncertainty — the common real answer),
+    # `unrated` (ranking is the prior) and `empty`. Only `unrated` means the judge never answered.
     "chemclaw_hypothesis_tournaments_total": ("outcome",),
     "chemclaw_hypothesis_screen_rejections_total": ("rule",),
     "chemclaw_hypothesis_check_refusals_total": ("code",),
@@ -1299,92 +889,62 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
-    # A source name is a registry entry an operator configured, never a caller's string — the same
-    # rule the `channel` label above follows. Attachment evictions carry no label at all: the only
-    # candidate is a session id, which is unbounded cardinality.
+    # A source name is an operator-configured registry entry, never a caller's string. Attachment
+    # evictions carry no label: the only candidate, a session id, is unbounded.
     "chemclaw_ingest_rejections_evicted_total": ("source",),
     "chemclaw_delivery_failures_total": ("channel",),
-    # Six series at most, and every value is a source literal: `end` is `ask`/`answer`, fixed at
-    # the two call sites, and `reason` is one of `BrokenPremise`'s three, fixed in `kg/premise.py`.
-    # Neither can carry a note id, which would be a caller's string and unbounded.
+    # Source literals only: `end` is `ask`/`answer` and `reason` one of `BrokenPremise`'s three.
+    # Never a note id.
     "chemclaw_premise_refusals_total": ("end", "reason"),
-    # Five series, and every value is a source literal in `api/runner._escalate_for_review`:
-    # `opened`, `joined`, `no_claims`, `no_actor`, `unavailable`. Nothing a caller supplies reaches
-    # it — a session id or an actor would be unbounded cardinality, and both are already in the log
-    # line beside each increment.
+    # Source literals in `api/runner._escalate_for_review`: `opened`, `joined`, `no_claims`,
+    # `no_actor`, `unavailable`. Session and actor stay in the log line.
     "chemclaw_answer_review_escalations_total": ("outcome",),
-    # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
-    # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
-    # same guarantee `state` above gets from a CHECK constraint.
+    # Fixed by `agent/condense.py`'s `DigestSource` literal: `extracted`, `degraded`, `oversized`.
     "chemclaw_protocol_digests_total": ("outcome",),
-    # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
-    # never a name a caller supplies, and the shipped fleet is the set of `connector.yaml` files in
-    # `connectors/` — not written down as a number here, because the number that was said six while
-    # seven shipped.
+    # Bounded by configuration: a connector is a bundle the chart enables, never a caller's string.
     "chemclaw_job_runtime_seconds_total": ("connector",),
-    # Two sources of conflict, different causes and different operator responses. `process` is a
-    # same-process double-submit (impossible with the LRU's single-session cardinality guarantee,
-    # but tracked for debugging). `durable` is a cross-replica race on the shared turn claim.
+    # What was busy: this process's slot, another replica's durable claim, or a line already
+    # occupied.
     "chemclaw_turns_conflict_total": ("scope",),
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
     # profile) rather than anything a caller can name.
     "chemclaw_repeated_tool_calls_total": ("tool",),
-    # The same bound and for the same reason: a tool name here is one the registry served, never a
-    # string a caller invented (`agent/tool_result_size.py` reads the request's tool name, which is
-    # the one the graph dispatched).
+    # A tool name the graph dispatched, never a string a caller invented.
     "chemclaw_tool_results_truncated_total": ("tool",),
-    # A template's own name, which is its *filename* in `data/templates/` — so the label set is
-    # bounded by what a deployment ships and enables, never by a string a caller supplies. That is
-    # the same bound as `connector` above, arrived at one layer up: a chemist can choose to run a
-    # template and cannot choose to invent one.
+    # A template's filename in `data/templates/`, bounded by what a deployment ships.
     "chemclaw_template_prompt_truncated_total": ("template",),
-    # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
-    # registry entry a deployment activates, never a string a caller supplies. The shipped set is
-    # the knowledge graph, the lexical and dense indexes, and the fingerprint store.
+    # A retriever's registry `name` (the knowledge graph, lexical and dense indexes, fingerprint
+    # store).
     "chemclaw_evidence_source_chunks_total": ("source",),
-    # The same `source` label, on the counter that has to be read *against* the one above. Without
-    # it the two series could not be joined at all: "graph contributed nothing this hour" and "some
-    # source raised this hour" were two numbers with no way to decide whether they were the same
-    # event, which is precisely the correlation an operator needs to tell a dark leg from a broken
-    # one. Same bound, same reason — a retriever's registry name, never a caller's string.
+    # The same `source` label, so a source contributing nothing can be joined against a source
+    # raising and a dark leg told from a broken one.
     "chemclaw_evidence_source_failures_total": ("source",),
     # The decline counter completes the triple: chunks, failures, skips, one `source` label each,
     # so the three series join on the same key.
     "chemclaw_evidence_source_skips_total": ("source",),
-    # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
-    # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
-    # enumerates it — across both call spellings (`degraded(...)` and `<module>.degraded(...)`) and
-    # both argument forms, since its first version saw only the bare-name positional one and a
-    # per-connector f-string label went past it silently. Nothing a request carries reaches here.
+    # A string literal at each `degraded()` call site, so the set is enumerable from source;
+    # `tests/test_degraded.py` enumerates it across call spellings and argument forms.
     "chemclaw_degraded_total": ("subsystem",),
     # Bounded by this module's own declarations: the label domain is `declared_metric_names()`.
     "chemclaw_gauge_read_failures_total": ("metric",),
-    # Its sibling, and bounded the same way — the metric that hit the cardinality cap can only be
-    # one of the names declared above. Unlabelled until 2026-09-04, which left an operator alerting
-    # on it knowing that *something* was undercounting and nothing about what.
+    # The metric that hit the cardinality cap: one of the declared names.
     "chemclaw_metric_series_dropped_total": ("metric",),
-    # The route *template* from `request.scope["route"].path`, enumerable from `app.routes` — which
-    # is the bound, and is why no count is written here: the one that was said 23 while `create_app`
-    # registered 21. Never `request.url.path`, which is caller-controlled and unbounded, and which
-    # is already the subject of a measured denial of service through the uvicorn access log.
+    # The route template from `request.scope["route"].path`, bounded by `app.routes`. Never
+    # `request.url.path`, which is caller-controlled and unbounded.
     "chemclaw_http_requests_total": ("route", "status_class"),
     "chemclaw_request_validation_failures_total": ("route",),
     # Four literals in `api/deps.py`, four in `api/auth.py` — source-fixed, like `subsystem`.
     "chemclaw_authz_refusals_total": ("resource",),
     "chemclaw_auth_failures_total": ("reason",),
-    # Outcome only. This carried a `provider` label until the collapse to one gateway
-    # (`D-2026-09-04-a-gateway-is-the-only-provider`) left it with one possible value. Per-model
-    # *spend* was never this series' question and stays in `turn_costs` (D-2026-08-01); endpoint
-    # *health* is, and the endpoint is now singular.
+    # Outcome only: there is one gateway endpoint, and per-model spend lives in `turn_costs`.
     "chemclaw_model_calls_total": ("outcome",),
     "chemclaw_tool_calls_total": ("tool", "outcome"),
     # A directory name under a configured skills tree, clamped by the read having succeeded rather
     # than by the visibility predicate, which is inert in a deployment that configures no gate.
     "chemclaw_behaviour_proposals_total": ("kind", "outcome"),
     "chemclaw_skill_loads_total": ("skill",),
-    # Both closed sets fixed in source (`exhibits/telemetry.py`'s `WriteOp`, `RefusalReason` and the
-    # store's `AuthorKind`): four write series and four refusal series, never a caller's string —
-    # an artefact id or a session would be unbounded, and both are on the `exhibit.*` log line.
+    # Closed sets fixed in source (`exhibits/telemetry.py`'s `WriteOp` and `RefusalReason`, the
+    # store's `AuthorKind`); artefact ids and sessions stay on the `exhibit.*` log line.
     "chemclaw_exhibit_writes_total": ("author_kind", "op"),
     "chemclaw_exhibit_refusals_total": ("reason",),
     "chemclaw_tool_refusals_total": ("reason",),
@@ -1392,12 +952,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_turns_finished_total": ("outcome",),
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
-    # A bundle name off the connector registry — a deployment's own `CHEMCLAW_ENABLED_CONNECTORS`
-    # entry, never a caller's string, which is the same rule every label in this table follows. It
-    # is the label the sibling gauge `chemclaw_connector_unhealthy` already carries, and the reason
-    # it is here is that the counter without it could not say *which* connector went dark: the
-    # `ChemclawConnectorsDegradingTurns` rule groups by it, and a dashboard reading the unlabelled
-    # form could only report that something had.
+    # A bundle name from the connector registry, matching the `chemclaw_connector_unhealthy` gauge's
+    # label, so alerts can say which connector went dark.
     "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
@@ -1410,49 +966,26 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_db_query_failures_total": ("kind",),
 }
 
-# The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes
-# from configuration, and a future label could come from a provider response — so an unbounded map
-# keyed on it is the same slow leak this codebase has already fixed three times (the budget
-# tracker's per-user counters, the front door's live sessions, the note index). Past the cap the new
-# series is refused and said so once, rather than being accepted quietly until the pod runs out of
-# memory.
-#
-# **64 until the HTTP surface arrived, and the margin was one series.** Measured across the front
-# door's 158 tests, `chemclaw_http_requests_total{route,status_class}` grew 35 series over 20 route
-# templates plus `<unmatched>`, with no route producing more than three status classes — a worst
-# case of 63 against a cap of 64. That is not a cardinality problem, it is a *sizing* one: the label
-# domain is the route table, enumerable from `app.routes`, and it grows by one whenever somebody
-# adds a route. 128 was sized against that table with room for it to double, and the table did:
-# the shared-session routes (`D-2026-09-27-in-a-shared-session-the-sender-governs`) took it past
-# the three-per-route worst case, which `tests/test_api_observability.py` reports rather than this
-# comment. 256 is the same sizing taken again — the table with room to double.
-#
-# Still generous for every other counter here: `profile` is a handful of names, so a *different*
-# metric reaching this means something is generating values it should not — which is the case this
-# cap exists for, and the reason it is raised rather than removed.
+# The most label sets one counter may hold. Label values come from configuration and possibly
+# provider responses, so an unbounded map would leak; past the cap a new series is refused and
+# reported once. Sized for the largest legitimate domain, `chemclaw_http_requests_total` over the
+# route table, with room to double (`tests/test_api_observability.py` reports the current worst
+# case). Any other metric reaching it is generating values it should not.
 _MAX_SERIES_PER_COUNTER = 256
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
     "chemclaw_egress_guard_armed": "1 when the in-process egress guard is installed, else 0.",
-    # **The compiled layer has its own arming state, and folding it into the gauge above would
-    # rebuild the blindness that licensed it.** `chemclaw_egress_guard_armed` says the *Python*
-    # guard is patched in; measured, it read 1 while a `grpc.insecure_channel`, the OTLP gRPC span
-    # exporter and `temporalio.Client.connect` each reached an off-allowlist listener, because all
-    # three open sockets below the interpreter. `netguard_preload.c` is the `LD_PRELOAD`
-    # interposition that refuses them, and whether it is loaded is a different question from
-    # whether `netguard.arm` ran — so it is a different series. 1 is measured from the dynamic
-    # linker, never from `LD_PRELOAD`: a preload naming a path that does not exist is ignored in
-    # silence, which is precisely where a gauge lies.
+    # Whether the compiled `LD_PRELOAD` interposer (`netguard_preload.c`) is loaded, separate from
+    # the Python guard: sockets opened below the interpreter (gRPC, the OTLP exporter, the Temporal
+    # client) bypass the Python guard. Read from the dynamic linker, never from `LD_PRELOAD`,
+    # because a preload naming a missing path is silently ignored.
     "chemclaw_egress_preload_armed": (
         "1 when the LD_PRELOAD egress interposer is loaded into this process, else 0."
     ),
-    # Two series rather than one, because a blocked **lookup** and a blocked **dial** are different
-    # events with different causes: the first is a name nothing declared, the second an address
-    # nothing resolved to. An operator reading one number cannot tell which happened, and the two
-    # want different next steps. Gauges rather than counters because the counting happens in C
-    # atomics — binding the reading means a scrape reflects what the interposer actually counted,
-    # with no polling loop to drift or die.
+    # A blocked lookup (a name nothing declared) and a blocked dial (an address nothing resolved to)
+    # are different events with different next steps. Gauges because the counting happens in C
+    # atomics; the scrape reads them directly.
     "chemclaw_egress_preload_refused_connect": (
         "Dials (connect/sendto/sendmsg) the LD_PRELOAD egress interposer refused in this process."
     ),
@@ -1460,26 +993,20 @@ _GAUGES: dict[str, str] = {
         "Name lookups the LD_PRELOAD egress interposer refused in this process."
     ),
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
-    # Published so a deployment that never set the key reads as an explicit 0 on a dashboard
-    # rather than as an absence of refusals, which is what an unset fairness cap and a working
-    # one look like from a scrape.
+    # Published so an unset fairness cap reads as an explicit 0 rather than as an absence of
+    # refusals.
     "chemclaw_turn_actor_capacity": (
         "Configured maximum concurrent turns one actor may hold on this process (0 = disabled)."
     ),
-    # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
-    # gauge above across pods is what the fleet is *admitting* right now; this is what it was
-    # declared to be allowed to admit. Config validation catches the product at deploy time, but it
-    # cannot see a Deployment scaled by hand or an HPA edited in the cluster — an alert comparing
-    # these two can. 0 when no ceiling is declared, which is what makes that alert self-disabling.
+    # `sum()` of the in-flight gauge across pods against this declared ceiling catches what config
+    # validation cannot see: a hand-scaled Deployment or an edited HPA. 0 when undeclared, which
+    # disables the alert.
     "chemclaw_fleet_turn_ceiling": "Declared fleet-wide ceiling on concurrent turns (0 = none).",
     "chemclaw_live_sessions": "Sessions held in the front door's in-process LRU.",
-    # **What the context budget is actually worth, measured instead of assumed.** The policy counts
-    # with chars/4 and the provider bills its own tokenizer; the two disagree by content type, and
-    # in the direction that matters — measured on this repository's payloads, the static prefix is
-    # 1.04x and a connector JSON result 0.45x, so a thread believed to be at budget was ~2.2x it.
-    # This is `billed / estimated`, smoothed over the calls this process has made, and it is the
-    # number `agent/context_budget.effective_trigger` divides the configured budget by. 1.0 means
-    # "not enough calls observed yet", which is also the state in which nothing is adjusted.
+    # `billed / estimated` tokens, smoothed over this process's calls: the chars/4 estimate and the
+    # provider's tokenizer disagree by content type. `agent/context_budget.effective_trigger`
+    # divides the configured budget by it; 1.0 means not enough calls observed yet, and nothing is
+    # adjusted.
     "chemclaw_context_estimator_ratio": (
         "Billed input tokens divided by this system's own estimate of the same request (1.0 = "
         "not yet calibrated)."
@@ -1487,116 +1014,70 @@ _GAUGES: dict[str, str] = {
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
-    # The knowledge graph coming *in*, which had no signal at all: `chemclaw_notes_publish_failures
-    # _total` covers a note failing to be written and nothing covered the corpus failing to
-    # reach a pod. `deploy/knowledge-sync.sh`'s loop swallows a failed refresh on purpose, so the
-    # pod serves a frozen graph and keeps citing it. Read from the volume by the process that
-    # answers from it (`kg/graph.py::knowledge_sync_age_seconds`), so it needs no sidecar and no
-    # kube-state-metrics.
+    # Age of the synced knowledge corpus. The sync loop swallows a failed refresh, so a pod can
+    # serve a frozen graph; read from the volume by the serving process (`kg/graph.py`), needing no
+    # sidecar.
     "chemclaw_knowledge_sync_age_seconds": (
         "Age of the newest note on this pod's knowledge tree, in seconds (-1 = the tree holds no "
         "note at all). Measures what this pod knows, not when the sync last ran."
     ),
-    # Pool saturation (D-119). `requests_waiting` above zero is the signal that `pg_pool_max_size`
-    # is too small for the offered load — the thing that used to show up as a connect timeout with
-    # an idle database, which is unreadable from any other metric.
+    # Pool saturation: `requests_waiting` above zero means `pg_pool_max_size` is too small for the
+    # load, which otherwise shows only as connect timeouts against an idle database.
     "chemclaw_pg_pool_size": "Connections held across this process's Postgres pools.",
     "chemclaw_pg_pool_available": "Pooled connections currently idle and available.",
     "chemclaw_pg_pool_requests_waiting": "Callers blocked waiting for a pooled connection.",
-    # **The queue in front of the checkpointer is not the pool's, and the gauge above cannot see
-    # it.** `AsyncPostgresSaver._cursor` opens `async with self.lock, get_connection(...)`, so every
-    # checkpointer statement in the pod serializes on one `asyncio.Lock` *before* it asks the pool
-    # for anything. Measured: 8 concurrent turns on 8 different threads gave max concurrency 1
-    # inside the saver and 612 ms of waiting, and during a full stall `pg_pool_requests_waiting`
-    # read 0 — which is the exact symptom `core/db.register_pool`'s docstring claimed it had
-    # closed. `pool_available: 0` is not a substitute either: a pool that can only ever hold one
-    # connection reads 0-available whenever it is used at all.
+    # The checkpointer's own queue: `AsyncPostgresSaver._cursor` serialises every statement on one
+    # `asyncio.Lock` before touching the pool, so pool gauges read idle during a checkpointer stall.
     "chemclaw_checkpointer_statements_waiting": (
         "Turns queued on the checkpointer's own lock, waiting to run one statement. Above zero "
         "means the pod is serializing turn-state writes, which no pool metric can show."
     ),
-    # The connection budget's two sides, the same pairing `chemclaw_turn_capacity` and
-    # `chemclaw_fleet_turn_ceiling` make one subject over: `sum()` of the per-process ceiling is
-    # what this deployment may open, and the declared number is what the server will serve. Config
-    # validation refuses a bad product at startup but only for the shape the chart rendered, so a
-    # `kubectl scale` or an in-cluster HPA edit is visible only by comparing these two. 0 when
-    # undeclared, which is what makes the alert self-disabling.
+    # The connection budget's two sides: `sum()` of per-process maxima against the server's declared
+    # ceiling catches scaling that config validation cannot see. 0 when undeclared, disabling the
+    # alert.
     "chemclaw_pg_pool_max_size": "This process's configured maximum pooled connections.",
     "chemclaw_pg_fleet_max_connections": (
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
-    # The second half of that pair, because one number describes one server: a deployment that
-    # points `session_store_dsn` at another server puts a front door's `/readyz` and checkpointer
-    # pools there. 0 when there is no split, which leaves the alert's comparison exactly what it
-    # was.
+    # The session server's ceiling, when `session_store_dsn` points front-door and checkpointer
+    # pools at another server. 0 when there is no split.
     "chemclaw_pg_session_fleet_max_connections": (
         "Declared ceiling on Postgres connections at a split session store (0 = none)."
     ),
-    # And the left-hand side that ceiling needs, because a sum against a sum is not two checks.
-    # `sum(pools) > primary_ceiling + session_ceiling` can only *miss*: enumerated over 200,000
-    # random (pools, ceilings) draws it produced 0 firings with neither server over and 49,993
-    # silences with one of them over. Measured on the shipped topology with the session server
-    # declared at 180, it sits at 183 (over its own ceiling) from 7 front-door replicas and the
-    # summed comparison stays silent until 13, by which point it is at **1.58x**. Splitting the
-    # left-hand side rather than labelling `chemclaw_pg_pool_max_size` keeps that gauge a pure
-    # configuration reading: a label carrying a *measured* server identity is unknown until a pool
-    # fills, so the ceiling alert would go silent during exactly the database outage it exists for.
-    #
-    # Which pools land here is the same `pg_endpoint` comparison `fleet_connections_per_server`
-    # makes, read from `core/config` rather than restated — so the startup half and the runtime
-    # half cannot disagree, and the two spellings of one server that config reads as two servers
-    # this reads as two as well. That limit is `pg_endpoint`'s and is pinned there.
+    # The pools aimed at the session server, so each server is checked against its own ceiling; a
+    # sum against a sum of ceilings can miss one server being over. A separate gauge rather than a
+    # label, so it stays a pure configuration reading. Which pools land here uses the same
+    # `pg_endpoint` comparison as `fleet_connections_per_server` in `core/config`.
     "chemclaw_pg_session_pool_max_size": (
         "This process's maximum pooled connections that land on a split session store's own "
         "server (0 = no split)."
     ),
-    # The calculation backend's admission budget (D-2026-08-27-a-per-worker-cap-is-not-a-backend-
-    # ceiling), the third pair of this shape. Unlike the two above, the left-hand side is *live*
-    # rather than configured, because the two kinds of process that dispatch there do not share a
-    # cap: a `calc` worker is bounded by `worker_max_concurrent_activities`, while that bundle's own
-    # MCP server pods dispatch straight from a tool call and are bounded by nothing local. Counting
-    # the sessions actually held is the only number that covers both, and `sum()` of it across pods
-    # is what `servers/calc` is being asked to serve right now.
+    # The calculation backend's admission budget. The left side is live rather than configured,
+    # since calc workers and the bundle's MCP server pods dispatch under different (or no) local
+    # caps; `sum()` across pods is what `servers/calc` is asked to serve.
     "chemclaw_calc_requests_in_flight": (
         "Calculation-backend sessions this process is currently holding open."
     ),
     "chemclaw_calc_backend_max_concurrent_requests": (
         "Declared ceiling on concurrent calculation-backend requests (0 = none)."
     ),
-    # The event-stream cap's two sides, the same pairing `chemclaw_turns_in_flight` and
-    # `chemclaw_turn_capacity` make for turns — and absent for exactly as long as the stream cap
-    # has existed. Only *rejections* were counted, so "are we near the per-pod cap" was
-    # unanswerable until the cap was already being hit.
+    # The event-stream cap's two sides, so "near the per-pod cap" is visible before rejections
+    # start.
     "chemclaw_event_streams_open": "Push-back event streams currently open on this process.",
     "chemclaw_event_stream_capacity": "Configured maximum concurrent push-back streams.",
-    # In-flight durable work. `chemclaw_jobs_started_total` minus a completion counter would have
-    # given this, except the two are booked in different processes — a job is launched by an agent
-    # tool in the front door and executed by a worker — so a per-process subtraction is a number
-    # nobody can take, and a fleet-wide one over raw counters is undone by any pod restart.
-    #
-    # **A deployment-wide reading, published identically by every worker**, so a dashboard takes
-    # `max()` over the series and never `sum()`. It is read from the broker's own visibility count
-    # (`durable/job_metrics.py`), because the per-process number this used to publish was not
-    # measurable from inside a workflow: driven live, it stuck at 1 after a terminate, read 0 for a
-    # RUNNING workflow after an eviction, and raised out of its own `finally` on worker shutdown.
+    # In-flight durable work, deployment-wide and published identically by every worker: take
+    # `max()`, never `sum()`. Read from the broker's visibility count (`durable/job_metrics.py`),
+    # because launches and completions are booked in different processes and cannot be subtracted
+    # per process.
     "chemclaw_jobs_in_flight": "Durable jobs open in this deployment (the same reading per pod).",
 }
 
-# Gauges that carry **one** label, read as a whole family from a single callable returning
-# `{label value: reading}`.
-#
-# One label, not an arbitrary set, because three real callers wanted exactly one and a general
-# mechanism for a case nobody has is the abstraction this repository's own rules refuse. The
-# callers: an outbox backlog per sink, ingest lag per source, and connector health per connector —
-# each of which was previously either a single summed number that answered nothing ("some sink is
-# behind, which one?") or a `COUNT(*)` the code declined to do per scrape.
+# Gauges that carry one label, read as a whole family from a single callable returning `{label
+# value: reading}`: outbox backlog per sink, ingest lag per source, connector health per connector.
 _GAUGE_FAMILIES: dict[str, str] = {
     "chemclaw_outbox_pending": "Result publications queued and not yet delivered, by sink.",
-    # The number that separates "a backlog of five that turns over every second" from "a backlog
-    # of five that has not moved since Tuesday". The partial index this reads
-    # (`result_publications_pending`) already exists, and `min(enqueued_at)` over it is an
-    # index-only scan on the leading edge — so the "a gauge would need a COUNT(*) on every scrape"
-    # objection that argued against a gauge here does not apply to an age.
+    # Separates a fast-turning backlog from a stuck one. `min(enqueued_at)` over the partial index
+    # `result_publications_pending` is an index-only scan, cheap per scrape.
     "chemclaw_outbox_oldest_pending_seconds": (
         "Age of the oldest undelivered result publication, by sink."
     ),
@@ -1608,40 +1089,16 @@ _GAUGE_FAMILIES: dict[str, str] = {
         "How far behind its source each ingest cursor is, in seconds. A source whose fetch has "
         "wedged advances no cursor and logs `ingested=0`, which is what a quiet source also does."
     ),
-    # **The half of the static prefix the ratchet cannot see.** `tests/test_context_floor.py`
-    # gates every in-process tool schema a turn binds, and an endpoint tool's schema arrives from a
-    # running MCP server at handshake — so a connector's docstrings grow every turn's cost, forever,
-    # with nothing in this repository able to fail. Measured at handshake, by connector, which is
-    # the only place both the tool list and its origin are known. Its `sum()` plus the ratcheted
-    # floor is what a turn actually pays before the chemist says anything.
+    # The prefix share `tests/test_context_floor.py` cannot ratchet: endpoint tool schemas arrive
+    # from the MCP server at handshake. Measured there, by connector; its `sum()` plus the ratcheted
+    # floor is what a turn pays before the chemist says anything.
     "chemclaw_connector_tool_schema_tokens": (
         "Estimated tokens of bound tool schema advertised by each connector at handshake."
     ),
-    # **The only series that answers "is the store filling", and there was none.** Nothing in this
-    # registry matched `retention`, `disk`, `table_size` or `prune`, and `durable/retention.py`
-    # imported no metrics at all — so a sweep that deleted 1 900 rows and returned 0 bytes, and a
-    # sweep that had not run since Tuesday, were the same silence. Read from
-    # `pg_total_relation_size` once per retention pass rather than per scrape — the same "publish
-    # the last reading, never query on a scrape" shape as the outbox families above — and over
-    # every table `durable/retention.py`'s register names, not just the swept ones, because the
-    # table filling the volume is quite often one nothing prunes.
-    #
-    # **A gauge and not a pair of counters, and that is a narrowing taken on measurement.** Rows
-    # deleted and bytes reclaimed were both drafted here as counters and both removed: the row
-    # count is already in the pass's own `RetentionOutcome`, where the module's docstring has
-    # always said the deletion is auditable, and reclaimed *bytes* is structurally near-zero —
-    # retention deletes the oldest rows, which sit at the front of the relation, where a plain
-    # `VACUUM` truncates nothing. Neither had an alert that could fire on it without also firing on
-    # a healthy deployment (a table that legitimately expires nothing yet; a table that grows
-    # because the deployment grows), and a series with no reader is a cost with no benefit —
-    # `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is where that rule
-    # lives. What survives is the one reading an operator actually queries: `topk(5,
-    # chemclaw_table_bytes)`.
-    #
-    # **Absent until a pass has run, which includes "for ever, on a deployment that never
-    # sweeps".** That is not seeded to zero for the reason `chemclaw_outbox_pending` is not: a
-    # fabricated 0 for a table holding gigabytes is worse than no reading. The absence is what
-    # `ChemclawRetentionNotSweeping` fires on.
+    # Whether the store is filling: `pg_total_relation_size` per table in `durable/retention.py`'s
+    # register (swept or not), read once per retention pass rather than per scrape. A gauge only:
+    # rows deleted are already in `RetentionOutcome`, and reclaimed bytes are structurally near
+    # zero. The query an operator runs is `topk(5, chemclaw_table_bytes)`.
     "chemclaw_table_bytes": (
         "Total relation size of each durable table in bytes, as of the last retention pass "
         "(heap, indexes and TOAST — `pg_total_relation_size`)."
@@ -1667,11 +1124,9 @@ _GAUGE_FAMILY_LABELS: dict[str, str] = {
 def declared_metric_names() -> frozenset[str]:
     """Every metric name this registry declares — counters, histograms and gauges together.
 
-    Public because a metric name is a contract with things *outside* this process, and the only
-    other place it is written down is prose: `docs/guides/runbook.md` tells an operator what to
-    query, and an ADR tells them what to alert on. `make prose-validate` resolves those citations
-    against this set (D-2026-08-08). Exposed as one function rather than three tables so a fourth
-    kind of metric cannot be added without every reader of "what is declared" seeing it.
+    Public because metric names are cited outside this process (runbook, ADRs) and `make
+    prose-validate` resolves those citations against this set. One function so a new metric kind
+    cannot escape it.
     """
     return (
         frozenset(_COUNTERS)
@@ -1684,13 +1139,8 @@ def declared_metric_names() -> frozenset[str]:
 def declared_histogram_names() -> frozenset[str]:
     """Just the histograms, for readers that must reason about their derived series.
 
-    A histogram is the one metric kind whose *declared* name is not the name anybody queries:
-    Prometheus derives `_bucket`, `_sum` and `_count` from it, and real PromQL — every
-    `histogram_quantile` an operator will ever write — cites the derived name. A reader checking
-    prose or a dashboard against `declared_metric_names()` therefore has to fold those three
-    suffixes back, and folding them against every declared name would accept
-    `chemclaw_turns_started_total_bucket` as well. Exposed as its own set so that fold can be
-    exact rather than approximate.
+    PromQL cites the derived `_bucket`, `_sum` and `_count` names; a reader folding those suffixes
+    back needs the exact histogram set, or it would accept them on any metric.
     """
     return frozenset(_HISTOGRAMS)
 
@@ -1698,10 +1148,8 @@ def declared_histogram_names() -> frozenset[str]:
 class Metrics:
     """A tiny, thread-safe counter/gauge/histogram registry rendering Prometheus exposition text.
 
-    Gauges are read through callables rather than stored, so a gauge can never drift from the
-    structure it describes (the semaphore, the session map, the connection pools) — there is
-    nothing to keep in sync. Counters and histograms are accumulated, since there is no live
-    structure holding "how many turns have ever run".
+    Gauges are read through callables so they cannot drift from the structure they describe;
+    counters and histograms are accumulated.
     """
 
     def __init__(self) -> None:
@@ -1710,13 +1158,10 @@ class Metrics:
         self._counts: dict[str, float] = dict.fromkeys(_COUNTERS, 0.0)
         self._gauges: dict[str, Callable[[], float]] = {}
         self._gauge_families: dict[str, Callable[[], Mapping[str, float]]] = {}
-        # Per histogram: one tally per bucket, plus a final overflow slot for samples past the
-        # last boundary, plus the running sum. The *cumulative* counts the exposition format wants
-        # are derived at render time, so recording a sample is one index and one increment.
-        # Keyed by histogram, then by label set — `()` for an unlabelled one. An unlabelled
-        # histogram is pre-seeded so it renders as an honest zero from the first scrape (it always
-        # did); a labelled one is not, for the reason the labelled counters are not: an invented
-        # zero series is indistinguishable from an observed one.
+        # Per histogram, per label set (`()` when unlabelled): one tally per bucket, an overflow
+        # slot, and the running sum; cumulative counts are derived at render time. Only unlabelled
+        # histograms are pre-seeded, since an invented zero series is indistinguishable from an
+        # observed one.
         self._histograms: dict[str, dict[tuple[tuple[str, str], ...], list[float]]] = {
             name: (
                 {(): [0.0] * (len(_HISTOGRAM_BUCKETS[name]) + 1)}
@@ -1728,9 +1173,8 @@ class Metrics:
         self._histogram_sums: dict[str, dict[tuple[tuple[str, str], ...], float]] = {
             name: ({(): 0.0} if name not in _HISTOGRAM_LABELS else {}) for name in _HISTOGRAMS
         }
-        # Labelled series, per counter, keyed by the sorted label pairs. Not pre-seeded: a series
-        # exists once it has been observed, which is the Prometheus convention and the same rule
-        # the gauge path states — an invented zero is indistinguishable from a real one.
+        # Labelled series, per counter, keyed by sorted label pairs. Not pre-seeded: a series exists
+        # once observed, the Prometheus convention.
         self._series: dict[str, dict[tuple[tuple[str, str], ...], float]] = {}
         self._capped: set[str] = set()
 
@@ -1739,11 +1183,9 @@ class Metrics:
     ) -> None:
         """Add to a declared counter. An undeclared name or label is a programming error, so raises.
 
-        The declaration is binding **in both directions**: a counter in `_COUNTER_LABELS` must be
-        incremented *with* its labels, and one absent from it must be incremented *without* any.
-        One rule rather than two, and it removes the case that has no good answer — a bare sample
-        beside labelled ones, which a scraper reads as a further series rather than as their total,
-        so the counter would silently double-count under any `sum()`.
+        Binding in both directions: a counter in `_COUNTER_LABELS` must be incremented with its
+        labels, and one absent without any. A bare sample beside labelled ones would be read as
+        another series and double-count under `sum()`.
         """
         if name not in _COUNTERS:
             raise KeyError(f"undeclared counter {name!r}")
@@ -1768,18 +1210,9 @@ class Metrics:
     def _note_series_cap(self, name: str) -> None:
         """Record that `name` hit the series cap, labelled with it. Caller holds the lock.
 
-        The cap used to leave nothing behind but one WARNING per metric per process lifetime, so
-        "this metric is undercounting and has been for two days" was a log line nobody re-reads
-        rather than a series anybody can alert on. It counts itself now — into a metric that is
-        deliberately *not* itself capped, since its whole label domain is the declared metric
-        names.
-
-        **Written straight into `_series` rather than through `increment`, for two reasons that
-        both have to hold.** The caller holds `self._lock`, which is a plain `Lock`, so re-entering
-        the public method would deadlock; and the cap check lives in `increment`, so bypassing it
-        is what makes "not itself capped" literally true rather than merely argued — this counter
-        keeps recording after every other one has stopped. The cardinality that buys is bounded by
-        `_COUNTERS` itself, which is a table in this file.
+        Written straight into `_series` rather than via `increment`: re-entering would deadlock on
+        the plain lock, and bypassing the cap check keeps this counter recording after others stop.
+        Its label domain is the declared metric names, so it needs no cap.
         """
         key = (("metric", name),)
         series = self._series.setdefault("chemclaw_metric_series_dropped_total", {})
@@ -1804,9 +1237,8 @@ class Metrics:
     def bind_gauge_family(self, name: str, source: Callable[[], Mapping[str, float]]) -> None:
         """Bind a one-label gauge family to a live source returning `{label value: reading}`.
 
-        Read on every scrape like an ordinary gauge, and guarded the same way — a source that
-        raises omits its family and increments `chemclaw_gauge_read_failures_total` rather than
-        failing the whole response.
+        Read on every scrape; a source that raises omits its family and increments
+        `chemclaw_gauge_read_failures_total` rather than failing the response.
         """
         if name not in _GAUGE_FAMILIES:
             raise KeyError(f"undeclared gauge family {name!r}")
@@ -1816,12 +1248,8 @@ class Metrics:
     def observe(self, name: str, seconds: float, labels: Mapping[str, str] | None = None) -> None:
         """Record one latency sample. An undeclared name or label is a programming error, so raises.
 
-        The declaration binds **in both directions**, exactly as `increment`'s does: a histogram in
-        `_HISTOGRAM_LABELS` must be observed *with* its labels, and one absent from it *without*
-        any. The reason is the same and it is not symmetry for its own sake — a bare sample beside
-        labelled ones is read by a scraper as a further series rather than as their total, so
-        `histogram_quantile` over a `sum by (le)` would silently mix a per-label distribution with
-        a duplicate of the whole.
+        Binding in both directions, as for `increment`: a bare sample beside labelled ones would mix
+        a duplicate of the whole into `histogram_quantile` over `sum by (le)`.
         """
         if name not in _HISTOGRAMS:
             raise KeyError(f"undeclared histogram {name!r}")
@@ -1833,9 +1261,8 @@ class Metrics:
             )
         key = tuple(sorted((label, str(value)) for label, value in given.items()))
         boundaries = _HISTOGRAM_BUCKETS[name]
-        # `bisect_left` puts a sample exactly on a boundary in that boundary's bucket, which is
-        # what Prometheus's `le` ("less than or equal") semantics mean. Past the last boundary it
-        # lands in the overflow slot rendered as `le="+Inf"`.
+        # `bisect_left` puts a sample on a boundary into that bucket, matching `le` (less than or
+        # equal); past the last boundary it lands in the `+Inf` overflow slot.
         index = bisect_left(boundaries, seconds)
         with self._lock:
             series = self._histograms[name]
@@ -1851,9 +1278,7 @@ class Metrics:
     def value(self, name: str) -> float:
         """A counter's total across every label set (tests assert on this, not on the text).
 
-        Summed rather than per-series on purpose: a caller asking for a counter's value wants the
-        number the unlabelled counter used to report, and Prometheus aggregates the same way
-        server-side. Reading one series is a query concern, not this registry's.
+        Summed, as Prometheus aggregates server-side; per-series reads are a query concern.
         """
         with self._lock:
             return self._counts[name] + sum(self._series.get(name, {}).values())
@@ -1861,9 +1286,7 @@ class Metrics:
     def observations(self, name: str) -> tuple[int, float]:
         """A histogram's `(count, sum)` across every label set.
 
-        Summed rather than per-series for the reason `value()` is: a caller asking for a
-        histogram's totals wants the numbers the unlabelled histogram used to report, and
-        Prometheus aggregates the same way server-side.
+        Summed, for the same reason as `value()`.
         """
         with self._lock:
             count = sum(sum(buckets) for buckets in self._histograms[name].values())
@@ -1887,10 +1310,8 @@ class Metrics:
             if name not in _COUNTER_LABELS:
                 lines.append(f"{name} {_sample(counts[name])}")
                 continue
-            # A labelled counter emits one line per observed series and never a bare one — the
-            # bare sample cannot exist, because `increment` requires the declared labels. A
-            # counter nothing has observed yet is therefore genuinely absent rather than zero,
-            # which is the Prometheus convention and this module's own rule for gauges.
+            # A labelled counter emits one line per observed series and never a bare one; an
+            # unobserved one is absent rather than zero.
             for key, total in sorted(series.get(name, {}).items()):
                 rendered = ",".join(f'{label}="{_escape(value)}"' for label, value in key)
                 lines.append(f"{name}{{{rendered}}} {_sample(total)}")
@@ -1900,16 +1321,9 @@ class Metrics:
                 # A gauge whose source is not bound is omitted rather than reported as 0 — a
                 # fabricated zero would be indistinguishable from a genuinely idle service.
                 continue
-            # **One failing source must not take the scrape down with it.** Until this guard
-            # existed, `render()` invoked every bound callable bare, so a `pool.get_stats()` that
-            # raised during a shutdown or a pool-registry race turned `/metrics` into an HTTP 500
-            # — losing all of this process's metrics, from this pod, at exactly the moment the
-            # incident they exist for was happening. Proven by binding a raising callable to
-            # `chemclaw_pg_pool_size`: the whole response was lost.
-            #
-            # Omitting the one gauge is the same rule the branch above states for an unbound one,
-            # applied to a source that cannot answer rather than one that is absent — and the
-            # counter is what stops that omission being silent.
+            # One failing source must not take the scrape down: a raising callable (for example
+            # `pool.get_stats()` during shutdown) would otherwise turn `/metrics` into a 500 during
+            # the very incident. The gauge is omitted and the failure counted.
             try:
                 reading = float(source())
             except Exception:
@@ -1939,23 +1353,17 @@ class Metrics:
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} histogram"]
             boundaries = _HISTOGRAM_BUCKETS[name]
             for key, buckets in sorted(histograms[name].items()):
-                # The label pairs a bucket line carries, with `le` appended — `le` must sit inside
-                # the same brace group as the rest, which is why this is built as a prefix rather
-                # than by formatting two separate groups.
+                # The label pairs for a bucket line; `le` must sit in the same brace group, hence a
+                # prefix.
                 declared = "".join(f'{label}="{_escape(value)}",' for label, value in key)
                 suffix = "".join(f'{label}="{_escape(value)}"' for label, value in key)
                 braced = f"{{{suffix}}}" if suffix else ""
-                # Prometheus buckets are cumulative ("how many samples were <= le"), so the
-                # per-bucket tallies are summed as they are emitted; the final `+Inf` bucket
-                # equals the count.
+                # Buckets are cumulative ("samples <= le"); the final `+Inf` bucket equals the
+                # count.
                 cumulative = 0.0
-                # `le` stays on `:g` while every *sample* moved to `_sample`, and the asymmetry is
-                # deliberate: `le` is a label, so its rendered text is part of the series identity.
-                # Re-spelling `3600` as `3600.0` would mint a new series beside the old one on every
-                # dashboard and recording rule that already reads this histogram. The two reasons
-                # `_sample` exists do not reach here — every boundary in `_HISTOGRAM_BUCKETS` is a
-                # small human-chosen number well inside six significant digits, and the `+Inf`
-                # bucket is spelled literally on the next line rather than formatted.
+                # `le` keeps `:g` deliberately: it is a label, so re-spelling `3600` as `3600.0`
+                # would mint new series. Boundaries are small human-chosen numbers, and `+Inf` is
+                # spelled literally below.
                 for boundary, tally in zip(boundaries, buckets[:-1], strict=True):
                     cumulative += tally
                     lines.append(
@@ -1970,9 +1378,8 @@ class Metrics:
         return "\n".join(lines) + "\n"
 
 
-# The process-wide registry. A module singleton for the same reason logging configuration is one:
-# a scrape targets a process, and code deep in the call tree (the audit sink, a tool) must be able
-# to count something without having a registry threaded down to it.
+# The process-wide registry: a scrape targets a process, and code deep in the call tree must be able
+# to count without a registry threaded down to it.
 METRICS = Metrics()
 
 # Exposition content type, per the Prometheus text format spec. Kept beside the renderer so the

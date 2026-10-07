@@ -1,11 +1,8 @@
-"""Per-task tool-utility A/B comparison (plan step 2b.4).
+"""Per-task tool-utility A/B comparison.
 
-Why this exists: tool/skill augmentation does **not** help uniformly — it is
-task-dependent and can introduce its own error class (docs/archive/research-review.md F8/F9).
-This module compares a metric value with tools against the same metric without them,
-per task, so the system can steer tool use **selectively** — crediting tools only where
-they measurably help and flagging tasks where they hurt. It is a pure comparison over
-already-scored values (produced by the metric layer); it does not run any model itself.
+Tool augmentation does not help uniformly and can introduce its own errors, so this compares a
+metric with tools against the same metric without them, per task, to credit tools only where they
+measurably help. A pure comparison over already-scored values; it runs no model.
 """
 
 from pydantic import BaseModel, Field
@@ -47,12 +44,9 @@ class ABSummary(BaseModel):
 def compare_tool_utility(tasks: list[TaskScores], higher_is_better: bool) -> ABSummary:
     """Compare augmented vs. baseline per task and aggregate where tools help/hurt.
 
-    `delta` is oriented so positive always means "tools improved the metric": for a
-    higher-is-better metric it is `augmented - baseline`, otherwise the reverse. A
-    delta within +/- `eval_ab_epsilon` (a per-metric noise floor) counts as no effect,
-    so tools are credited or blamed only above measurement noise. An empty task list
-    is rejected: it would yield a benign-looking "no effect anywhere" summary, the
-    same vacuous pass `load_eval_cases` refuses for an empty case-set (G4).
+    `delta` is oriented so positive means "tools improved the metric". A delta within +/-
+    `eval_ab_epsilon` (the metric's noise floor) counts as no effect. An empty task list is rejected
+    rather than reported as a benign "no effect anywhere".
     """
     if not tasks:
         raise ValueError("empty task list — an A/B comparison over nothing proves nothing")

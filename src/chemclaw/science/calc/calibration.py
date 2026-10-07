@@ -1,53 +1,19 @@
-"""Close the loop between what was predicted and what actually happened (gap IDEA-2).
+"""Close the loop between what was predicted and what actually happened.
 
-The stack predicts (xTB, pKa, solubility, BO surrogates) and, separately, ingests what actually
-happened (the ELN). Nothing connected the two. `evals/metrics.py::prediction_error` exists but
-scores against a *held-out reference in a committed case file* — not against reality as it arrives —
-so "how far should I trust this calculator?", which is the entire job of the `calculation-selection`
-skill, was answerable only in prose.
+A ledger of predictions keyed on `(calc_type, calc_version, input_hash)`, reconciled against
+measurements as they arrive, so "how far should I trust this calculator?" has a numeric answer.
+`input_hash` is `stable_hash(canonical_smiles)`, not the calculation cache's molecule hash; joining
+the two needs a translation.
 
-This is the ledger that makes it answerable in numbers: every prediction is recorded against a
-`(calc_type, calc_version, input_hash)` identity, so a later measurement of the same thing meets it
-without a second naming scheme.
+Three figures: **bias** (runs high or low — correctable), **MAE** (typical error), and **coverage**
+(how often the truth fell inside the stated ±1σ). Coverage's target is 0.683, not 1.0: the stated
+uncertainties are 1σ RMSEs, so a well-calibrated calculator misses about a third of the time;
+materially below means error bars too tight, above too loose.
 
-**That `input_hash` is *not* the calculation cache's, and this docstring claimed it was.** The
-ledger hashes the canonical SMILES (`stable_hash(canonical)` in
-`connectors/calc/server/tools.py::_log_prediction`); the cache hashes a dict around it
-(`store.molecule_hash` is `stable_hash({"smiles": ...})`). Measured on ethanol: `f29e20f49d416e54`
-against `a7d334ebee616d78`. Nothing joins the two tables today, so the claim cost nothing — but it
-is a claim about a key, and whoever writes that join on the strength of this sentence gets zero
-rows and no error. The two schemes are independent; a join needs a translation, not a `USING`.
-
-**What calibration means here, and why it is three numbers rather than one.**
-
-- **Bias** (mean signed error) says whether a calculator runs high or low. A calculator that is
-  reliably +0.4 log units off is *usable with a correction*; one with the same absolute error
-  scattered either way is not.
-- **MAE** says how far off it typically is — the number a chemist actually wants when deciding
-  whether a prediction can stand in for an experiment.
-- **Coverage** says how often the truth fell inside the stated uncertainty. This is the one a mean
-  error cannot show: a calculator whose errors are small but whose error bars never contain the
-  answer is miscalibrated in a way that makes its uncertainty actively misleading, which is worse
-  than reporting none.
-
-  **Its target is 0.683, not 1.0, and nothing here used to say so.** The interval is ±1σ and the
-  published uncertainties it is scored against are 1σ RMSEs (`crippen_logp_uncertainty = 0.68` is
-  Wildman-Crippen's own reported RMSE), so a *correctly* calibrated calculator with Gaussian errors
-  misses roughly a third of the time by construction. Read against an unstated target of 1.0 — the
-  only one a reader supplies on their own — a perfectly calibrated calculator reads as 32%
-  miscalibrated. Materially below 0.683 means the error bars are too tight; materially above means
-  they are too loose, which is its own defect and not a better result.
-
-**Deliberately advisory.** Nothing here changes a prediction. *Recording* is best-effort and a
-calibration failure never fails a calculation — a broken ledger must degrade the *advice about*
-predictions, never the predictions themselves.
-
-**Reading is not.** The rule above is about the write that rides along with a calculation; it was
-also applied to the read, and there it means something else entirely. `reconciled_for` is called
-only by the two trust tools, so a swallowed read has no calculation to protect — it just answers
-"no measurement has ever missed" when the database is down. It raises now, and `Calibration`
-carries a `verdict` that separates a disabled ledger from an empty one from too few points, because
-all three used to serialize as bias/MAE/RMSE 0.0 and the ledger is **off by default**.
+Recording a prediction is best-effort and never fails a calculation. Recording a measurement and
+reading the ledger raise on failure, because there the ledger *is* the deliverable.
+`Calibration.verdict` separates a disabled ledger (the default) from an empty one and from too few
+points.
 """
 
 import logging
@@ -71,16 +37,9 @@ ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
     predicted_at = now()
 """
 
-# The measurement itself, kept whether or not anything predicted it (DARK-9, `infra/sql/030`).
-# Written *before* the reconciliation below, so a measurement for a molecule nothing has predicted
-# survives instead of being discarded by an UPDATE that matches nothing.
-#
-# **The conflict target is the source too** (`infra/sql/093`). `030` keyed the table on
-# `(property, input_hash)` and argued that "two values for one property of one molecule is a
-# correction, not two facts" — true of a lab revising its own number, false of a replicate or a
-# second site, and this statement is where the difference was destroyed: a second lab's `DO UPDATE`
-# overwrote the first lab's value and stamped its own name on the row. It still replaces under one
-# source, which is the correction case that argument is right about.
+# The measurement itself, kept whether or not anything predicted it, and written before the
+# reconciliation so it survives. Keyed by source too: a replicate or second site is a second
+# fact, while a second value from the same source replaces (a correction).
 _UPSERT_MEASUREMENT = """
 INSERT INTO measurements (property, input_hash, subject, value, unit, source, observed_at)
 VALUES (%s, %s, %s, %s, %s, %s, now())
@@ -90,21 +49,10 @@ ON CONFLICT (property, input_hash, source) DO UPDATE SET
     observed_at = now()
 """
 
-# Every measurement on file for one property of one molecule, as a single row: the value a
-# prediction is scored against, how far the reporters are apart, and who they were.
-#
-# **One fragment, three readers**, because the number `calculator_trust` reports and the number
-# `report_measurement` quotes back to the chemist must be the same number by construction rather
-# than by two implementations agreeing. The reconciliation is a mean: with the source in the key
-# there can be several rows, and an unaggregated `UPDATE … FROM measurements` would have taken
-# whichever one the planner handed it first — a scored value determined by nothing the caller
-# could see.
-#
-# `count(*)` is the number of *sources*, not of reports: the primary key holds one row per source,
-# so a lab that measured three times contributes one. `count(DISTINCT unit)` is carried because a
-# mean over two units is a number in neither; `report_measurement` reconciles every calibrated
-# value into the ledger's own unit before it gets here, so this reads 1 in every shipped path and
-# says so rather than being believed.
+# Every measurement for one property of one molecule as one row: the consensus value (mean over
+# sources), their spread, and who they were. One fragment for every reader, so the scored value
+# and the quoted value are the same number. `count(*)` counts sources; `count(DISTINCT unit)` is
+# carried because a mean over two units is meaningless (values are converted before writing).
 _CONSENSUS = """
     SELECT avg(value)                                AS value,
            min(value)                                AS lowest,
@@ -117,10 +65,7 @@ _CONSENSUS = """
      WHERE property = %s AND input_hash = %s
 """
 
-# The reverse direction, and the reason the table is worth having rather than merely honest: a
-# prediction made *after* a measurement reconciles against it immediately. Without this, storing
-# the measurement would only stop the lie, and the ledger would still learn nothing from the
-# measure-then-predict order that new chemistry actually follows.
+# The reverse direction: a prediction made *after* a measurement reconciles against it at once.
 _RECONCILE_FROM_MEASUREMENT = f"""
 UPDATE predictions p
    SET observed_value = c.value, observed_at = c.observed_at, observed_source = c.reported_by
@@ -131,14 +76,9 @@ UPDATE predictions p
    AND c.value IS NOT NULL
 """
 
-# Deliberately *not* scoped by version: a measurement is a fact about the molecule, not about the
-# calculator that guessed at it. One reported value scores every version's prediction of that
-# molecule, which is what makes a version-over-version comparison possible at all.
-#
-# It writes the *consensus* rather than the value just reported, so the figure a chemist reads does
-# not move to whichever source wrote last. `c.value IS NOT NULL` guards the empty aggregate: a
-# grouping-free aggregate over no rows still yields one row of NULLs, and blanking an observed
-# value is worse than doing nothing.
+# Not scoped by version: a measurement is a fact about the molecule and scores every version's
+# prediction. Writes the consensus, not the latest value; `c.value IS NOT NULL` guards the
+# empty aggregate, which would otherwise blank an observed value.
 _RECORD_OBSERVATION = f"""
 UPDATE predictions p
    SET observed_value = c.value, observed_at = c.observed_at, observed_source = c.reported_by
@@ -148,10 +88,8 @@ UPDATE predictions p
    AND c.value IS NOT NULL
 """
 
-# Scoped to one calculator *version*. Pooling versions was the other half of REV-12: even with the
-# write path fixed, a read that ignored the version would average a v1 that ran high against a v2
-# that ran low and report the cancellation as good calibration. A chemist asking "how far off is
-# this calculator" means the one that just answered them.
+# Scoped to one calculator version: pooling versions could average opposite biases into
+# apparent good calibration.
 _SELECT_RECONCILED = """
 SELECT subject, predicted_value, predicted_uncertainty, observed_value
   FROM predictions
@@ -172,21 +110,14 @@ class Calibration(BaseModel):
 
     calc_type: str
     n: int
-    # Whether the ledger is recording at all. `calibration_enabled` defaults to **False**, so a
-    # shipped deployment's answer here is "nothing is being recorded", not "nothing has missed" —
-    # and those two were the same payload.
+    # Whether the ledger is recording at all (`calibration_enabled` defaults to False), so "nothing
+    # recorded" is distinguishable from "nothing missed".
     enabled: bool = True
     bias: float | None = None
     mean_absolute_error: float | None = None
     rmse: float | None = None
-    # Fraction of observations that fell inside the prediction's stated ±1σ interval. `None` when
-    # no prediction carried an uncertainty — deliberately not 0.0, which would read as "never
-    # covered" rather than "never claimed".
-    #
-    # **The target is 0.683, not 1.0**: the interval is one standard deviation and the stated
-    # uncertainties are 1σ RMSEs, so a correctly calibrated calculator misses a third of the time.
-    # Anyone reading this field against an implied 1.0 reports a well-calibrated calculator as 32%
-    # miscalibrated.
+    # Fraction of observations inside the prediction's stated ±1σ. `None` when no prediction carried
+    # an uncertainty ("never claimed", not "never covered"). The target is 0.683, not 1.0.
     uncertainty_coverage: float | None = None
     unit: str = ""
 
@@ -200,11 +131,8 @@ class Calibration(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before quoting any of these figures.
 
-        A `computed_field` and not a bare property, for the reason `FingerprintSearch.verdict` and
-        `ScreenResult.verdict` are: a property is not serialized, so the sentence explaining what
-        an all-zero payload means would never leave this process — and this was the last advisory
-        model in the package without one. A **database outage** is not among the states below
-        because it is no longer a state: `reconciled_for` raises rather than answering `[]`.
+        A `computed_field` so it is serialized. A database outage is not a state here:
+        `reconciled_for` raises.
         """
         if not self.enabled:
             return (
@@ -247,9 +175,7 @@ class ObservedConsensus(BaseModel):
     made `FingerprintSearch.verdict` a `computed_field` is about a payload that leaves the process.
     """
 
-    # `property_name` rather than `property`: the field would shadow the builtin decorator inside
-    # this class body, which is a `"str" not callable` error on `spread` below rather than a
-    # readability preference.
+    # `property_name` because `property` would shadow the builtin decorator in this class body.
     property_name: str
     value: float
     lowest: float
@@ -257,9 +183,7 @@ class ObservedConsensus(BaseModel):
     # One row per source, so this counts reporters rather than reports: a lab that measured three
     # times under one source name contributes one.
     sources: int
-    # How many distinct units those rows carry. `1` in every shipped path, because
-    # `report_measurement` reconciles a calibrated value into the ledger's own unit before writing
-    # — carried rather than assumed, because a mean over two units is a number in neither.
+    # Distinct units among those rows: `1` in every shipped path, carried rather than assumed.
     units: int
     reported_by: str
 
@@ -291,9 +215,7 @@ class Residual(BaseModel):
     def within_uncertainty(self) -> bool | None:
         """Whether the measurement fell inside the stated ±1σ. `None` when none was claimed.
 
-        **±1σ, so `False` on about a third of well-calibrated predictions.** The stated
-        uncertainties are 1σ RMSEs, and a residual outside one of them is the ordinary case rather
-        than a miss worth explaining — see the module docstring's 0.683.
+        `False` on about a third of well-calibrated predictions (see the module's 0.683).
         """
         if self.uncertainty is None or self.uncertainty <= 0:
             return None
@@ -315,9 +237,8 @@ class PredictionRecord(BaseModel):
 async def record_prediction(record: PredictionRecord) -> None:
     """Log a prediction for later reconciliation. Best-effort: never fails the calculation.
 
-    Idempotent by `(calc_type, calc_version, input_hash)`: re-predicting the same thing updates the
-    row rather than accumulating duplicates, which would silently double-weight that input in the
-    calibration.
+    Idempotent by `(calc_type, calc_version, input_hash)`, so a repeated prediction does not
+    double-weight its input.
     """
     if not settings.calibration_enabled:
         return
@@ -336,9 +257,7 @@ async def record_prediction(record: PredictionRecord) -> None:
                         record.unit,
                     ),
                 )
-                # A measurement may already be on file — new chemistry is routinely measured before
-                # it is predicted — so scoring the prediction it was just written for happens here
-                # rather than waiting for a measurement that has already arrived.
+                # A measurement may already be on file, so score the new prediction against it now.
                 await cur.execute(
                     _RECONCILE_FROM_MEASUREMENT,
                     (record.calc_type, record.input_hash, record.calc_type, record.input_hash),
@@ -363,51 +282,21 @@ async def record_observation(
 ) -> int | None:
     """Store a measured value, reconcile any matching predictions, and return how many it scored.
 
-    **A measurement is identified by who reported it** (`infra/sql/093`). Two sources measuring one
-    property of one molecule — a replicate, a second solvent system, a second site — are two facts,
-    and the predictions they score are updated to their *consensus* (the mean over sources) rather
-    than to whichever arrived last. Before this, `measurements` was keyed on
-    `(property, input_hash)` and the second write deleted the first: measured on one prediction of
-    -0.30 log S, `lab-basel`'s -0.10 reported a bias of -0.200 and `lab-shanghai`'s -0.95 then
-    reported +0.650 — a sign flip on the arrival of an equally valid number, at `n=1` both times,
-    with nothing logged and no counter moved.
+    A measurement is identified by its source: values from different sources are separate facts, and
+    predictions are scored against their consensus (mean over sources); a second value from the same
+    source replaces the first. `report_measurement` defaults the source to `chemist-reported`. The
+    measurement is stored even when nothing predicted it, and a later prediction reconciles against
+    it on write.
 
-    A second value under the **same** source still replaces, because that is one reporter revising
-    one number — the case `030_measurements.sql` argued for, kept where it is true. `source` is
-    therefore load-bearing at the caller: `report_measurement` defaults it to `chemist-reported`,
-    so two chemists who do not name their labs still collapse into one row, and the reply says so.
-
-    **The measurement is kept either way**, which it was not before (DARK-9). This was a bare
-    `UPDATE` against `predictions`, so a value for a molecule nothing had predicted matched no row
-    and was discarded — while `report_measurement` told the chemist it had been "recorded". That is
-    the *common* case, not an edge one: new chemistry is measured before anyone thinks to predict
-    it, so the ledger could only ever learn from molecules the agent happened to guess at first.
-
-    Zero is still a normal and informative return, and still means "nothing had predicted this" —
-    it no longer means "and so it is gone". A later prediction of the same thing reconciles against
-    the stored measurement on write, so the measure-then-predict order works as well as the
-    reverse.
-
-    **`None` is not zero, and the difference is the whole contract.** Zero means the value was
-    stored and nothing had predicted it; `None` means it was not stored at all, because the ledger
-    is disabled. Collapsing the two is what let `report_measurement` tell a chemist their
-    measurement was "kept" while `calibration_enabled` was False — which is the **default**, so the
-    tool said it every time.
-
-    **This one does not swallow, unlike `record_prediction` above.** That asymmetry is deliberate.
-    A prediction row is advice *about* work that already happened, so losing it must never cost the
-    calculation — logging and continuing is right there. A measurement is the entire deliverable of
-    the call: there is no primary result to protect, and swallowing turns the tool's only job into
-    a false claim of success (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). A write
-    failure raises, and the caller says so.
+    Unlike `record_prediction` this does not swallow failures: storing the measurement is the call's
+    whole deliverable.
 
     Returns:
-        How many predictions the measurement reconciled, or `None` if the ledger is disabled and
-        nothing was stored.
+        How many predictions the measurement reconciled (zero: stored, nothing predicted it), or
+        `None` if the ledger is disabled and nothing was stored.
 
     Raises:
-        Exception: whatever the database raises. The connector's error sanitizer turns it into a
-            caller-safe message; what matters is that it is not reported as a success.
+        Exception: whatever the database raises; the connector's sanitizer makes it caller-safe.
     """
     if not settings.calibration_enabled:
         return None
@@ -426,12 +315,8 @@ async def record_observation(
 async def consensus_for(property_name: str, input_hash: str) -> ObservedConsensus | None:
     """What every source has measured for one property of one molecule, or `None` for nothing.
 
-    The same `_CONSENSUS` fragment the two reconciliations write from, so the value a chemist is
-    told their prediction is scored against and the value actually written are the same number by
-    construction. `None` means no measurement is on file — not a failure, and not a zero.
-
-    Raises whatever the database raises, for `reconciled_for`'s reason: the caller's whole
-    deliverable is this read, so an unreachable database must not answer "nothing was measured".
+    Reads the same `_CONSENSUS` fragment the reconciliations write from. Raises on database failure,
+    since this read is the caller's whole deliverable.
     """
     if not settings.calibration_enabled:
         return None
@@ -462,9 +347,8 @@ def summarize(
 ) -> Calibration:
     """Compute the calibration figures from `(predicted, uncertainty, observed)` triples.
 
-    Pure, so the statistics are testable without a database — the same split the eval harness uses.
-    `enabled` is carried through rather than read from config here for the same reason: it is the
-    caller's fact about the ledger, and this function must stay a function of its arguments.
+    Pure, so the statistics are testable without a database; `enabled` is the caller's fact about
+    the ledger.
     """
     if not pairs:
         return Calibration(calc_type=calc_type, n=0, enabled=enabled, unit=unit)
@@ -496,26 +380,13 @@ def summarize(
 async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
     """Every prediction of this calculator version that a measurement has since answered.
 
-    The one read of the ledger, so the aggregate and the per-molecule listing can never disagree
-    about which rows they describe — they are the same rows, summarized or not.
-
-    Unbounded on purpose. The filter is `observed_value IS NOT NULL`, and an observation is a
-    measurement somebody made and typed in; the table's growth is bounded by bench work, not by
-    how often the calculator runs. A cap here would silently drop measurements from the
-    calibration, which is worse than the read it would protect.
-
-    **A read failure raises**, where it used to be logged and answered as `[]`. The module's
-    best-effort rule protects a *calculation* from a ledger fault — but nothing calls this during
-    a calculation. Its only callers are `calculator_trust` and `calculator_outliers`, whose entire
-    deliverable is this read, so there was no primary result the swallow was protecting: an
-    unreachable database returned an empty residual list, which the summary then rendered as
-    bias/MAE/RMSE 0.0 — a calculator that has never missed. That is the read half of
-    D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed, whose write half was fixed in
-    `record_observation` for the identical reason.
+    The one read of the ledger, so aggregate and listing describe the same rows. Unbounded on
+    purpose: growth is bounded by bench work, and a cap would silently drop measurements. Raises on
+    failure, because the only callers (`calculator_trust`, `calculator_outliers`) have no other
+    result, and `[]` would read as a calculator that never missed.
 
     Raises:
-        Exception: whatever the database raises. The connector's error sanitizer turns it into a
-            caller-safe message; what matters is that it is not reported as a clean ledger.
+        Exception: whatever the database raises; the connector's sanitizer makes it caller-safe.
     """
     if not settings.calibration_enabled:
         return []
@@ -538,10 +409,8 @@ async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
 async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") -> Calibration:
     """Read the reconciled rows for one calculator *version* and summarize them.
 
-    `calc_version` is required rather than defaulted: a default would silently reproduce the pooled
-    reading this exists to remove, and every caller already knows which version answered.
-
-    Raises whatever `reconciled_for` raises — see its note on why a failed read is not an empty one.
+    `calc_version` is required: a default would reintroduce pooled readings. Raises whatever
+    `reconciled_for` raises.
     """
     residuals = await reconciled_for(calc_type, calc_version)
     return summarize(

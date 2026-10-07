@@ -362,8 +362,9 @@ async def _recording(
     plan step, agent and, inside the block, its result.
     """
     args = bounded_repr(arguments)
-    # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
-    # `actor` bound at build time when there is none (tests, the non-service caller).
+    # The real actor is the turn's authenticated Entra user; fall back to the build-time `actor`
+    # when
+    # there is none (tests, non-service callers).
     event_actor = get_current_actor() or actor
     # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
     event_cid = get_current_correlation_id() or correlation_id

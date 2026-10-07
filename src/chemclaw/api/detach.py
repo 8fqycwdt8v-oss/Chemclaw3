@@ -1,84 +1,27 @@
 """A turn that survives its client: detach on disconnect, stop only on request.
 
-**The decision this module carries
-(`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`).** The turn stream used to read any client
-disconnect as cancellation, because closing the SSE response was the only way a client could stop
-a turn — so the Stop button and a Wi-Fi handoff were indistinguishable, and a 10-minute multi-tool
-turn died with the connection that happened to be carrying it. The work was lost from the live
-view *and* from the transcript (written only after the answer), on a turn that may have been three
-events from delivering it.
+(`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`.) An SSE disconnect detaches the client and the
+turn runs on: a pump task drives `run_turn` to completion, the checkpoint and transcript land as
+usual, and the client recovers the answer on reconnect. An explicit stop
+(`POST /sessions/{id}/turn/stop`) cancels the pump, delivering `CancelledError` into `run_turn` so
+every existing teardown path runs in the task whose context stamped the ambients. A detached turn
+is billed in full, bounded by the loop cap and `service_turn_timeout_seconds`.
 
-So the two meanings are separated. An SSE disconnect — a network blip, a closed laptop, a stalled
-reader past the send timeout — **detaches** the client and the turn runs on: the pump task below
-keeps driving `run_turn` to completion, the checkpointer and the transcript land exactly as they
-would have, and the client recovers the answer from `GET /sessions/{id}/messages` on reconnect.
-An explicit **stop** is a first-class request (`POST /sessions/{id}/turn/stop`) that cancels the
-pump, which delivers the same `CancelledError` into `run_turn` that a disconnect used to — every
-teardown path built for D-130 runs unchanged, in the pump task whose context stamped the ambients.
+The generator's `finally` releases the lease and the durable claim, so a session stays claimed for
+exactly as long as its turn runs. The admission permit is the exception: it is the process-wide
+semaphore, so it is released at the detach (`on_detach`); otherwise hung-up clients could hold
+every permit on the replica. `chemclaw_turns_in_flight` counts leases, so detached turns stay
+visible.
 
-**The token-budget shape that vetoed stream_events v3 cannot reappear here, by direction.** That
-veto was about an abandoned turn booking *less* (v3 booked 0 where the driver books ~30). A
-detached turn books *more*: it runs to completion, so every token it spends is metered and billed.
-The cost of that honesty is real and stated — a chemist who closes the tab pays for the whole
-turn — and it is bounded twice, by the loop cap (attached on every profile) and by
-`service_turn_timeout_seconds`, which keeps ticking inside the pump.
+Several participants can watch one turn. Each reader has its own bounded buffer and the pump never
+waits on one: a reader whose buffer fills is cut off with one `stream_lagged` error. A late joiner
+sees events from attach onward (there are no event ids to replay from). Only the sender's departure
+is a detach; a watcher closing their tab changes nothing. A watch counts against
+`service_turn_max_watchers` until its response ends (`Watch.close`), not merely until it is cut off.
 
-**What the pump owns, and the one thing it deliberately does not.** The turn generator's own
-`finally` releases the in-process lease and the durable claim; running the generator to completion
-in the pump is what keeps both held while the model is genuinely still working — a session stays
-claimed — and the next message in its line waiting — for exactly as long as a turn is running,
-whether anyone is watching it or not.
-
-The **admission permit** is the exception, and it was not one until it was measured. That permit
-is not per session: it is the process's shared `service_max_concurrent_turns` semaphore, so
-holding it for a detached turn charges *everyone else on the replica* for work nobody is watching.
-Measured by POSTing and hanging up one fresh session per permit: every permit on the replica was
-held, and every other chemist's turn was shed as `queued` then `error`, for up to
-`service_turn_timeout_seconds` — reachable by a flaky mobile network, a crashed tab, or a UI that
-retries on disconnect, where the retry *adds* a holder rather than replacing one. The cap is a
-setting (`core/config/service.py`) and this paragraph names no value for it on purpose: the
-measurement is "one hung-up client per permit", which holds at whatever the cap is, and the number
-this sentence used to carry was 8 while the shipped default had moved to 12. Before this module
-existed a disconnect returned the permit immediately, so the failure was self-limiting. So the
-permit is released at the detach, through
-`on_detach`: admission is fairness to a *waiting client*, and a detached turn has none. What still
-bounds the detached turn is what always did — the loop cap, `service_turn_timeout_seconds` ticking
-inside the pump, and the per-user token budget where one is configured — and it stays visible,
-because `chemclaw_turns_in_flight` counts leases rather than permits, so a replica running more
-turns than it admitted reads as exactly that.
-
-**Several people can watch one turn, and none of them can hold it**
-(`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A shared session has more than one
-participant, so a turn has more than one reader: the sender's own stream, and any other
-participant's `GET /sessions/{id}/turn/stream`. Each reader has **its own** bounded buffer and the
-pump never waits on any of them — it offers every event to every attached reader and moves on.
-A reader whose buffer is full has stopped reading, and it is cut off with one `stream_lagged`
-error rather than allowed to slow the turn or anybody else's view. That is a change for the sender
-too, and a deliberate one: a single reader used to push back on the pump through a shared queue,
-so a stalled browser held the turn until the send timeout closed it. Measured, a healthy reader
-outruns the producer (the empty-queue path ran on 100 of 101 reads at a 1 ms token cadence), so the
-buffer is only ever filled by a reader that has stopped — and the thing to protect from it is the
-turn, not the reader. A late joiner sees the turn from the moment it attaches: the stream carries
-no event ids, so there is nothing to replay from, and what came before is in the transcript once
-the answer lands — which is exactly what a sender reconnecting after a detach gets.
-
-The **sender's** reader keeps the one role no watcher has: its departure is the detach
-(`on_detach`, or a stop under `survive_disconnect=False`). A watcher closing their tab changes
-nothing about the turn.
-
-**A stop sent by an unloading page waits for a reload**
-(`D-2026-10-03-an-unload-stop-waits-for-a-reload`). The browser cannot tell a reload from a closed
-tab at unload time, so the page's stop arrives from both; `defer_stop` holds it for
-`service_turn_unload_grace_seconds`, and the sender coming back through
-`GET /sessions/{id}/turn/stream` inside that window cancels it (`resume`). An explicit stop stays
-immediate, and cancels a pending one on the way.
-
-**A watcher counts against the cap until its socket is gone, not until the pump stops feeding it.**
-Being cut off ends the *delivery*; the connection and whatever it had buffered stay until the
-reader drains or the send timeout closes it. Counting only the readers the pump still feeds let a
-participant stall a view, get it cut off, and open another — past `service_turn_max_watchers` with
-every stalled socket still held. So a watch is released by the response that serves it, exactly
-when that response ends (`Watch.close`), whichever way it ends.
+A stop from an unloading page is deferred (`defer_stop`) for `service_turn_unload_grace_seconds`,
+since a reload and a close look the same; the sender returning cancels it (`resume`). An explicit
+stop is immediate.
 """
 
 import asyncio
@@ -93,11 +36,8 @@ from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-#: Per reader, so a stalled browser can fill only its own. Sized well past anything a *reading*
-#: client accumulates — a healthy reader finds its buffer empty on nearly every read — because the
-#: only reader that reaches it is one that has stopped, and cutting that one off is the point. It
-#: also bounds the memory one abandoned view can pin for as long as it takes the send timeout to
-#: close it.
+# Per reader, so a stalled browser fills only its own. Large, because only a reader that has stopped
+# fills it; it also bounds what one abandoned view pins until the send timeout closes it.
 _QUEUE_SIZE = 1024
 
 #: End-of-turn marker. Its own object, because `None` could plausibly be an event one day.
@@ -122,13 +62,11 @@ def lagged_frame() -> dict[str, str]:
 class _DraftSlot:
     """A queued `exhibit_draft` frame whose content a newer frame of the same call may replace.
 
-    **Why a draft is coalesced and nothing else is.** Every draft frame carries the *whole*
-    document so far (`ExhibitDraftEvent`), so a frame a reader has not yet taken is made worthless
-    by the next one of its call — and a reader that has stopped reading would otherwise hold every
-    one of them: up to `_QUEUE_SIZE` frames of a 200 kB document is ~200 MB pinned by one stalled
-    tab. So a reader's buffer holds at most one draft per call, refreshed in place, and the reader
-    receives the newest text when it gets there. Every other event is a fact in a sequence and is
-    queued as it is.
+    Each draft frame carries the whole document so far, so an untaken frame is worthless once a
+    newer
+    one exists; a stalled reader would otherwise pin a buffer full of large documents. A buffer
+    holds at
+    most one draft per call, refreshed in place. Every other event is queued as is.
     """
 
     __slots__ = ("call_id", "frame")
@@ -155,8 +93,7 @@ class _Reader:
 def _draft_call_id(item: Any) -> str | None:
     """The tool-call id of an `exhibit_draft` frame, or `None` for every other item.
 
-    Read off the frame's own JSON because a frame is what the pump is handed; parsed only for the
-    one event type that is coalesced, so every other event pays a dict lookup.
+    Read off the frame's JSON, parsed only for the coalesced event type.
     """
     if not isinstance(item, dict) or item.get("event") != "exhibit_draft":
         return None
@@ -196,23 +133,18 @@ class DetachableTurn:
     ) -> None:
         """Start pumping `source` immediately; the turn is running from this moment.
 
-        The sender's reader is attached here rather than when `events()` is first iterated, so
-        nothing the turn produces before the response starts is lost.
+        The sender's reader is attached here, so nothing produced before the response starts is
+        lost.
 
-        `survive_disconnect=False` restores the old posture for a deployment that prefers cost
-        over completion: the sender's detach then stops the turn, exactly as closing the stream
-        always did. The knob lives on the object rather than being read ambiently so a test can pin
-        either posture without touching settings.
-
-        `on_detach` fires once, at the instant the sender's reader is known to be gone and the
-        turn is known to be continuing — the one moment nothing else in the process can observe.
-        Its caller uses it to give back what was held *for the reader* rather than for the turn
-        (see `chemclaw.api.routes.turns`); it must not raise and must not block, because it runs
-        inside a reader teardown that is usually a cancellation.
-
-        `correlation_id` is the id of the request that started the turn — the one its sender's
-        response header carried — so a page reattaching through the watch route can tell *its*
-        turn from another participant's that started since (`TURN_CORRELATION_HEADER`).
+        `survive_disconnect=False` makes the sender's detach stop the turn (cost over completion);
+        held on
+        the object so tests can pin either posture. `on_detach` fires once, when the sender's reader
+        is
+        gone and the turn continues, to give back what was held for the reader (see
+        `chemclaw.api.routes.turns`); it runs inside a cancellation and must not raise or block.
+        `correlation_id` is the starting request's, so a reattaching page can tell its turn from a
+        later
+        one (`TURN_CORRELATION_HEADER`).
         """
         self._session_id = session_id
         self.correlation_id = correlation_id
@@ -233,9 +165,7 @@ class DetachableTurn:
         self._resumers: frozenset[str] = frozenset()
         self._deferrals = 0
         self._task = asyncio.create_task(self._pump(source), name=f"turn:{session_id}")
-        # **On the task, not on a reader's path.** See `_note_pump_failure`: the two places a
-        # reader could retrieve it are both places a reader may never reach, and a turn that
-        # detached has no reader at all. A done callback runs on every ending there is.
+        # A done callback, because a detached turn has no reader to retrieve the exception.
         self._task.add_done_callback(self._note_pump_failure)
         # A turn that ends inside a grace window takes its pending stop with it.
         self._task.add_done_callback(lambda _t: self._drop_pending_stop())
@@ -254,24 +184,25 @@ class DetachableTurn:
     def watchers(self) -> int:
         """How many participants besides the sender hold a view of the turn open right now.
 
-        A view the pump has cut off still counts until its stream closes: its socket and buffer are
-        held until then, so it is still a watcher for every purpose the cap exists for.
+        A cut-off view still counts until its stream closes, since its socket and buffer are still
+        held.
         """
         return len(self._watching)
 
     async def _pump(self, source: AsyncIterator[dict[str, str]]) -> None:
         """Drive the turn to its end, offering each event to every reader still attached.
 
-        The generator's own `finally` — permit, lease, claim, booking — runs here, at the turn's
-        *true* end, whichever way it ends. Nothing here awaits a reader: see `_offer`.
+        The generator's own `finally` (permit, lease, claim, booking) runs here at the turn's true
+        end.
+        Never awaits a reader: see `_offer`.
         """
         try:
             async for item in source:
                 self._offer(item)
         finally:
-            # Never blocking teardown: a full buffer loses the marker, and `_next_event` reads the
-            # pump's *state* for exactly that case, so the marker is the ordinary terminator rather
-            # than the only one.
+            # Never block teardown: a full buffer loses the marker, and `_next_event` checks the
+            # pump's state
+            # for that case.
             for reader in list(self._readers):
                 with contextlib.suppress(asyncio.QueueFull):
                     reader.queue.put_nowait(_DONE)
@@ -279,12 +210,11 @@ class DetachableTurn:
     def _offer(self, item: Any) -> None:
         """Put `item` in every attached reader's buffer; cut off any reader whose buffer is full.
 
-        No `await`, so a reader cannot detach half-way through one delivery and no reader's pace
-        reaches the turn. A cut-off reader keeps what is already buffered — it reads that first and
-        is then told it lagged — so it never sees a gap in the middle of its stream, only an end.
-
-        A draft frame whose call already has one waiting in a reader's buffer replaces it there
-        rather than queueing behind it (`_DraftSlot`).
+        No `await`, so no reader's pace reaches the turn. A cut-off reader reads what it already
+        has, then
+        learns it lagged — an end, never a gap. A draft frame replaces an older waiting one of its
+        call
+        (`_DraftSlot`).
         """
         call_id = _draft_call_id(item)
         for reader in list(self._readers):
@@ -310,30 +240,17 @@ class DetachableTurn:
     async def _next_event(self, reader: _Reader) -> Any:
         """The reader's next event, `_LAGGED` once it was cut off, or `_DONE` once the turn is over.
 
-        **The bug this closes was a live hang, and the trigger is an ordinary turn.** The pump's
-        `finally` offers `_DONE` with `put_nowait`, and a buffer that is full at that moment drops
-        it. Reproduced (when the pump still blocked on one shared queue) at the queue's size and
-        twice it with a reader momentarily behind: the pump task finished, the queue drained to
-        empty, and the reader awaited a marker that no longer existed. Nothing sends on that
-        connection, so the SSE send timeout never fires and the 15 s ping keeps succeeding; the
-        stream stays open for the pod's lifetime holding a slot against `--limit-concurrency`.
-
-        So end-of-stream is decided by the fact rather than by the message: the pump task being
-        done, with the buffer drained, *is* the end of the turn. `asyncio.wait` rather than
-        `wait_for`, because there is no timeout here to pick — the two things that can happen are
-        an event arriving and the turn ending.
-
-        **Lagged is checked before done**, because a reader that was cut off missed events and
-        must be told so even if the turn has since finished — "the turn ended" would be a false
-        account of a stream with a hole in its tail.
+        End-of-stream is decided by the pump task being done with the buffer drained, not by the
+        `_DONE`
+        marker, which a full buffer can drop — otherwise the reader would wait forever on a
+        connection the
+        ping keeps alive. Lagged is checked before done: a cut-off reader missed events and must be
+        told.
         """
-        # **The buffer-non-empty path is the *rare* one.** A healthy stream is one whose reader
-        # outruns its producer, so the buffer is empty at nearly every read. Measured over 101
-        # reads, with the producer pausing 1 ms between tokens — slower than that is what a real
-        # provider does: this branch ran **once** and the task-juggling path below ran **100**
-        # times. The per-event cost of that path (~22 µs against ~0.4 µs for a bare `get`) stays,
-        # because removing the getter task means the marker must be *guaranteed*, which costs a
-        # second synchronisation primitive in a module whose defects have all been races.
+        # Fast path when events are buffered (rare: a healthy reader outruns the producer). The
+        # slower
+        # getter-task path below is kept because it guarantees the end is seen without a second
+        # synchronisation primitive.
         if not reader.queue.empty():
             return reader.queue.get_nowait()
         if reader.lagged:
@@ -346,29 +263,22 @@ class DetachableTurn:
             if getter.done():
                 return getter.result()
         finally:
-            # Including on the reader's own cancellation, which is the detach path: an orphaned
-            # getter would otherwise outlive the stream it was reading for. Cancelling a woken
-            # `Queue.get` does not consume the item — asyncio re-wakes the next getter and leaves
-            # it queued — so the drain below still sees everything the pump delivered.
+            # Including on the reader's own cancellation (the detach path). Cancelling a woken
+            # `Queue.get` does
+            # not consume the item, so the drain still sees everything.
             if not getter.done():
                 getter.cancel()
         return reader.queue.get_nowait() if not reader.queue.empty() else _DONE
 
     def _note_pump_failure(self, task: "asyncio.Task[None]") -> None:
-        """Log a pump that ended by raising, and *retrieve* it so asyncio does not shout at GC.
+        """Log a pump that ended by raising, and retrieve the exception so asyncio does not report it
+        at GC.
 
-        `run_turn` turns every `Exception` into an error event, so a failure reaching here was
-        above it — and until this ran as a done callback, nothing retrieved it. Measured across
-        eight raise scenarios: **0 calls, 0 log records, and `task._log_traceback is True` in all
-        eight**, which is asyncio's flag for "I will print `Task exception was never retrieved` at
-        garbage-collection time" — under no session, no correlation id, and possibly never.
-
-        A reader-side placement shares a deeper problem — a detached turn has no reader, and a
-        reader that is cancelled mid-stream never runs another line of this class. A done callback
-        is the one hook that fires on every ending, exactly once, whether anybody was watching or
-        not.
-
-        `CancelledError` is excluded because it is the ordinary stop path.
+        `run_turn` turns every `Exception` into an error event, so anything reaching here was above
+        it. A
+        done callback is the one hook that fires on every ending, reader or not. `CancelledError` is
+        the
+        ordinary stop path and is excluded.
         """
         if task.cancelled():
             return
@@ -389,14 +299,10 @@ class DetachableTurn:
     def watch(self, oid: str | None = None) -> Watch | None:
         """Another participant's view, from this moment on; `None` once the turn is over.
 
-        `oid` is whose view it is, held for as long as the view is open: a deferred unload stop
-        that expires while its sender is watching is a reload that arrived first, not a departure.
-
-        Attached here, synchronously, rather than on first iteration, so the view starts at the
-        event after this call and not at whatever the response's first read happens to be.
-        Whether this caller may watch — a participant of *this* session, within the watcher cap —
-        is the route's to decide before it calls; this object is reached only through the session
-        it was registered under.
+        `oid` is whose view it is, held while open: a deferred unload stop expiring while its sender
+        watches means the reload arrived first. Attached synchronously so the view starts at the
+        next event.
+        Whether the caller may watch is the route's decision.
         """
         if not self.running:
             return None
@@ -417,8 +323,9 @@ class DetachableTurn:
         """One reader's stream, to the turn's end, its own cut-off, or its own cancellation.
 
         The `finally` detaches the reader and drains its buffer. For the sender's reader it is also
-        the detach itself: the turn continues (and `on_detach` gives back what was held for the
-        reader), or — under the old posture — stops.
+        the
+        detach: the turn continues (and `on_detach` runs), or, under `survive_disconnect=False`,
+        stops.
         """
         try:
             while True:
@@ -455,10 +362,9 @@ class DetachableTurn:
                 if self._on_detach is not None:
                     self._on_detach()
             else:
-                # The configured posture is the old one: a disconnect stops the turn. On a
-                # task because this runs inside the reader's own cancellation, where an await
-                # re-raises immediately; held on the instance so the write cannot be
-                # garbage-collected mid-cancel.
+                # Configured to stop on disconnect. On a task because an await here would re-raise
+                # the cancellation
+                # immediately; held on the instance so it is not garbage-collected.
                 self._stopper = asyncio.get_running_loop().create_task(self.stop())
         self._sender_attached = False
 
@@ -470,20 +376,17 @@ class DetachableTurn:
     def defer_stop(self, grace: float, *, resumers: frozenset[str], max_deferrals: int) -> bool:
         """Stop the turn in `grace` seconds unless one of `resumers` reattaches first.
 
-        **Why a stop can wait** (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). A page that is
-        being discarded stops its turn so a chemist who closed the tab does not hold capacity for
-        an answer nobody reads — but the browser cannot tell a reload from a close at unload time,
-        so the same stop arrived from every reload and killed the turn the reloaded page was about
-        to pick up again. Deferred, the stop only lands if nobody comes back.
+        A discarded page stops its turn, but at unload a reload looks like a close, so the stop
+        waits
+        (`D-2026-10-03-an-unload-stop-waits-for-a-reload`).
 
-        `True` when a window is pending after this call — a new one, or one already pending, whose
-        deadline this does **not** move: one window per stop, so repeating the unload stop cannot
-        keep a turn alive. `False` when no window may be granted — the turn is over, or it has had
-        `max_deferrals` already (each reattach cancels the pending stop, so a reload loop would
-        otherwise restart the window indefinitely) — and the caller stops at once instead.
-
-        `resumers` are the principals whose reattach cancels the stop: the one who asked for it
-        and the turn's sender. Anyone else watching the turn changes nothing.
+        `True` when a window is pending after this call — new or already pending, whose deadline is
+        not
+        moved, so repeating the stop cannot keep a turn alive. `False` when no window may be granted
+        (turn
+        over, or `max_deferrals` used, bounding a reload loop); the caller then stops at once.
+        `resumers`
+        are the principal who asked and the turn's sender.
         """
         if not self.running:
             return False
@@ -501,9 +404,7 @@ class DetachableTurn:
     def resume(self, oid: str | None) -> bool:
         """Cancel a pending unload stop because `oid` came back to the turn; whether it did.
 
-        Only a principal named when the stop was deferred cancels it — the turn's sender or the
-        one who asked for the stop — so another participant opening a view of the turn cannot keep
-        alive a turn its sender walked away from.
+        Only a principal named when the stop was deferred can cancel it.
         """
         if self._pending_stop is None or oid is None or oid not in self._resumers:
             return False
@@ -525,12 +426,9 @@ class DetachableTurn:
     async def _stop_after(self, grace: float) -> None:
         """Wait out the grace window, then stop the turn — unless whoever it waited for is here.
 
-        **Read at expiry, not at the stop.** The reloaded page's watch can reach the service
-        *before* the old page's keepalive stop does — likelier when the unload first withdraws a
-        queued ticket and only then stops — and then `resume` ran with nothing to cancel. So a
-        resumer with a view open when the window ends is a reload that arrived first, and the turn
-        runs on. Not read when the stop arrives: a page that was itself following the turn has its
-        own watch open while it unloads, and that view closes within the window, so the stop lands.
+        Checked at expiry, not when the stop arrives: the reloaded page's watch may arrive before
+        the old
+        page's stop, and an unloading page's own watch closes within the window.
         """
         await asyncio.sleep(grace)
         # Past the window the stop is no longer cancellable: released *before* the await below, so
@@ -558,17 +456,10 @@ class DetachableTurn:
     async def stop(self) -> None:
         """Cancel the running turn — the explicit act a disconnect no longer performs.
 
-        The cancellation lands inside `run_turn` exactly where a disconnect used to land it, so
-        the whole D-130 teardown — rollback, booking, ambient resets, the released permit — runs
-        unchanged. Awaited so the caller's 200 means "stopped", not "asked nicely".
-
-        **The `Exception` arm says so out loud now, and used to say nothing at all.** A cancelled
-        turn ending in `CancelledError` is the expected outcome and stays quiet; anything else is
-        a teardown that failed — a rollback that raised, a booking that raised — and swallowing it
-        left the stop route answering 200 with the only record of the failure discarded. Still
-        suppressed, because the turn *is* stopped either way and the caller's answer is the same;
-        logged, because "stopped cleanly" and "stopped, and its teardown broke" are different
-        facts and only the server can keep the second one.
+        The cancellation lands in `run_turn` so the normal teardown runs. Awaited, so the caller's
+        200
+        means "stopped". A teardown that raised is logged and suppressed: the turn is stopped either
+        way.
         """
         # An explicit stop is immediate whatever is pending: the window was for a reload, and
         # this is somebody pressing Stop (or the window itself expiring, which released it first).
@@ -577,12 +468,9 @@ class DetachableTurn:
         try:
             await self._task
         except asyncio.CancelledError:
-            # **Whose cancellation was that?** `await self._task` raises the same `CancelledError`
-            # for "the turn I just cancelled ended" and for "the stop route's own handler was
-            # cancelled while waiting" — a client that gave up on the stop request, a pod draining
-            # — and swallowing the second is swallowing a cancellation addressed to this frame,
-            # which asyncio requires to propagate. The task's own state tells them apart: it is
-            # `cancelled()` only in the first case, and merely not-done in the second.
+            # Distinguish the turn's cancellation from this handler's own: only in the first case is
+            # the task
+            # `cancelled()`, and a cancellation addressed to this frame must propagate.
             if not self._task.cancelled():
                 raise
         except Exception:
@@ -597,9 +485,7 @@ class DetachableTurn:
 class RunningTurns:
     """The per-process registry the stop route resolves a session's live turn from.
 
-    A thin dict wrapper rather than a bare dict on `app.state`, so registration and expiry are
-    written once: an entry is removed when its task finishes, whichever way, via the done
-    callback — there is no path that leaves a dead turn answering `running`.
+    Entries are removed by the task's done callback, so a finished turn never answers `running`.
     """
 
     def __init__(self) -> None:
@@ -624,32 +510,18 @@ class RunningTurns:
     def live(self) -> list[tuple[str, DetachableTurn]]:
         """Every session with a turn running here, and the turn — a snapshot, safe to iterate.
 
-        What `api/turn_relay.TurnRelay` polls for: the requests other replicas address to a turn
-        can only be answered by the process whose registry holds it.
+        Polled by `api/turn_relay.TurnRelay` to answer other replicas' requests for these turns.
         """
         return [(session_id, turn) for session_id, turn in self._turns.items() if turn.running]
 
     async def drain(self, timeout: float) -> int:
         """Wait up to `timeout` for every live pump to finish; report how many did not.
 
-        **This is what makes a detached turn survive a rolling update rather than only a
-        disconnect.** A pump task is not an in-flight HTTP request, so uvicorn's own drain does not
-        know one exists; without this the front door's lifespan `finally` closed the memory store,
-        the checkpointer's pool and the shared store pool while turns were still running, and the
-        answer this module exists to deliver was lost from the transcript it promised to be in.
-        Measured before it existed: shutdown returned in 0.001 s and the running turn's next
-        checkpoint write raised `PoolClosed`.
-
-        The registry already holds every live turn and already prunes on completion, so this is a
-        snapshot plus one `asyncio.wait`. Snapshot, because `register`'s done callback deletes from
-        the same dict as each pump finishes.
-
-        Nothing is cancelled here. A turn is bounded by its own `service_turn_timeout_seconds`
-        deadline, measured from when *it* started, so a caller passing that same number can only
-        be reached by a turn whose deadline is already firing — and cutting a turn short to save a
-        second of a grace period the chart has already provisioned would trade the answer for
-        nothing. What is left running is *said*, because a pod that exits with work in flight is a
-        fact an operator has to be able to find.
+        Pump tasks are not HTTP requests, so uvicorn's drain does not see them; without this,
+        shutdown would
+        close the pools under running turns. Snapshots the registry, since completion deletes from
+        it.
+        Cancels nothing: each turn is bounded by its own deadline. Turns still running are reported.
         """
         pumps = [turn._task for turn in list(self._turns.values()) if not turn._task.done()]
         if not pumps:

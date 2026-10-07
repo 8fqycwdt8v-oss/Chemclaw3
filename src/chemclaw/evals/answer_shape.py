@@ -1,24 +1,16 @@
 """What recorded answers are made of: tables, document-shaped prose and structure lists.
 
-Why this exists: the artefacts decision
-(`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`) had to know what answers spend
-their tokens on before deciding what an artefact holds, and one of its two `Revisit when:` lines is
-a re-run of exactly this measurement over a corpus recorded with artefacts on. A trigger nobody can
-re-run is a sentence, so the measurement is a module rather than a script in a scratch directory.
+A re-runnable measurement (a `Revisit when:` trigger of the artefacts ADR depends on it). Reads the
+live-probe outcomes `evals/live.py` writes and reports, per directory:
 
-It reads the live-probe outcomes `evals/live.py` writes (`{"probe": ..., "outcome": ...}` JSON, one
-per probe) and reports, per directory:
-
-- answers carrying a Markdown table, and carrying one of at least `min_rows` data rows;
-- the tables' share of answer tokens, counted with `count_tokens_approximately` — the counter
-  `tests/test_context_floor.py` and compaction use, so the figures compare with the prefix's;
-- of the figures stated inside tables, how many are verbatim tool values. **Only where the run
-  recorded `verified_numbers`**, and a figure absent from that list is *unchecked*, never wrong:
-  `_verified_numbers` measured "numbers no tool returned" at precision zero, so the complement is
-  deliberately not reported;
-- document-shaped answers — at least `document_tokens` tokens under at least two Markdown headings;
-- answers listing at least `min_structures` distinct structures as backticked SMILES (an RDKit
-  parse with at least `min_structures` heavy atoms, so `CO` or a code word does not count);
+- answers carrying a Markdown table, and one of at least `min_rows` data rows;
+- the tables' share of answer tokens, counted with `count_tokens_approximately` (the counter
+  compaction and `tests/test_context_floor.py` use);
+- of the figures inside tables, how many are verbatim tool values — only where the run recorded
+  `verified_numbers`; an absent figure is *unchecked*, never wrong;
+- document-shaped answers — at least `document_tokens` tokens under at least two headings;
+- answers listing at least `min_structures` distinct backticked SMILES of at least
+  `min_structures` heavy atoms;
 - how often `render_structure` ran.
 
 Run: `python -m chemclaw.evals.answer_shape tasks/live-test*/ ...` (directories are searched
@@ -52,8 +44,7 @@ _HEADING = re.compile(r"^#{1,4} \S", re.MULTILINE)
 class Thresholds:
     """What counts as a big table, a document and a structure list.
 
-    Parameters of the measurement rather than settings of the system: nothing at runtime reads
-    them, and a re-run that changes one says so on its command line.
+    Parameters of the measurement, not settings of the system: nothing at runtime reads them.
     """
 
     min_rows: int = 4
@@ -87,9 +78,8 @@ def tokens(text: str) -> int:
 def structures(answer: str, min_atoms: int) -> set[str]:
     """Distinct canonical SMILES the answer writes as code spans of at least `min_atoms` atoms.
 
-    Parsed through `core.chem`'s strict helpers rather than RDKit directly: evals is not a layer
-    that may import RDKit (`tests/test_third_party_layering.py`), and the strict form refuses the
-    truncating parses (`"CCO junk"` as ethanol) a bare parser would count as a structure.
+    Parsed through `core.chem`'s strict helpers: evals may not import RDKit, and the strict form
+    refuses truncating parses (`"CCO junk"` as ethanol).
     """
     seen: set[str] = set()
     for span in _CODE_SPAN.findall(answer):

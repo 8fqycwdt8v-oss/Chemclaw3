@@ -165,8 +165,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "expand_note",
         "find_knowledge_gaps",
         "find_notes",
-        # A search over the durable job record (D-157). Emphatically a read, and one an agent
-        # should make *before* asking for an expensive run to be authorized.
+        # A search over the durable job record; a read the agent should make before asking for an
+        # expensive run.
         "find_past_jobs",
         "gather_evidence",
         # A model call is a cost, not an effect: it writes nothing and reaches only readable

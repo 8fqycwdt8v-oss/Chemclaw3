@@ -1,25 +1,12 @@
 """Mine the stored conversations for recurring procedure and propose what survives the guard.
 
-The consumer `chemclaw/cli/trajectory_census.py` never had. That command answers "is there enough
-here to distil"; this one distils, and puts what it finds in the queue
-`D-2026-09-18-a-proposal-is-not-a-skill-and-a-route-is-not-a-tool` built. Nothing it produces
-changes any behaviour: a proposal waits for the person it belongs to.
+The distilling counterpart to `chemclaw/cli/trajectory_census.py`; findings go into the
+behaviour-proposal queue, so nothing changes behaviour until the person a proposal belongs to
+accepts it.
 
-**On demand, never on a timer**, for the rule `CLAUDE.md` states and the campaign and playbook
-miners already follow: no Temporal Schedule mines knowledge, and knowledge never arrives on a
-timer. (The rule was phrased as "no Schedule opens a pull request" until
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the gate; nothing in this
-tree opens one, and who asked is what the rule was ever about.) A miner that ran hourly would
-fill a queue nobody asked it to fill.
-
-**Dry by default.** Printing what it would propose costs nothing and is what somebody running this
-for the first time wants; `--propose` is the flag that writes. That ordering is deliberate rather
-than cautious — the output is the evidence for whether the guard is doing anything, and a run that
-proposed before anybody had read it would be a miner whose effect precedes its explanation.
-
-**On an empty corpus it proposes nothing and says so.** `make trajectory-census` reports zero on a
-database nobody has used, so that is the expected first result rather than a fault, and the message
-says which of the two it is.
+On demand, never on a timer: no Temporal Schedule mines knowledge. Dry by default; `--propose`
+writes, so the output can be read before anything is proposed. On an empty corpus (the expected
+first result) it proposes nothing and says so.
 """
 
 import argparse
@@ -35,14 +22,9 @@ from chemclaw.cli.trajectory_census import _stored, census
 async def _skills_by_session() -> dict[str, frozenset[str]]:
     """What each session loaded, from `turn_costs.skills_loaded` — the guard's whole input.
 
-    Session granularity because that is what the guard asks (`agent/distiller.py`: a skill read on
-    a session's second turn shapes its tenth), so every turn's array is unioned into its session's.
-
-    An empty map is the honest answer on a deployment that has never loaded a skill, and it makes
-    the guard a no-op rather than a filter that silently drops everything — which is the direction
-    that matters, since a guard erring toward *admitting* evidence would be the self-confirming
-    failure it exists to prevent. That risk is real and bounded: with no rows, nothing has been
-    accepted either, so there is no skill to be confirmed by.
+    Unioned per session, since a skill read on a session's second turn shapes its tenth
+    (`agent/distiller.py`). An empty map makes the guard a no-op; with no loaded skills there is
+    also nothing accepted to self-confirm.
     """
     from chemclaw.core import db
     from chemclaw.core.config import settings
@@ -61,13 +43,9 @@ async def _skills_by_session() -> dict[str, frozenset[str]]:
 async def _actor_of(sessions: list[str]) -> str:
     """Whose queue a proposal about these sessions belongs in.
 
-    A proposal is per person — that is what makes one chemist's rejection not decide for another —
-    so a distilled one needs an owner. It is read from the sessions the evidence came from rather
-    than taken as an argument, because an operator running this command is not the person the
-    trajectory belongs to and a proposal filed under the operator would act on the wrong turns.
-
-    Returns the empty string when the sessions disagree or carry no actor, which the caller treats
-    as "not attributable" and refuses to propose for.
+    Read from the sessions the evidence came from, never from the operator running the command.
+    Returns the empty string when the sessions disagree or carry no actor, which the caller refuses
+    to propose for.
     """
     from chemclaw.core import db
     from chemclaw.core.config import settings
@@ -95,11 +73,8 @@ async def _run(write: bool, as_json: bool) -> int:
     found = bounded(candidates(report, by_class, await _skills_by_session()))
 
     if write and not personal_skills_available():
-        # **Refused up front rather than filed and discovered later.** A proposal's only outcome is
-        # `POST /proposals/skill/{name} {accepted: true}`, which needs the personal tier — so with
-        # the tier off this would write durable rows that the one route able to act on them answers
-        # 503 to, and the chemist would find that out after deciding. The dry run still works and is
-        # the useful half here: it says what the corpus would propose.
+        # Refused up front: accepting a proposal needs the personal tier, so with it off the rows
+        # could never be acted on. The dry run still works.
         print(
             "refusing to file: this deployment keeps no personal skills, so nothing could accept "
             "what this would propose (needs CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session "

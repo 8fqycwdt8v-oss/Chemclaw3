@@ -1,21 +1,14 @@
-"""The ambient plan-step link for the current tool call (D-2026-08-27).
+"""The ambient plan-step link for the current tool call.
 
-When a tool launches a durable job from inside a harness turn, the job should record *which plan
-step* it was launched for — but the step is not something the model should pass as an argument (it
-joins to the audit trail, and the model must not be able to spoof it), and the todo list itself
-must never be written by a launcher (a marker in a todo's `content` revokes the approval keyed on
-it — the rule `agent/state.py` records, applied twice). So `agent/plan_link.py`'s middleware
-stamps the current step into a `contextvar` for the duration of each tool call, and job-launching
-code reads it here — exactly the carrier and the polarity `core.session_context` established for
-the session id.
+A durable job records which plan step launched it, but the step must not be a model argument (it
+joins to the audit trail and must not be spoofable), and launchers must never write the todo list (a
+marker in a todo's `content` revokes its approval). So `agent/plan_link.py`'s middleware stamps the
+step into a `contextvar` per tool call and job-launching code reads it here, as
+`core.session_context` does for the session id. Imports only `contextvars`.
 
-Kernel material like its sibling: two bare strings, nothing imported but `contextvars`, readable
-from `connectors` and `core.turn_signals` without touching the agent layer.
-
-The value is a `(plan_step, plan_hash)` pair rather than two vars, because the two are one fact —
-a step is only meaningful inside the plan revision it belongs to, and two vars could be reset out
-of step with each other. `("", "")` — the default off the graph path (a template step, the CLI, a
-test) — reads as "this call was not made from a plan step", never as an error.
+One `(plan_step, plan_hash)` pair rather than two vars, since a step only means something within its
+plan revision. `("", "")`, the default off the graph path, means "not called from a plan step",
+never an error.
 """
 
 from contextvars import ContextVar

@@ -1,19 +1,12 @@
-"""The stable, ELN-agnostic reaction target schema (plan step 4.1).
+"""The stable, ELN-agnostic reaction target schema.
 
-An **ORD-inspired** pydantic subset — the canonical shape every layer above the ELN
-integration knows (graph notes, fingerprint search, metrics). It is deliberately a subset
-of the full Open Reaction Database proto: only the fields Chemclaw actually consumes
-(structure, roles, amounts, the headline conditions and yield, provenance), so there is no
-speculative schema. An ELN adapter maps its own format *into* this; nothing here knows any
-ELN's quirks (G6).
+An ORD-inspired pydantic subset — only the fields Chemclaw consumes (structure, roles, amounts,
+headline conditions and yield, provenance) — that every layer above ELN integration knows. Adapters
+map their format into this; nothing here knows any ELN's quirks.
 
-Late-development recipes are **step-by-step** — charge, cool, add dropwise over time, age,
-quench, extract, crystallize — not a single set of conditions. Mirroring ORD's ordered
-`inputs` (with `addition_time`/`addition_order`) + `conditions` + `workups[]`, the schema
-carries an ordered `steps` list and the raw `procedure_text`, so a detailed procedure is
-represented and preserved rather than flattened to one headline temperature/time. The
-flat headline fields remain the summary every existing consumer reads; `steps` is a
-purely additive procedural overlay (it never feeds the reaction SMILES / fingerprints).
+Development recipes are step-by-step, so beside the flat headline fields (the summary existing
+consumers read) the schema carries an ordered `steps` list and the verbatim `procedure_text`.
+`steps` is purely additive and never feeds the reaction SMILES or fingerprints.
 """
 
 from datetime import date
@@ -36,10 +29,8 @@ class Role(StrEnum):
     PRODUCT = "product"
 
 
-# The roles the reaction-SMILES convention calls agents: present in the flask, not consumed into
-# the product skeleton. One definition, because `reaction_smiles` and `transformation_smiles` must
-# agree on which species the middle slot names — one showing them and the other omitting them is
-# the whole distinction between the two methods.
+# The roles the reaction-SMILES convention calls agents: present but not consumed into the product.
+# One definition so `reaction_smiles` (shows them) and `transformation_smiles` (omits them) agree.
 _AGENT_ROLES = frozenset({Role.SOLVENT, Role.CATALYST})
 
 
@@ -82,29 +73,17 @@ class _Charged(BaseModel):
     """
 
     role: Role
-    # Amounts are optional (an ELN may omit them), and kept in milligrams when known.
-    #
-    # This used to say "mass drives the mass-balance and green-chemistry checks". It does not
-    # drive the mass-balance check: `ingest/eln/validate.py` reads neither field — it compares
-    # element *sets*, which is the strongest sound check available without stoichiometric
-    # coefficients. Nor could it today, even if the check were written: measured across every
-    # shipped fixture, **no outcome carries a mass at all** (inputs do), so a
-    # products-cannot-outweigh-inputs check would be a no-op on the whole corpus. `mass_mg` is
-    # read by `ingest/eln/record.py` for the charge sheet and the record's scale, which is real.
+    # Amounts are optional (an ELN may omit them), and kept in milligrams when known. `mass_mg`
+    # feeds the charge sheet and scale in `ingest/eln/record.py`; the mass-balance check compares
+    # element sets and reads neither field.
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
-    # Millilitres, for a species the source charged **by volume** — the ordinary case for a neat
-    # liquid reactant and for every solvent. A third independent field rather than a conversion,
-    # because converting needs a density this record does not carry and inventing one would present
-    # a derived number as a recorded one (`D-2026-08-26-a-transcription-may-not-infer-a-setpoint`).
-    # It exists because the alternative was measured: `ord_adapter._amount` read `mass` and `moles`
-    # only, so a volumetric charge reached the record as no amount at all — a 49.3 g charge whose
-    # `scale:` bullet read "40 g", and a `## Charge` row reading "amount not recorded" for a species
-    # whose amount the source *did* record.
+    # Millilitres, for a species charged by volume (neat liquids, solvents). A separate field rather
+    # than a conversion, since converting needs a density the record does not carry
+    # (D-2026-08-26-a-transcription-may-not-infer-a-setpoint).
     volume_ml: float | None = Field(default=None, ge=0.0)
-    # Whatever else the source recorded about this species — a lot number, a supplier, an
-    # equivalents figure, an assay. See `OrdReaction.attributes` for why this is a bag of strings
-    # and not a set of fields.
+    # Whatever else the source recorded about this species (lot, supplier, equivalents, assay); see
+    # `OrdReaction.attributes`.
     attributes: dict[str, str] = Field(default_factory=dict)
 
 
@@ -117,17 +96,11 @@ class Component(_Charged):
 class UnstructuredComponent(_Charged):
     """A species the source **names** and gives no structure for — carried as named, never drawn.
 
-    The real case is the Perera flow-Suzuki screen (*Science* 2018, 359, 429), whose source
-    spreadsheet publishes the second coupling partner only as the paper's own shorthand
-    (`2a, Boronic Acid`) and the product only as a phrase. `ord_adapter` tries every exact route to
-    a structure first (SMILES, InChI, a known reagent name); this is what is left when none
-    resolves and the source still said *something* about the species.
-
-    `name` is the source's text verbatim. It is not a structure, it is not resolved later, and no
-    code path may turn it into one: a guessed structure would propagate into a fingerprint index, a
-    similarity hit and a note citing it, which is exactly what refusing these records used to
-    protect. A reaction carrying one is `RecordTier.CITATION_ONLY`
-    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+    What is left when `ord_adapter`'s exact routes to a structure (SMILES, InChI, known reagent
+    name) all fail but the source still named the species. `name` is the source's text verbatim, and
+    no code path may turn it into a structure: a guess would propagate into fingerprints and
+    citations. A reaction carrying one is `RecordTier.CITATION_ONLY`
+    (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable).
     """
 
     name: str = Field(min_length=1)
@@ -136,14 +109,12 @@ class UnstructuredComponent(_Charged):
 class RecordTier(StrEnum):
     """Which evidence tier a transcribed reaction belongs to.
 
-    `STRUCTURED` — every species has a structure: the reaction is fingerprinted, labelled and
-    reachable by structure and similarity search, as every record was before this tier existed.
+    `STRUCTURED` — every species has a structure: fingerprinted, labelled and reachable by structure
+    and similarity search.
 
-    `CITATION_ONLY` — at least one species is named without a structure
-    (`UnstructuredComponent`). The record is stored and citable for what it *does* state — a yield,
-    a base, a ligand, a temperature — and is excluded from every structure and similarity search,
-    because any fingerprint of it would describe a reaction nobody ran: the one with the unnamed
-    species left out.
+    `CITATION_ONLY` — at least one species is an `UnstructuredComponent`. Stored and citable for
+    what it states, excluded from every structure and similarity search, since any fingerprint would
+    describe a reaction nobody ran.
     """
 
     STRUCTURED = "structured"
@@ -153,20 +124,17 @@ class RecordTier(StrEnum):
 class StructureNotGiven(ChemclawError):
     """A structure was asked of a reaction whose source gave none for one of its species.
 
-    Raised by `OrdReaction.reaction_smiles`/`transformation_smiles` on a citation-only record. A
-    ChemclawError, so a path that reaches it by mistake rejects one entry rather than aborting a
-    batch — and rejects it *loudly*, where returning the structured subset would have fingerprinted
-    a different reaction with nothing saying so.
+    Raised by `reaction_smiles`/`transformation_smiles` on a citation-only record. A
+    `ChemclawError`, so a path reaching it by mistake rejects one entry loudly rather than
+    fingerprinting a different reaction.
     """
 
 
 class StepKind(StrEnum):
     """The kind of action a procedure step performs (a coarse subset of ORD's actions).
 
-    Deliberately small: it labels a preserved instruction so the graph and metrics can
-    reason about *what happens when* (an addition vs. a workup vs. a purification) without
-    reproducing ORD's full `ReactionWorkup`/`ReactionConditions` type space. The verbatim
-    instruction is always kept on the step, so a coarse label never loses information.
+    Deliberately small; the verbatim instruction is always kept on the step, so a coarse label loses
+    nothing.
     """
 
     ADDITION = "addition"  # charge/add/dissolve a species into the vessel
@@ -200,17 +168,11 @@ DateSource = Literal["stated", "entry"]
 
 
 class OutcomeClass(StrEnum):
-    """How an experiment turned out (gap KNW-3).
+    """How an experiment turned out.
 
-    Nothing previously marked an experiment as failed, and the distillation is structurally biased
-    against failures: `find_playbook_candidates` distils what *recurs* across projects, and failures
-    do not recur — they get abandoned after one attempt. So "don't try X, we did, it decomposed on
-    scale" — the most valuable and most systematically lost knowledge in process development — had
-    nowhere to live.
-
-    `INCONCLUSIVE` is deliberately distinct from `FAILURE`: a run that was aborted, mis-charged, or
-    never assayed carries no evidence about the chemistry, and collapsing it into "failure" would
-    teach the corpus something untrue.
+    Failures do not recur across projects, so without an explicit marker the most valuable negative
+    knowledge is lost. `INCONCLUSIVE` is distinct from `FAILURE`: an aborted, mis-charged or
+    unassayed run carries no evidence about the chemistry.
     """
 
     SUCCESS = "success"
@@ -243,22 +205,18 @@ class Impurity(BaseModel):
     smiles: str | None = None
     # Chromatographic area percent (HPLC/GC) — the number a process chemist actually tracks.
     area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
-    # Relative retention time: this peak's retention divided by the main peak's, on the method that
-    # ran. Unitless by construction and **method-relative by construction** — an RRT means nothing
-    # without the method it was measured on, which is what the `analytical-method` note type and
-    # the `measured-by` edge are for. Unbounded above (a late-eluting impurity can exceed 1) and
-    # positive: a zero or negative RRT is not a chromatographic observation.
+    # Relative retention time: this peak's retention over the main peak's, on the method that ran.
+    # Unitless and method-relative (the `analytical-method` note and `measured-by` edge carry the
+    # method). Unbounded above; must be positive.
     rrt: float | None = Field(default=None, gt=0.0)
 
     @model_validator(mode="after")
     def _identifiable(self) -> "Impurity":
         """An impurity with neither a name nor a structure is not a record of anything.
 
-        **An RRT alone does not identify one**, deliberately. It says where a peak eluted on one
-        method, which is how a chemist *refers* to an unknown — "the RRT 0.94 peak" — and that
-        reference is a name. So a record carrying only `rrt` is asking this model to stand in for a
-        peak nobody has named, and the honest place for it is a name of exactly that form. Letting
-        it through would put rows in the corpus that no query can join and no chemist can read.
+        An RRT alone does not identify one: "the RRT 0.94 peak" is how a chemist names an unknown,
+        so such a row belongs under that name (`unresolved_peak_name`) rather than as an unjoinable
+        row.
         """
         if not self.name and not self.smiles:
             raise ValueError("an impurity needs at least a name or a SMILES")
@@ -268,18 +226,9 @@ class Impurity(BaseModel):
 def unresolved_peak_name(rrt: float) -> str:
     """The name an impurity known only by its retention time is recorded under.
 
-    `Impurity._identifiable` refuses a row carrying only `rrt` **and states the remedy**: an RRT is
-    how a chemist refers to an unknown — "the RRT 0.94 peak" — and that reference is a name, so the
-    honest place for it is a name of exactly that form. The decision was taken at the model and the
-    corresponding action was never taken at the adapters, which dropped such a row with a WARNING:
-    measured on a three-row HPLC table, `in=3 out=2`, and on a table of unresolved peaks alone,
-    `in=2 out=0` — a 1.9 area% peak and a 0.42% one gone, and the record reading as though it
-    carried no impurity profile at all. In-entry drops are not written to the rejection ledger, so
-    nothing queryable said those rows had existed.
-
-    One function rather than an f-string per adapter because the *form* is the contract: a corpus in
-    which one source writes `RRT 0.94 peak` and another writes `rrt=0.94` cannot be read by one
-    question. `:g` keeps `0.94` as `0.94` and `1` as `1` rather than `1.0`.
+    The remedy `Impurity._identifiable` prescribes, so adapters name an RRT-only row rather than
+    drop it. One function because the form is the contract every source must share; `:g` renders
+    `0.94` and `1` without a trailing `.0`.
     """
     return f"RRT {rrt:g} peak"
 
@@ -310,45 +259,23 @@ class OrdReaction(BaseModel):
     time_h: float | None = Field(default=None, ge=0.0)
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     provenance: str = Field(min_length=1)
-    # When the experiment was actually run (gap KNW-1). Without it the largest note class in the
-    # system has no time axis at all: reaction evidence cannot be recency-ranked, F10-G2's
-    # bi-temporal note fields have nothing to be populated from, and `memory.chains` has no
-    # fallback ordering when the product->reactant graph is cyclic. Optional because a source may
-    # genuinely not record it, never because we do not care.
+    # When the experiment was actually run: the time axis for recency ranking, bi-temporal note
+    # fields and `memory.chains` ordering. Optional because a source may not record it.
     performed_at: date | None = None
-    # **Where `performed_at` came from, because the two sources are not equally strong.** A date the
-    # source stated is when the run was performed. The seam's fallback (`adapter.DatedIngest`) uses
-    # the entry's *creation* timestamp, which is when the record was written — usually the same day,
-    # and sometimes three weeks of bench work transcribed in one afternoon.
-    #
-    # Without this the weaker fact is indistinguishable from the stronger one, and the consequence
-    # is not cosmetic: `Progression.is_timeline()` goes true and the campaign note asserts "Runs in
-    # the order they were performed" over what may be one afternoon of typing. That is precisely the
-    # failure this field's own ADR is about (`D-2026-08-26-silence-is-not-a-successful-run`) — a
-    # value the source could not supply reading as one it did — so the fallback carries its
-    # provenance, exactly as `condense.DigestSource` does for a value read out of prose.
+    # Where `performed_at` came from: `"stated"` by the source, or `"entry"` when
+    # `adapter.DatedIngest` filled it from the entry's creation time, which may be days after the
+    # bench work. Without this the weaker date would make `Progression.is_timeline()` claim runs are
+    # in performed order.
     date_source: DateSource = "stated"
-    # Outcome quality beyond yield (gap KNW-2). `purity_percent` is the headline assay/area figure
-    # for the product; `impurities` is the profile behind it. Both optional — an early-route entry
-    # may report yield only — and both deliberately excluded from the reaction SMILES and every
-    # fingerprint: they are *outcomes*, not structure.
+    # Outcome quality beyond yield: `purity_percent` is the headline assay figure and `impurities`
+    # the profile behind it. Both optional, and both excluded from the reaction SMILES and
+    # fingerprints as outcomes, not structure.
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     impurities: list[Impurity] = Field(default_factory=list)
     # How the experiment turned out, and (for a failure) why in the chemist's own words.
-    #
-    # **`None` is "the source did not say", and that is not the same as success.** This defaulted to
-    # SUCCESS, on the argument that silence had always meant an ordinary run and reinterpreting it
-    # would retroactively weaken the corpus. That argument holds for a source with a status column
-    # that happened to be null. It does not hold for a source that cannot state an outcome at all —
-    # an ELN keeping its results in free text — where the default made **every** record assert a
-    # success nobody claimed, and did it silently, on the one field whose whole purpose is that a
-    # failure must not read as an ordinary run (`OutcomeClass`). A corpus of unread prose came out
-    # as a 100% success rate. See `D-2026-08-26-silence-is-not-a-successful-run`.
-    #
-    # `None` is deliberately not folded into `INCONCLUSIVE`: that value means the run carries no
-    # evidence about the chemistry, which is itself a statement somebody made. "Nobody has read the
-    # prose yet" is a different fact, and collapsing the two teaches the corpus something untrue —
-    # the same argument `OutcomeClass` already makes for keeping INCONCLUSIVE apart from FAILURE.
+    # `None` is "the source did not say", which is neither success nor `INCONCLUSIVE`
+    # (D-2026-08-26-silence-is-not-a-successful-run): defaulting to success would make an
+    # unstructured source report a 100% success rate.
     outcome_class: OutcomeClass | None = None
     failure_reason: str | None = None
 
@@ -356,9 +283,7 @@ class OrdReaction(BaseModel):
     def _failure_is_explained(self) -> "OrdReaction":
         """A recorded failure needs its reason, or it teaches nothing worth keeping.
 
-        The entire value of a negative result is *why* it failed; an unexplained one would enter
-        the corpus as an unactionable "someone tried this once", which is worse than absent because
-        it looks like evidence.
+        An unexplained failure looks like evidence while being unactionable.
         """
         if self.outcome_class is OutcomeClass.FAILURE and not (self.failure_reason or "").strip():
             raise ValueError("a reaction recorded as a failure must carry a failure_reason")
@@ -367,37 +292,19 @@ class OrdReaction(BaseModel):
     # The project/campaign this experiment belongs to — the grouping key for the semantic
     # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
     project: str | None = None
-    # What this run was set up to test, in the chemist's own words (D-162). Process development is
-    # a sequence of hypotheses, not a screen: "does dropping to 60 °C keep the yield and kill the
-    # des-bromo impurity" is the *reason* a run exists, and without it the record shows only that
-    # a condition moved, leaving the agent to invent a motive or ignore the question. Optional and
-    # never inferred — a source that does not capture intent leaves this empty, which reads as
-    # "not recorded", not as "no hypothesis".
+    # What this run was set up to test, in the chemist's own words (D-162). Optional and never
+    # inferred: empty means "not recorded", not "no hypothesis".
     hypothesis: str | None = None
-    # The detailed procedure, when the source records one. `steps` is the ordered recipe
-    # (empty for sources that give only headline conditions); `procedure_text` is the raw
-    # prose, kept verbatim so nothing a chemist wrote is dropped on ingest.
+    # The detailed procedure, when recorded: `steps` is the ordered recipe (empty for headline-only
+    # sources) and `procedure_text` the verbatim prose.
     steps: list[ReactionStep] = Field(default_factory=list)
     procedure_text: str | None = None
     # Everything the source recorded that this schema has no field for, as the source labelled it.
-    #
-    # It exists because of what a declaratively-bound source is: `ingest.eln.warehouse` maps a
-    # site's own tables onto this model from a YAML binding, and no schema written today can name
-    # the columns a corporate ELN will carry — a lot number, an equivalents figure, an assay, a
-    # vessel id, whichever of a dozen child tables the site keeps. Without somewhere for them to
-    # land, each newly-interesting column costs an edit to this model, to `eln.record` and to their
-    # tests; with it, that column is a line of YAML. That is the whole trade, and it is the reason
-    # this field is here rather than a set of typed ones.
-    #
-    # **Strings, not values.** These are unmodelled by definition, so there is no type to validate
-    # against and no unit to normalise to. Stringifying keeps the note body deterministic (it is
-    # rendered, and amendment detection compares bodies byte-for-byte) and keeps this from becoming
-    # a second, untyped schema competing with the fields above. A datum that earns a real question
-    # earns a real field, in its own change.
-    #
-    # **Never chemistry.** `reaction_smiles`, `transformation_smiles` and both fingerprint paths
-    # ignore this entirely — a structure reaching the corpus through an unvalidated bag of strings
-    # is exactly the failure the typed fields exist to prevent.
+    # A declaratively bound source (`ingest.eln.warehouse`) maps a site's own tables, whose extra
+    # columns no schema can name in advance; this keeps each such column a line of YAML rather than
+    # a model change. Strings, not typed values, so the rendered note stays deterministic; a datum
+    # that earns a real question earns a real field. Never chemistry: structures and fingerprints
+    # ignore this entirely.
     attributes: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -413,10 +320,8 @@ class OrdReaction(BaseModel):
     def _has_inputs_and_a_product(self) -> "OrdReaction":
         """A reaction needs at least one input and one product, in either tier.
 
-        This was `min_length=1` on `inputs` and `outcomes`, which is the same rule while every
-        species has a structure. With `unstructured` beside them it has to count across both: the
-        flow-Suzuki records name their product without a structure, so `outcomes` is empty there
-        and the reaction still has a product — the source said what it was.
+        Counted across structured and `unstructured` species, since a citation-only record may name
+        its product without a structure.
         """
         if not self.inputs and all(c.role is Role.PRODUCT for c in self.unstructured):
             raise ValueError("a reaction needs at least one input component")
@@ -432,9 +337,8 @@ class OrdReaction(BaseModel):
     def product_count(self) -> int:
         """How many products the source recorded, with or without a structure.
 
-        `len(outcomes)` stopped being that number when an unstructured product became possible,
-        and "exactly one product" is a question two readers ask (`record._principal_product`, the
-        headline yield) — a record with one drawn product and one named one has two.
+        `len(outcomes)` misses unstructured products; "exactly one product" is asked by
+        `record._principal_product` and the headline yield.
         """
         return len(self.outcomes) + sum(1 for c in self.unstructured if c.role is Role.PRODUCT)
 
@@ -458,17 +362,10 @@ class OrdReaction(BaseModel):
     def major_impurity(self) -> "Impurity | None":
         """The impurity a chemist would call the major one, or `None` when the record cannot say.
 
-        Ranked by recorded `area_percent`, the number process development actually chases. When no
-        impurity carries an area% the list is unranked, and naming one anyway would be the same
-        fabrication `eln.note._principal_product` refuses for products — the answer would look like
-        evidence about which impurity dominated while being an artifact of the export's ordering.
-        A single recorded impurity is the exception that needs no ranking: it is the only one the
-        record names, so calling it the major one adds no claim.
-
-        **On the record rather than on a consumer**, because two consumers now ask it — the
-        comparative table and the reaction note's own frontmatter — and "which impurity is the
-        major one" is a property of the reaction, not of either artifact. Two copies of this rule
-        would be two answers to a question a chemist reads as one.
+        Ranked by recorded `area_percent`. With no area% the list is unranked and naming one would
+        be an artefact of export order, except that a single recorded impurity is trivially the
+        major one. On the record because both the comparative table and the reaction note's
+        frontmatter ask it.
         """
         ranked = [imp for imp in self.impurities if imp.area_percent is not None]
         if ranked:
@@ -478,20 +375,16 @@ class OrdReaction(BaseModel):
     def step_components(self) -> list[Component]:
         """Every species introduced by a step (e.g. a mid-procedure reagent or a quench).
 
-        Distinct from `inputs`: a workup reagent (brine, drying agent) or a reagent added
-        only partway through belongs to the procedure, not the reaction SMILES. The mass-
-        balance check folds these into the available-element set so they never cause a
-        false rejection, but they stay out of the fingerprinted reaction.
+        Belongs to the procedure, not the reaction SMILES. The mass-balance check counts these as
+        element sources, but they stay out of the fingerprinted reaction.
         """
         return [c for step in self.steps for c in step.components]
 
     def species(self, role: Role) -> frozenset[str]:
         """The canonical structures playing `role` in this run, a mid-procedure step's included.
 
-        A reagent added partway through the recipe lives on the step, not on `inputs` — and
-        swapping it is exactly the kind of change an optimization series is made of, so it must
-        not be invisible to anything that compares two runs. Canonical, so a source spelling one
-        molecule two ways cannot fabricate a change.
+        Step reagents are included because swapping one is a typical optimization change; canonical
+        so two spellings of one molecule never look like a change.
         """
         return frozenset(
             standard_smiles(c.smiles)
@@ -508,22 +401,12 @@ class OrdReaction(BaseModel):
     def reaction_smiles(self) -> str:
         """The **record** form: `reactants>agents>products`, exactly as the chemist wrote it.
 
-        Three-part because that is what the reaction-SMILES convention has always meant by an
-        agent — a species present in the reaction but not consumed into the product skeleton — so
-        a note body, a campaign step list and a playbook's representative reaction all show the
-        solvent and the catalyst in the slot that says what they are. Raw component SMILES for the
-        same reason (D-2026-07-31): what is displayed should be what was recorded, and the
-        standardized spellings exist to be *keys*, not to be read.
-
-        **This is not the string that is fingerprinted, and believing that it was is what made a
-        previous fix a no-op.** `DrfpEncoder.internal_encode` begins by folding the agent slot back
-        onto the reactants (`sides[0] += "." + sides[1]`), so `A.B>solvent>C` and `A.B.solvent>>C`
-        produce byte-identical bits — moving the solvent here changed the notation and nothing
-        else. What the fingerprints index is `transformation_smiles`; see it for what the agent
-        slot now actually does.
+        Agents (solvent, catalyst) in the middle slot and raw component SMILES, because this is what
+        is displayed. Not the fingerprinted string: DRFP folds the agent slot back onto the
+        reactants, so fingerprints use `transformation_smiles`.
 
         Raises `StructureNotGiven` on a citation-only record rather than leaving the unnamed species
-        out: a partial string here reads exactly like a whole reaction to every caller.
+        out.
         """
         self._require_structure()
         agents = ".".join(c.smiles for c in self.inputs if c.role in _AGENT_ROLES)
@@ -534,29 +417,16 @@ class OrdReaction(BaseModel):
     def transformation_smiles(self) -> str:
         """The **fingerprint** form: `reactants>>products`, agent-slot species left out entirely.
 
-        Solvent and catalyst are dropped rather than moved, because dropping them is the only
-        thing DRFP can see. DRFP shingles each side and keeps the symmetric difference, so a
-        species that appears only on the left — which every solvent and every catalyst does —
-        survives that difference whole and contributes a large, nearly constant block of set bits.
-        The solvent is often the largest fragment present and is present in every run, so
-        similarity was dominated by the variable process development is usually *optimizing*: two
-        runs of one coupling in THF and in 2-MeTHF scored 0.82 against each other, less than two
-        unrelated reactions sharing a solvent. Excluded, the same pair scores 1.0 — they are the
-        same transformation, which is what campaign grouping (`memory.optimization`) and
-        `similar_reactions` are asking about. Conditions are recorded beside the note, not inside
-        the structure.
+        DRFP keeps the symmetric difference of the two sides, so a solvent or catalyst on the left
+        survives whole and dominates similarity with the variable being optimized; dropped, two runs
+        of one coupling in different solvents score as the same transformation. Reagents stay: they
+        participate stoichiometrically.
 
-        Reagents stay on the left: a base or an oxidant participates stoichiometrically and is part
-        of what the transformation *is*.
+        Built from `standard_smiles` per species (the lenient helper, so one odd label does not
+        abort ingestion), matching `STANDARDIZATION_VERSION` in `reaction_definition()`.
 
-        `standard_smiles` per species, because "the same compound" is what a fingerprint row should
-        be keyed on and `STANDARDIZATION_VERSION` is already folded into `reaction_definition()` —
-        a claim the reaction rows did not honour while this built the string from raw `smiles`. The
-        lenient helper, not the strict one: an ELN drop with one odd label must not abort ingestion
-        (a genuinely unparseable reaction is caught downstream by `drfp_bitstring`).
-
-        Raises `StructureNotGiven` on a citation-only record — this is the fingerprint input, and a
-        fingerprint of the structured subset would index a reaction nobody ran.
+        Raises `StructureNotGiven` on a citation-only record, since a fingerprint of the structured
+        subset would index a reaction nobody ran.
         """
         self._require_structure()
         reactants = (c for c in self.inputs if c.role not in _AGENT_ROLES)
@@ -567,6 +437,6 @@ class OrdReaction(BaseModel):
     def compounds(self) -> list[Component]:
         """Every structured component (inputs + outcomes), for per-compound indexing.
 
-        `unstructured` is deliberately not here: this list is read as structures.
+        `unstructured` is excluded: this list is read as structures.
         """
         return [*self.inputs, *self.outcomes]

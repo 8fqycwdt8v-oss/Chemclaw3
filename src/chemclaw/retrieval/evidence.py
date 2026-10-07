@@ -1,11 +1,8 @@
-"""The report harness's source-agnostic contract (plan steps 5b.1, 5b.2).
+"""The report harness's source-agnostic contract.
 
-An `EvidenceChunk` is a retrieved fact that **must** carry a back-reference to the source note
-it came from (`source_note_id`) — the harness refuses to synthesize anything not tied to a
-note (no fabricated statistics, 5b.4). A `SourceRetriever` is the only thing the harness core
-knows: a `retrieve(query, filters)` that returns evidence chunks. Concrete sources (graph,
-fingerprint search, analytics) implement it as thin adapters, so adding a source — later even
-external literature — is a new retriever behind this interface, never a change to the core (G6).
+An `EvidenceChunk` must carry `source_note_id`; the harness refuses to synthesize anything not
+tied to a note. A `SourceRetriever` (`retrieve(query, filters)`) is the only thing the harness
+core knows, so a new source is a new retriever behind this interface, never a core change.
 """
 
 from collections.abc import Iterable
@@ -22,37 +19,20 @@ class EvidenceChunk(BaseModel):
     source_note_id: str = Field(min_length=1)
     # How the chunk was found (which retriever) — provenance for the report footer.
     retriever: str = Field(min_length=1)
-    # A relevance/support score in [0, 1], higher = keep first when a sweep must truncate (KM-5).
-    # Each retriever sets it in its own terms — graph hits by the note's `confidence`, structural
-    # hits by similarity, index hits by `ts_rank` or cosine — so it is a ranking heuristic, not a
-    # calibrated cross-source probability.
-    #
-    # **Which is why it orders a source's own list and nothing wider.** `gather_evidence` used to
-    # sort the union of every source by this number before capping it, and measurably starved the
-    # lexical leg to zero surviving chunks: a note's `confidence` and a Postgres `ts_rank` are not
-    # the same quantity and the higher scale simply won. Both merge modes now go by rank position,
-    # which *is* comparable across sources, and each retriever applies this score inside its own
-    # ranking where it means something.
-    #
-    # **What reaches the model is therefore not the finder's number.** `hybrid.restated_as_position`
-    # rewrites this field to `1 / (1 + position)` in the merged list, in both modes, because a
-    # number that contradicts the order it is printed beside is worse than no number. The finder's
-    # own value governs its source's ranking and the cap, and is spent by the time the chunk is
-    # returned; `confidence` below carries the note's confidence as a field of its own.
-    #
-    # Defaults to a neutral 0.5: every current retriever sets it explicitly, so this only governs a
-    # future retriever that forgets to — and neutral keeps such a chunk in the middle of its
-    # source's ranking rather than silently pinning it last (and truncated).
+    # A relevance score in [0, 1], set by each retriever in its own terms (note confidence,
+    # similarity, `ts_rank`, cosine): a ranking heuristic within one source, not comparable across
+    # sources. Merges go by rank position, and `hybrid.restated_as_position` rewrites this to
+    # `1 / (1 + position)` in the merged list so the printed number matches the order; `confidence`
+    # carries the note's own confidence. The neutral default keeps a retriever that forgets to set
+    # it
+    # mid-ranking.
     score: float = Field(default=0.5, ge=0.0, le=1.0)
-    # Notes this chunk's source note is known or suspected to disagree with (`kg.conflicts`,
-    # KM-8). A *flag*, never a filter: retrieval has no basis for deciding which of two curated
-    # notes is right, and silently returning both is what made two contradictory notes read as
-    # corroboration. Empty for the ordinary case, so a reader sees the marker only when there is
-    # something to see.
-    #
-    # The *strongest* disagreements, declared ones first, not all of them: on a corpus shaped like
-    # a real programme this list ran to ~141 ids per chunk, which is a fact about the corpus rather
-    # than a signal about the note (`conflict_max_per_note`).
+    # Notes this chunk's source note is known or suspected to disagree with (`kg.conflicts`). A
+    # flag,
+    # never a filter: retrieval cannot decide which note is right, and returning both silently reads
+    # as
+    # corroboration. Holds the strongest disagreements, declared first, up to
+    # `conflict_max_per_note`.
     conflicts_with: list[str] = Field(
         default_factory=list,
         description=(
@@ -61,9 +41,7 @@ class EvidenceChunk(BaseModel):
             "confirmations. The disputing note may not be in this sweep at all."
         ),
     )
-    # How many disagreements there are in total, which is not always `len(conflicts_with)`. Carried
-    # because a truncated list with nothing saying so reads as a complete one — the same rule the
-    # tool-result number cap follows. Renderers say "3 of 141" when the two differ.
+    # The total number of disagreements, so a truncated list never reads as complete ("3 of 141").
     conflicts_total: int = Field(
         default=0,
         ge=0,
@@ -72,63 +50,30 @@ class EvidenceChunk(BaseModel):
             "when only the strongest are listed."
         ),
     )
-    # Who authored the source note, where it came from, and how sure it is (D-160). `NoteRef` has
-    # exposed all three to `find_notes`/`expand_note` since KM-6; the sweep that gathers most of
-    # the evidence an answer is built on carried none of them, so the model saw a claim and no way
-    # to weigh who was claiming it. `confidence` did reach here — as `score`, a truncation-order
-    # signal — which is not the same thing as being *told* a note is uncertain.
-    #
-    # This is harmless while everything readable was human-merged, and becomes a correctness bug
-    # the moment a second, ungated tier exists (D-161). It ships first and on its own for that
-    # reason.
-    #
-    # `created_by` is deliberately `""`, not `"human"`, when the retriever could not establish it:
-    # a structural hit is generated from the fingerprint index and has no note author. Defaulting
-    # to "human" would assert provenance nobody checked, in the one field whose whole purpose is
-    # to be trusted.
+    # Who authored the source note, where it came from, and how sure it is, so the model can weigh a
+    # claim by its claimant. `created_by` is `""` rather than `"human"` when the retriever cannot
+    # establish it (a structural hit has no note author): defaulting would assert unchecked
+    # provenance.
     created_by: str = ""
     source: str = ""
     confidence: float | None = None
-    # When the source note stopped being valid, or `None` while its window is open.
-    #
-    # **Carried because a date-windowed sweep serves retired notes and nothing said so.** An
-    # unwindowed sweep drops a note that is not current today (KM-7, D-055), so every chunk it
-    # returns is live and this field is `None`; a sweep naming a period deliberately does not apply
-    # that rule — "what did we recommend in 2024" is asking for exactly the notes that have since
-    # been retired — and the chunk it built was byte-identical to one from a live note. A reader
-    # with the note's `confidence`, its author and its source but no idea it was withdrawn is being
-    # handed the most confident-looking form of superseded advice.
-    #
-    # Not a filter, for the same reason `conflicts_with` is not one: which of a retired note and
-    # its replacement answers the question is the caller's, and the caller asked for the period.
+    # When the source note stopped being valid, or `None` while its window is open. A date-windowed
+    # sweep deliberately serves retired notes, and this field says so. Not a filter: the caller
+    # asked
+    # for the period.
     valid_to: date | None = None
     # Which of the query's terms (`kg.search.query_terms`) this chunk's note actually contains.
     #
-    # **Because an absent answer was indistinguishable from a present one.** `GraphRetriever`
-    # ranks `complete or scored`: when no note matches every term it widens to *any* term, and
-    # measured over the shipped corpus complete matches in the top 8 were **0 of 8** on questions
-    # the corpus does answer — so widening is the normal path, not the fallback, and the leg
-    # always fills `retrieval_top_k`. `gather_evidence("what is the melting point of ibuprofen")`
-    # returns `retrieval_top_k` chunks about aspirin, DCM and route scoring — eight at the
-    # shipped default, in the same shape as a successful query, while the tool's own docstring
-    # tells the model that empty means "nothing on file, never invented".
+    # The graph leg widens to any-term matches and always fills `retrieval_top_k`, so an absent
+    # answer
+    # looks like a present one. Which terms matched (e.g. not the compound name) is what lets the
+    # model
+    # qualify an answer; a count does not discriminate. A separate field because `score` is
+    # overwritten by the merged rank.
     #
-    # **Terms rather than a count, because the counts were measured and do not discriminate.**
-    # Mean top-chunk coverage is 0.372 where the answer is present and 0.400 where it is absent;
-    # complete matches are 1/19 against 0/3. What separates the two cases is *which* terms
-    # matched: `melting` and `point` did, `ibuprofen` did not. That is a judgment the model can
-    # make against the question it asked and this system cannot make for it — so this field is
-    # evidence for the model's own qualification of an answer, not a classifier's verdict.
-    #
-    # It is a field of its own rather than the `score` it conceptually replaces because
-    # `hybrid.restated_as_position` overwrites `score` with the merged rank in both merge modes:
-    # match quality reached here once, as a number, and was spent before the model saw it.
-    #
-    # **`None` is "this source did not report it", never "nothing matched"** — the distinction
-    # `Hits.found` makes one class over. The share, warehouse, vendored-dataset and verifier legs
-    # build chunks from raw document text and never tokenise a query, so a zero there would be a
-    # claim nobody checked. An *empty list* on a note-backed chunk is a real statement: the dense
-    # leg can surface a note that shares no word with the question at all.
+    # `None` means the source did not report it (legs built from raw document text never tokenise
+    # the
+    # query); an empty list on a note-backed chunk is a real statement.
     matched_terms: list[str] | None = Field(
         default=None,
         description=(
@@ -159,84 +104,42 @@ class EvidenceSweep(BaseModel):
     """
 
     chunks: list[EvidenceChunk] = Field(default_factory=list)
-    # `None` when everything found was returned. Otherwise which bound cut the list — the two are
-    # separately actionable: a `count` cut narrows with a filter, a `chars` cut narrows the sources.
-    #
-    # **The bound that bit first**, when both would have. That is the actionable one, but it means a
-    # reader who narrows on `chars` may then meet the count cap; `total_before_cap` is what says how
-    # much is still unseen either way.
+    # `None` when everything found was returned; otherwise the bound that bit first: a `count` cut
+    # narrows with a filter, a `chars` cut by narrowing sources. `total_before_cap` says how much is
+    # still unseen.
     truncated_by: Literal["count", "chars"] | None = None
     # How many chunks survived merging before either cap, so "40 of 300" is expressible.
     total_before_cap: int = Field(default=0, ge=0)
     # Sources that could not be asked at all. Empty is the ordinary case; a name here means this
     # answer is about less than the whole corpus, whatever the chunks say.
     sources_failed: list[str] = Field(default_factory=list)
-    # What each source contributed to the merge, by name — the per-branch fact the fan-out
-    # already computed and then dropped at this boundary, so the model could not tell "the share
-    # leg found nothing", "the share leg isn't configured" and "the share leg declined" apart:
-    # three different answers rendered identically as an absence. Counts are pre-merge (what the
-    # source handed the sweep), so a source out-competed at the cap still shows its work.
-    #
-    # **Pre-merge is right for this field and wrong as the only measurement**, which is why
-    # `fanout.record_kept_chunks` exists: a leg that hands over thirty chunks and survives the
-    # merge with none reads as healthy here, and that is exactly the shape
-    # `D-2026-08-01-a-cap-that-starves-a-source` measured. The metric pair
-    # (`chemclaw_evidence_source_chunks_total` and `chemclaw_evidence_source_kept_total`) carries
-    # both halves, so the ratio is alertable across turns while this field stays what a single
-    # answer's reader needs.
+    # What each source handed to the merge (pre-merge counts), by name, so "found nothing", "not
+    # configured" and "declined" are distinguishable. A leg out-competed at the cap still shows its
+    # work
+    # here; the kept-after-merge half is metered by `fanout.record_kept_chunks`.
     sources: dict[str, int] = Field(default_factory=dict)
-    # How many hits a source discarded at **its own** bound, before the merge ever saw them —
-    # by name, and only for the sources that both cut and can say so.
-    #
-    # **`sources` and `truncated_by` together were still not the whole truth.** Both describe the
-    # *merge*: `sources` counts what a leg handed over, `truncated_by` names which of
-    # `gather_evidence_max_chunks`/`_max_chars` cut the merged list. Neither can see a leg that
-    # truncated before handing anything over — and `retrieval_top_k` is 8, so on the shipped
-    # configuration that is the *only* cut that ever bites. Measured on 5,000 matching notes: the
-    # sweep reported `chunks=8, total_before_cap=8, truncated_by=None` while 4,992 were dropped
-    # inside the graph leg. "A cut does not look like a corpus" was true of the merge and false of
-    # the legs.
-    #
-    # A source absent from this dict either cut nothing or **cannot say** — the dense and lexical
-    # legs push `LIMIT k` into the index and do not know what they did not fetch. That is why the
-    # unknown is an absence rather than a zero: a zero here would assert "nothing was cut" on the
-    # one leg that cannot check it.
+    # How many hits a source discarded at its own bound, before the merge saw them, by name. With
+    # `retrieval_top_k` small this is usually the cut that bites, and `truncated_by` cannot see it.
+    # A source absent here cut nothing or cannot say (dense and lexical legs push `LIMIT k` into the
+    # index), so unknown is an absence, never a zero.
     sources_truncated: dict[str, int] = Field(default_factory=dict)
     # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
-    # Distinct from `sources_failed` because the fixes differ: a failure is an outage, a skip is
-    # a fact about the deployment or the call (an unentitled actor, a filter a source cannot
-    # serve, a notes directory with nothing in it).
+    # Distinct
+    # from `sources_failed`: a failure is an outage, a skip is a fact about the deployment or the
+    # call.
     sources_skipped: dict[str, str] = Field(default_factory=dict)
 
 
 class Hits(list[EvidenceChunk]):
     """What one source returned, and how many it had **before its own bound cut them**.
 
-    A `list` subclass rather than a wrapper, and that is the whole design decision. The count has to
-    travel from the retriever that cuts to the fan-out that reports, and the three shapes that could
-    carry it were each worse:
+    A `list` subclass so every existing caller keeps working; only the retrievers that cut set
+    `found`, and only `fanout` reads it. Not a retriever attribute (one instance serves concurrent
+    turns) and not per-chunk (a source returning nothing would have nowhere to put it).
 
-    - **Changing `retrieve`'s return type.** Honest, and it churns 84 call sites of which **81 are
-      tests** — every `len(await r.retrieve(...))` and `assert ... == []` in the suite — for no
-      behavioural gain in any of them. A diff whose signal-to-noise is 3:81 is one nobody reviews.
-    - **A mutable attribute on the retriever.** One instance serves concurrent turns, so the count
-      would be whichever turn wrote last. That is the defect, not a way to report it.
-    - **The count repeated on every chunk.** N copies of one fact, and a source that returns zero
-      chunks then has nowhere to put it — which is exactly the case worth reporting.
-
-    A `Hits` *is* a list, so every existing caller and every test keeps working unchanged; only the
-    retrievers that cut set `found`, and only `fanout` reads it.
-
-    **`found` is `None` when the source cannot say, and that is not the same as "did not cut".**
-    `GraphRetriever` materialises its whole candidate set and then truncates, so it knows both
-    numbers. The dense and lexical legs push `LIMIT k` into the index and genuinely do not know what
-    they did not fetch — reporting `found == len(self)` for them would assert "nothing was cut" on
-    the one leg that cannot check, which is the ambiguous zero
-    `D-2026-08-03-a-metric-must-declare-what-it-can-see` is about. `None` says "unknown"; a reader
-    that wants a total must treat it as unknown rather than as agreement.
-
-    `+` and slicing return plain lists, losing `found`. That is correct rather than unfortunate: a
-    concatenation of two sources' hits has no single pre-cut total to carry.
+    `found` is `None` when the source cannot say (index legs that push `LIMIT k` down), which is not
+    "did not cut". `+` and slicing return plain lists, correctly: a concatenation has no single
+    total.
     """
 
     __slots__ = ("found",)
@@ -255,10 +158,9 @@ class Hits(list[EvidenceChunk]):
 class RetrieverSkip(Exception):
     """A source declining to answer, with the reason a reader can act on.
 
-    Raised by a retriever when it *cannot meaningfully ask* — an unentitled caller, a filter the
-    source cannot serve, a notes tree with nothing in it — as opposed to asking and finding
-    nothing. The fan-out reports it as a skip rather than a failure or a zero: all three used to
-    collapse into an indistinguishable `[]`, which is the D-2026-08-01 class one category over.
+    Raised when a retriever cannot meaningfully ask (an unentitled caller, an unservable filter, an
+    empty notes tree), as opposed to asking and finding nothing. The fan-out reports it as a skip,
+    distinct from a failure or an empty result.
     """
 
     def __init__(self, reason: str) -> None:

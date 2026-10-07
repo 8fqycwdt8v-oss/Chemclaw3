@@ -333,7 +333,7 @@ this system cannot caveat well enough, and it has no second caller.
 ## 6. What this map does not tell you
 
 - **Nothing here was run against a live campaign.** The BoFire behaviour is measured; the *use
-  cases* are verdicted from the code and from `tasks/story-audit-optimization.md`. In the 190-probe
+  cases* are verdicted from the code and from the optimization story audit (removed from `tasks/` 2026-10-07; in git history). In the 190-probe
   live run, `suggest_next_experiment` was selected **zero** times — a skill-routing defect that has
   since been fixed and **not re-tested live**. A capability nothing routes to is not a served story.
 - **The durable campaign has never run a real optimization.** `objectives.py`'s registry holds two

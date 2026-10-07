@@ -1,10 +1,8 @@
-"""Postgres backend for the calculation store (plan step 1b.3).
+"""Postgres backend for the calculation store.
 
-Implements the same `ResultStore` interface as `InMemoryStore`, backed by the
-`calculation_results` table (see `infra/sql/001_calculation_results.sql`), so
-results survive process restarts and are shared across workers. A `put` is an
-upsert keyed by the flat calculation key; a `get` is a single primary-key lookup.
-The DSN comes from the one config source.
+Implements `ResultStore` over `calculation_results` (`infra/sql/001_calculation_results.sql`), so
+results survive restarts and are shared across workers. A `put` is an upsert keyed by the flat
+calculation key; a `get` is a primary-key lookup.
 """
 
 import logging
@@ -71,13 +69,8 @@ _SELECT = (
     "FROM calculation_results WHERE key = %s"
 )
 
-# What a browse matches. Every filter is `%s IS NULL OR <column> = %s`-shaped so one prepared
-# statement serves every combination — the alternative is assembling SQL from whichever filters
-# were set, which is how a query builder starts.
-#
-# Written once and used by both statements below, because the page and the total have to describe
-# the same set of rows: a total derived from a predicate that had drifted from the page's would be
-# worse than no total at all.
+# What a browse matches. Every filter is `%s IS NULL OR <column> = %s`, so one prepared statement
+# serves every combination; shared by page and count so both describe the same rows.
 _WHERE = """
      WHERE (%(calc_type)s::text IS NULL OR calc_type = %(calc_type)s)
        AND (%(calc_version)s::text IS NULL OR calc_version = %(calc_version)s)
@@ -103,15 +96,9 @@ _FIND = f"""
      LIMIT %(limit)s
 """
 
-# How many rows the same query matches, cap and all — the number that turns a full page from "this
-# is what we have" into "this is 20 of 30".
-#
-# **A second statement rather than `count(*) OVER ()` folded into `_FIND`.** A window aggregate has
-# to consume the whole matching set before it emits a row, which takes the `LIMIT` off the top of
-# the plan and makes the *page* pay for the total. Measured on 50,000 rows at the shipped
-# indexes: the page costs 0.65 ms, a filtered count 0.49 ms, an unfiltered count 4.09 ms. The
-# browse is called before "committing hours of compute", so a millisecond buys the one thing the
-# page cannot say for itself.
+# How many rows the same query matches, so a full page reads as "20 of 30". A separate statement
+# rather than `count(*) OVER ()`, which would make the page pay for the total by defeating the
+# `LIMIT`.
 _COUNT = f"""
     SELECT count(*)
       FROM calculation_results
@@ -122,9 +109,7 @@ _COUNT = f"""
 class PostgresStore:
     """Durable `ResultStore` backed by Postgres.
 
-    Opens a short-lived connection per call: calculations are coarse-grained and
-    infrequent relative to their cost, so a connection pool would be premature
-    complexity here (KISS). Introduce pooling only if store traffic proves it.
+    A short-lived connection per call; calculations are coarse-grained relative to their cost.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -135,11 +120,8 @@ class PostgresStore:
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection with the configured per-statement timeout.
 
-        Pooled per process when the process opened a pool (`chemclaw.core.db.pooling`), so a
-        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
-        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
-        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
-        activity for its whole budget.
+        Pooled when the process opened a pool, a dedicated connect otherwise. An unreachable
+        database reports "Postgres unreachable at <host>", and a hung query is cancelled.
         """
         async with db.connection(self._dsn) as conn:
             yield conn
@@ -153,13 +135,9 @@ class PostgresStore:
         if row is None:
             return None
         result, provenance, compute_seconds, structure_id, epoch = row
-        # `checked_payload` rather than the old `result if isinstance(result, dict) else
-        # json.loads(result)`: that else-branch was written for a driver that hands back a string,
-        # and psycopg parses jsonb *whatever* its top level is — so an array, a string, a number or
-        # a `null` (all storable under `JSONB NOT NULL`) reached `json.loads` as a `list`/`int` and
-        # produced `TypeError: the JSON object must be str, bytes or bytearray, not list`, which
-        # names neither the table nor the row. No supported driver returns a string here; if one
-        # ever does, this refuses it by name instead of guessing.
+        # `checked_payload` refuses a non-object jsonb top level by name rather than failing later
+        # with
+        # an anonymous `TypeError`.
         return StoredResult(
             key=key,
             result=checked_payload(key, result),
@@ -172,16 +150,10 @@ class PostgresStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key.
 
-        **The payload goes through `json_column`, which is a backstop and not the check.**
-        `checked_payload` is the check, and it runs one door earlier in `cached_compute`; this door
-        is public and has writers that never pass through that one — `ArrayOffloadingStore`'s
-        rewrite, a backfill, and whatever comes next, by the same argument
-        `publish_stored_result` makes about being paired with `put` rather than with
-        `cached_compute`. Measured, a `float("nan")` arriving here came back as
-        `InvalidTextRepresentation: invalid input syntax for type json / DETAIL: Token "NaN" is
-        invalid` — a server-side error naming a JSON token, no field and no caller. `json_column`
-        makes it a `ValueError` raised in this process at the column holding the value
-        (`chemclaw.core.jsonb`, which carries the argument and the other four paths it covers).
+        `checked_payload` in `cached_compute` is the check; `json_column` here is the backstop for
+        writers that bypass it (`ArrayOffloadingStore`, backfills), turning a non-finite float into
+        a `ValueError` at the offending column instead of a server-side JSON error
+        (`chemclaw.core.jsonb`).
         """
         key = stored.key
         async with self._connection() as conn:
@@ -206,9 +178,7 @@ class PostgresStore:
     async def known(self, keys: Sequence[str]) -> set[str]:
         """Which of `keys` the cache holds — the `kg.validate.CalculationExistence` answer.
 
-        One indexed `= ANY` probe rather than a `get` per key, because `make kg-validate` asks
-        for a whole corpus's `calc_refs` at once. Returns keys, not rows: existence is the whole
-        question, and the payloads would be dead weight on a gate that only prints ids.
+        One indexed `= ANY` probe for a whole corpus's `calc_refs`; returns keys only.
         """
         if not keys:
             return set()
@@ -223,27 +193,14 @@ class PostgresStore:
     async def find(self, query: CalculationQuery) -> CalculationPage:
         """Return results matching `query`, newest first, capped at `query.limit`.
 
-        A molecule filter is applied as an `input_hash` equality, never a scan: the hash is
-        `stable_hash(canonical_smiles)` and is not reversible, so the query molecule is hashed the
-        same way a key is built and compared. Canonicalisation happens here rather than at the
-        caller so `CCO` and `OCC` find the same rows.
+        A molecule filter canonicalises the SMILES here and compares `input_hash` (not reversible,
+        so never a scan). Rows whose `epoch` is neither current nor `''` are excluded, matching
+        `store._matches` (`tests/test_postgres_store.py` pins the two agreeing).
 
-        A row whose recorded `epoch` is neither the current one nor `''` is excluded, matching
-        `store._matches`. The two are separate code for the reason every other filter here is —
-        this one must run in SQL because it filters before it fetches — and
-        `tests/test_postgres_store.py` pins them agreeing, which is the only thing that keeps a
-        predicate stated twice from drifting.
-
-        **The page carries what it left behind.** `total_matched` counts every matching row, so a
-        capped page says how much it is a page *of*, and `unreadable` counts the rows this page
-        dropped — `_readable_row` logs one and returns a shorter list, which no reader of the list
-        can distinguish from six rows existing. Both are on the page rather than in the log,
-        because the caller that has to qualify its answer is a model that never sees the log.
-
-        The count is a second statement in the same transaction as the page. Under READ COMMITTED
-        each statement takes its own snapshot, so a row inserted between them can make the total
-        one larger than the page could have shown — an over-count on a browse, which reports "more
-        exist" and is the direction that cannot claim a completeness it does not have.
+        The page carries `total_matched` (so a capped page says what it is a page of) and
+        `unreadable` (rows dropped by `_readable_row`), because the model qualifying its answer
+        never sees the log. The count runs in the same transaction but its own snapshot, so it can
+        only over-count.
         """
         params = {
             "calc_type": query.calc_type,
@@ -274,13 +231,8 @@ class PostgresStore:
 def _readable_row(row: TupleRow) -> StoredResult | None:
     """One `find` row, or `None` with a warning when its payload is not a result.
 
-    **Dropped rather than raised, and only on this path.** `get` addresses one key and must refuse
-    a corrupt row by name — the caller asked for that row and would otherwise be handed a wrong
-    answer. `find` is a browse ("what do we already have on this molecule"), and one poisoned row
-    taking the whole listing down with a `TypeError` is what it did before: measured, seven rows
-    of which one held a jsonb string answered zero. That is the same call
-    `retrievers._chunks_from_hits` makes when an index hit's note no longer loads. The row is not
-    hidden — it is logged here, and asking for it by key still refuses by name.
+    Dropped only on this browse path, so one corrupt row cannot take down a listing; `get` by key
+    still refuses it by name.
     """
     try:
         return _stored_from_row(row)
@@ -292,9 +244,8 @@ def _readable_row(row: TupleRow) -> StoredResult | None:
 def _stored_from_row(row: TupleRow) -> StoredResult:
     """Rebuild a `StoredResult` from a `find` row, key components included.
 
-    `find` returns the key columns rather than parsing `key`, so a calculator version containing
-    the separators the flat form uses cannot be split back wrongly — the flat string is an index
-    key, not a serialization format.
+    Reads the key columns rather than parsing `key`, since a version may contain the flat form's
+    separators.
     """
     _, calc_type, calc_version, input_hash, params_hash = row[:5]
     result, provenance, compute_seconds, created_at, structure_id, epoch = row[5:]
@@ -318,11 +269,6 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
 def default_store() -> ResultStore:
     """Return the production result store.
 
-    The one place that names the production backend, so a tool module does not have to
-    know which one it is. Every tool that needs a store imports this and tests swap it at
-    the importing module (`monkeypatch.setattr(<module>, "default_store", ...)`) — it lives
-    here rather than in one tool module because storage is not a calculator concept, and
-    the BO featurizer needs the same seam as the calculators (Rule of Three: two callers
-    plus the test seam, one definition).
+    The one place that names the production backend; tests monkeypatch it at the importing module.
     """
     return PostgresStore()

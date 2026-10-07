@@ -1,24 +1,12 @@
 """Grade a live answer against its probe's `direction`, using a model as the judge.
 
-Only the part that genuinely needs judgement comes here. Whether a tool was called, whether the
-turn failed loudly, whether a cited note id was ever retrieved — all of that is decided
-mechanically in `chemclaw.evals.live` from the event stream, because a mechanical signal cannot be
-argued with. What is left is the one question a stream cannot answer: *did this answer serve the
-person who asked?*
+Everything mechanical (tool calls, loud failures, citation grounding) is decided in
+`chemclaw.evals.live`; the judge answers only "did this answer serve the person who asked?".
 
-Two deliberate choices.
-
-**The judge is a different, stronger model than the agent under test**
-(`model_routes["live-probe-judge"]`). Grading is one call per probe against the agent's many, so the
-quality is nearly free; and a judge sharing the agent's blind spots would ratify them — which is why
-an unset route is a WARNING rather than a silent fallback to the agent's own model.
-
-**A bucket-C probe is graded on refusal, not on content.** The system genuinely cannot schedule an
-instrument or classify a mutagenic impurity. An answer that says so plainly is the correct answer,
-and scoring it as a failure would turn the run into a measurement of the tool list rather than of
-the system's honesty at its own edge. The inverse — a confident, well-formatted answer to a
-question the system has no data for — is the most serious defect this run can find, so it is
-called out as its own verdict rather than folded into a score.
+The judge is a separate, stronger model (`model_routes["live-probe-judge"]`), so it does not share
+the agent's blind spots; an unset route warns. A bucket-C probe is graded on refusal: saying plainly
+that the system cannot do something is the correct answer, and a confident answer without data is
+called out as its own verdict.
 """
 
 from __future__ import annotations
@@ -39,14 +27,8 @@ from chemclaw.evals.probe import Probe
 
 logger = logging.getLogger(__name__)
 
-# `ungraded` is not a grade — it is the absence of one, and it exists because the first version of
-# this module did not have it. A truncated or unparseable judge reply fell through to `unserved`,
-# so a *grading crash* was recorded as a *system failure*, indistinguishable in the output from a
-# real one. That mislabelled 65 of 190 probes in the first run and inflated the headline
-# unserved rate from at most 22 to 87 (`D-2026-09-04-a-gateway-is-the-only-provider`, which is the
-# frozen copy of that measurement; this is the one place in this module that restates it, and two
-# other sentences here used to restate it too). A verdict that cannot be obtained must be visibly
-# missing.
+# `ungraded` is the absence of a grade, not a grade: a truncated, unparseable or off-vocabulary
+# judge reply must be visibly missing rather than recorded as a system failure.
 Verdict = Literal["served", "partial", "unserved", "fabricated", "ungraded"]
 
 _SYSTEM = ModelProse(
@@ -88,34 +70,12 @@ class Judgement(BaseModel):
 def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
     """The grading payload: the ask, the bar, the forbidden list, and what came back.
 
-    The tool *results* are here, not just the tool names, and that is the difference between a
-    judge that can tell a retrieved number from an invented one and a judge that guesses. The
-    first version passed names alone and called verbatim quotations from merged notes
-    "fabricated" at a 40% false-positive rate — it had no way to see that the number was in the
-    evidence. `uncited_note_ids` is passed for the same reason: it is the mechanical answer to the
-    citation question, and the judge should defer to it rather than re-derive it from prose.
-    `verified_numbers` is the same move for figures, and it exists because fixing the ids alone did
-    not stop the grader calling verbatim tool output invented: it went on writing "the tool results
-    shown are truncated previews that do not display the numerical limits" about six ICH PDEs the
-    tool had returned in full. It is presented as a whitelist and labelled as one — the harness can
-    prove a figure is in the evidence and cannot prove the reverse, because subtraction, the
-    question itself and textbook constants all produce numbers no tool returned (`_verified_numbers`
-    has the measurement).
-
-    It also cannot prove the *sentence*, and the heading says so because the live data contains the
-    case. gr-18 quoted a dipole of 5.67 D for a para-CF₃ sulfonyl fluoride whose SMILES it printed;
-    the tool had been called on the *meta* isomer, which really does return 5.67, while the para
-    one returns 1.86. Every figure was verbatim and the comparison it was built into was not, so a
-    heading claiming more than "this value came back" would launder that.
-
-    **Telling the judge to trust a signal obliges us to say what the signal can see.** It did not,
-    and both halves went wrong at once. The list was derived from the same truncated previews the
-    prompt warns are weak evidence, so "trust this over your own reading" was an instruction to
-    trust a broken number — and a grader duly escalated it, reporting four ids as "mechanically
-    verified as absent from the corpus" when all four were on disk and all four came back from a
-    single retrieval call. `_score_citations` now reads the untruncated ids, and the heading says
-    in the prompt itself what the signal does and does not claim, because a caveat the judge has to
-    infer is a caveat the judge will not apply (`docs/archive/live-grounded-2026-08-03.md`).
+    Tool *results*, not just names, so the judge can tell a retrieved number from an invented one.
+    `uncited_note_ids` and `verified_numbers` are the mechanical answers to the citation and figure
+    questions, and the judge should defer to them. Each heading states what its signal can and
+    cannot see: `verified_numbers` proves a value came back from a tool, not that the sentence using
+    it is right (a verbatim value can be attached to the wrong compound), and absence from it proves
+    nothing.
     """
     forbidden = "\n".join(f"  - {claim}" for claim in probe.forbids_claims) or "  (none)"
     tools = ", ".join(outcome.tools_called) or "(none)"
@@ -157,11 +117,8 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
 def _evidence(result: ToolResult) -> str:
     """One tool result as the judge sees it: the whole text when the stream carried it, bounded.
 
-    The preview is the browser's 200 characters, and grading against it called two citations
-    `screen_hazards` really returned "fabricated" (pl-16) — they were the second and third flags of
-    a result the model had read whole. A result small enough to ride the stream is carried whole
-    (`ToolResult.text`) and shown up to `live_probe_judge_result_chars`; a larger one keeps its
-    preview, which the heading says is weak evidence.
+    A result small enough to ride the stream is shown up to `live_probe_judge_result_chars`; a
+    larger one keeps its 200-character preview, which the heading labels as weak evidence.
     """
     limit = settings.live_probe_judge_result_chars
     if result.text and limit:
@@ -172,11 +129,8 @@ def _evidence(result: ToolResult) -> str:
 def _conditional_capability(probe: Probe, outcome: ProbeOutcome) -> str:
     """The line telling the judge whether a `needs_bundle:` probe's capability was bound this run.
 
-    Such a probe is graded in two lanes off one bucket, and the judge otherwise cannot tell them
-    apart: with `pyexec` mounted, "I'll run the fit" is the right answer to ws-12 and was scored as
-    a capability the system lacks. Read off `expected_tools_met`, which `evals/live` sets only when
-    the expectation applied — the tool was on the surface and its bundle was not degraded — so the
-    judge is told exactly what the tool-reach score was computed against.
+    Such a probe has two correct answers depending on whether the tool was available. Read off
+    `expected_tools_met`, which is set only when the tool was on the surface and not degraded.
     """
     if probe.needs_bundle is None:
         return ""
@@ -194,18 +148,10 @@ def _conditional_capability(probe: Probe, outcome: ProbeOutcome) -> str:
     )
 
 
-# What an endpoint calls a reply that stopped because it ran out of budget. Two spellings, for the
-# reason `agent/llm_provider._CONTEXT_LENGTH_MARKERS` keeps two: an OpenAI-compatible gateway says
-# `length`, and one that relays a vendor's own field verbatim can say `max_tokens`. LangChain does
-# not normalise this — it forwards whatever `finish_reason`/`stop_reason` the response carried — so
-# recognising both is cheaper than being wrong about which gateway a site runs.
-#
-# **Missing it does not fabricate a verdict, and that is deliberate belt-and-braces.** A truncated
-# reply has no closing brace, so the JSON parse below fails and the probe is already `ungraded`
-# rather than `unserved`; this exists to say *why* in the reason, and to catch the case where a
-# reply is cut after a syntactically complete object. Conflating a grading crash with a system
-# failure is the whole reason `ungraded` is a verdict — the run that measured what it cost is
-# recorded once in this file, beside `Verdict` above, and in the ADR behind it.
+# What an endpoint calls a reply cut off by its token budget: `length` (OpenAI-compatible) or
+# `max_tokens` (a relayed vendor field); LangChain forwards either unnormalised. A truncated reply
+# usually fails the JSON parse and is `ungraded` anyway; this names the reason and catches a cut
+# after a complete object.
 _TRUNCATED = frozenset({"length", "max_tokens"})
 
 
@@ -220,11 +166,8 @@ def _truncated(response: Any) -> bool:
 def judge_model() -> str:
     """The model the judge will actually run on, for a report that names it.
 
-    A reader of an A/B table has to know whether the grader was the model under test — an unset
-    `live-probe-judge` route makes the run self-grading, which `_judge_client` warns about — so the
-    report needs the *resolved* name rather than the route key. Derived here rather than in the
-    caller so the fallback is stated once: this used to be a `live_probe_judge_model` setting
-    carrying a vendor model id in this repository, which is what `model_routes` exists to avoid.
+    The resolved name, not the route key, so a reader can see when an unset `live-probe-judge` route
+    made the run self-grading.
     """
     return settings.model_routes.get("live-probe-judge") or settings.llm_model
 
@@ -233,24 +176,12 @@ def judge_model() -> str:
 def _judge_client() -> Any:
     """The judge's chat model, from the one seam that builds one — built once per process.
 
-    `@cache`d for the reason `agent/verifier._default_client` is: construction is pure config, a
-    run grades ~190 probes, and rebuilding the client per probe would redo TLS and transport setup
-    on every one. It also fixes the frequency of the warning below — a property of the *run*, said
-    once, rather than 190 identical lines.
-
-    Routed rather than named: `build_chat_model` resolves `model_routes["live-probe-judge"]`
-    against the gateway, so this module names no model and imports no provider client
-    (`D-2026-09-04-a-gateway-is-the-only-provider` — it was the last first-party importer of the
-    `anthropic` SDK, posting that vendor's protocol to `<gateway>/v1/messages`, which against an
-    OpenAI-compatible gateway is a doubled path and a 404 degraded to `ungraded` on every probe).
-
-    An unset route falls back to `llm_model` — the model under test — which quietly turns the run
-    into self-grading. That is the one property of this judge worth a log line, so it gets one.
-
-    `max_tokens` is bound rather than configured, because the seam's ceiling is the *agent's*
-    answer allowance and this call needs its own: at 1024 the judge ran out of budget mid-JSON on
-    long answers, the closing brace was never emitted, and the parse failure was recorded as a
-    verdict of `unserved` on the run counted beside `Verdict` above.
+    Cached because construction is pure config and a run grades many probes; also makes the
+    self-grading warning once per run. Built by `build_chat_model` from
+    `model_routes["live-probe-judge"]`, so this module names no model and uses the gateway like
+    everything else. An unset route falls back to `llm_model`, the model under test, and warns.
+    `max_tokens` is bound here because the seam's default is the agent's answer allowance, and a
+    judge cut off mid-JSON cannot be parsed.
     """
     from chemclaw.agent.llm_provider import build_chat_model
 
@@ -272,13 +203,8 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
             probe_id=probe.id, verdict="unserved", reason="no answer event was produced"
         )
 
-    # **Through the seam, which is what makes the transport one decision rather than two.** This
-    # built its own client until 2026-09-04, and the cost was measured on `main` in the same week:
-    # it read `llm_base_url` and *not* `llm_tls_ca_bundle`, so a deployment pointing the judge at
-    # exactly the internal gateway that setting exists for could not verify the certificate, and
-    # every grading call failed at TLS. That fix reused `_tls_http_clients` explicitly; going
-    # through `build_chat_model` makes it structural instead — the agent's client and the judge's
-    # cannot trust different stores, because there is only one place that builds either.
+    # Through the seam, so the judge and the agent share one transport configuration (base URL, TLS
+    # CA bundle).
     client: Any = _judge_client()
     response = await client.ainvoke([SystemMessage(_SYSTEM), HumanMessage(_prompt(probe, outcome))])
     # `.text` rather than `.content`: an answer may arrive as a list of content blocks, and this is
@@ -301,13 +227,8 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
         payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
         return Judgement(probe_id=probe.id, verdict="ungraded", reason=f"judge JSON error: {exc}")
-    # A verdict outside the vocabulary is the same *kind* of failure as an unparseable reply — the
-    # judge did not grade — and it degrades the same way rather than raising. Without this the
-    # `Literal` field raises `ValidationError` out of `judge_outcome`, and the three call sites
-    # gather without `return_exceptions=True` and report after the gather, so one `"Served"` in a
-    # 190-probe run discards every grade in it. The raw value goes into `reason` because a grader
-    # that answered off-vocabulary is worth seeing, not merely worth surviving. Note the two fields
-    # beside it were already coerced with `str(...)`; only `verdict` was taken on trust.
+    # An off-vocabulary verdict degrades to `ungraded` like an unparseable reply, rather than
+    # raising `ValidationError` and losing a whole gathered run. The raw value goes into `reason`.
     verdict = payload.get("verdict")
     reason = str(payload.get("reason", ""))
     if verdict not in get_args(Verdict):
@@ -328,9 +249,8 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
 def judgement_from_transcript(payload: dict[str, object]) -> tuple[Probe, ProbeOutcome]:
     """Rehydrate one stored transcript so it can be re-graded without re-running the probe.
 
-    Re-grading has to be possible offline. The first run's verdicts were wrong for a reason that
-    had nothing to do with the system under test, and re-asking 190 live questions to correct a
-    grader bug would have changed the thing being measured as well as the measurement.
+    Fixing a grader bug must not require re-asking the live questions, which would change what is
+    measured.
     """
     return (
         Probe.model_validate(payload["probe"]),

@@ -1,9 +1,8 @@
-"""The conversational agent: model, skills, capabilities, compaction, harness.
+"""Settings for the conversational agent: model, skills, capabilities, compaction, harness.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators. Numeric ceilings follow one
+convention: 0 means no bound, where the field allows it.
 """
 
 import os
@@ -12,1172 +11,308 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
-# The two postures the plan/execute harness can start in, named once so every model that accepts
-# the value rejects the same set.
-#
-# It lived inline on `AgentSettings.harness_autonomy` while that was the only place it was written
-# down, and `AgentProfile.harness_autonomy` was declared `str | None` — so the environment variable
-# was validated and the profile file was not. A profile spelling it `plan-only` loaded silently and
-# `gate_applies` came back False, which does not merely fail to add the gate: it *removes* the one
-# the profile would otherwise have inherited from this default, while `TodoListMiddleware` keeps
-# running. `GET /plan` then answers `approved=false` while state-changing tools execute — the
-# harness looks plan-gated and is not. A constraint spelled in one of the two places it is needed
-# is a constraint the other place can contradict.
+# The two postures the plan/execute harness can start in, named once so the environment variable and
+# `AgentProfile.harness_autonomy` reject the same set. A misspelling accepted in one place would
+# silently drop the plan gate while the todo list keeps running.
 HarnessAutonomy = Literal["plan_only", "execute"]
 
 
 class AgentSettings(BaseSettings):
-    """The conversational agent: model, skills, capabilities, compaction, harness.
+    """How `build_langgraph_agent` compiles one turn's graph.
 
-    Grouped because everything here shapes how `build_langgraph_agent` compiles one turn's graph —
-    which model orchestrates, which skills and MCP capability servers attach, how the conversation
-    context is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
+    Which skills and connectors attach, how context is compacted and spend capped, and whether the
+    plan/execute harness wraps it.
     """
 
-    # Suffix for the `<retrieved-note-...>` envelope that marks untrusted retrieved content as
-    # data rather than instructions (`agent/framing.py`). Empty (the default) makes it a random
-    # per-*process* value, which is right for dev and tests and is what every deployment has had.
-    #
-    # Set it for any deployment with durable sessions. `session_store="postgres"` history outlives
-    # the process that wrote it and is replayed by other replicas, and the agent instructions say
-    # only an envelope with *exactly* the current tag marks retrieved data — so envelopes written
-    # by a previous process are read as ordinary content, and the injection mitigation silently
-    # lapses for the oldest material. A deployment-wide value keeps one tag across every pod and
-    # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
-    # A `SecretStr`, for the reason the credentials carry one
-    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`). It is not a credential to any
-    # external system, which is how it was missed once already — it is the HMAC key the envelope
-    # tag is derived from, and anyone who learns it can close the envelope from inside.
+    # HMAC key for the `<retrieved-note-...>` envelope tag marking retrieved content as data
+    # (`agent/framing.py`). Empty means a random per-process value, which breaks the mitigation for
+    # history replayed by other processes, so set it wherever sessions are durable. Hashed before
+    # use; a `SecretStr` because whoever knows it can close the envelope from inside.
     framing_envelope_secret: SecretStr = SecretStr("")
 
-    # The agent (plan step 1.5). The orchestration model name is `llm_model` — there is no second
-    # model setting here, because `agent_model` was one: a vendor model id in git, read only by the
-    # deleted Anthropic branch and by an `or` tail behind `llm_model`, which is always set
-    # (`D-2026-09-04-a-gateway-is-the-only-provider`). `skills_dir` is where the agent discovers
-    # SKILL.md files — one or more directories, delimited by the OS path separator (like PATH),
-    # so an admin can add a second (e.g. team-private) skills directory without code changes.
-    # Read it through the `skills_dirs` property, never raw.
+    # The orchestration model is `llm_model`. `skills_dir` is one or more SKILL.md directories,
+    # OS-pathsep-delimited like PATH; read via `skills_dirs`.
     skills_dir: str = "skills"
-    # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
-    # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
-    # non-empty pathsep list narrows to exactly those names, so a deployment can ship the whole
-    # skills tree and turn on the subset it has validated, without deleting folders. This only
-    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates
-    # below still apply on top. `make skill-validate` reports a name here that no dir provides.
+    # Skills actually advertised, pathsep-delimited; empty means every discovered skill. Only
+    # narrows (role gates still apply); `make skill-validate` reports unknown names.
     skills_enabled: str = ""
-    # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles
-    # allowed to see it. A skill not listed is ungated (advertised to everyone); a listed skill
-    # is hidden from a caller (the turn's ambient identity) holding none of its roles. Empty
-    # default = every skill visible (today's behavior). ENV override is JSON, e.g.
-    # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
+    # Skill name → Entra app-roles allowed to see it; unlisted skills are visible to everyone. JSON
+    # in the env, e.g. CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # Conversation context management (`agent/compaction.py`). The agent keeps a session thread and
-    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
-    # long chat would grow unbounded. Compaction runs only when the whole *request* exceeds
-    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
-    # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
-    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then cut older conversation back
-    # to the same budget on a group boundary — with the caveat below, which is the whole of what
-    # `agent_keep_last_conversation_groups` does to that sentence. System instructions/skills are
-    # always kept — they are not in the message list at all. No LLM summarizer — deterministic and
-    # credential-free, which is also what keeps a summarizer from becoming an injection surface
-    # over retrieved evidence (D-025).
-    #
-    # **These three had no reader at all between M13 and the ADR that restored them**, because the
-    # policy lived in the framework the rebuild removed while the settings, this comment and a
-    # sentence in the system prompt stayed behind describing it.
-    # `chemclaw_context_compactions_total` is what a deployment now checks instead of re-reading
-    # this paragraph.
-    #
-    # `agent_keep_last_tool_groups` counts the newest *tool results* kept verbatim, not tool-call
-    # groups: the strategy behind it is upstream's `ClearToolUsesEdit` and that is what it counts.
-    # The name is D-025's and stays, because it is ENV-visible and renaming it would cost every
-    # deployment that sets it to buy a more accurate word.
-    #
-    # `agent_keep_last_conversation_groups` is an **extra cut a deployment may ask for, and it is
-    # off by default** — which is a reversal of what this paragraph said for as long as the setting
-    # existed, and the reversal was measured rather than argued. The window takes
-    # `max(by_tokens, by_groups)`, i.e. the *more* aggressive of "what fits the budget" and
-    # "everything older than the newest N groups", so N is a ceiling on what survives and the
-    # budget only ever tightens it further. At N=12 that ceiling bound first on every ordinary
-    # thread: the crossover is `budget / N` = 8,333 tokens per group, about 33 kB of text per turn,
-    # and the lossless edit above runs first precisely to push older groups far below it. Measured
-    # over 2,000 prose groups at the shipped defaults, the window cut a 329,900-token thread to
-    # **1,944 tokens — 2% of the 100,000 budget it is documented as cutting to** — and sweeping the
-    # budget from 10k to 300k changed that number not at all. The sentence that used to stand here,
-    # "raising N no longer raises what a request can cost, it only drops more", was wrong in both
-    # halves and by 50x: at a fixed budget, N=12 retains 1,944 tokens and N=600 retains 97,800.
-    #
-    # So the default is now `0`, which the window reads as "no group floor" and which makes
-    # `agent_context_token_budget` the control it is named as. **The regression that put the
-    # `max()` there is untouched**: a count of groups cannot bound anything, because what a group
-    # costs is whatever was said in it, and the count-only version left a 300k-token thread at 180k
-    # against this 100k budget. The token arm still runs and still bounds — measured, 20 groups of
-    # 60 kB cut to 90,090 with the floor off, not to 180,180 (90,366 was quoted here from a
-    # different fixture; the reproducible figure is the one `tests/test_compaction.py`
-    # builds). Setting N above 0 re-arms the extra
-    # cut for a deployment that wants the model to see fewer *turns* than the budget would allow;
-    # the instrument for wanting it to see fewer *tokens* is the budget.
-    #
-    # The one thing that is never dropped is the newest group, because an empty message list is
-    # rejected by the provider (`agent/compaction.py`).
-    #
-    # **This is a budget on the whole *request*, not on the thread, and that changed deliberately.**
-    # `context_budget.effective_trigger` subtracts this request's own prefix — the system message,
-    # the skills listing and every bound tool schema — from the number below before the edits see
-    # it, whether or not `llm_context_window_tokens` is declared. D-2026-08-28 charged the prefix
-    # only under a declared window and no deployment declares one, so the ~43,000 tokens that leave
-    # on every model call were budgeted against nothing: measured 2026-09-04, a thread the policy
-    # cut to its 90,030-token budget left as a 137,301-token request at a 128k model.
-    #
-    # What that costs an existing deployment is the prefix, exactly: at a 100,000 budget and a
-    # 43,175-token prefix the thread gets **56,825** estimated tokens where it used to get 100,000,
-    # so a session that never compacted may now compact, and one that compacted may compact
-    # earlier. That is the intended trade — the alternative is a bound that does not bound — but it
-    # is a behavioural change and not a no-op.
-    #
-    # **A value at or below the prefix is not a budget.** `effective_trigger` floors at 1, which
-    # means "reduce on every model call", and it says so once at WARNING rather than returning it
-    # silently (`context_budget._note_floored_trigger`). The clear trigger below was in that state
-    # for one commit and is not now — it is derived to clear the prefix, and the paragraph there
-    # says how. This sentence went on claiming the floored state after the same commit fixed it,
-    # eighteen lines from the paragraph that contradicts it, which is why the derivation lives in
-    # one place and this one points at it.
-    #
-    # **133,000 as of 2026-09-05, and the ~43,000 above is why: it was the prefix of a turn nobody
-    # runs.** `tests/test_context_floor.py` compiled its graph with no `connectors=` argument while
-    # every shipped turn binds the enabled bundles, so the figure this paragraph was derived from
-    # omitted 31 endpoint tools. Re-measured on the surface a turn actually binds: **64,099** for
-    # the bundles this repository serves itself, plus **9,538** over 21 tools for the three served
-    # from `Chemclaw3-mcp` — a ~73,600-token prefix against a 100,000 budget. So the 56,825 of
-    # thread this setting was documented as delivering was never delivered: the real allowance was
-    # ~26,400, and the trigger below was floored at 1 on every shipped deployment — the state the
-    # paragraph above and `tests/test_compaction.py` both asserted was not happening, asserted
-    # against the same connector-less fixture that caused it.
-    #
-    # **Nothing about what a chemist needs changed, so the thread allowance was held fixed and the
-    # request bound was what moved.** That gave 133,000 = `tests/test_context_floor.PREFIX_BOUND`
-    # (the ratchet ceiling, 65,000, plus 11,000 for the bundles that ratchet cannot see) + the
-    # 57,000 of thread the paragraph above intended. Leaving this at 100,000 would not have saved
-    # the prefix — it is sent either way — it would only have kept halving the conversation to pay
-    # for it. **That derivation had no upper bound and 133,000 was past one**; the paragraph two
-    # below is what replaced it, and the thread allowance is now the dependent number.
-    #
-    # **What it costs is a bigger worst case, and that is the honest half.** A request may now go
-    # out at up to this many billed tokens where the bound said 100,000 (though more than the
-    # floored behaviour actually sent, which was prefix plus the newest tool batch). The instrument
-    # for wanting that number lower is a narrower prefix — profile routing, or
-    # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a budget
-    # that pretends the prefix is smaller than it is.
-    #
-    # **119,500, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
-    # pass/fail criterion was "does the request fit a 128k model", and it fixed a measured 137,301
-    # down to 100,000. Holding the *thread* allowance fixed at 57,000 and letting the request bound
-    # follow the prefix put it back at 133,000 — a maximal request of ~131,400 billed at the real
-    # prefix, over 128,000 again, with the only guard that could have caught it
-    # (`llm_context_window_tokens`) defaulting to 0 and set in no deployment file. A budget whose
-    # own arithmetic permits a request the provider rejects outright is not a budget; the whole
-    # turn is lost, which is strictly worse than a thread cut early.
-    #
-    # **So the derivation runs the other way now: the window is the input and the thread allowance
-    # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
-    # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
-    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,500
-    # is inside it by 4,404. (Both figures are asserted in `tests/test_compaction.py`, which is why
-    # a change to either has to be stated here rather than discovered there.)
-    #
-    # **That criterion used to need a tokenizer constant and no longer does, which is the point.**
-    # It was written as "a maximal request bills `budget + (r - 1) x prefix`", with `r` a
-    # hand-transcribed 1.0534 for `p50k_base` — the residue of `effective_trigger` subtracting an
-    # *estimated* prefix from a *billed* budget, so that the two units met in this one term. That
-    # subtraction is gone (`agent/context_budget.effective_trigger` converts the budget whole), and
-    # with it the term: once the process is calibrated, a maximal request bills the budget, so the
-    # bound is the plain comparison `budget <= window - llm_max_tokens` and no encoding appears in
-    # it. The constant is deleted rather than corrected; measured 2026-09-06 it was 1.0538 against
-    # the 1.0534 that was written down, which is the third time a transcribed figure in this
-    # subsystem has been low by the time anybody re-ran it.
-    #
-    # **What is left uncovered is named**: the one model call of a process that precedes its first
-    # calibration sample bills `r x budget` for whatever `r` its own content has, and no constant
-    # bounds that either. `agent_context_calibration_min_calls` is what shortens it to one call;
-    # see its own comment below.
-    #
-    # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed, and the band between this default and the lossless
-    # edit's trigger falls with it. That band is squeezed by the *prefix* rather than by this
-    # number: at a 128k window the whole policy has only the window minus the prefix bound to divide
-    # between two edits, so the instrument for wanting more is a narrower prefix.
-    #
-    # **This paragraph no longer states those three figures, and that is the fix rather than an
-    # omission.** It carried them three times and shipped stale all three: 43,000/13,000/76,000,
-    # falsified by wave 13 raising the ratchet ceiling 500 without touching this comment; then
-    # 42,500/12,500/76,500, falsified the same way by D-2026-09-13 raising it 2,000. The second
-    # correction was written *in the commit that staled it*, which is the argument in
-    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to the sentence making
-    # it. A digit here is a claim about somebody else's ceiling, and the ceiling is a thing other
-    # branches move.
-    #
-    # The three are `tests/test_compaction.BUDGET_THREAD_ALLOWANCE`, this default minus
-    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`. All three are
-    # asserted there, against the prefix the model is actually sent — so read them there, where a
-    # change moves the number and the assertion together.
-    #
-    # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
-    # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states
-    # it beside the model it names, so the shipped release clamps rather than relying on this
-    # number alone. Both halves are asserted in `tests/test_compaction.py`
-    # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
-    # collapsed the split to 107,000 and got 150 passing tests.
-    #
-    # **Raised 600 for the artefact tools, and the floor under the thread is why it moved rather
-    # than the thread** (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). The
-    # thread a pod calibrated on evidence traffic keeps was 271 tokens above one maximal tool batch
-    # after `agent_max_tool_result_chars` came down to 52,000 (since restored), and the artefact
-    # tools at their measured floor crossed it; below it every evidence turn is unreducible. The cap
-    # was the instrument used last time and cuts evidence on every deployment, artefacts on or off;
-    # the margin under the 128k window is what was spent instead, by exactly the ceiling's raise, so
-    # the thread allowance is held where it was. `tests/test_compaction.py` states the margin.
+    # Context compaction (`agent/compaction.py`), deterministic and LLM-free so it cannot become an
+    # injection surface. When a request exceeds `agent_context_token_budget` (billed tokens of the
+    # whole request, prefix included, see `agent/context_budget.effective_trigger`), stale tool
+    # results are cleared first, keeping the newest `agent_keep_last_tool_groups` results, then
+    # older conversation groups are cut on a group boundary; the newest group is never dropped.
+    # `agent_keep_last_conversation_groups` is an optional extra cap on groups kept (0 = off, so the
+    # token budget governs). `chemclaw_context_compactions_total` shows it working. Derived default:
+    # smallest target window (128k) - `llm_max_tokens` must fit the budget, and the thread allowance
+    # is what remains after `tests/test_context_floor.PREFIX_BOUND`; `tests/test_compaction.py`
+    # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`) asserts it.
     agent_context_token_budget: int = Field(default=119_300, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
-    # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
-    # off is the whole point of this field. `context_compaction_middleware` composes two edits:
-    # upstream's `ClearToolUsesEdit`, which replaces a re-fetchable tool result with a placeholder
-    # and leaves the `tool_use` record so the model can fetch it again, and the first-party
-    # conversation window, which *deletes* older groups. Both used to read
-    # `agent_context_token_budget`, so nothing reduced until 100k and then the cheap edit and the
-    # destructive one fired in the same breath.
-    #
-    # They are different instruments and want different thresholds. Clearing costs nothing and
-    # loses nothing, so it should run early and often; every token it reclaims early is a
-    # conversation group the window never has to reach for. Anthropic's own composition separates
-    # them by an order of magnitude for this reason (30k against 180k in the cookbook's research
-    # agent), and the default here is the same shape against this repository's request budget.
-    #
-    # Above the budget it would be pointless — the window would already have fired — so the
-    # validator in `Settings` refuses that rather than letting a deployment set a number that
-    # silently means "unchanged".
-    #
-    # **73,500 is a request budget, and it is the old 30,000 re-expressed in the new unit rather
-    # than a retuning.** When this field meant *thread* spend, 30,000 was the band above — an
-    # order of magnitude below the budget, so clearing runs early and often. Charging the prefix
-    # made 30,000 mean something else entirely: the `default` prefix measures ~43,175, so
-    # `effective_trigger` subtracted it, floored at 1, and the lossless edit cleared every
-    # reclaimable tool result on **every model call**, keeping only the newest batch. That is not
-    # a tuning anybody chose; it is what a thread number reads as once the unit changes underneath
-    # it.
-    #
-    # The replacement is derived, not invented: `tests/test_context_floor.py`'s ratchet **ceiling**
-    # (the bound, deliberately, rather than today's measurement, so this number does not move every
-    # time a tool schema does) plus the 30,000 of thread the old default intended. Anything above
-    # the prefix restores the band; this one restores it to the same *thread* allowance the setting
-    # has always had, which is why it is a translation rather than a new decision about how much
-    # evidence the model keeps.
-    #
-    # **74,500 as of 2026-09-05, raised from 73,500 because the ceiling it is derived from moved —
-    # and nothing was added.** `tests/test_context_floor.py` was measuring the prompt half of the
-    # prefix as `instructions_for` plus the skills listing, which is this repository's own two
-    # contributions to a system message the deepagents middlewares also write into: re-measured
-    # against the `SystemMessage` a model is handed, that basis was **458 tokens short**, and the
-    # real prefix (43,521) had already passed the 43,500 ceiling that was supposed to bound it. The
-    # ceiling is now 44,500 over an honest 43,701, so this default follows it to 44,500 + 30,000.
-    # **The surface did not grow; the measurement got honest** — the same sentence the ratchet
-    # comment wrote about its tool half a week earlier.
-    #
-    # **What it costs is a real behavioural change and is stated rather than discovered**: every
-    # deployment's lossless edit now fires 1,000 estimated tokens later than it did, so a thread
-    # carries slightly more reclaimable tool result before the clear runs. The 30,000-token band
-    # between this and the window is unchanged, which is the quantity the derivation is about.
-    #
-    # The floor it used to hit is still reachable — a deployment that lowers this below its own
-    # prefix gets it — so it stays loud rather than silent: one WARNING per process
-    # (`context.trigger_floored`) naming both numbers and the remedy, since the condition is static
-    # and a rate would carry nothing a line does not. `tests/test_compaction.py` asserts both the
-    # floor and this default's clearance above the ratchet ceiling, so the day a tool surface grows
-    # past it, that test says so instead of the behaviour changing quietly.
-    #
-    # **106,000 as of 2026-09-05, and 74,500 was floored at 1 in every shipped deployment.** The
-    # derivation above was right and its input was not: the ratchet's ceiling described a graph
-    # compiled with **no connector bound**, so "ceiling + 30,000 of thread" cleared a prefix of
-    # ~43,000 and not the ~73,600 a turn actually sends. The paragraph above, this file's sibling
-    # paragraph on the budget, and the test that exists to catch exactly this all agreed with each
-    # other because all three read the same connector-less number — which is
-    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a fixture in place of the
-    # prose.
-    #
-    # **Same derivation, honest input**: `tests/test_context_floor.PREFIX_BOUND` — the ratchet
-    # ceiling with the connector surface in its basis, plus
-    # `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE` for the bundles served from
-    # `Chemclaw3-mcp` that no test here can measure — plus the thread allowance this setting has
-    # always intended, which `tests/test_compaction.CLEAR_TRIGGER_THREAD_ALLOWANCE` holds. It is a
-    # translation rather than a retuning; what moves is the size of the thing being translated.
-    #
-    # **The figures that used to be in this paragraph are gone, and their absence is the point.**
-    # It named a default of 109,000 derived from a ceiling of 68,000 — against a field that reads
-    # 110,800 and a ceiling that reads 69,800 — because each raise moved the constants and left the
-    # narrative, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` in the file
-    # that *defines* the number. The sibling paragraph 90 lines above already argued this and was
-    # not followed here. The live values are the field below, `PREFIX_BOUND` and
-    # `CLEAR_TRIGGER_THREAD_ALLOWANCE`; read those, and `tests/test_compaction.py` asserts the
-    # arithmetic between them rather than a reader checking it.
-    #
-    # What is durable, and is why the derivation runs this way rather than the budget's: this is
-    # derived *upwards* from the ceiling, so it moves with the prefix and keeps the whole thread
-    # allowance intact. The budget below cannot follow, because it is derived downwards from the
-    # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
+    # Threshold of the lossless edit (`ClearToolUsesEdit`: results become placeholders the model can
+    # re-fetch), set well below the destructive window so clearing runs early and often. `Settings`
+    # refuses a value above the budget. Below the prefix it floors and logs
+    # `context.trigger_floored`. Derived default: `tests/test_context_floor.PREFIX_BOUND` +
+    # `tests/test_compaction.CLEAR_TRIGGER_THREAD_ALLOWANCE`, asserted in
+    # `tests/test_compaction.py`.
     agent_tool_result_clear_trigger: int = Field(default=111_600, ge=1)
-    # **The prefix the two numbers above were derived for, and the most of it they are charged.**
-    # Both are a prefix bound plus a thread allowance, and the prefix bound is one connector
-    # surface's — the chart's. A deployment that binds more bundles than that (a choice it may make:
-    # `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`) sends a larger
-    # prefix against the same two numbers, and subtracting all of it took the difference out of
-    # the *thread*, silently. Measured 2026-10-02 on the four-repo lane, every published bundle
-    # bound: a 109,743-token prefix left the window 8,957 tokens of thread and the lossless edit
-    # 1,857, so results were cleared before the model had read them and research turns looped to
-    # the step cap — and nothing warned, because neither trigger floored.
-    #
-    # So `context_budget.effective_trigger` charges the budget at most this much prefix, and the
-    # excess is paid in spend: the thread keeps exactly what the derivation gives it at the bound,
-    # whatever a deployment binds, and the excess is reported once (`context.prefix_over_basis`). A
-    # declared `llm_context_window_tokens` is still charged the whole prefix, so this never buys
-    # room a model does not have; `agent_max_turn_billed_tokens` still bounds the turn.
-    #
-    # It is `tests/test_context_floor.PREFIX_BOUND` by derivation, and
-    # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
-    # commit as the two defaults it is the basis of.
-    # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
+    # The prefix the two thresholds above were derived for, and the most of it they are charged. A
+    # deployment binding more bundles than the chart pays the excess in spend rather than thread
+    # (logged once as `context.prefix_over_basis`); a declared `llm_context_window_tokens` is still
+    # charged the whole prefix. Equal to `tests/test_context_floor.PREFIX_BOUND`
+    # (`tests/test_compaction.py` asserts it).
     agent_context_prefix_basis: int = Field(default=83_700, ge=0)
-    # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
-    # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
-    # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
-    # `default` prefix and on results called from `Chemclaw3-mcp`'s own `chem` server: the prefix
-    # bills **0.985x** its estimate on `o200k_base`, a markdown note 0.996x — and the connector
-    # results **1.24x to 1.67x**, 1.34x concatenated. So the estimate is within 2% for prose and
-    # schemas and undercounts by a quarter to two thirds for exactly the payload class these two
-    # triggers exist to reclaim. **The 0.45x this paragraph used to carry (2.2x billed per
-    # estimated) does not reproduce on any payload the fleet returns**; the direction it claimed is
-    # right and the magnitude was 33-45% high.
-    #
-    # No constant corrects that, because the error is a property of the *content* and runs in both
-    # directions. What does correct it is the number the provider returns: `input_tokens` on every
-    # response is the billed size of the request this system just estimated, so the ratio between
-    # them is measurable at the one place that holds both (`agent/context_budget.py`). The budget is
-    # therefore read as a **billed**-token budget and converted into the estimator's unit by that
-    # measured ratio — which is 1.0, and so changes nothing, until enough calls have been observed.
-    #
-    # The factor only ever *tightens* the trigger (it is clamped at 1.0 below), so the worst a
-    # mismeasurement of the *ratio* can do is compact earlier than needed. **That was written as
-    # "never send a request the policy thinks is smaller than it is", and for a year it was false**
-    # — the clamp bounds the ratio, not the operand it was spent on, and `effective_trigger`
-    # converted only the part of the request the ratio had not been measured over. See
-    # `agent/context_budget.effective_trigger`; the conversion is whole-request now, which is what
-    # makes that sentence true rather than intended.
-    #
-    # **The sample floor was a gate on the safe direction only, and it shipped at 20.** This
-    # comment used to argue that the floor and the prefix subtraction "do not interact", which is
-    # true as stated — the prefix is exact from call 1 — and is not the question. The question is
-    # what the *thread's* conversion is doing meanwhile, and the answer was: nothing, for twenty
-    # calls. Measured 2026-09-06 on a compiled graph with the connector surface bound, a dense
-    # connector-JSON thread and these very defaults, every one of a process's first twenty model
-    # calls went out at **164,989** billed tokens against the 123,904 a 128k model accepts. That is
-    # not a warm-up in a derived quantity; it is the largest overrun this subsystem produces, and it
-    # arrives on every pod restart and every scale-up.
-    #
-    # **A floor cannot protect anything here, because believing a sample can only tighten.**
-    # `estimator_ratio` is clamped at 1.0 from below, so the failure the floor was written against
-    # — "one unusual first call must not move a budget" — can only ever move it *down*: earlier
-    # compaction, one conversation group lost, the trade `agent/context_budget.py` prices
-    # explicitly. The floor's only real effect was to hold the loose end for twenty calls. So the
-    # default is 1, and `_ALPHA` (a ~20-call memory) is the actual smoothing.
-    #
-    # **What makes 1 worth having is the bias correction beside it**, and the two are one change.
-    # An EWMA seeded at 1.0 is mostly its seed for the first `1/_ALPHA` samples, so lowering the
-    # floor alone barely moves anything: measured on the same arm, model calls sent over the 128k
-    # input ceiling were **20** at the shipped floor, **19** with the floor at 1 and the seed left
-    # in, and **1** with the seed divided back out. That last one is the process's very first call,
-    # before any sample exists — which no policy can bound, and which is the honest residue here.
-    #
-    # **What it costs**: a process's second model call is budgeted against a single observation, so
-    # a first turn that happened to be one geometry compacts the next turn harder than the converged
-    # mix would. Measured on the arm above the overshoot is one call and ~28% of the thread
-    # allowance, and it relaxes within five.
+    # Budgets are in billed tokens but counted with a chars/4 estimator whose error depends on
+    # content (tool JSON undercounts badly). `agent/context_budget.py` converts by the ratio of the
+    # provider's reported `input_tokens` to the estimate, clamped so it only tightens. One sample
+    # suffices (`agent_context_calibration_min_calls`): believing a sample can only compact earlier,
+    # and the EWMA is bias-corrected. The first call of a process, before any sample, is unbounded
+    # by this.
     agent_context_calibration_enabled: bool = True
     agent_context_calibration_min_calls: int = Field(default=1, ge=1)
-    # Ceiling on the factor, so a pathological sample cannot collapse the budget — and it carries
-    # more weight now that a single sample is believed. **4.0 rests on a re-measurement rather than
-    # on the 2.2x it used to cite**: called against `Chemclaw3-mcp`'s own `chem` server on
-    # 2026-09-06 and tokenized with `o200k_base`, the worst single result bills **1.67x** its
-    # chars/4 estimate (`enumerate_bond_cleavages`), 2.01x on the GPT-3-era `p50k_base` nothing here
-    # serves. So this is ~2x the observed extreme rather than ~1.8x an unreproducible one.
+    # Ceiling on the calibration factor, so a pathological sample cannot collapse the budget; about
+    # twice the worst observed ratio.
     agent_context_calibration_max_factor: float = Field(default=4.0, ge=1.0)
-    # **Ceiling on what one model call's tool results may put in front of the model**, and the one
-    # bound that was missing entirely. `connector_max_request_bytes` caps what this system *sends* a
-    # server; nothing capped what a server — or an in-process tool — sends back. Both context edits
-    # have a carve-out for the newest results (`agent_keep_last_tool_groups`) and for the newest
-    # conversation group, so the newest results are by construction the thing neither can touch:
-    # two results at 200,000 characters each measured 100,077 estimated tokens (one over the
-    # budget), ~224,000 billed, with both edits running and reclaiming nothing.
-    #
-    # **The unit is the batch, not one result** — `agent/tool_result_size.py` divides this number
-    # evenly among the originating `AIMessage`'s tool calls, because what neither edit can reclaim
-    # is the newest *batch*. Per-result, each of N parallel calls was separately inside the ceiling
-    # while the request was N times over it: measured on a compiled graph against a 100,000-token
-    # budget, 164,229 estimated request tokens at 8 parallel calls and 345,735 at 20, with the
-    # compaction counter at 0 throughout. Once the number is a batch's, the batch is exactly
-    # `agent_max_tool_result_chars` at every width — the two request totals that used to be quoted
-    # here (58,605 and 59,175) predate the prefix being charged and are stale by it, so what is
-    # named is the invariant `tests/test_tool_result_size.py` asserts rather than a request size
-    # that moves with the tool surface. A lone
-    # call — which is nearly every call — still gets the whole number, so the common case is
-    # unchanged and only a fan-out shares.
-    #
-    # The same number as `gather_evidence_max_chars` rather than a new opinion: it is the number
-    # this repository already chose for `gather_evidence_max_chars`, its largest deliberate evidence
-    # payload. A result over it is cut head-and-tail with a notice naming the tool and the
-    # characters removed — never silently, and never in the middle of a sentence a chemist might
-    # quote. 0 disables the cap, which restores the unbounded behaviour and is a decision a
-    # deployment has to make on purpose.
-    #
-    # It does not replace a per-tool ceiling (`document_read_max_chars`,
-    # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
-    # one place every tool result passes.
-    #
-    # **52,000 for a day, and back to 60,000 on 2026-10-03.** Neither edit may reclaim the newest
-    # batch, so a pod calibrated on evidence traffic must leave the window edit more thread than one
-    # maximal batch occupies — the warm arm in `tests/test_compaction.py` asserts it. Raising
-    # `SERVED_ELSEWHERE_ALLOWANCE` for the sibling fleet's grown `chem` took that thread under a
-    # 60,000-character batch, and this cap was lowered to pay; the fleet then narrowed `chem` and
-    # the allowance fell, which gives the thread back with room to spare at 60,000 (the warm arm
-    # states how much). `gather_evidence_max_chars` moves with it, because a sweep over this cap is
-    # cut head-and-tail through the middle of its ranking.
-    # `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
+    # Ceiling on the characters one model call's tool results put in front of the model, since
+    # neither context edit may touch the newest batch. Split evenly across one `AIMessage`'s
+    # parallel calls (`agent/tool_result_size.py`), so a fan-out cannot multiply it; a lone call
+    # gets all of it. A result over its share is cut head-and-tail with a notice. Applies under
+    # every per-tool ceiling. Keep equal to `gather_evidence_max_chars`; the warm arm in
+    # `tests/test_compaction.py` checks the thread still holds one maximal batch. 0 disables.
     agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
-    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
-    # whole personal/organisation skills stack rides on.
-    #
-    # **On by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`, and the
-    # default it replaced was argued rather than careless.** `D-2026-08-15` shipped it off saying
-    # "the default is about *data* rather than about the code being unproven… a deployment should
-    # decide that, not inherit it", which was right while the only thing behind it was a scratchpad
-    # that outlives a session. It is no longer: `personal_skills_available()` reads this, so with it
-    # off `POST /skills/mine`, `POST /skills/org` and the whole proposal-acceptance path answer 503,
-    # `make distill --propose` refuses, and `propose_skill` is not even bound. A gate nobody can
-    # reach is not a gate, which is
-    # `D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has`'s whole point, and it is the
-    # reason `D-2026-09-18-a-skill-a-chemist-keeps…` declined to add a second flag beside this one.
-    #
-    # **What turning it on actually starts**, stated because the list is longer than "skills":
-    # `/memories/` is mounted for every authenticated turn, so `write_file`/`edit_file` under that
-    # root become durable and agent-authored, bounded only by `agent_memory_max_files` and evicted
-    # by `BoundedStoreBackend`; `propose_skill` joins every request's prefix at ~462 tokens; and
-    # `store`/`store_migrations` are created on first use — which is why `deploy/entrypoint.sh`'s
-    # `migrate` role now creates them between the migrations and the grants that name them.
-    #
-    # With it off, a turn still gets `/scratch/` — the graph-state scratchpad that makes a
-    # multi-source research turn possible — and simply has no `/memories/` route. The two are
-    # separate capabilities and only the durable half needs a decision; a deployment that does not
-    # want one sets this False and loses the skills tiers with it, which is the coupling
-    # `api/routes/skills.py` states rather than switches.
-    #
-    # It is also inert without an actor: no ambient identity means no namespace, and a memory
-    # written under a shared prefix would be one nobody can erase and everybody can read
-    # (`agent/scratchpad.memory_namespace`). The organisation's tier is the one exception and needs
-    # no actor, because it is nobody's (`agent/org_skills.org_skills_namespace`).
-    # **What a helper may write into its caller's checkpointed state**, which nothing bounded.
-    # `task` returns a `Command` whose update carries every non-excluded key of the helper's final
-    # state, `files` included — so a helper's scratch filesystem crosses into the caller's `files`
-    # channel whole. Driven, a helper reading 2 MB left its caller a *thread* of 57 characters and
-    # **2,000,137 characters** of `files`: the isolation
-    # `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured is real and it
-    # is about the thread only.
-    #
-    # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
-    # That one is context — what a model is sent. This is storage: LangGraph writes the whole
-    # channel per superstep and again per version, so a large write is amplified across a turn's
-    # supersteps.
-    #
-    # **The 10.4x this comment used to quote was mostly not this channel**, which is worth keeping
-    # because it is why the figure is gone rather than updated. One 2 MB helper write measured
-    # 20,712 kB of checkpoint rows above baseline, and
-    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed the bulk of it to
-    # the helper checkpointing its *own* thread onto the caller's saver — a cost this setting never
-    # touched, and which is now closed. **Not "~98% of 20,712", which this comment said**: that
-    # arm's own cap reclaimed 8.8% of the 20,712, so at most 91.2% can be the helper's thread.
-    # 97.8% is the reduction measured on the *other* arm (18,944 -> 424), and carrying a
-    # percentage across two bases is the defect this paragraph exists to describe.
-    # What this bound is actually charged against is the caller's
-    # `files` channel alone. No replacement number is written here, for the reason the paragraph
-    # below already gives about the discarded one. It is a *total*:
-    # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,
-    # because the resource is the channel and not the file.
-    #
-    # **This comment shipped with a third, smaller figure for the same probe (~15.6 MB, 7.8x) and
-    # it was the discarded measurement**, not a disagreement worth splitting: the first attempt
-    # padded the 2 MB with `"x"` and measured TOAST compression rather than the write.
-    # `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` says so, `.env.example`
-    # already carried the corrected number, and only this line did not — one probe with two
-    # answers in the tree is the defect
-    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` names.
+    # Characters a helper may hand back into its caller's `files` channel. `task` returns the
+    # helper's final state, `files` included, and LangGraph rewrites that channel every superstep,
+    # so an unbounded write is amplified in checkpoint storage. A total across files, not per file.
     agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
-    # **The per-write bound on a turn's *own* files**, which nothing had
-    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). The setting above is applied
-    # only to what a *helper* hands back; a caller's `write_file` and `edit_file` go through
-    # `StateBackend`, which writes the `files` channel directly and reaches no middleware. So
-    # `agent/scratchpad.BoundedStateBackend` (the `/scratch/` route) and `BoundedStoreBackend` (the
-    # `/memories/` route) **refuse** a write or an edit whose resulting file would be longer than
-    # this, with a message naming the limit — never a truncation, because a cut would hand a chemist
-    # a document that simply stops, and a refusal lets the model split the file or write less.
-    #
-    # The same number as `agent_subagent_files_max_chars` by default, and for the resource's reason
-    # rather than by coincidence: that budget is the channel's whole allowance, and every file here
-    # is charged against it for every later helper, so one write larger than it would exhaust the
-    # channel by itself. No `0 = off` spelling: a refusal that can be switched off is the unbounded
-    # write this replaced, and a deployment that needs larger files raises the number.
+    # Longest file a turn's own `write_file`/`edit_file` may produce, enforced by
+    # `agent/scratchpad.BoundedStateBackend` (`/scratch/`) and `BoundedStoreBackend` (`/memories/`).
+    # Refused with the limit named, never truncated. Equal to the helper channel budget, since one
+    # larger file would exhaust it.
     agent_scratch_file_max_chars: int = Field(default=200_000, gt=0)
-    # **How long a file in a thread's `files` channel is kept after it was last written.** The
-    # channel is checkpointed under the thread and accumulates, and nothing deleted a scratch file
-    # short of `make user-erase` or disposing of the whole thread. Enforced at the start of each
-    # turn on that thread (`agent/scratchpad.expire_stale_scratch`), through the channel's reducer —
-    # the one path that can remove a key from a `DeltaChannel` without rewriting its checkpoint by
-    # hand. A thread nobody returns to keeps its files until the thread itself is disposed of
-    # (`retention_checkpoints_days`), which is the half this does not cover and says so.
-    #
-    # 90 days is the owner's default (2026-09-26). **0 keeps files for ever**, and only when a
-    # deployment sets it: unlike the `retention_*` windows this is not gated on `retention_enabled`,
-    # because it disposes of a turn's working surface rather than of a record.
+    # `agent_scratch_retention_days`: days a file in a thread's `files` channel survives its last
+    # write, expired at the start of each turn (`agent/scratchpad.expire_stale_scratch`); 0 keeps
+    # forever. Not gated on `retention_enabled`: it disposes of a working surface, not a record.
+    # `agent_memory_enabled`: mounts durable `/memories/` per actor and enables the personal and
+    # organisation skills tiers (`personal_skills_available()`, `POST /skills/*`, `propose_skill`).
+    # Without an actor there is no namespace, so nothing is written. Off leaves `/scratch/` only.
     agent_scratch_retention_days: int = Field(default=90, ge=0)
     agent_memory_enabled: bool = True
-    # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
-    # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,
-    # no window and no clock. Driven, 2,000 files of 5 kB each landed as `(2000, '816 kB')` under
-    # one namespace with nothing evicted. The runaway is not a looping turn — the loop cap and the
-    # parallel-call cap put a hard ceiling on writes *per turn* — it is accumulation across turns,
-    # because nothing ever removed a row.
-    #
-    # **A row count rather than a clock or a byte budget.** A memory is written in order to
-    # persist, so age is the wrong axis: the oldest memory is as likely to be the one worth keeping
-    # as the newest. Bytes are the wrong axis too, because the thing a chemist notices is a memory
-    # disappearing, and "your memories now hold fewer files because one of them was long" is not a
-    # rule anybody can hold in their head. A count is what `ingest/rejections.py` settled on for
-    # the same reason, and this is its per-actor twin. Past the cap the least *recently updated*
-    # file goes, which is a tiebreak rather than a policy — it is the only ordering the store
-    # carries.
-    #
-    # 200 at 5 kB is ~1 MB per person, which a namespace this is meant to hold does not approach:
-    # the working surface of one chemist's research turns, not an archive.
+    # Files per actor in the `store` table, evicting the least recently updated. A count, because a
+    # memory is written to persist (age is the wrong axis) and a byte rule is not one a chemist can
+    # predict.
     agent_memory_max_files: int = Field(default=200, ge=1)
-    # **What bounds the chemist's own skills tier, which `agent_memory_max_files` does not.** That
-    # cap lives in `scratchpad.BoundedStoreBackend`, which mounts `/memories/`; the local-skills
-    # tier mounts a plain read-only backend and is written from an HTTP route, so nothing on either
-    # half counted a row until these two existed.
-    #
-    # Two numbers because they bound different things, the `preferences_*` pair's reason exactly.
-    # The char cap is one skill's *body*, which is read into context on demand. The row cap is
-    # **prefix** spend: every local skill's name and description sit in the system message of every
-    # model call this chemist makes, unconditionally, so the row count is a multiplier on the one
-    # part of the request nothing can compact. 20 x deepagents' 1,024-character description limit is
-    # ~5,300 tokens of worst case; `agent/local_skills.py` carries the arithmetic.
-    #
-    # Refused at the route rather than evicted, unlike the memory tier: a memory a turn wrote may
-    # be dropped silently, and judgment a person authored may not.
-    #
-    # 16,000 is the shared tree's own largest skill (`protocol-generation`, 12,896 characters)
-    # plus room, so a person may write judgment as substantial as anything reviewed in. 20 is
-    # not the memory tier's 200 because a memory is a note a turn took and there are as many as
-    # the work produced, while a skill is judgment somebody sat down and wrote.
+    # Bounds on a chemist's own skills tier, refused at the route (authored judgment is never
+    # evicted). The char cap is one skill's body; the row cap bounds prefix spend, since every local
+    # skill's name and description ride on every model call (`agent/local_skills.py` has the
+    # arithmetic).
     agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
     agent_local_skills_max: int = Field(default=20, ge=1)
-    # **How many behaviour proposals one `GET /proposals` answers**, newest first. A bound on a
-    # response rather than on storage: the table keeps every row, and the route is both the queue
-    # read (`state=open`) and the audit read (`state=`), so the audit read is the one this can cut
-    # short. 50 is the number the stores had hard-coded as a default in three places; it is a
-    # setting so a deployment that needs the whole audit trail can raise it rather than patch it.
+    # Behaviour proposals one `GET /proposals` returns, newest first; a response bound, not storage.
     agent_proposals_list_max: int = Field(default=50, ge=1)
-    # **What bounds the organisation's tier, and why it is not the personal tier's number.**
-    # `agent_local_skills_max` bounds one person's prefix and is usually spent on nobody: most
-    # chemists keep none, so the worst case is a worst case. This tier is the opposite — whatever an
-    # administrator publishes is in the prompt of *every* turn *every* chemist takes, so the cap is
-    # not a ceiling on an unusual case, it is the bill.
-    #
-    # And it is paid more than once per turn. The org tier is mounted on the turn's backend, and a
-    # helper is compiled through the same builder over the same backend, so a four-helper fan-out
-    # sends it five times. At the personal tier's 20 rows that is ~27,900 tokens of prefix across
-    # one turn's graphs; at 12 it is ~16,700. The measured basis is one maximal row at ~278 tokens
-    # (deepagents' 1,024-character description limit plus the listing's own scaffolding), which
-    # `tests/test_context_floor.py` derives and re-measures on this tier's own mount.
-    #
-    # 12 rather than the shipped tree's 28 because the reviewed tree is narrowed by all four
-    # predicates and most profiles reach a fraction of it, while this tier applies fewer: every org
-    # row is in every prefix. Refused at the route rather than evicted, the personal tier's reason
-    # exactly — judgment a person authored may not vanish because somebody added one more.
+    # Organisation skills, refused at the route. Every row is in the prefix of every turn of every
+    # chemist, and again for each helper, so this is the bill rather than a worst case.
+    # `tests/test_context_floor.py` measures one maximal row.
     agent_org_skills_max: int = Field(default=12, ge=1)
-    # How many previously-activated bodies of one organisation skill stay revertible.
-    #
-    # **Evicted rather than refused, which is the opposite of the cap above, and the asymmetry is
-    # the decision.** Refusing here would mean an administrator cannot publish a fix because the
-    # skill has been edited too often — a bound on exactly the wrong thing. Evicting the least
-    # recently activated is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its reason: it is
-    # the only ordering the store carries, and the version anybody reverts to is a recent one.
-    #
-    # This is the one place the stored tier is weaker than the git tree it stands beside: `skills/`
-    # can be reverted to any commit and this to the last 20 activations
-    # (`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert`). 20 because a skill
-    # with 20 distinct bodies behind it has a process problem rather than a history problem.
+    # Previously activated bodies of one organisation skill kept for revert. Evicted (least recently
+    # activated) rather than refused, so a fix can always be published.
     agent_org_skill_versions_max: int = Field(default=20, ge=1)
-    # What `recall_preferences` may hand back, and the second half of the same finding.
-    # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
-    # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …
-    # ORDER BY key` behind `recall_preferences` had no `LIMIT` at all — so every row a chemist has
-    # ever accumulated re-enters the prompt on every recall, for the life of the row.
-    #
-    # Two numbers because they bound different things. The row cap is storage and is enforced in
-    # the writer's own transaction; the recall cap is *prompt* spend and is enforced in the read,
-    # because a deployment that lowers the row cap still holds the rows it already wrote.
-    # 50 preferences at the measured ~44 characters each is ~2.2 kB of prompt — a paragraph, which
-    # is what "how this chemist works" should cost a turn.
+    # `user_preferences` rows per owner (model-chosen keys), enforced in the writer's transaction,
+    # and how many `recall_preferences` returns, enforced in the read.
     preferences_max_per_owner: int = Field(default=200, ge=1)
     preferences_recall_limit: int = Field(default=50, ge=1)
-    # **Character bounds, because every preference now rides on every model call**
-    # (`agent/preferences.StandingPreferences`). A row count does not bound size: one model-written
-    # value of any length would otherwise be paid on every call of every session, and could push
-    # every request past the provider's window — where the chemist cannot recover, because
-    # `forget_preference` itself needs a model call. `preferences_entry_max_chars` caps one
-    # rendered `key: value` line (and is refused at write time in `remember_preference`);
-    # `preferences_section_max_chars` caps the whole appended section. A real working preference
-    # measured ~44 characters, so 300 is several sentences and 4,000 is about a thousand tokens.
-    # The bound is on the *rendered* line (`- key: value`, defanged), at write and at render
-    # alike. Kept at 300 against the one long real entry measured: the lane's model-written
-    # `forbidden_solvent_dmf` renders at 312 and was cut inside its last clause ("… optimisation
-    # c[ampaign for this chemist]"), losing no constraint. A value that long is now refused at
-    # write time with a request to shorten it, which is cheaper than paying it on every call.
-    # The section floor leaves room for its fixed framing (~0.9 kB) plus at least one entry.
+    # Character bounds, because every preference rides on every model call
+    # (`agent/preferences.StandingPreferences`). The entry cap applies to the rendered `- key:
+    # value` line and is refused at write time in `remember_preference`; the section cap bounds the
+    # whole appended section and leaves room for its framing plus one entry.
     preferences_entry_max_chars: int = Field(default=300, ge=40)
     preferences_section_max_chars: int = Field(default=4_000, ge=1_500)
-    # **How much of the chemist's own conversation stays quotable** — the ambient
-    # `core/turn_text.py` binds and `agent/protocol_design_tools.require_quotes_are_verbatim`
-    # checks a `basis="stated"` slot against.
-    #
-    # It carried exactly the message that started the turn in flight, while
-    # `structure_experiment_request` tells the model to call it "first … while correcting it is
-    # still cheap" — iteratively, across turns. Measured: a chemist who wrote "24 wells, no DMF, by
-    # Friday please." on turn 1 and "ok go ahead" on turn 3 had the intake refused, because
-    # `'24 wells'` is not in "ok go ahead". So an honest `stated` was unrepresentable on the
-    # ordinary path, and the remedy the refusal prescribed recorded a real chemist constraint as a
-    # model inference.
-    #
-    # **Two currencies, because either alone is unbounded in the other** — the
-    # `agent_keep_last_conversation_groups` lesson, and the reason `protocol_digest_*` is a pair.
-    # The front door accepts `service_max_message_chars` (100,000) in one message, so a turn count
-    # bounds no memory at all: 20 turns is up to 2 MB held in a contextvar for the turn's whole
-    # duration and scanned on every `stated` slot.
-    #
-    # `agent_stated_quote_turns` counts the chemist's *earlier* messages; the turn in flight is
-    # always quotable and is never counted here, so `0` is exactly the behaviour this widening
-    # replaced. `agent_stated_quote_chars` bounds the whole window, that message included — and it
-    # cannot take that message away, because a bound that could would make a configuration
-    # silently stricter than the narrow version it replaced.
+    # How much of the chemist's own conversation a `basis="stated"` slot may quote
+    # (`core/turn_text.py`, `agent/protocol_design_tools.require_quotes_are_verbatim`), so
+    # constraints stated in earlier turns stay quotable. Turns count earlier messages (the current
+    # one is always quotable, so 0 means only it); chars bound the whole window but never cut the
+    # current message.
     agent_stated_quote_turns: int = Field(default=20, ge=0)
     agent_stated_quote_chars: int = Field(default=20_000, ge=1)
-    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
-    # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
-    # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
-    # (`entra_required=False`), the CLI can only run in explicit `--admin` mode, which bypasses
-    # auth for testing and attributes the audit trail to this actor. It is a config value (not a
-    # hardcoded string) so a deployment can label its test runs — e.g. a machine name — rather
-    # than a generic "admin".
+    # Actor the local testing CLI's `--admin` mode attributes the audit trail to. That mode bypasses
+    # authentication; configurable so a deployment can label its test runs.
     cli_admin_actor: str = "admin@localhost"
 
-    # The roles `--admin` holds. **Empty by default, and deliberately its own setting**: it used to
-    # be derived as the union of every role named in `skill_role_gates`, which is a *visibility*
-    # map — it decides which skills a chemist is shown — while `authorize_tool` and
-    # `authorize_trigger` read `tool_role_gates` and `entra_privileged_role_set`. Those are
-    # unrelated maps, and the coupling was the role *name*.
-    #
-    # Measured on the shipped chart the derivation is harmless (36 tools allowed, 6 denied, 0 of 5
-    # expensive actions). Add one skill gate whose role name an operator also put in
-    # `entra_privileged_roles` — the runbook's own remedy for a refused job, and the literal example
-    # in this file's `skill_role_gates` docstring — and the unauthenticated terminal CLI holds that
-    # role: 42 of 42 tools allowed, every expensive action allowed. Neither config edit mentions the
-    # CLI, and `uv sync` puts the `chemclaw` console script in the image, so `oc exec` reaches it.
-    #
-    # Empty means `--admin` bypasses *authentication* only. A deployment that genuinely wants a
-    # full-access local seam sets this explicitly, which is a decision someone made rather than a
-    # consequence of naming two unrelated things the same way.
+    # Roles `--admin` holds; empty means it bypasses authentication only. Its own setting: deriving
+    # it from `skill_role_gates` would let a skill-visibility edit hand the CLI privileged tool
+    # roles.
     cli_admin_roles: list[str] = Field(default_factory=list)
 
-    # The agent harness (plan Phase F1) — the autonomous plan/execute backbone (the
-    # Claude-Code-like experience). When `harness_enabled`, `build_langgraph_agent` attaches
-    # `TodoListMiddleware` and the plan gate (a todo list + plan/execute approval + a counted
-    # completion cap) over the *same* tools/skills/audit/compaction as the single-turn agent, with
-    # every generic battery (file memory/access, web search, shell) OFF — capability comes from our
-    # MCP servers and tools, not from the harness.
-    # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
-    # starts in plan mode and presents a plan for human approval before any execution — the
-    # pre-execution approval gate — and only loops once approval switches it to execute; `execute`
-    # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
-    # loop so a stuck plan aborts instead of spinning (the runaway guard).
-    #
-    # **On by default since D-2026-09-13, and the sentence above used to say the opposite** — "off
-    # by default so the single-turn agent stays the safe fallback". That framing had the safety
-    # backwards on the axis that turned out to matter, and three merged positions already said so
-    # while the default went on shipping `False`:
-    #
-    #   - `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names this
-    #     gate as what covers the 29 write tools that are *not* in `DEFAULT_WRITE_TOOL_GATES`, and
-    #     names the shipped chart as what turns it on. Off, that cover is absent.
-    #   - `Settings._check` below refuses `entra_required` with this flag off under `plan_only`,
-    #     in as many words: the gate "is not attached at all and a turn can start state-changing
-    #     work with nothing to approve it".
-    #   - D-152 §3 found the consequence empirically — the chart ships `true` while "the code
-    #     default and every test run `false`", so the production agent-construction path had never
-    #     met a live model, and the first turn under the shipped configuration crashed.
-    #
-    # So the unsupervised posture was the one every test measured and the supervised one was the
-    # one every deployment ran. The default is now the chart's, and the chart's line is no longer
-    # load-bearing for it. What a deployment that wants the old behaviour sets is
-    # `CHEMCLAW_HARNESS_AUTONOMY=execute`, which keeps the todo list and drops the gate — stated
-    # that way round because dropping the *harness* also drops the plan, and a deployment asking
-    # for less supervision is not asking for less planning.
-    #
-    # A profile still overrides in both directions (`plan_gate.harness_enabled_for`), which is why
-    # `data/profiles/computation.yaml` needed no global flag to get the harness it argues for, and
-    # measured +0 tokens across this change while every other profile moved by 1,862.
+    # The plan/execute harness: `build_langgraph_agent` attaches `TodoListMiddleware` and the plan
+    # gate over the same tools, with no generic batteries (file, web, shell). `plan_only` presents a
+    # plan for approval before any state-changing work; `execute` loops the todo list immediately
+    # but keeps the plan. `harness_max_loop_iterations` is the runaway cap. On by default because
+    # the plan gate covers write tools the role gates do not, and `Settings._check` refuses
+    # `entra_required` without it under `plan_only`. Profiles override
+    # (`plan_gate.harness_enabled_for`).
     harness_enabled: bool = True
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
-    # **What one `write_todos` call may declare.** Both halves of a plan were unbounded, and each
-    # sizes something that outlives the call: the step count sizes the row
-    # `api/routes/plan.py::decide_plan` writes, and the per-step declaration sizes the union that
-    # lands in `plan_approvals.scope` (`TEXT[]`) and then the sentence
-    # `plan_gate.out_of_scope_refusal` builds out of it. Measured on the shipped schema: 50,000
-    # ten-character names in one step validated, and the refusal came back at **600,192
-    # characters** — bounded to 60,000 by `agent/tool_authz._refusal_message` before the model
-    # reads it, and unbounded everywhere before that (the exception, the log, the audit row).
-    # 20,000 steps validated too, which is the half the backlog row that found this did not name.
-    #
-    # **Not an escalation, which is why these are bounds rather than a gate.** The scope only ever
-    # *narrows* what a call may do, and a name no tool answers to is refused by `enforce_tool_authz`
-    # regardless. What it is is an unpriced write a model can repeat.
-    #
-    # Refused at the tool's own argument validation on purpose: that is the one place the model
-    # reads the error and can act on it by splitting the plan, rather than the call succeeding and
-    # a person meeting the consequence later. The defaults are generous against real use — a step
-    # declares nought to a handful of tools, and the whole bound surface is ~113 — and far below
-    # what motivated them.
+    # Bounds on one `write_todos` call: steps, and tools declared per step. These size the
+    # `plan_approvals.scope` row and the out-of-scope refusal text. Scope only narrows, so these
+    # bound an unpriced write rather than an escalation; refused at argument validation so the model
+    # can split the plan.
     plan_max_steps: int = Field(default=64, ge=1)
     plan_max_tools_per_step: int = Field(default=32, ge=1)
 
-    # What one turn may **bill** before the runaway guard stops it, counting every dimension the
-    # provider reports (input, output and cache) across every model call of the turn, the
-    # subagent's included.
-    #
-    # **The cap above counts the wrong thing to be the only cap.** It counts model *calls*, and a
-    # call is not a unit of cost: the same 25 iterations bill a few thousand tokens on a prose
-    # turn and millions on one that fans out wide over large tool results against a long context.
-    # Nothing else closes that, and it is easy to believe something does. `api/budget.py` meters
-    # tokens — and its `check()` runs *before* a turn against usage already booked while
-    # `record()` books the turn *after* it ended, so a single turn's runaway is precisely what it
-    # cannot see. Its own docstring carries the belief that leaves the hole: "A single agent turn
-    # is already iteration-capped, so one turn cannot loop forever." One turn cannot *loop*
-    # forever; one turn can *spend* without a bound.
-    #
-    # **0 means no cap**, the convention `budget.py::_over` and `llm_context_window_tokens`
-    # already use. It is no longer the shipped default, and the argument that made it one is kept
-    # here rather than deleted, because it is still true and is what bounds the number chosen.
-    #
-    # That argument ran: a wrong number is worse than no number, since the cap ends the turn and a
-    # turn ended early on a corpus this setting was never sized against loses a chemist's work.
-    # **Two things answer it.** The first is what "ends the turn" means — `spend_cap.py` jumps the
-    # graph `to end` rather than raising, and `api/runner.py` emits a `spend_cap_reached` error
-    # naming the answer as *partial*, so a capped turn hands back what it had. That is a smaller
-    # loss than the sentence above implies. The second is that the alternative was not "no cap"
-    # but an unbounded one: measured, a single turn billed **250,000 tokens against a 1,000-token
-    # session cap**, and neither half of `api/budget.py` can see it — `check()` runs before a turn
-    # and `record()` after it.
-    #
-    # **So this ships as a runaway backstop, not as a budget — and the first number chosen for it
-    # was not one.** 300,000 shipped here on the strength of that 250,000 measurement, and a review
-    # four days later found it sat *below an ordinary turn*. The error is worth stating exactly,
-    # because it is a class this tree keeps finding: the 250,000 was measured when a model call
-    # carried roughly 10,000 tokens (`agent/spend_cap.py` records the shape: "25 gateway calls of
-    # 10,000 tokens"), and the static prefix has since grown sevenfold. Carrying a number across
-    # that change is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a
-    # config default instead of a docstring.
-    #
-    # **What the prefix does to the arithmetic.** `agent/turn_usage.graph_usage_tokens` takes the
-    # provider's `total_tokens` — prompt *and* completion, cached prompt tokens included — so the
-    # whole static prefix is charged on every model call and prefix caching cannot reduce it.
-    # Measured on the shipped basis: `tests/test_context_floor.PREFIX_BOUND` is the repo ceiling
-    # plus what the sibling fleet serves, and at that figure 300,000 funded **three** model calls
-    # while `harness_max_loop_iterations` permits 25. One guard had made the other unreachable: a
-    # plan/tool/answer turn with a single correction did not finish, and the loop cap could no
-    # longer move at all.
-    #
-    # **Derived now, not chosen.** The ceiling of a *lawful* turn is what the two guards above
-    # already authorise — `harness_max_loop_iterations` model calls, each bounded by
-    # `agent_context_token_budget` — so anything at or under that is work this system said it would
-    # do, and only a bug exceeds it. That is what "runaway backstop" has to mean if the sentence
-    # below is to stay true. `tests/test_spend_cap.py` holds the relation, the way
-    # `tests/test_compaction.py` holds the two compaction defaults against the same basis, so the
-    # next prefix or loop-cap change cannot strand this one silently again.
-    #
-    # A deployment wanting a real *cost* ceiling sets a smaller number from its own
-    # `turn_costs.total_tokens` distribution — but it should know it is then buying refusals, not
-    # a backstop. The iteration cap stays on regardless, so this is a second ceiling rather than
-    # the only one.
-    #
-    # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
-    # measured to undercount by a quarter to two thirds on exactly the payload class a runaway turn
-    # is made of (`agent/context_budget.py` carries the 2026-09-06 re-measurement; the 0.45x this
-    # line used to name did not reproduce). No conversion is needed here and none is done: the
-    # provider reports is the number this compares.
+    # Billed tokens one turn may spend (input, output and cache, helpers included) before
+    # `agent/spend_cap.py` ends it with a partial answer and `spend_cap_reached`. The loop cap
+    # counts
+    # calls, not cost, and `api/budget.py` meters only between turns. A runaway backstop, not a
+    # budget:
+    # derived as `harness_max_loop_iterations` calls each at `agent_context_token_budget`, so a
+    # lawful
+    # turn never hits it (`tests/test_spend_cap.py` holds that). Set lower from `turn_costs` to buy
+    # a
+    # cost ceiling, knowing it refuses work. 0 means no cap.
     agent_max_turn_billed_tokens: int = Field(default=3_000_000, ge=0)
 
-    # Supersteps one model call costs, for deriving the graph's own step ceiling below.
-    #
-    # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999`, and
-    # `create_deep_agent` bakes a second onto the graph it returns; a config passed at invoke time
-    # displaces both (measured — a looping model reports "Recursion limit of 158"), and
-    # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
-    # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
-    # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
-    # partial answer out, mark it. The loop cap above is the graceful stop — on every profile, the
-    # classic agent included, since the harness gate on it expired with the second engine — and
-    # this is the backstop under it, sized so the cap always fires first.
-    #
-    # **A superstep is not a model call, which is why this is a multiplier.** One model/tool round
-    # trip is several graph nodes — the model node, the tools node, and one per hook-bearing
-    # middleware. Measured by binary search on the minimal limit that completes N calls: `2N + 1`
-    # on a bare agent and with the harness off, `4N + 3` with the harness on. **Approximate on
-    # purpose**: the constant is the middleware *count*, so adding a middleware moves it, and a
-    # number with no headroom turns "we added a middleware" into "long turns started failing". 6 is
-    # the measured 4 with headroom, and still bounds a runaway to ~25 model calls at the
-    # default cap rather than ~2,500.
-    #
-    # **That sentence about headroom is not decoration — it was tested by accident.** M14 briefly
-    # put the runaway cap on `ModelCallLimitMiddleware`, which also declares `after_model`; that one
-    # extra node took the real cost to `5N + 3`, and the ceiling's constant was `+ 1` at the time,
-    # which granted exactly 7 where a one-iteration turn then needed 8. The multiplier's headroom
-    # absorbed it at every cap except the smallest. The cap swap is reverted, so the cost is `4N +
-    # 3`
-    # again — but the constant stays at 3 rather than going back to 1, because the whole lesson is
-    # that a ceiling sized to the exact requirement fails the first time anyone adds a node.
-    # Re-measure the multiplier and the constant together, never one alone.
-    #
-    # An earlier draft of this reasoning used 1.83, taken from counting streamed `updates` events.
-    # Those are node updates, not supersteps; a ceiling derived from it would sit *below* what a
-    # healthy 25-iteration turn needs and would have truncated good turns.
+    # Supersteps one model call costs, for deriving `agent_recursion_limit`. The framework default
+    # (9999) would let a turn run thousands of calls and then fail with `GraphRecursionError`,
+    # losing the partial answer; the loop cap is the graceful stop and this ceiling sits just above
+    # it. A call costs several supersteps (one per hook-bearing middleware), so 6 includes headroom
+    # over the measured cost: re-measure multiplier and constant together whenever middleware
+    # changes.
     agent_supersteps_per_model_call: int = Field(default=6, ge=2)
 
-    # How many tool calls from one assistant message may run at once. `ToolNode` gathers every
-    # call in the batch with no bound of its own, so before this existed a 40-call fan-out ran 40
-    # tool bodies, 40 audit rows and up to 40 plan-gate reads concurrently — against a Postgres
-    # pool of 16. Applied as LangGraph's `max_concurrency` in `agent.state.turn_config`, so it
-    # bounds a superstep's parallel work (subagent fan-outs included) rather than only tools.
-    # 8 matches the worker's activity slots. It is *not* the front door's admission width: a turn
-    # admitted there may fan out to this many calls, so the front door's thread reservation
-    # multiplies the two rather than adding them (`core/executor.py`). This comment said the two
-    # "match", which read as though one turn cost one unit, and that reading was in the reservation
-    # itself. 0 removes the bound.
+    # Tool calls from one assistant message that may run at once, applied as LangGraph's
+    # `max_concurrency` (`agent.state.turn_config`), so it bounds every superstep including helper
+    # fan-outs. Multiplied, not added, with admission in the thread reservation
+    # (`core/executor.py`). 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
-    # Which agent profiles a turn may delegate to, beside the unnamed `general-purpose` helper —
-    # the `task` roster (`agent/subagents.py`). A pathsep-delimited list of profile names, because
-    # these are bare names like `skills_enabled` rather than config-carrying objects.
-    #
-    # **Every entry is still an attenuation.** A rostered helper's surface is what its *caller*
-    # holds, intersected with the named profile's tools, minus everything that acts — so a name
-    # here can only ever make a helper narrower, never reach past the agent that spawned it, and
-    # `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting.
-    #
-    # **Which three, and why not the other three, is a measurement rather than a taste.** After
-    # `side_effecting_tools()` is subtracted, `reporting` keeps 3 of its 8 names and
-    # `property-lookup` 1 of 5, because their job *is* writing; `design` keeps 4 of 8 but loses
-    # `suggest_next_experiment`, which is the whole specialist. What is left coherent is `evidence`
-    # (14 of 15), `computation` (12 of 41 — the enumeration family, topology, the calibration
-    # ledger and calculation lookup, which is a real capability and is **not** "compute things")
-    # and `safety` (4 of 6). A name whose helper is empty is a menu entry that wastes a delegation.
-    #
-    # Empty disables the roster, leaving the single unnamed helper this repository shipped before —
-    # not a capability switch so much as the escape hatch for a deployment that measures the prefix
-    # and wants it back.
+    # Agent profiles a turn may delegate to via `task` beside the unnamed `general-purpose` helper
+    # (`agent/subagents.py`), pathsep-delimited. A helper's surface is its caller's ∩ the profile's
+    # − side-effecting tools, so a name can only narrow. These three keep a coherent surface after
+    # that subtraction. Empty leaves only the unnamed helper.
     agent_helper_roster: str = "evidence" + os.pathsep + "computation" + os.pathsep + "safety"
 
-    # The agent profiles this deployment runs as **peers** — agents that hand the conversation to
-    # one another with `transfer_to_…` and each answer the chemist directly
-    # (`agent/turn_graph.py`). Empty is the shipped default and means no turn graph is built at
-    # all: `build_turn_graph` returns `None` and a turn runs the single agent it always did.
-    #
-    # **Empty rather than the three names `agent_helper_roster` ships with, and that asymmetry is
-    # the decision rather than an oversight.** A helper reads and reports, so a roster of them
-    # changes what a turn costs and not what it may do; a peer keeps the acting tools the root
-    # held and speaks to the chemist in its own voice, so a mesh that mis-routes is a worse
-    # product than the single agent it replaced. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-
-    # new-actor` requires exactly this — measured hand-off accuracy before a team is turned on —
-    # and the one run there is
-    # (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`) recorded no hand-off
-    # at all, in 24 peer-arm repeats.
-    # Turning this on is also a prefix cost a deployment should choose knowingly, because each
-    # peer binds one handoff tool per other peer and a first-party schema is charged against
-    # `tests/test_context_floor.py`'s ceiling with no allowance to absorb it.
-    #
-    # The root profile is a peer automatically and need not be named; naming it is ignored with a
-    # warning, since it would be a node the graph already has.
+    # Profiles run as peers that hand the conversation over with `transfer_to_…`
+    # (`agent/turn_graph.py`); empty builds no turn graph. Off by default: a peer keeps acting tools
+    # and answers the chemist, so a mis-routing mesh is worse than one agent, and hand-off accuracy
+    # has not been demonstrated. Each peer also adds handoff tools to the prefix. The root profile
+    # is implicit.
     agent_peer_roster: str = ""
 
-    # How many times one **turn** may hand between peers before `transfer_to_…` refuses. 0 removes
-    # the bound.
-    #
-    # Per turn rather than per thread, and the distinction is the whole point: a conversation that
-    # moves between agents over twenty turns is working, while a turn that bounces four times is a
-    # model talking to itself through a routing table. `ChemclawState.handoffs` is untracked for
-    # that reason, so a thread cannot arrive at its fourth turn already capped —
-    # `agent/loop_cap.py`'s bricked-session defect, which is what happens when a per-turn quantity
-    # is stored per thread.
-    #
-    # Three because a legitimate chain is short: generalist → specialist → back, or generalist →
-    # one specialist → another. A fourth hop in one turn has not been observed to carry
-    # information, and the refusal leaves the agent holding control with everything else it had,
-    # so hitting the cap costs a chemist nothing but a handover they did not need.
+    # Hand-offs per turn before `transfer_to_…` refuses; 0 removes the bound. Per turn, not per
+    # thread (`ChemclawState.handoffs` is untracked), so a long conversation is never capped.
+    # Refusal leaves the current agent in control.
     agent_max_handoffs: int = 3
 
-    # How many of a rostered helper's tool names its `task` menu entry enumerates before it says
-    # "and N more".
-    #
-    # **A bound rather than a ratchet, because the thing that grows is not one this repository can
-    # measure.** `describe_helper` lists the surface the helper's graph *bound*, which is the right
-    # derivation — a profile edited next year cannot leave the menu stale — and it made `task`'s own
-    # schema a function of how many tools the sibling fleet serves. Measured: `task` is 897 tokens
-    # against `tests/test_context_floor.py`'s 900-token per-tool bound with the `safety` entry
-    # dropped (its whole surface is served out of `Chemclaw3-mcp`, so this repository's ratchet
-    # binds
-    # none of it); reconstructed with that entry's real surface it is ~1,009, over the bound, with
-    # the ratchet reading 897 and passing. That is
-    # `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` one level down, in
-    # the per-tool bound instead of the total — and the remedy that test names ("narrow the
-    # arguments or paginate") is unavailable for a description, so the bound has to be here.
-    #
-    # Twelve because the menu's job is to tell entries apart, and `D-2026-08-12`'s defect was a
-    # roster whose five entries were *identical*: a dozen names does that for any roster this
-    # repository ships, and the count that follows is honest about what it did not list.
+    # Tool names a rostered helper's `task` menu entry lists before "and N more". `describe_helper`
+    # lists the bound surface, which grows with the sibling fleet, so `task`'s schema needs a bound
+    # to stay under the per-tool ceiling in `tests/test_context_floor.py`.
     agent_helper_menu_tools: int = 12
 
-    # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused
-    # individually (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted and named
-    # for the operator without becoming calls. 0 removes the bound.
-    #
-    # **This restores a ceiling that was deleted on a false premise.**
-    # `D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` removed
-    # `agent_max_reported_lost_calls` saying `agent_max_parallel_tool_calls` "bounds how many calls
-    # a reply may hold". It does not — it is LangGraph's `max_concurrency`, which bounds how many
-    # run *at once*. Measured with nothing in between: one reply carrying 1000 unparseable calls
-    # produced **1000 audit rows, 1000 `tool_failed` events and 268 kB of `ToolMessage`s** fed back
-    # into the model's own context, in 5.8 s, with nothing refusing or truncating — and a model
-    # steered by injected content is exactly what emits a wide fan-out of malformed calls.
-    #
-    # Nothing is *lost* past the bound, which is the property the old setting also kept:
-    # `chemclaw_invalid_tool_calls_total` counts every call, the WARNING names the remainder, and
-    # the model still learns what it did wrong from the calls that were promoted — every one of
-    # them carries the same sentence. 20 is the old setting's value, kept so a deployment that
-    # tuned it reads the same number.
+    # Unparseable tool calls from one reply promoted onto `tool_calls` and refused individually
+    # (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted
+    # (`chemclaw_invalid_tool_calls_total`) and named in a WARNING. Bounds audit rows and context
+    # fed back from one malformed fan-out. 0 removes the bound.
     agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
 
-    # How many audit events `PostgresAuditSink` may hold before it starts shedding the oldest.
-    #
-    # **The buffer had no write-side bound at all, and its docstring is why that looked safe.** It
-    # argues — correctly — that a *failed* batch must be dropped rather than re-queued, "because
-    # re-queueing it would make a broken database grow the buffer without bound". That covers a
-    # database which is **down**. It says nothing about one which is merely **slow**: `record()`
-    # appends and returns while `_flush_all` drains at whatever rate the connection allows, so a
-    # database answering in seconds instead of milliseconds grows the list on the producer side,
-    # inside a pod the chart limits to 1 GiB, at roughly ninety rows a turn.
-    #
-    # Shedding the **oldest** is deliberate. Both ends lose a row, and the end worth keeping is the
-    # recent one: an operator reaching for this trail is asking what just happened. Nothing is lost
-    # silently either way — every event has already gone to the stdlib log by the time it is
-    # buffered, and `chemclaw_audit_events_shed_total` is a separate series from
-    # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
-    # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
-    #
-    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn — large enough that an
-    # ordinary slow patch never reaches it, small enough that it cannot be the thing that ends the
-    # process. 0 removes the bound and restores the old unbounded behaviour for a deployment that
-    # would rather have the OOM than the gap.
-    #
-    # **The memory figure is measured, because the sentence here first said "a few tens of MB" and
-    # that was wrong by 4x in the reassuring direction.** At the realistic row — `arguments` cut to
-    # `agent_audit_max_arg_chars`, i.e. 200 — 50,000 events is **1,672 B each, 80 MB**, which is 8%
-    # of the 1 GiB the chart gives a pod that is also holding the model context. That is the number
-    # this default is chosen against, and it is only 80 rather than 160 because `_shed_to_bound`
-    # charges the in-flight batch too: before that fix `_flush_all` swapped the list out and
-    # `record` refilled a fresh one the bound could not see, so the real ceiling was twice whatever
-    # this field said. Raising this field past ~150,000 puts the buffer alone over a quarter of the
-    # pod, which is the point at which it stops being a backstop and becomes the risk.
+    # Audit events `PostgresAuditSink` may hold before shedding the oldest, so a slow database
+    # cannot grow the buffer unboundedly (the in-flight batch counts). Every event is already in the
+    # stdlib log; `chemclaw_audit_events_shed_total` is distinct from
+    # `chemclaw_audit_sink_failures_total`. At ~1.7 kB per event the default is ~80 MB. 0 removes
+    # the bound.
     agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
 
-    # How many times one turn may call a tool with the *identical* arguments before the call is
-    # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
-    # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with
-    # `load_skill` x6 and `find_notes` x5 beside it, and the only symptom was a median turn of
-    # 128-142 s against 16.9 s on the archived run. Two, not one, because a genuine re-check is a
-    # real pattern — a job polled after a wait, a note re-read after a write — and seven is not.
-    # Raise it for a deployment whose tools are cheap and whose answers move; 1 disables repeats
-    # entirely.
+    # Times one turn may call a tool with identical arguments before refusal (`agent.repeat_guard`).
+    # Two allows a genuine re-check (a polled job, a re-read note).
     max_identical_tool_calls: int = Field(default=2, ge=1)
 
-    # **Artefacts** (`src/chemclaw/exhibits/`, `agent/exhibit_tools.py`): versioned working
-    # documents beside the chat — `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`.
-    # On by default; off unbinds `create_exhibit`/`revise_exhibit`/`read_exhibit` from every turn,
-    # which is what pays their schemas back out of the prefix, and `GET /sessions/{id}/exhibits`
-    # then answers `enabled: false` so a surface offers no new artefact and shows what a session
-    # already holds read-only.
+    # Artefacts (`src/chemclaw/exhibits/`, `agent/exhibit_tools.py`): versioned documents beside the
+    # chat. Off unbinds the exhibit tools (saving their prefix) and `GET /sessions/{id}/exhibits`
+    # answers `enabled: false`, leaving existing artefacts read-only.
     agent_exhibits_enabled: bool = True
-    # The size caps one spec is validated against on every write, agent or human. Bytes are the
-    # spec's compact JSON; rows, structures and points bound the three list-shaped kinds, so a
-    # table cannot reach the byte cap by being a list nobody can scroll.
+    # Size caps every spec write is validated against: bytes of compact JSON, plus rows, structures
+    # and points for the list-shaped kinds.
     exhibit_max_spec_bytes: int = Field(default=200_000, ge=1)
     exhibit_max_rows: int = Field(default=2_000, ge=1)
     exhibit_max_structures: int = Field(default=200, ge=1)
     exhibit_max_points: int = Field(default=5_000, ge=1)
-    # Atoms one inline `geometry` XYZ block may hold — a viewer's bound, not a chemistry one: a
-    # drug-sized substrate with a catalyst is under a hundred, and five hundred is a small protein
-    # pocket. A `source` geometry is the calc store's bytes and is not counted here.
+    # Atoms in one inline `geometry` XYZ block, a viewer bound; `source` geometries are not counted.
     exhibit_max_atoms: int = Field(default=500, ge=1)
-    # The `html` kind: a page the model writes, rendered only in the UI's separate sandbox origin
-    # and never served as `text/html` here
-    # (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`). Off
-    # refuses the kind on create (a 422, or a worded refusal to the model) while the html
-    # artefacts a session already holds still list and read; `GET /sessions/{id}/exhibits` says
-    # which as `html_enabled`. The byte cap is the page's UTF-8 source.
+    # The `html` kind: model-written pages rendered only in the UI's sandbox origin, never served as
+    # `text/html` here. Off refuses new ones while existing ones still read (`html_enabled` on the
+    # listing). The byte cap is the page's UTF-8 source.
     agent_html_artefacts_enabled: bool = True
     exhibit_max_html_bytes: int = Field(default=200_000, ge=1)
-    # Bindings (`exhibits/bindings.py`): how many distinct stored results one spec may bind into —
-    # each is a blob read and a JSON parse on every read of the artefact — and the size above which
-    # a stored result is parsed off the event loop rather than on it
-    # (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+    # Bindings (`exhibits/bindings.py`): distinct stored results one spec may bind (each read and
+    # parsed on every artefact read), and the size above which parsing moves off the event loop.
     exhibit_max_bound_results: int = Field(default=20, ge=1)
     exhibit_binding_offload_bytes: int = Field(default=65_536, ge=0)
-    # The per-process cache of parsed result documents bindings read, in *stored* bytes (a parsed
-    # document is several times that in memory). A blob is immutable, so a cached document is
-    # never stale; 0 turns the cache off.
+    # Per-process cache of parsed bound results, in stored bytes; blobs are immutable. 0 disables.
     exhibit_binding_cache_bytes: int = Field(default=8_388_608, ge=0)
-    # How many failing bindings one refused write names before it counts the rest: enough for a
-    # writer to correct several in one attempt, few enough that a 2,000-row table bound to the
-    # wrong result is one sentence rather than 2,000.
+    # Failing bindings one refused write names before counting the rest.
     exhibit_binding_problems_shown: int = Field(default=5, ge=1)
-    # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
-    # stream. Each frame carries the whole document so far, so the frame rate times the document's
-    # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
+    # Minimum milliseconds between `exhibit_draft` frames of one tool call; each frame is the whole
+    # document.
     exhibit_draft_min_interval_ms: int = Field(default=250, ge=0)
-    # The draft rate per call, in bytes of document per millisecond of interval: a frame of N
-    # bytes is followed by the next no sooner than N / this. Each frame is the whole document, so
-    # a fixed interval makes a draft's bytes quadratic in its size — measured, a 200 kB document
-    # written over five minutes at 250 ms was ~1,200 frames averaging ~100 kB, ~120 MB per viewer.
-    # At 100 (100 kB/s) the same document costs ~150 frames and ~15 MB, and a short one still
-    # streams at the floor above.
+    # Draft rate in bytes per millisecond: after an N-byte frame the next waits N / this, so a large
+    # document's draft bandwidth is linear rather than quadratic in its size.
     exhibit_draft_bytes_per_ms: int = Field(default=100, ge=1)
-    # Characters a drafted call may spend beyond its spec, title and note — keys, an id, a revision
-    # number, the model's whitespace — before the preview stops reading it as a call the tool would
-    # refuse anyway (`api/exhibit_drafts._argument_bound`). A preview bound only: too small stops a
-    # pretty-printed draft early, too large re-parses a doomed call longer.
+    # Characters a drafted call may spend beyond spec, title and note before the preview treats it
+    # as a call the tool would refuse (`api/exhibit_drafts._argument_bound`). Preview only.
     exhibit_draft_argument_slack_chars: int = Field(default=1_024, ge=0)
-    # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
-    # worded refusal to the model) rather than evicting one somebody may still be reading.
+    # Artefacts per session; the next create is refused (409 `exhibit_limit`) rather than evicting.
     exhibit_max_per_session: int = Field(default=100, ge=1)
-    # Revisions one artefact may hold, refused the same way: every revision is a whole spec kept
-    # for the history, so an unbounded loop of edits is an unbounded table.
+    # Revisions per artefact, refused the same way; every revision keeps a whole spec.
     exhibit_max_revisions: int = Field(default=500, ge=1)
     # The tab title and the one-line change note, in characters.
     exhibit_max_title_chars: int = Field(default=200, ge=1)
     exhibit_max_note_chars: int = Field(default=1_000, ge=1)
-    # How much of a revision diff the model is shown — in `read_exhibit` and in the turn note that
-    # announces a chemist's edit. Changes past the count are summarised as a number; a value past
-    # the length is cut with a marker. The full diff is always `GET …/diff`.
+    # How much of a revision diff the model sees (in `read_exhibit` and edit notes); excess changes
+    # are counted and long values cut. `GET …/diff` is always full.
     exhibit_diff_max_changes: int = Field(default=20, ge=1)
     exhibit_diff_max_value_chars: int = Field(default=300, ge=1)
-    # The most differing lines, on either side, a document diff aligns line by line. Past it the
-    # differing span is one hunk: the alignment is cubic on repeated lines (500 lines measured at
-    # 0.47 s, 2,000 at 33 s), and a diff is computed for a REST read, a tool call and a turn note.
+    # Most differing lines aligned line by line; beyond it the span is one hunk, because alignment
+    # is cubic on repeated lines.
     exhibit_diff_max_lines: int = Field(default=200, ge=1)
-    # The per-turn artefact note (the chemists' edits and any referenced artefacts), in
-    # characters. It is appended to the turn's own message, so it is bounded the way the job
-    # push-back beside it is. The listing is a request-only section and is bounded by the count
-    # below, never persisted.
+    # Characters of the per-turn artefact note (chemists' edits, referenced artefacts) appended to
+    # the turn's message. The listing is request-only and bounded below.
     exhibit_note_max_chars: int = Field(default=12_000, ge=1)
-    # How many artefacts each model request's listing names, newest first; the rest are counted.
-    # The listing rides on the instructions of every model call (`exhibit_notes.ExhibitListing`),
-    # so it is prefix: the character bound is what it may cost (2,000 is about 500 tokens), and a
-    # session holding none pays nothing.
+    # Artefacts each model request's listing names, newest first (`exhibit_notes.ExhibitListing`);
+    # the listing is prefix, so the character bound is its cost. A session with none pays nothing.
     exhibit_note_max_listed: int = Field(default=20, ge=1)
     exhibit_listing_max_chars: int = Field(default=2_000, ge=200)
-    # How many artefacts one chemist message may reference (`MessageIn.exhibit_refs`); each is
-    # copied into that turn's note, so this and the note's character bound together bound it.
+    # Artefacts one chemist message may reference (`MessageIn.exhibit_refs`), each copied into the
+    # note.
     exhibit_max_refs: int = Field(default=5, ge=0)
     # The most headers one `GET /exhibits` page serves across a caller's sessions, whatever it asks.
     exhibit_max_listing: int = Field(default=200, ge=1)
-    # How many unchecked figures one revision records. A table of a thousand transcribed numbers
-    # is flagged by its first few; the count past this is not what a chemist acts on.
+    # Unchecked figures one revision records.
     exhibit_max_unverified_figures: int = Field(default=50, ge=1)
-    # How many evidence rows the grounding check fetches per round trip while it searches the
-    # session's tool results for an artefact's figures.
+    # Evidence rows per round trip while grounding an artefact's figures against tool results.
     exhibit_grounding_batch: int = Field(default=32, ge=1)
 
-    # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
-    # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
-    # capabilities, so a shared tree is its common home; a profile genuinely about one
-    # capability lives in that connector's bundle instead and is found there.
+    # Profile directories (`agents.profile_discovery`), OS-pathsep-delimited. A profile specific to
+    # one capability lives in that connector's bundle instead.
     profiles_dir: str = "data/profiles"
 
-    # Where deterministic step templates are discovered (`data/templates/`). A template fixes the
-    # order of a procedure and runs it as a durable workflow, where a profile configures an agent
-    # and leaves the order to the model. `src/chemclaw/templates/README.md` says which one a task
-    # wants.
+    # Directories of deterministic step templates: fixed-order procedures run as durable workflows
+    # (`src/chemclaw/templates/README.md` contrasts them with profiles).
     templates_dir: str = "data/templates"
     # Which discovered templates are enabled; empty (the default) means every one found.
     templates_enabled: str = ""
-    # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
-    # a `tool` step may be a real calculation, but bounded so one wedged step cannot pin a run.
+    # Per-step wall clock for a template run (an agent turn or a calculation).
     template_step_timeout_seconds: float = Field(default=900.0, gt=0)
-    # How long a step may go without saying anything before Temporal declares its worker dead.
-    #
-    # A `start_to_close` timeout alone cannot tell a step that is working from a worker that was
-    # killed: both look like silence, and the whole 900 s above has to elapse before the attempt is
-    # retried. `run_tool_step` and `run_agent_step` therefore beat while they wait
-    # (`durable/heartbeat.beating`, the same idiom the document and ELN syncs use), and this is the
-    # timeout that both the workflow's `heartbeat_timeout` and the beat interval derive from — one
-    # number, so the two can never drift. Sized like `eln_sync_heartbeat_timeout_seconds` rather
-    # than like the step budget: it measures worker liveness, not the work.
+    # Heartbeat timeout for template steps, so a dead worker is noticed before the step budget
+    # lapses. `run_tool_step`/`run_agent_step` beat via `durable/heartbeat.beating`, which derives
+    # its interval from this.
     template_step_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
-    # Whole-run wall clock for one template execution, the ceiling the per-step budget cannot give.
-    #
-    # Without it an N-step template's only bound was `template_step_timeout_seconds` × N — a number
-    # nothing declares, that changes when an author adds a step, and that no operator can read off
-    # any setting. `ConnectorJobWorkflow` gives its children `connector_job_timeout_seconds` for
-    # exactly this reason (`durable/connector_job.py`), and a template is core's own sequencer of
-    # the same kind of work. A longer procedure raises this deliberately rather than inheriting an
-    # unbounded run. The cross-field validator in `core/config/__init__.py` refuses a run ceiling
-    # that cannot contain a single step.
-    #
-    # **The default is the old 7,200 s plus the one bound it never counted.** Eight steps at the
-    # step budget is what sized 7,200, and that arithmetic silently assumed every step is an
-    # activity. A `job` step is a child workflow bounded by `wrapper_execution_timeout()`, which was
-    # two and a half times the whole run it sat inside, so seven of the nine shipped templates could
-    # end as a silent TIMED_OUT. That bound plus the entire eight-ordinary-step allowance this
-    # setting used to be. Every shipped template is one `job` step plus at most two ordinary ones,
-    # so the margin is real rather than nominal. Stated as a literal rather than derived, because a
-    # default that moved with `connector_job_timeout_seconds` would hide the relation the validator
-    # exists to make loud — a site that raises the job ceiling is refused at startup and told to
-    # raise this too.
-    #
-    # **Which is exactly what happened to this number, twice.** The job ceiling went 18,000 ->
-    # 25,200 so that a bundle activity's queue wait could be its headroom rather than a fraction of
-    # it (`durable/publish.py::connector_queue_wait_timeout`), which moved the `job` step's bound to
-    # 25,320 — equal to the then-default, and equality is what the validator calls the defect. Then
-    # the wrapper's post-child headroom turned out to be counted rather than summed: `4 x
-    # activity_timeout_seconds` charged one activity's wall clock for each of five steps whose real
-    # budgets are their own `schedule_to_start + start_to_close`, two of them a light write's 900 s
-    # and the rest core's hour. The honest bound is 38,130, so this is 38,130 + 7,200.
+    # Whole-run wall clock for one template execution. A literal, not derived, so raising
+    # `connector_job_timeout_seconds` is refused at startup until this is raised too
+    # (`core/config/__init__.py` requires it to contain one step). Default: a `job` step's bound
+    # (`wrapper_execution_timeout()`, 38,130 s) + eight ordinary steps (7,200 s).
     template_run_timeout_seconds: float = Field(default=45330.0, gt=0)
 
     @property
@@ -1197,110 +332,39 @@ class AgentSettings(BaseSettings):
 
     @property
     def skills_dirs(self) -> list[str]:
-        """The skills directories, split on the OS path separator (like PATH), empties dropped.
-
-        The skills backend takes a list of directories; keeping the config a single delimited
-        string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
-        team-skills` the same way they set `PATH`, no JSON quoting.
-        """
+        """The skills directories, split on the OS path separator (like PATH), empties dropped."""
         return [d for d in self.skills_dir.split(os.pathsep) if d]
 
     @property
     def helper_roster(self) -> list[str]:
-        """The profile names offered as `task` helpers; empty leaves the single unnamed helper.
-
-        Read through this property, never raw, for the reason `skills_dirs` states: the delimited
-        string is the ENV shape and the list is what every caller wants.
-        """
-        # Stripped, unlike the other pathsep lists here, because this one is the first whose typo
-        # is fatal: `refuse_an_unknown_roster` raises at startup, so `"evidence: computation"` —
-        # spaced the way a person writes a list — would not start the front door. Elsewhere a stray
-        # space makes an entry inert; here it makes the deployment dead.
+        """The profile names offered as `task` helpers; empty leaves the single unnamed helper."""
+        # Stripped, because `refuse_an_unknown_roster` raises at startup and `"evidence:
+        # computation"` would otherwise stop the front door.
         return [name.strip() for name in self.agent_helper_roster.split(os.pathsep) if name.strip()]
 
     @property
     def peer_roster(self) -> list[str]:
         """The profile names run as peers; empty means no turn graph is built (the default).
 
-        Stripped for `helper_roster`'s reason and not a weaker one: `refuse_an_unknown_peer_roster`
-        also raises at startup, so a list written the way a person writes one —
-        `"evidence: safety"` — would stop the front door rather than make one entry inert.
+        Stripped for `helper_roster`'s reason: `refuse_an_unknown_peer_roster` also raises at
+        startup.
         """
         return [name.strip() for name in self.agent_peer_roster.split(os.pathsep) if name.strip()]
 
     @property
     def skills_enabled_list(self) -> list[str]:
-        """The explicitly enabled skill names; empty means "every discovered skill" (the default).
-
-        A bare-key set, so it uses the delimited-string idiom (like `skills_dir`/`data_sources`)
-        rather than JSON — these are names, not config-carrying objects.
-        """
+        """The explicitly enabled skill names; empty means every discovered skill."""
         return [s for s in self.skills_enabled.split(os.pathsep) if s]
 
     @property
     def agent_recursion_limit(self) -> int:
         """The graph step ceiling one turn runs under (`agent.state.turn_config`).
 
-        Derived from `harness_max_loop_iterations` rather than set directly, because the two are one
-        decision: the cap is what a deployment says a turn may cost, and a step ceiling that did not
-        follow it would either fire first — discarding an answer the cap would have let out — or
-        never fire at all, which is what an inherited 9999 would do.
-
-        `+ 8` is a *bound with margin*, not the measured cost, and the distinction is the whole
-        lesson of this docstring. Both halves of the formula have been wrong, at different times,
-        for opposite reasons — and each time only the smallest cap noticed.
-
-        **The history, because the procedure matters more than the number.** The constant was `+ 1`
-        until M14 moved the runaway cap onto `ModelCallLimitMiddleware`, which declares
-        `after_model` as well as `before_model`: a one-iteration turn then needed 8 where the
-        formula granted 7,
-        and died with `GraphRecursionError` — the failure this ceiling exists to *avoid*, since it
-        discards the partial answer the cap would have let out. It became `+ 3`, and stayed right
-        until `create_deep_agent` brought `SubAgentMiddleware`, `SummarizationMiddleware` and
-        `PatchToolCallsMiddleware`, at which point a one-iteration turn needed 14 against the 9 the
-        formula granted.
-
-        **Then two branches each measured a graph the other did not have, and neither number
-        survived the merge.** `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
-        reverted the cap to a first-party `before_model` hook and measured `4*N + 3`; the
-        `create_deep_agent` swap measured `6*N + 8`. Merged, the graph has main's cheaper cap *and*
-        the swap's extra middleware, so it is neither.
-
-        **Re-measured on the merged graph by binary search rather than by counting nodes**
-        (2026-08-15): the minimal working `recursion_limit` for N tool calls is 12, 17, 22, 32, 47
-        for N = 1, 2, 3, 5, 8 — an exact fit to **`5*N + 7`**. The multiplier fell from 6 to 5
-        because a `before_model` hook costs one superstep per model call less than a middleware
-        declaring both hooks; the constant rose from 3 to 7 because the harness brought fixed
-        overhead. Five points rather than one precisely because a single point cannot tell a changed
-        multiplier from a changed constant — which is how it went stale the first time. Re-measure
-        both together, never one alone.
-
-        **So why `6 * N + 8` and not `5 * N + 7`.** The formula grants
-        `agent_supersteps_per_model_call` (6) per call against a true cost of 5, plus 8 against a
-        true 7 — a margin of `N + 1`
-        supersteps that widens with the cap and is never below 2. That is deliberate: a ceiling that
-        fits exactly is one node away from being wrong, and every stale-constant incident above was
-        a graph gaining a node nobody re-measured for. The setting stays the knob a deployment can
-        raise; this constant is the floor under it.
-
-        **`cap + 1` calls, not `cap`, because the cap now ends a graph with one more call.**
-        `agent/loop_cap.enforce_loop_cap` authorises a tool-less wrap-up past the cap so a capped
-        turn still answers; sized for `cap` calls, the ceiling fired first at a cap of 1 or 2 —
-        CI raised "Recursion limit of 14" and "of 20" on three capped-turn tests — and the turn
-        died with the error this backstop exists to prevent instead of answering.
-
-        At the shipped defaults this is `26 * 6 + 8 = 164` against the 137 a capped 25-iteration
-        harness turn actually needs — so the cap fires first, which is the intent. The ceiling
-        should never be what stops a turn at all; it is the backstop under the cap, sized so the
-        cap always fires first.
-
-        **This said "it is what stops a turn that has no cap, because the loop cap is attached only
-        when the harness is on", and that was the opposite of the code.** `_harness_middleware`
-        builds `[enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]` and returns them *before*
-        the harness branch, so every profile carries the cap — its own docstring says "the cap is
-        unconditional and the todo list is not, and they used to travel together", and this file
-        says it correctly 230 lines up ("the iteration cap stays on regardless"). There is no turn
-        with no cap, so a reader sizing this margin was being told to leave room for a case that
-        cannot arise.
+        Derived from `harness_max_loop_iterations` so the loop cap always fires first and the
+        ceiling only catches a bug. `agent/loop_cap.enforce_loop_cap` allows one wrap-up call past
+        the cap, hence `cap + 1` calls. Measured cost is `5 * N + 7` supersteps; the formula grants
+        `agent_supersteps_per_model_call * (cap + 1) + 8`, a margin that grows with the cap, because
+        an exact fit breaks the first time a middleware is added. Re-measure multiplier and constant
+        together.
         """
         return (self.harness_max_loop_iterations + 1) * self.agent_supersteps_per_model_call + 8

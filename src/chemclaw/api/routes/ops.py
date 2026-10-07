@@ -1,9 +1,8 @@
 """The operator surfaces: liveness, readiness, the Prometheus exposition, and schedule health.
 
-`/healthz`, `/readyz` and `/metrics` are the three deliberately unauthenticated routes — a kubelet
-and a Prometheus scrape cannot present a bearer token — and `tests/test_route_auth_coverage.py`
-pins that allowlist to exactly these. `/schedules` lives beside them because it answers the same
-audience: an operator asking "is the machinery running", not a chemist asking about chemistry.
+`/healthz`, `/readyz` and `/metrics` are the only unauthenticated routes (a kubelet and a scrape
+have no token); `tests/test_route_auth_coverage.py` pins that allowlist. `/schedules` serves the
+same operator audience.
 """
 
 import asyncio
@@ -29,9 +28,8 @@ from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
 log = logging.getLogger(__name__)
 
-# What one readiness probe answers with. Named so `_shared_probe` can be one function over both —
-# a connector sweep and a database verdict share every line of the single-flight bookkeeping and
-# differ only in what they return.
+# What one readiness probe answers with, so `_shared_probe` serves both the connector sweep and the
+# database verdict.
 _Probed = TypeVar("_Probed")
 
 
@@ -43,21 +41,12 @@ async def healthz() -> dict[str, str]:
 async def _connector_health(request: Request) -> list[ConnectorHealth]:
     """The connector sweep: at most once per `service_readiness_cache_seconds`, and once at a time.
 
-    Monotonic, not wall-clock: a clock adjustment must not make the last sweep look
-    arbitrarily fresh.
-
-    **The window alone only suppressed sequential repeats, and the concurrency is chosen by the
-    caller.** This docstring used to trade away a lock on the grounds that "two callers racing past
-    the window both probe once, which is a wasted sweep and not a correctness problem" — true of
-    two, and the number is not two. The read, the `await` and the cache write are a check-then-act,
-    so *every* request in flight while a sweep runs misses: measured on the real app, 50 concurrent
-    probes inside one 5 s window did 50 full connector fan-outs. This route is unauthenticated by
-    necessity (a kubelet cannot present a token) and therefore also outside `require_principal`'s
-    per-principal budget, so one credential-less TCP connection bought N outbound connections to
-    the connector fleet, with no ceiling anywhere in the path.
-
-    Single-flight rather than a lock: a lock would serialise the waiters behind one probe *each*,
-    while what they all want is the same answer. Everyone reads the one result.
+    Monotonic time, so a clock step cannot make a sweep look fresh. The window alone would not stop
+    concurrent misses: this route is unauthenticated and outside the rate budget, so every request
+    in
+    flight during a sweep would start its own fan-out. Single-flight rather than a lock, so all
+    waiters
+    share one result.
     """
     front = state(request)
     window = settings.service_readiness_cache_seconds
@@ -69,22 +58,9 @@ async def _connector_health(request: Request) -> list[ConnectorHealth]:
 async def _sweep_connectors(front: FrontDoorState) -> list[ConnectorHealth]:
     """Probe every connector once and refresh the readiness snapshot with what came back.
 
-    **Never raises, the way `_probe_database` never raises**, and for a stronger reason than its
-    sibling has: connector health on this route is *reported, never gating* (see `readyz`), so a
-    sweep that propagated would turn a signal the route promises cannot fail the pod into the one
-    thing that fails it hardest — a 500 on the readiness probe, draining the pod, with
-    `{"detail": "The request could not be completed due to an internal error."}` as the operator's
-    whole diagnosis.
-
-    This used to lean entirely on `probe_connectors`'s own "never raises" docstring. That promise
-    covers the gathered probes; it does not cover the loop above them (`enabled()`, `health_url`,
-    `bundle_queue`) or a `_probe_queues` failure outside its own except clause. A promise made one
-    module away is not a bound.
-
-    The last snapshot stands rather than an empty list, matching what `refresh_open_jobs` does with
-    its gauge: a fleet nobody could measure this second is not a fleet that just went healthy, and
-    the snapshot is not refreshed either — so the next request past the window tries again instead
-    of caching the failure into a permanently stale reading.
+    Never raises: connector health is reported, never gating, so a failure here must not 500 the
+    readiness probe. On failure the last snapshot stands and its timestamp is not refreshed, so the
+    next request retries.
     """
     try:
         # Through the front-door module so the suite's patch seam (`chemclaw.api.app.
@@ -103,15 +79,10 @@ async def _shared_probe(
 ) -> _Probed:
     """Run `probe` once for every caller that finds the cache stale at the same moment.
 
-    The in-flight task is kept on `app.state` under `name`, and the check-and-start is atomic on
-    the event loop — there is no `await` between reading the slot and writing the new task — which
-    is exactly the property the cache read alone did not have.
-
-    `shield`, because the awaiting caller does not own the probe: an unauthenticated client that
-    hangs up mid-probe would otherwise cancel the task every other caller is waiting on, which
-    would hand this route's amplification back to whoever asked for it. The done-callback retrieves
-    a failed probe's exception so an abandoned one cannot surface as `Task exception was never
-    retrieved`; a caller still sees the failure by awaiting it.
+    The in-flight task lives on `app.state` under `name`, and check-and-start has no `await` between
+    them, so it is atomic on the loop. `shield`, so a client hanging up cannot cancel the probe
+    others
+    await. The done callback retrieves a failed probe's exception; awaiting callers still see it.
     """
     inflight = front.readiness_probes.get(name)
     if inflight is None or inflight.done():
@@ -129,27 +100,14 @@ def _drain(task: "asyncio.Task[Any]") -> None:
 
 
 async def _database_ready(request: Request) -> bool:
-    """Whether Postgres answers **and** its schema carries this image, re-probed once per window.
+    """Whether Postgres answers and its schema carries this image, re-probed once per window.
 
-    Two verdicts from one round trip, cached together because they are taken together
-    (`_probe_database`). The route reads them apart again to say which one failed; nothing here
-    collapses them, because "the database is down" and "this pod is ahead of the schema" have
-    different operators and different fixes.
-
-    Re-probed at most once per `service_readiness_cache_seconds`.
-
-    Cached on the same window and for the same reason as the connector sweep: this route is
-    unauthenticated by necessity and runs every ten seconds per pod, so an uncached probe is a
-    database round trip any caller can trigger at will.
-
-    Bounded by `service_readiness_db_timeout_seconds`, its **own** short budget rather than the
-    pool's. That distinction is the whole reason a probe is safe here. `connectors/server.py`
-    deliberately does not hold its readiness on the database, because an unreachable one would hold
-    it for the full pool timeout — but that is an argument against an *unbounded* wait, not against
-    answering the question. A readiness probe exists to report "not ready" quickly; a probe that
-    reports it in a second is doing its job, and one that hangs for ten is the failure.
-
-    A failure is reported, never raised: this route must answer, and `False` is the answer.
+    Two verdicts from one round trip (`_probe_database`), cached together and reported separately,
+    since "database down" and "pod ahead of schema" have different fixes. Cached per
+    `service_readiness_cache_seconds`, since this unauthenticated route would otherwise be a
+    database
+    round trip on demand. Bounded by `service_readiness_db_timeout_seconds`, its own short budget: a
+    readiness probe should say "not ready" quickly. Never raises; `False` is the answer.
     """
     front = state(request)
     window = settings.service_readiness_cache_seconds
@@ -161,76 +119,21 @@ async def _database_ready(request: Request) -> bool:
 async def _probe_database(front: FrontDoorState) -> bool:
     """Ask Postgres one bounded question and cache the answer.
 
-    Single-flight for a sharper reason than the connector sweep: each miss borrows from the shared
-    pool, so 50 concurrent probes requested 50 checkouts against `pg_pool_max_size` — and every
-    authenticated request needing the store in that window queued behind them and, past
-    `pg_pool_timeout_seconds`, was shed 503.
+    Single-flight because each miss would borrow from the shared pool.
 
-    **`asyncio.wait_for` around the whole leg bounds the *acquisition*, and it is not a budget for
-    the query.** That distinction is this paragraph's own correction: it claimed the wrapper made
-    `service_readiness_db_timeout_seconds` a budget outright, which holds for the connect leg it
-    was measured on and fails on the leg it names. Driven against a *paused* Postgres — the
-    "blackholed, not refused" case below, produced with `docker pause` — a warm pooled connection
-    ran past the wrapper twice over: once answering `200 ready` after 7.6 s for a database it could
-    not reach, once never returning at all. The mechanism is upstream and reproduces with no code
-    from this repository in the way: `AsyncConnection.wait()` catches the `CancelledError`, calls
-    `_try_cancel` (which dials the same frozen server), and then re-waits on the socket with no
-    timeout of its own.
+    `asyncio.wait_for` bounds acquisition (the connect leg), which the connection's own timeouts do
+    not
+    cover. It does not reliably bound a query on an already-open connection to an unresponsive
+    server:
+    psycopg re-waits on the socket after cancelling. The kubelet's `readinessProbe.timeoutSeconds`
+    (derived by the chart from this setting) catches that case; the residual is upstream's.
 
-    **That cancel has since gained a deadline and the leg is still unbounded**, said here because
-    the version number reads like a fix. psycopg 3.3 added `AsyncConnection.cancel_safe(timeout=)`
-    and `_try_cancel` now delegates to it with `timeout=5.0` — but it is the *re-wait* after it
-    that has no bound. Re-driven on 3.3.4 against a paused Postgres: an in-flight `SELECT 1` on an
-    already-checked-out connection, under a 2 s `asyncio.wait_for`, did not return within 120 s.
-    The same drive through `core/db.py::connection` returns at its budget, 4 of 4, because a pool
-    checkout that has to open a connection hangs in the *connect* leg instead — which this wrapper
-    has always bounded, and which is the measurement that would wrongly close the `DEFERRED.md` row.
-
-    What bounds it in a deployment is the kubelet, not this function: the chart derives
-    `readinessProbe.timeoutSeconds` from this setting plus the connector budget plus a margin — 5 s
-    on the shipped values, `failureThreshold: 3` — so a 7.6 s answer is a failed probe whatever it
-    says, and the pod goes not-ready, which is the correct outcome reached by the wrong route. The
-    residual is recorded rather than papered over, because the honest fix is upstream and the
-    alternative here would be a second timeout that cannot cancel what the first one could not.
-
-    The kwarg is still what bounds the query on a server that is *answering*. That kwarg becomes a
-    Postgres-side
-    `statement_timeout` GUC (`db._merged_options`) — it bounds a query's execution *after* a
-    connection already exists, and does nothing for however long acquiring one takes. Acquisition
-    is bounded by two settings this probe does not read at all: `pg_connect_timeout_seconds` for a
-    fresh `connect()` and `pg_pool_timeout_seconds` for a pool checkout, both ten seconds by
-    default and both independent of the readiness budget. Measured against a blackholed (not
-    refused) Postgres address, the connect leg alone took ~10s while the Helm-derived
-    `readinessProbe.timeoutSeconds` assumes this whole function costs at most
-    `service_readiness_db_timeout_seconds` — the same class of defect the connector-queue sweep
-    fixed the same way (`connectors/health.py::_probe_queues`): wrap the outer awaitable, because a
-    component's own internal timeout kwarg only ever bounds the part of the work it was told about.
-
-    **The kwarg is not belt-and-suspenders, and calling it that is what nearly deleted it.** It is
-    also what keeps this probe *off* the stores' pool: `core/db` keys a pool on
-    `(loop, dsn, libpq options, requested max_size)` and the options string carries the statement
-    timeout, so asking for two seconds mints a second pool this process holds for its life — and
-    buys the thing the connection budget exists to protect. Measured on the real app with all eight
-    of the stores' pooled connections held: with the separate pool `/readyz` answered **200 in
-    0.026 s**; sharing the stores' key it answered **503 "database unreachable" in 2.005 s**,
-    against a database that was healthy and idle. That is readiness amplification — the kubelet
-    pulls a pod out of the Route for being *busy*, moving its load onto siblings that are equally
-    busy — and it also misreports pool saturation as an unreachable server, which is exactly the
-    distinction `chemclaw_pg_pool_requests_waiting` was introduced (D-119) to keep separate.
-
-    **That pool is one connection wide, because one is what this leg uses.** `_shared_probe`
-    collapses every concurrent caller onto a single in-flight task: measured at 1,000 concurrent
-    `/readyz` with the cache window off, 40 checkouts and a peak of **one** simultaneous checkout,
-    and a probe that blows its own budget releases before the next starts (`pool_available` is 1
-    immediately after an `asyncio.wait_for` cancellation, next checkout 0.002 s). Left at
-    `pg_pool_max_size` it declared eight connections of the fleet budget and *held three* — the
-    first checkout races the initial fill, so a `min_size=2` pool settles at three — per
-    front-door pod, for one `SELECT 1`. Sized here rather than in `core/db` because the bound is a
-    property of this route's single-flight, not of the database.
-
-    Labelled, because it is the one non-default borrower in `src/` and six samples a minute per pod
-    would otherwise land in `operation="unspecified"` — the hole `connection()`'s own docstring
-    calls the likeliest place for a slow query to hide.
+    The timeout kwarg becomes a server-side `statement_timeout`, bounding the query on a responsive
+    server. Because `core/db` keys pools on the options string, it also gives this probe its own
+    pool,
+    so a busy store pool cannot make readiness report the database unreachable. That pool is one
+    connection wide, matching the single-flight. Labelled, so its samples do not land in
+    `operation="unspecified"`.
     """
     try:
 
@@ -251,9 +154,9 @@ async def _probe_database(front: FrontDoorState) -> bool:
     except (psycopg.Error, ConnectionError, TimeoutError):
         log.warning("readiness: Postgres did not answer", exc_info=True)
         reachable = False
-        # Not a schema verdict: a database that did not answer was not asked. Leaving this False
-        # would report "schema behind image" for an outage, which is the misdiagnosis the second
-        # verdict exists to prevent.
+        # A database that did not answer was not asked about its schema; False would misreport an
+        # outage
+        # as a schema mismatch.
         current = True
     front.database_reachable = reachable
     front.schema_current = current
@@ -262,50 +165,23 @@ async def _probe_database(front: FrontDoorState) -> bool:
 
 
 async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool:
-    """Whether `schema_migrations` records the newest migration **this image** ships.
+    """Whether `schema_migrations` records the newest migration this image ships.
 
-    **The comparison is one-directional, and that is the whole design.** It asks only whether the
-    newest file this image ships has been applied; ledger rows *beyond* it are not looked at. So a
-    pod whose image is ahead of the schema — new code against an old database, which throws
-    `UndefinedColumn` on the first turn — is unready, while a **rollback**, whose image is behind a
-    schema that only ever goes forward, stays ready and can serve. Those are two different
-    comparisons, and conflating them into "the ledger equals the file set" would make a rollback
-    impossible: every rolled-back pod would refuse traffic, which is a worse failure than the one
-    this closes. The backwards half is answered where it can be acted on rather than by refusing to
-    serve — `core/migrate.py`'s `migrate.database_ahead` WARNING.
+    One-directional: an image ahead of the schema is unready (its code would hit missing columns),
+    while a rollback, whose image is behind a forward-only schema, stays ready.
+    `core/migrate.py`'s `migrate.database_ahead` warning reports the other direction. Normally the
+    Helm
+    pre-upgrade hook migrates first; this catches `--no-hooks`, `kubectl set image` and a sync past
+    a
+    failed hook.
 
-    Why readiness at all: the Helm `pre-upgrade` hook Job normally applies the migration before any
-    new pod starts, so this is unreachable on the happy path. `--no-hooks`, a `kubectl set image`,
-    and an ArgoCD sync that proceeds past a failed hook all reach it, and until this existed the
-    probe was `SELECT 1` only — so such a pod passed readiness, joined the Route, and failed in
-    traffic instead of at rollout. Measured against a schema at `080` with today's code:
-    `/readyz` answered `200 {"status": "ready"}` while `outbox`, `calculation_results.epoch` and
-    `turn_costs.turn_id` were all missing.
-
-    **It admits a ledger it is not allowed to read, and not a ledger that is not there** — and
-    those were one branch until 2026-09-19, which made the admitted shape wider than the case it
-    argues. The argument is about *privilege*: the probe reads `session_store_dsn or postgres_dsn`,
-    which under a split session store is a *different* server from the one `migrate()` runs against,
-    and a role that may use the store but may not select the ledger is a legitimate deployment this
-    repository cannot see. Refusing there turns a diagnostic into a fleet-wide outage over someone
-    else's grant table, so `InsufficientPrivilege` still returns True.
-
-    `UndefinedTable` is not that case. `schema_migrations` is created by the first migration, so its
-    absence is not "the check could not run" — it is the strongest possible evidence that the check
-    would fail, because *nothing* has been applied. Measured against an empty database with
-    `session_store="postgres"`: `200 {"status": "ready"}`, the pod in the Route, and every session
-    write failing. It is the same fact as the behind-schema case at its limit and takes the same
-    answer, with the same remedy in the same log line.
-
-    Readiness, not startup: a pod that came up against an old schema becomes ready again the moment
-    an operator applies the migration, with no restart — and a schema mismatch drains the pod from
-    the Route rather than crash-looping it, the same trade
-    `test_a_database_outage_drains_the_pod_without_restarting_it` pins for an outage.
-
-    On the same connection and inside the same cached, single-flighted probe as `SELECT 1`, so it
-    costs one extra round trip per `service_readiness_cache_seconds` per pod and nothing per
-    request. Reading the newest shipped filename is one directory listing with no file opened
-    (`newest_shipped_migration`), which is why it is not worth a cache of its own.
+    A missing ledger (`UndefinedTable`) means nothing was applied and is unready. An unreadable one
+    (`InsufficientPrivilege`) is admitted: under a split session store the probe's role may lawfully
+    lack access, and refusing would turn a diagnostic into an outage. Readiness rather than startup,
+    so
+    applying the migration restores the pod without a restart. Runs on the probe's connection;
+    reading
+    the newest shipped filename is one directory listing.
     """
     newest = newest_shipped_migration()
     if newest is None:
@@ -316,15 +192,7 @@ async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool
         )
         row = await cursor.fetchone()
     except psycopg.errors.UndefinedTable:
-        # **No ledger is not an unreadable ledger, and admitting both was wider than the case
-        # argued below.** `schema_migrations` is created by the first migration, so its absence
-        # means *no* migration has been applied — the extreme of the very fact this probe exists to
-        # catch, not a diagnostic that could not run. Driven 2026-09-19 against an empty database
-        # under the chart's shipped `CHEMCLAW_SESSION_STORE=postgres`: `/readyz` answered
-        # `200 {"status":"ready"}`, so the pod joined the Route and failed every session write.
-        # Reachable by the three paths this function's docstring already names, and by the
-        # two-releases-one-database hazard the chart's own `temporal.namespace` error message admits
-        # no guard can cover.
+        # No ledger at all means no migration has been applied: unready.
         log.warning(
             "readiness: schema_migrations does not exist, so no migration has been applied to "
             "this database at all — this pod's code is ahead of the schema and would fail in "
@@ -335,10 +203,9 @@ async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool
         )
         return False
     except psycopg.errors.InsufficientPrivilege:
-        # **This is the case the paragraph above argues, and the only one.** A role that may use the
-        # session store but may not select the ledger is a legitimate split-store deployment this
-        # repository cannot see, the probe genuinely could not run, and refusing would turn a
-        # diagnostic into an outage in a cluster nobody here configured.
+        # A role that may not read the ledger is a legitimate split-store deployment; admit rather
+        # than
+        # refuse.
         log.warning(
             "readiness: schema_migrations exists but cannot be selected by this role, so the "
             "schema is not being checked against this image (newest shipped: %s)",
@@ -360,44 +227,16 @@ async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool
 async def readyz(request: Request, response: Response) -> dict[str, str | int]:
     """Readiness: the agent can be built, Postgres answers, and how many connectors are down.
 
-    **The database gates; the connectors do not**, and the asymmetry is the point. An unreachable
-    connector costs the agent one capability, so its state is *reported* — hiding it would leave a
-    chemist wondering why an answer got worse — and a deployment that would rather not serve at all
-    in that state sets `connectors_required`, which fails startup instead.
+    The database gates (under `session_store="postgres"` a pod cannot serve a turn without it); the
+    connectors are reported, not gating — `connectors_required` fails startup instead. Reported as a
+    count, not names: this body is public, and names stay on `/metrics` and in logs. The database
+    verdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay
+    ready).
 
-    **As a count, not as a roster**, because this route is unauthenticated and therefore its body
-    is a public document. `name=state` for every enabled bundle is an inventory of the deployment's
-    internal capability surface plus a live signal of which parts are currently down — a map for
-    choosing what to probe next — handed to anything that can reach the pod or the Route, which
-    declares no `spec.path` and so serves this on the external host. The names live where they were
-    already argued as scrape-visible: `chemclaw_connectors_unhealthy` on `/metrics`, and the
-    per-connector WARNING each failed probe logs. `values.yaml` accepts "operational
-    reconnaissance" for counts; it never accepted it for names. Postgres under
-    `session_store="postgres"` is not a capability: the session claim, the conversation history, the
-    owner lookup and the audit sink all go through it, so a pod that cannot reach it cannot serve a
-    turn at all. It reported itself ready anyway until the 2026-08-05 database review — probing the
-    thing that costs a capability and not the thing that costs the service
-    (D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without).
-
-    **The database verdict is two questions, and the second one is directional.** Reaching Postgres
-    was the whole probe until 2026-09-09, so a pod whose image was *ahead* of the schema passed
-    readiness on a `SELECT 1`, joined the Route, and threw `UndefinedColumn` on its first turn.
-    `_schema_carries_this_image` adds the second question — is the newest migration this image
-    ships applied? — and asks it in that direction only, so a **rollback** (image behind a schema
-    that only moves forward) stays ready and can serve. Making it symmetric would refuse traffic on
-    every rolled-back pod, which is a worse defect than the one being fixed; the backwards case is
-    reported by `core/migrate.py` instead, where an operator can act on it.
-
-    Not gated under `session_store="memory"`, where there is no store to answer for.
-
-    503 rather than an exception, so the body still names what failed — a kubelet only reads the
-    status, but an operator running `curl` reads the reason. `/healthz` is deliberately untouched:
-    a database outage must drain these pods from the Route, not restart them into a crash loop that
-    would leave nothing to serve the moment it comes back.
-
-    Both probes are cached for `service_readiness_cache_seconds`. Caching does not weaken the
-    connector signal (reported, never gating) and bounds the database one to at most one round trip
-    per window per pod. Set 0 to probe every time.
+    503 rather than an exception, so `curl` shows the reason. `/healthz` stays untouched: an outage
+    should drain pods, not restart them. Both probes are cached for
+    `service_readiness_cache_seconds`
+    (0 probes every time).
     """
     health = await _connector_health(request)
     ready = True
@@ -405,10 +244,7 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
     if settings.session_store == "postgres":
         ready = await _database_ready(request)
         if not ready:
-            # Which of the two verdicts failed, read back from the same cached probe. A kubelet
-            # reads only the status code; this line is the whole diagnosis for the operator
-            # running `curl`, and "database unreachable" over a schema mismatch would send them
-            # to the wrong system.
+            # Which verdict failed, so an operator running `curl` goes to the right system.
             status = (
                 "database unreachable"
                 if not state(request).database_reachable
@@ -418,25 +254,19 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return {
         "status": status,
-        # `unhealthy` rather than `state == "unreachable"`: a jobs-only bundle whose queue nobody
-        # polls is down in the way that matters, and this body and `/metrics` must not hold two
-        # definitions of it (D-2026-08-27-a-queue-with-no-poller-is-unreachable).
+        # `unhealthy`, the same predicate `/metrics` uses, so a jobs-only bundle with no poller
+        # counts.
         "connectors_unhealthy": sum(1 for item in health if item.unhealthy),
     }
 
 
 async def metrics() -> Response:
-    """Prometheus exposition for this pod (gap DEP-4).
+    """Prometheus exposition for this pod.
 
-    Unauthenticated on purpose, like `/healthz` and `/readyz`: a scrape happens before and
-    independently of user identity. What makes that safe is the exposition itself — counts,
-    capacity and an operator-chosen `profile` label, never a session id, a user, or any turn
-    content, enforced by D-152's declared-label allowlist.
-
-    It is *not* the NetworkPolicy, which this docstring used to name. A NetworkPolicy selects
-    peers, not paths, and the front door's Route declares no `spec.path` — so this endpoint is
-    reachable on the external host wherever the Route is enabled. `deploy/values.yaml`
-    (`route.ipWhitelist`) carries the control for a deployment that will not accept that.
+    Unauthenticated, like the probes. Safe because the exposition holds only counts, capacity and a
+    `profile` label — never a session, user or turn content (enforced by the declared-label
+    allowlist).
+    The Route exposes it externally; `route.ipWhitelist` in `deploy/values.yaml` restricts that.
     """
     return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
 
@@ -444,15 +274,11 @@ async def metrics() -> Response:
 async def schedules(
     principal: CurrentUser,
 ) -> list[ScheduleHealth]:
-    """Health of every periodic job: when it last ran, and whether it succeeded (gap SCH-4).
+    """Health of every periodic job: when it last ran, and whether it succeeded.
 
-    Nothing reported this, so an ELN sync failing every run advanced no cursor and raised no
-    alarm — it surfaced weeks later as "the agent doesn't know about recent experiments",
-    the hardest class of problem to attribute.
-
-    Read from Temporal's own schedule state rather than a second table: Temporal is already
-    the authority on when a Schedule fired and how the run ended, and a mirrored table could
-    only ever drift from it.
+    So a failing scheduled sync is visible. Read from Temporal's schedule state, the authority, not
+    a
+    mirrored table.
     """
     return await describe_schedules()
 
@@ -460,14 +286,7 @@ async def schedules(
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    Registered with the app's own decorators rather than an `APIRouter` + `include_router`:
-    since FastAPI 0.139 `include_router` is lazy — `app.routes` would hold opaque
-    `_IncludedRouter` nodes, invisible to everything that walks the route table by type
-    (`tests/test_route_auth_coverage.py`, the session-scope inventory in
-    `tests/test_service.py`) — and a standalone router's routes carry no
-    `dependency_overrides_provider`, which silently disables `app.dependency_overrides`.
-    Registering on the app keeps both exactly as they were when these handlers lived in
-    `create_app`.
+    App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
     app.get("/healthz")(healthz)
     app.get("/readyz")(readyz)

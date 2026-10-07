@@ -631,7 +631,7 @@ async def record_knowledge_note(
     # A linked compound note is written first (see `record._build_write`), so the agent can cite the
     # molecule without checking whether its note exists.
     reference = await record_note(note, default_writer(), dependencies=compound_dependencies(note))
-    # Surface what landed on the turn's stream (gap RCH-4) — see `core.turn_signals`.
+    # Surface what landed on the turn's stream — see `core.turn_signals`.
     record_note_written(note.id, reference)
     return reference
 

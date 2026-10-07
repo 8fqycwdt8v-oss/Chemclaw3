@@ -146,8 +146,8 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         The job id to poll for progress.
     """
     authorize_trigger("request_development_report")
-    # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user. Its
-    # result travels on the request rather than being discarded — see `ReportRequest.requested_by`.
+    # `require_actor`: under Entra, refuse durable work with no user. The result travels on the
+    # request as `ReportRequest.requested_by`.
     request = ReportRequest(
         title=title,
         sections=sections,

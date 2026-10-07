@@ -1,29 +1,15 @@
 """Turning a calculator's own result model into the canonical published record.
 
-**This is the only place that knows both vocabularies**, and keeping it in one module is what makes
-"a stored payload becomes a queryable fact" a single reviewable act rather than a rule each
-calculator half-remembers.
+The only place that knows both vocabularies. Every projector holds three properties:
 
-Three properties the projectors below are written to hold, each of which was a real failure mode
-somewhere in this tree before it was a rule here:
-
-- **A number is never guessed.** `ReactionEnergyResult.delta_g_kcal` is `None` at `quick` level
-  *and* when any species' symmetry number was unstated — so a projector that fell back to
-  `delta_e_kcal` would publish an electronic energy as a free energy. Absent stays absent; there is
-  no fallback anywhere in this module.
+- **A number is never guessed.** Absent stays absent (e.g. `delta_g_kcal` is `None` at
+  `quick` level and is never replaced by `delta_e_kcal`); there is no fallback here.
 - **A unit is stated, never assumed.** Every fact goes through `properties.to_canonical`, which
-  refuses a unit it has no conversion for rather than passing it through. The model field names
-  carry their units (`delta_g_kcal`, `energy_hartree`) and that is what is read.
-- **The payload rides along untouched.** Whatever a projector fails to extract is still in
-  `ResultRecord.payload`, so a projector bug is a re-projection rather than lost science. One
-  projector narrows it — `_hessian` drops the packed `.npy` arrays, which are megabytes and are not
-  science a re-projection could read. It states the argument in its own docstring, and `project`
-  states what a narrowing may and may not be.
+  refuses a unit it cannot convert.
+- **The payload rides along untouched**, so a projector bug is a re-projection rather than lost
+  science. Only `_hessian` narrows it (see `project`).
 
-**Geometries are not copied into the record.** A `Structure` reaches the published row as its
-`structure_id` — the same rule `D-2026-08-21` established for what reaches the model's context, and
-for the same reason: the coordinates are already held, addressably, and 3N floats in a fact table
-are 3N floats nobody queries.
+Geometries are not copied into the record: a `Structure` appears as its `structure_id`.
 """
 
 import logging
@@ -54,21 +40,16 @@ logger = logging.getLogger(__name__)
 class ProjectionError(ValueError):
     """A payload could not be projected into a record.
 
-    A `ValueError`, so `durable/publish.py` marks it non-retryable by class name: a payload whose
-    shape the projector cannot read will fail identically on every attempt, and the fix is code.
+    A `ValueError`, so `durable/publish.py` marks it non-retryable: the fix is code.
     """
 
 
 def _identify(smiles: str | None) -> tuple[str, str]:
     """`(compound_id, canonical_smiles)` for a SMILES, or two empty strings.
 
-    `core.chem.compound_id` is reused rather than an InChIKey minted here: it is already the join
-    key between the knowledge graph, the fingerprint search and the QM notes, so a published result
-    meets the note about the same compound with no second naming scheme.
-
-    **A SMILES RDKit cannot parse is degraded to empty rather than raised on.** The calculation
-    genuinely happened and its numbers are worth keeping; refusing to publish a finished result
-    because a label will not canonicalize would lose the science to protect the join.
+    `core.chem.compound_id` is the join key the knowledge graph and fingerprint search already use.
+    An unparseable SMILES degrades to empty rather than raising: a label must not cost a finished
+    calculation.
     """
     if not smiles:
         return "", ""
@@ -84,12 +65,7 @@ def _identify(smiles: str | None) -> tuple[str, str]:
 def _molecule(smiles: str | None, structure_id: str = "") -> SubjectMember:
     """The single member of a one-molecule or one-geometry subject.
 
-    `role` is always `"subject"` — that is what "the single member" means here, and every one of
-    this module's call sites relied on the default. It was a widening `str` parameter nobody
-    passed, which cost `SubjectMember.role`'s closed `MemberRole` literal its check at the one
-    place a projection bug would show up as an unqueryable value in the column every reaction
-    query filters on. A member with any other role is built by `_species_members`, which names
-    each one.
+    `role` is always `"subject"`; members with other roles come from `_species_members`.
     """
     identifier, canonical = _identify(smiles)
     return SubjectMember(
@@ -102,17 +78,10 @@ def _molecule(smiles: str | None, structure_id: str = "") -> SubjectMember:
 
 
 def _state(structure: dict[str, Any]) -> tuple[int | None, int | None]:
-    """The electronic state a geometry payload states — `(charge, multiplicity)` — or two Nones.
+    """The electronic state a geometry payload states, `(charge, multiplicity)`, or two Nones.
 
-    **Absent stays absent here too.** A geometry that reaches this module as a bare `structure_id`
-    (a scan's input, a rotamer, a ranked species) says nothing about its charge, and the published
-    `structure` row must say nothing either: `0`/`1` is a real state a query matches, so
-    substituting it makes "we did not record this" indistinguishable from "we recorded a neutral
-    singlet" — and it was doing exactly that for every ion this system has published.
-
-    A geometry that arrives whole does state it: a cached `Structure` dump always carries both
-    fields, and the job path's `without_geometry` projection carries them whenever they are not the
-    ordinary neutral closed-shell values it omits by design.
+    Absent stays absent: `0`/`1` is a real state a query matches, so a bare `structure_id` must
+    not become a neutral singlet. A whole `Structure` dump carries both fields.
     """
     charge = structure.get("charge")
     multiplicity = structure.get("multiplicity")
@@ -125,10 +94,8 @@ def _state(structure: dict[str, Any]) -> tuple[int | None, int | None]:
 def _species_members(reactants: list[str], products: list[str]) -> list[SubjectMember]:
     """A reaction's members, one per stoichiometric equivalent.
 
-    That is the tools' own convention — `compute_reaction_energy` documents listing a species once
-    per equivalent (`["O", "O"]` for two waters) — so the faithful projection is N members at
-    stoichiometry 1, not one member carrying a coefficient. The ordinals match the order
-    `ReactionEnergyResult.species` uses, which is what lets a per-species fact address its member.
+    The tools list a species once per equivalent (`["O", "O"]` for two waters), so this is N
+    members at stoichiometry 1. Ordinals match `ReactionEnergyResult.species`'s order.
     """
     members: list[SubjectMember] = []
     for smiles in reactants:
@@ -153,34 +120,11 @@ def _member_for(
 ) -> int | None:
     """The ordinal of the member a `SpeciesEnergy` describes, or None if it matches none.
 
-    Matched on `(role, molecule)` rather than on list position -- see the caller for the corruption
-    that position-matching produced.
-
-    **And the match is one-to-one**, which is what `claimed` is for. A species appearing twice in
-    the equation is two members, because listing a species once per equivalent is the tools' own
-    stoichiometric convention (`["O", "O"]` for two waters). Returning the *first* member with that
-    identity for both copies looked harmless and was not: member 1 received no facts at all, and
-    the two facts for member 0 collided on `value_id` -- which is a content hash over
-    `(calc_ref, scope, ordinal, property)` -- so the far end's `DO UPDATE` silently kept one and
-    discarded the other. Measured on `2 H2O`: 6 property rows carrying 5 distinct ids.
-
-    Handing each copy the next unclaimed member of that role restores the invariant the ordinals
-    exist for: one member, one set of per-species facts, one id.
-
-    **The molecule is the member's own SMILES, and `compound_id` is not consulted at all.** It was,
-    and it was consulted *first*: `compound_id` hashes the **standardized** structure, so two
-    members that are tautomers of one another — or an acid and its conjugate base — are one value
-    to it, the exact-SMILES branch behind it was never reached, and matching degenerated back to
-    the list position this function exists to avoid. Measured on 2,4-pentanedione with its species
-    listed enol-first: each species' electronic energy was attached to the other member, both
-    plausible numbers in the same unit and nothing downstream able to notice.
-
-    Reordering the two would have left a branch that cannot run. `_species_members` is the only
-    producer of the members this is called with, and it fills both fields from a single `_identify`
-    call — which returns an id only when the SMILES parsed — so a member here carrying an id and no
-    SMILES cannot arise. A producer that breaks that invariant will see its species match nothing
-    and be told so by the caller's warning, which is the right failure: the coarse identifier is
-    what silently attached the wrong energies, and it must not be the fallback for its own defect.
+    Matched on `(role, molecule)`, not list position, and one-to-one via `claimed`: a species
+    appearing twice is two members, and handing both copies the same ordinal would collide their
+    `value_id`s and silently drop a fact. The molecule is the member's exact SMILES, never
+    `compound_id`, which standardizes and would conflate tautomers or an acid and its conjugate
+    base. `_species_members` always sets the SMILES when it sets an id, so there is no id fallback.
     """
     canonical = _identify(species.get("smiles"))[1]
     role = species.get("role")
@@ -206,28 +150,13 @@ def _fact(
     uncertainty_kind: str = "",
     member: int | None = None,
 ) -> PropertyFact | None:
-    """One numeric fact, canonicalized — or None when the calculator did not produce the value.
+    """One numeric fact, canonicalized, or None when the calculator did not produce the value.
 
-    Returning None for an absent number rather than substituting one is the whole discipline of
-    this module: `delta_g_kcal is None` means the free energy was not established, and every caller
-    below filters Nones out rather than defaulting them.
-
-    **`value` is canonical and `reported_value` is what the calculator said.** `to_canonical` is the
-    one place a unit conversion happens on the publish path, which is what makes a predicate over
-    `value_canonical` sound.
-
-    This paragraph used to say the conversion was an identity on every live path, because every
-    call site passed an already-canonical unit and only its own unit test exercised it. That stopped
-    being true when `max_gradient` was corrected to the unit it actually holds, and the guard is now
-    load-bearing: a projector reporting an energy difference in hartree or kJ/mol — the natural
-    shape for anything coming back from `servers/calc` — lands off by 627.5 or 4.184 with the unit
-    string beside it still right, and therefore inside or outside every range filter the column
-    exists for.
-
-    How many sites convert is not written here, because it moved twice while that sentence stood.
-    `tests/test_publish_projection.py::test_the_conversion_guard_is_load_bearing_on_a_live_path`
-    derives it and fails if the set ever empties. Keeping the reported pair is what makes a wrong
-    conversion recoverable rather than merely wrong.
+    Returning None rather than substituting is this module's discipline; callers filter Nones out.
+    `value` is canonical (the only unit conversion on the publish path, so `value_canonical`
+    predicates are sound) and `reported_value` keeps what the calculator said, so a wrong conversion
+    is recoverable. `tests/test_publish_projection.py` asserts the conversion is exercised on a live
+    path.
     """
     if value is None:
         return None
@@ -275,23 +204,10 @@ def _kept(*facts: PropertyFact | None) -> list[PropertyFact]:
 def _facts_belong_in_the_scalar_table(facts: list[PropertyFact]) -> None:
     """Refuse a projection that wrote a quantity the registry declares for another table.
 
-    This is the control `properties.ScopeKind` claims and did not have: nothing compared a fact's
-    property against `definition_for(name).scope_kind`, so a per-atom, per-point or per-conformer
-    quantity written as a scalar was stored rather than caught, and the placement a site's
-    `property_definition` table ships was a statement a consumer could not trust. Measured, one
-    shipped projection did exactly that — every species distribution published `relative_energy`,
-    a *per-conformer* quantity, as a calculation scalar.
-
-    **Here rather than on `PropertyFact`, because a registry mismatch is a projection bug and
-    cannot be caused by data — and only this side is a projection.** The model is also what
-    `durable/publish_results._drain_one` parses a queued document back through, so the same check as
-    a validator refused rows this system had already written and dead-lettered them; see the note on
-    `record.PropertyFact`. Raising is right where `_identify` degrades instead: the alternative to
-    failing a projection is a row nobody can find under a name that means something else.
-
-    `calculation` names the scalar table and covers *both* of that table's row scopes, so the
-    per-species facts a reaction publishes at `member` scope are not violations — `FactScope` on
-    the row is what distinguishes them.
+    Compares each fact against `definition_for(name).scope_kind`, so a per-atom, per-point or
+    per-conformer quantity cannot be stored as a scalar. Here rather than on `PropertyFact`, because
+    a mismatch is a projection bug and the model also parses already-queued documents. `calculation`
+    covers both of the scalar table's row scopes (calculation and member).
     """
     for fact in facts:
         declared = definition_for(fact.property).scope_kind
@@ -316,10 +232,8 @@ def _not_computed(
 ) -> list[FlagFact]:
     """One flag per item a screen could not compute, so "which screens are partial" is a query.
 
-    The message is the item's name alone and the server's reason rides in `detail`, which is JSONB:
-    a reason is the calculation service's own sentence and a species screen's nests a whole ranking
-    refusal, so putting it in `message` — `VARCHAR(2000)` at every sink — would let one partial
-    screen fail its whole record at the sink and dead-letter the items that *were* computed.
+    The message is the item's name; the server's reason rides in the JSONB `detail`, since a long
+    reason in the bounded `message` column could fail the whole record at the sink.
     """
     return [
         FlagFact(
@@ -352,41 +266,21 @@ def _bond_label(entry: dict[str, Any]) -> str:
 def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> Any:
     """A payload field read under its current name, falling back to the name it used to have.
 
-    **Only for a rename that was a rename**, i.e. one where the diff shows the *same expression*
-    assigned to a new keyword. `RefinedEnsemble`'s entropy and ensemble correction are the one such
-    case in this module: `c7035b66` changed
-    `conformational_entropy_cal_per_mol_k=round(entropy, 3)` to
-    `refined_conformational_entropy_cal_per_mol_k=round(entropy, 3)` and
-    `ensemble_correction_kcal=round(-temperature * entropy / 1000.0, 3)` to
-    `refined_ensemble_correction_kcal=...` in `connectors/calc/compose.py`, and changed nothing
-    else — same `entropy = ensemble_entropy(populations, degeneracies)`, same `populations`, same
-    `degeneracies`. Its own message says so ("What was wrong was the label, not the arithmetic")
-    and the diff is what confirms it; a rename where the *quantity* also moved must refuse the row
-    instead, because a fallback would then publish a silently wrong number under a trusted name.
-
-    **Why a fallback rather than a refusal here.** Without one, a `RefinedEnsemble` stored between
-    migration 055 and that commit projected cleanly, counted as queued, and reached the results
-    store missing both of its headline numbers — with no warning, no counter and no refusal, so a
-    consumer could not tell it from an ensemble that genuinely had none. Refusing would at least
-    have made it *visible* (it would land in `backfill.WalkCounts.failed`), but the value is
-    recoverable and identical, so refusing would discard science to make a point.
-
-    Reachable only through `payload_kind="RefinedEnsemble"` — an exact model-name lookup, and no
-    `_CALC_TYPE_PROJECTORS` prefix routes here — so the legacy name on a payload that reaches this
-    is the refined subset's own entropy. `ConformerEnsemble`'s field of that name means the
-    whole-ensemble quantity and never arrives here: `_ensemble` owns those rows.
+    Only for a pure rename, where the same expression was assigned to a new name:
+    `RefinedEnsemble`'s entropy and ensemble correction gained a `refined_` prefix with no change to
+    the arithmetic. A rename where the quantity also moved must refuse the row instead. Reachable
+    only
+    through `payload_kind="RefinedEnsemble"`, so the legacy name here is always the refined subset's
+    own value.
     """
     value = payload.get(current)
     if value is not None:
         return value
     value = payload.get(legacy)
     if value is not None:
-        # WARNING rather than a flag on the record: the value published is the same number under
-        # the correct name, so there is nothing for a *consumer* to be told, while an operator
-        # running a backfill over a legacy corpus wants to know it is one. The subject label rather
-        # than the calc ref because a projector is handed a `model_dump` and nothing else (see the
-        # note above the projectors); `outbox.project_payload` is what names the ref, on the
-        # failures.
+        # A log line rather than a flag: the published value is identical, so only an operator
+        # running a
+        # backfill over a legacy corpus needs to know.
         logger.warning(
             "publish: %s read from the legacy field %r (now %r) for %r; the arithmetic is "
             "unchanged, only the name",
@@ -400,17 +294,10 @@ def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> A
 
 # --- the projectors, one per result model -------------------------------------------------------
 #
-# Each takes the model's `model_dump(mode="json")` rather than the model itself, deliberately. Two
-# reasons, and the second is the load-bearing one: a dict is what comes back out of
-# `calculation_results.result` and out of `job_records.result`, so the backfill path and the live
-# path run the *same* projector rather than two that can disagree; and importing the models here
-# would make this module depend on shapes that cross a Temporal wire, where an older history can
-# carry a field this release has renamed.
-#
-# That last clause is a hazard rather than a note, and it went unhandled for one release: a
-# `.get()` under the *new* name reads `None` off an older payload and `_kept` then drops the fact,
-# so the row publishes cleanly and short. `_renamed` above is the one place a legacy name is read,
-# and it exists for the one rename that was a rename.
+# Each takes `model_dump(mode="json")` rather than the model, so the backfill path (dicts from
+# `calculation_results` and `job_records`) and the live path run the same projector, and this
+# module does not depend on shapes that cross a Temporal wire. A field read only under its new
+# name silently drops on older payloads; `_renamed` is the one place a legacy name is read.
 
 
 def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
@@ -441,9 +328,8 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
             uncertainty=uncertainty,
             uncertainty_kind="reported",
         ),
-        # `delta_h_kcal` and `delta_g_kcal` are None at `quick` level and whenever a species'
-        # symmetry number was unstated. Absent stays absent: substituting delta_e here would
-        # publish an electronic energy under the name of a free energy.
+        # None at `quick` level and whenever a symmetry number was unstated; never substituted with
+        # delta_e.
         _fact(
             "reaction_delta_h",
             payload.get("delta_h_kcal"),
@@ -464,23 +350,15 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         # setting, so a stored boolean with no threshold cannot be re-read after someone changes it.
         _fact("exotherm_threshold", payload.get("exotherm_threshold_kcal"), "kcal/mol"),
         _text("reaction_level", payload.get("level")),
-        # Beside `reaction_delta_g`, because a free energy without its reference state is not a
-        # quantity anyone downstream can use: a solution ΔG is quoted at 1 mol/L and a gas one at
-        # 1 atm, and for Δn != 0 the two differ by 1.894·Δn kcal/mol. Rows written before
-        # `D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity` carry no
-        # such fact and were the 1 atm number in both phases.
+        # Beside `reaction_delta_g`: a free energy is unusable without its reference state (1 mol/L
+        # vs
+        # 1 atm differ by 1.894*dn kcal/mol).
         _text("standard_state", payload.get("standard_state")),
         _text("conformer_treatment", payload.get("conformer_treatment")),
     )
-    # The per-species breakdown, which is what `job_records.result` holds today and nothing can
-    # query.
-    #
-    # **Matched by (role, molecule), never by list position.** `species` and the equation's own
-    # lists are two independently produced sequences: a `quick`-level run returns no species at
-    # all, and nothing in the result model promises the two orders agree. Zipping them by index
-    # attaches a product's free energy to a reactant -- silently, since both are plausible numbers
-    # in the same units -- which is a data corruption rather than a missing row. Measured: a
-    # two-species breakdown over a three-member equation put cyclohexane's energy on butadiene.
+    # The per-species breakdown, matched by (role, molecule), never by list position: the two lists
+    # are produced independently, and zipping by index would attach a product's energy to a
+    # reactant.
     claimed: set[int] = set()
     for species in payload.get("species") or []:
         index = _member_for(subject.members, species, claimed)
@@ -532,14 +410,11 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
 def _solvent_screen(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """A solvent comparison — the aggregate only; its parts publish as their own records.
+    """A solvent comparison: the aggregate only; its parts publish as their own records.
 
-    **The rule this follows: never store an aggregate whose parts are not also stored.** A screen's
-    per-solvent energies are published as ordinary reaction records at their own `Conditions`, and
-    this record carries only what is genuinely about the comparison — the spread and the winner.
-    `records_from_solvent_screen` below is what emits both halves. The payoff is that "compare
-    this reaction across solvents" then answers over solvents that were never screened in one call,
-    which is the more common case.
+    Never store an aggregate whose parts are not also stored. The per-solvent energies publish as
+    reaction records at their own `Conditions` (see `records_from_solvent_screen`), so cross-solvent
+    questions answer over every solvent run, screened together or not.
     """
     reactants = list(payload.get("reactants") or [])
     products = list(payload.get("products") or [])
@@ -556,17 +431,11 @@ def _solvent_screen(
         engine="xtb",
         treatment=payload.get("level") or "",
     )
-    # **A spread and a winner are findings about a comparison, and one medium is not one.** Over a
-    # single row the spread is zero by construction, so publishing it would answer "screens where
-    # the solvent does not matter" with a screen that compared nothing — which a screen reduced to
-    # one medium by failures, or asked for one solvent over ions, is. Both are read either way, so
-    # the field guard sees them consumed.
-    #
-    # **And a partial screen publishes neither**, for `weakest_bond`'s reason: the spread over the
-    # media that were computed is only a lower bound on the screen's, and a medium that failed may
-    # be the best one. Both are calculation-scope facts a query reads without the
-    # `medium_not_computed` flags beside it — "best solvent = toluene" would find a screen whose
-    # DMSO the clock stopped.
+    # A spread and a winner describe a comparison: over one medium the spread is zero by
+    # construction,
+    # and over a partial screen they are only bounds (a failed medium may be the best). Both are
+    # read
+    # either way so the field guard sees them consumed.
     spread, best = payload.get("spread_kcal"), payload.get("best_solvent")
     compared = len(payload.get("effects") or []) >= 2 and not payload.get("failed")
     facts = _kept(
@@ -598,21 +467,12 @@ def _solvent_screen(
 def _species_solvent_screen(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """One species set ranked across media — the aggregate; each medium publishes its own record.
+    """One species set ranked across media: the aggregate; each medium publishes its own record.
 
-    Same rule as `_solvent_screen`: never store an aggregate whose parts are not also stored. The
-    per-medium distributions are published as ordinary `SpeciesDistribution` records at their own
-    `Conditions`, so "which tautomer dominates in DMSO" answers over media that were never screened
-    together — and this record carries only what is about the *comparison*: the largest swing, and
-    whether the dominant form reordered.
-
-    `dominance_changes` is a flag rather than a property, and at `warning` severity, because it is
-    not a measurement: it says every other number describing "the compound" is about a different
-    species depending on the medium, which is a caveat a reader must meet without asking for it.
-
-    The subject is a `system` and the vocabulary is `_species_distribution`'s, deliberately: this is
-    that projector's aggregate, and a comparison whose subject kind or `distribution_kind` differed
-    from its own parts' would not join to them.
+    Same rule as `_solvent_screen`. This record carries only the comparison: the largest swing and
+    whether the dominant form reordered. `dominance_changes` is a warning flag, not a property: it
+    tells a reader that "the compound" means a different species per medium. Subject kind and
+    vocabulary match `_species_distribution` so the aggregate joins its parts.
     """
     distributions = list(payload.get("distributions") or [])
     first = distributions[0] if distributions else {}
@@ -685,19 +545,12 @@ def _species_solvent_screen(
 def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A conformer ensemble: one subject, N conformer rows.
 
-    The members the search found are **outputs, not subjects** — the subject is the molecule that
-    was searched. Each conformer reaches the record as its `structure_id`, never its coordinates:
-    one measured search envelope was 29,086 characters of Cartesians, and a fact table full of them
-    is a fact table nobody queries.
-
-    `population` is carried when the payload has it, and its `temperature_k` goes on the conditions
-    so the number is never read without the temperature that produced it.
+    The subject is the molecule searched; members are outputs, each published as a `structure_id`,
+    never coordinates. `population` is carried when present, with its `temperature_k` on the
+    conditions.
     """
-    # **The subject is the seed the search started from, and the two upstream shapes name it
-    # differently.** `ConformerEnsemble` (returned) carries `smiles`; `EnsemblePayload` (cached)
-    # carries only `structure_id`, because it is keyed on a geometry rather than a molecule. Taking
-    # both is what lets one projector serve the cached row and the returned envelope — and it is
-    # why `SubjectMember` accepts a structure with no SMILES.
+    # The subject is the search seed: `ConformerEnsemble` carries `smiles`, the cached
+    # `EnsemblePayload` only `structure_id`; both are read so one projector serves both shapes.
     smiles = payload.get("smiles")
     seed_structure_id = payload.get("structure_id") or ""
     subject = Subject(
@@ -725,12 +578,8 @@ def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
             # publishing an ensemble. Skipped loudly rather than stored unreachable.
             logger.warning("publish: ensemble member %d has no structure_id; skipped", index)
             continue
-        # **The two ensemble shapes carry different halves, and neither carries both.** Measured
-        # against the models: `EnsembleMember` (the cached search) has `energy_hartree` and no
-        # relative energy or population; `Conformer` (what the tool returns after Boltzmann
-        # weighting) has `relative_kcal` and `population` and no absolute energy. Reading both keys
-        # optionally is what lets one projector serve `xtb.conformers` rows and returned ensembles
-        # alike — and `ConformerFact` refuses a member that has neither.
+        # The cached shape carries `energy_hartree`; the returned shape carries `relative_kcal` and
+        # `population`. Both are read optionally; `ConformerFact` refuses a member with neither.
         energy = member.get("energy_hartree")
         relative = member.get("relative_kcal")
         if energy is None and relative is None:
@@ -769,23 +618,13 @@ def _refined_ensemble(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A conformer ensemble re-weighted by free energy over its top N members.
 
-    Shares `_ensemble`'s subject and conformer rows, and deliberately does **not** share its
-    property names — and reads the two renamed fields through `_renamed`, because a payload stored
-    before that rename carried the same numbers under the ensemble-wide names and was publishing
-    without either of them. `RefinedEnsemble` renamed its own entropy and correction to `refined_*`
-    because they are computed over the refined subset and renormalized within it — the
-    ensemble-wide names mean something else one model away — and publishing them under the shared
-    names would put two meanings in one column, which is the exact confusion the model's own
-    comment exists to prevent.
+    Shares `_ensemble`'s subject and conformer rows but publishes `refined_*` property names: these
+    are computed over the refined subset, and sharing the ensemble-wide names would put two meanings
+    in one column. Legacy payloads are read through `_renamed`.
 
-    **`energy_hartree` carries the electronic energy, not the Gibbs energy**, even though the
-    ranking here is by G. `ConformerFact` holds one absolute energy, and the electronic one is the
-    value that means the same thing in both ensemble shapes — so "the same conformer, E-weighted
-    and G-weighted" is a comparison on one column rather than on two that silently differ. The free
-    energy is not lost: it is what `relative_kcal` and `population` express, and
-    `TheoryLevel.treatment` (`free-energy-weighted-top-n`) is what says so. The per-member
-    *absolute* G is the one thing this does not publish, and that is a stated omission rather than
-    an oversight — there is no second absolute-energy column to put it in.
+    `energy_hartree` is the electronic energy (comparable across both ensemble shapes); the
+    G-weighting is expressed by `relative_kcal`, `population` and `TheoryLevel.treatment`. The
+    per-member absolute G has no column and is not published.
     """
     smiles = payload.get("smiles")
     subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
@@ -858,12 +697,9 @@ def _refined_ensemble(
     )
 
 
-# Which registered property an ensemble average is *of*, by the name the job was asked for.
-# `EnsembleProperty.property_name` is the tool's own vocabulary (`EnsembleProperties`), and the
-# registry's is the cross-calculator one — a scalar average has to land on the same name a single
-# -point calculation of it lands on, or "the dipole of this molecule" is two columns depending on
-# whether an ensemble was averaged. The two per-atom entries map to a *site* property instead,
-# which is why this table names the scope as well as the property.
+# Which registered property an ensemble average is *of*, by the job's own property name, so an
+# averaged value lands on the same name a single-point calculation does. Per-atom entries map to a
+# site property, hence the scope in each entry.
 _AVERAGED_PROPERTIES: dict[str, tuple[str, str, str]] = {
     # asked-for name -> (registered property, unit, scope)
     "dipole_debye": ("dipole", "debye", "calculation"),
@@ -880,18 +716,10 @@ def _ensemble_property(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """One property, Boltzmann-averaged over a conformer ensemble.
 
-    **The average lands on the same registered name a single-point calculation of it lands on**, so
-    "the dipole of this molecule" is one column whether or not an ensemble was averaged;
-    `TheoryLevel.treatment` and `members_averaged` are what say an average was taken. The
-    alternative — `dipole_averaged` beside `dipole` — is the registry split
-    `test_no_two_properties_of_one_dimension_land_on_the_same_subject` exists to catch.
-
-    **The spread is not published, and that is a decision.** `WeightedValue` carries min, max and
-    spread, and each is in the averaged property's *own* unit — debye here, eV there, dimensionless
-    for a Fukui index. One registered `property_spread` would therefore have no canonical unit, and
-    a per-property companion name for each is the registry bloat this table exists to avoid. What
-    is published is the mean, which is the value the job was asked for; `population_covered` says
-    how much of the ensemble stands behind it.
+    Lands on the same registered name as a single-point value, with `TheoryLevel.treatment` and
+    `members_averaged` saying an average was taken. The spread is not published: it is in each
+    property's own unit, so one registered `property_spread` would have no canonical unit.
+    `population_covered` says how much of the ensemble backs the mean.
     """
     smiles = payload.get("smiles")
     subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
@@ -909,9 +737,9 @@ def _ensemble_property(
     asked = str(payload.get("property_name") or "")
     mapped = _AVERAGED_PROPERTIES.get(asked)
     if mapped is None:
-        # A property this release cannot name is dropped rather than stored under the tool's own
-        # vocabulary: an unregistered name is refused at write time anyway, and storing it under a
-        # made-up one would put a value nobody can find beside values they can.
+        # An unregistered property is refused, not stored under the tool's vocabulary where nobody
+        # could
+        # find it.
         raise ProjectionError(
             f"ensemble average of {asked!r} has no registered property; add it to "
             "`_AVERAGED_PROPERTIES` and to `publish.properties`"
@@ -957,16 +785,9 @@ def _species_distribution(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A ranked population over related species: tautomers, microstates, stereoisomers.
 
-    **The species are candidates, not subject members.** A subject's members are what the
-    calculation was *about* — for a reaction, its reactants and products — while these are what it
-    *produced*: an open-ended ranked set whose length is the enumeration's, not the question's.
-    `CandidateFact` is the shape for exactly that ("one ranked output ... what does this suggest,
-    and how strongly"), and this is its first producer; the table it writes has existed since the
-    schema shipped with nothing to fill it.
-
-    The subject is therefore the enumeration itself, as a `system` — there is no single molecule
-    this is about, and calling it one would make the tautomer set of a compound collide with the
-    compound.
+    The species are `CandidateFact` outputs (an open-ended ranked set), not subject members. The
+    subject is the enumeration itself, as a `system`, so a compound's tautomer set never collides
+    with the compound.
     """
     species = list(payload.get("species") or [])
     if not species:
@@ -1001,13 +822,11 @@ def _species_distribution(
             smiles=_identify(item.get("smiles"))[1],
             compound_id=_identify(item.get("smiles"))[0],
             score=item.get("population"),
-            # A *species* population, not a conformer's: `population` is registered at conformer
-            # scope and belongs to the `conformer` table, so scoring a candidate row with it made
-            # `score_property` disagree with the placement `property_definition.scope_kind` states.
+            # A *species* population: `population` is conformer-scoped and belongs to the
+            # `conformer` table.
             score_property="species_population",
-            # The tool's own extra fields, verbatim and never a predicate — the relative energy
-            # that produced the population, the label a chemist reads, and how many conformers
-            # stood behind each species.
+            # The tool's extra fields, verbatim and never a predicate: relative energy, label,
+            # conformer count.
             detail={
                 "relative_kcal": item.get("relative_kcal"),
                 "label": item.get("label") or "",
@@ -1023,17 +842,9 @@ def _species_distribution(
         _fact("species_enumerated", payload.get("enumerated"), ""),
         _text("distribution_kind", payload.get("kind")),
         _text("reaction_level", payload.get("level")),
-        # **The gap to the runner-up, not the winner's own relative energy.** This published
-        # `species[0]["relative_kcal"]`, which is 0.0 by construction: the composer computes each
-        # species' energy relative to the lowest and then sorts the ranking by it, so element 0 is
-        # always the minimum. Every distribution therefore carried one calculation-scope zero,
-        # wearing the method uncertainty as though a measurement had been made, and naming no
-        # species — so "every tautomer set with a gap above 2 kcal/mol", the question this fact
-        # exists for, matched nothing, ever.
-        #
-        # Element 1's relative energy is the discrimination the ranking actually rests on, and it
-        # is the number the uncertainty beside it makes a decision out of. Absent for a set of one:
-        # nothing was ranked, which is not a gap of zero.
+        # The gap to the runner-up, not the winner's own relative energy (always 0.0 by
+        # construction).
+        # That gap is what the ranking rests on. Absent for a set of one: nothing was ranked.
         _fact(
             "species_gap",
             species[1].get("relative_kcal") if len(species) > 1 else None,
@@ -1059,16 +870,10 @@ def _bond_survey(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """Bond dissociation energies across one molecule's breakable bonds.
 
-    **Each bond is a `SiteFact` pair, which is what that shape is for** — `atom_j >= 0` makes it a
-    pair rather than a single site, the same representation a bond order uses. The alternative, a
-    `PropertyFact` per bond with a synthetic member ordinal, is the cardinality mistake `SiteFact`'s
-    own docstring argues against: a 33-atom molecule contributes one calculation-scope energy and
-    dozens of bonds, and folding those into the scalar table builds the index that answers "pKa
-    between 4 and 6" over rows that are overwhelmingly bond energies.
-
-    The weakest bond is published as a calculation-scope fact as well as being flagged on its site
-    row, because "which bond breaks first" is the question this survey exists to answer and it
-    should not require a window function over the site table to ask.
+    Each bond is a `SiteFact` pair (`atom_j >= 0`), not a scalar per bond, so bond energies stay out
+    of the scalar table's index. The weakest bond is also a calculation-scope fact, since "which
+    bond
+    breaks first" is the question the survey answers.
     """
     smiles = payload.get("smiles")
     if not smiles:
@@ -1108,10 +913,8 @@ def _bond_survey(
             weakest = bond
     failed = list(payload.get("failed") or [])
     if failed:
-        # **The weakest of the bonds that were computed is not the molecule's weakest bond.** A
-        # refused bond may be weaker, and `weakest_bond` is a calculation-scope fact a query reads
-        # without the flag rows beside it, so a partial survey publishes its bonds as sites and no
-        # weakest at all; the `bond_not_computed` flags name what is missing.
+        # A partial survey publishes no weakest bond: a refused bond may be weaker, and
+        # `bond_not_computed` flags name what is missing.
         weakest = None
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
@@ -1196,9 +999,8 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
         method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
     )
     unit = payload.get("unit") or ""
-    # The coordinate names *which* internal coordinate, and the atom indices are what make that
-    # unambiguous: "dihedral" alone does not say which dihedral. Folded into the label so the series
-    # is self-describing without a join back to the payload.
+    # The atom indices name *which* coordinate ("dihedral" alone does not), folded into the label so
+    # the series is self-describing.
     atoms = payload.get("atoms") or []
     coordinate = payload.get("coordinate") or ""
     x_label = f"{coordinate}({','.join(str(a) for a in atoms)})" if atoms else coordinate
@@ -1234,10 +1036,9 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
         _fact("scan_minimum_coordinate", payload.get("minimum_value"), ""),
         _text("scan_coordinate", x_label),
     )
-    # The relaxed geometry at the minimum, as an address — the scan's output, in the same shape an
-    # optimization's is. A `produced_structure` fact rather than a field on the record: the
-    # record's own `structure_id` means the geometry the calculation ran ON, and overloading it
-    # would answer a different question than the one a chemist holding a conformer address asks.
+    # The relaxed minimum geometry as a `produced_structure` fact: the record's own `structure_id`
+    # is
+    # the geometry the calculation ran on.
     produced = (payload.get("minimum_structure") or {}).get("structure_id") or ""
     facts = [*facts, *_kept(_text("produced_structure", produced))]
     extra: dict[str, Any] = {"properties": facts, "points": points}
@@ -1249,14 +1050,9 @@ def _rotation(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A rotational profile: points as a series, rotamers as conformers, the barrier as a fact.
 
-    Three shapes because the result genuinely has three, and each already exists here: the profile
-    is a `PointFact` series exactly as a scan's is, a rotamer is a geometry with a degeneracy —
-    which is what `ConformerFact` is for — and the barrier plus the lifetime it implies are
-    per-compound numbers a site will query.
-
-    **The barrier is published, and the *count* of rotatable bonds already was.** That asymmetry is
-    what `D-2026-08-25-a-cache-is-not-a-record` built this seam to remove: `rotatable_bonds` is a
-    descriptor and `rotational_barrier` is the science.
+    Three shapes because the result has three: the profile is a `PointFact` series like a scan's, a
+    rotamer is a geometry with a degeneracy (`ConformerFact`), and the barrier and implied lifetime
+    are per-compound numbers a site will query.
     """
     smiles = payload.get("smiles")
     subject = Subject(
@@ -1298,20 +1094,16 @@ def _rotation(
         if rotamer.get("relative_kcal") is not None
     ]
     barriers = payload.get("barriers") or []
-    # **The barrier out of the most populated well**, which is what decides configurational
-    # stability — not the highest point of the profile and not an average over directions. The
-    # rotamers arrive most-populated first, so that well is ordinal 0, and its barrier is the one
-    # leaving it. The comment used to say this while the code took `max(forward_kcal)`; on
-    # n-butane those are different barriers, and the one described here is the one a record about
-    # configurational stability wants.
+    # The barrier out of the most populated well (ordinal 0), which decides configurational
+    # stability, not the profile's highest point.
     leaving = [barrier for barrier in barriers if barrier.get("from_rotamer") == 0]
     highest = max(leaving or barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
     lifetime = (highest or {}).get("interconversion") or {}
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
-        # The barrier carries the method's uncertainty as the record's own uncertainty, exactly as
-        # a reaction energy does — it is the number a reader has to hold this one against, and the
-        # half-life below is exponential in it.
+        # The method's uncertainty rides on the barrier, as on a reaction energy; the half-life
+        # below is
+        # exponential in it.
         _fact(
             "rotational_barrier",
             (highest or {}).get("forward_kcal"),
@@ -1342,38 +1134,22 @@ def _rotation(
     )
 
 
-# Which fields of a Hessian payload are packed `.npy` arrays. Named here rather than imported from
-# `science/calc/artifacts.py::HESSIAN_ARRAYS` because this module reads *payloads*, not models, and
-# a stored row from an older calculator may carry a field the current mapping no longer names —
-# the same reason every projector above takes a dict.
+# Packed `.npy` fields of a Hessian payload, named here rather than imported because this module
+# reads payloads, which may come from an older calculator.
 _PACKED_ARRAYS: tuple[str, ...] = ("hessian_npy", "dipole_derivatives_npy")
 
 
 def _hessian(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """The second derivatives at one geometry — everything about them except the matrix.
+    """The second derivatives at one geometry: everything about them except the matrix.
 
-    **This row holds no frequencies, and that is the finding rather than an omission.** Wavenumbers
-    are the eigenvalues of the *mass-weighted* Hessian, and a `HessianPayload` carries the matrix
-    and an `atom_count` but no elements — the geometry is a `structure_id`, an address into a store
-    this module may not read (a projector is pure and synchronous, and the backfill walks rows whose
-    structures may be long gone). So no arrangement of this projector can publish a frequency;
-    the frequencies reach the store through `ThermochemistryResult`, which is where the masses were
-    applied. That is the whole reason the Hessian and the thermochemistry were one question rather
-    than two (`D-2026-08-27-a-composite-needs-a-hook-not-a-projector`).
+    No frequencies: they need the mass-weighted Hessian, and the payload carries no elements (the
+    geometry is an address this pure projector may not read). Frequencies are published from
+    `ThermochemistryResult`. Published here: the SCF energy and `max_gradient`, the evidence the
+    geometry was a stationary point.
 
-    What it *does* publish is the pair that makes a frequency set readable afterwards: the
-    electronic energy the SCF settled at, and `max_gradient` — the evidence that the geometry
-    differentiated was a stationary point at all
-    (`D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry`). Reported in
-    Hartree/Angstrom and converted, which is the first live use `to_canonical` has ever had.
-
-    **The packed arrays do not ride along.** Every other projector leaves `ResultRecord.payload`
-    untouched so a projection bug is a re-projection rather than lost science; here the payload is
-    the one in this system that is *megabytes* — 99x99 doubles at 33 atoms, ~1.4 MB of base64 at
-    120 — and `result_publications` is a queue nobody prunes. Re-projecting them could not recover
-    a frequency either, for the reason above. So an array reaches the record the way a geometry
-    does: by not being copied (D-2026-08-21). The matrix itself is not lost — `ArrayOffloadingStore`
-    put it in the content-addressed artifact store before the row was written.
+    The packed arrays do not ride along: they are megabytes, the outbox is never pruned, and no
+    re-projection could derive a fact from them. The matrix is kept in the content-addressed
+    artifact store.
     """
     structure_id = payload.get("structure_id") or ""
     subject = Subject(kind="geometry", members=[_molecule(None, structure_id)], label=structure_id)
@@ -1443,17 +1219,15 @@ def _thermochemistry(
         _fact("entropy", payload.get("entropy_cal_per_mol_k"), "cal/(mol*K)"),
         _fact("symmetry_number", payload.get("symmetry_number"), ""),
         _fact("mode_count", payload.get("mode_count"), ""),
-        # The evidence `is_minimum` alone cannot carry: a geometry that is not *stationary* usually
-        # shows no imaginary mode at all, and `thermo._vibrational` sums over positive wavenumbers
-        # only, so its zero-point energy is quietly too small rather than obviously wrong
-        # (`D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry`). Reported in
-        # Hartree/Angstrom; `None` when the backend that ran reported no gradient.
+        # A non-stationary geometry often shows no imaginary mode, and its ZPE is quietly too small,
+        # so
+        # the gradient is the evidence `is_minimum` cannot carry. Reported in Hartree/Angstrom;
+        # `None`
+        # when the backend reported none.
         _fact("max_gradient", payload.get("max_gradient_hartree_per_angstrom"), "hartree/angstrom"),
         _flag("is_minimum", payload.get("is_minimum")),
-        # The reference state `entropy`, `gibbs_correction` and `gibbs_free_energy` above are
-        # quoted at — 1 atm in the gas phase, 1 mol/L in solution. Three of the facts in this list
-        # are meaningless without it, and `pressure_pa` alone would leave a reader to infer the
-        # convention from 2478957 Pa.
+        # The reference state the entropy and Gibbs terms are quoted at (1 atm gas, 1 mol/L
+        # solution).
         _text("standard_state", payload.get("standard_state")),
         _text("conformer_treatment", payload.get("conformer_treatment")),
     )
@@ -1482,18 +1256,15 @@ def _thermochemistry(
         for index, mode in enumerate(payload.get("modes") or [])
         if mode.get("ir_intensity_km_per_mol") is not None
     ]
-    # An imaginary mode is a fact about the geometry, not a warning about the run: it says the
-    # structure is a saddle point. Reported as negative wavenumbers, which is the convention the
-    # result model itself uses.
+    # An imaginary mode is a fact about the geometry (a saddle point), reported as a negative
+    # wavenumber like the result model.
     facts += [
         PropertyFact(property="imaginary_frequency", value=float(frequency), unit="cm^-1")
         for frequency in (payload.get("imaginary_frequencies_cm") or [])[:1]
     ]
-    # **Why the `ir_intensity` series above is short, published rather than left to be inferred.**
-    # The intensities are dropped from the points when they could not be paired with the modes, so a
-    # consumer of the result store otherwise sees wavenumbers with no intensities and no reason —
-    # and "this calculation produced no spectrum" is exactly the open-ended emitted assertion
-    # `FlagFact` exists for, raised by some results of this kind and by most not at all.
+    # Says why the `ir_intensity` series is short: intensities that could not be paired with modes
+    # are
+    # dropped, and a consumer should see the reason.
     unpaired = payload.get("spectrum_unavailable")
     flags = (
         [
@@ -1559,14 +1330,9 @@ def _site_reactivity(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """Fukui indices and the conceptual-DFT panel: per-atom facts plus per-molecule ones.
 
-    All the per-atom indices are published rather than only the ranked one, because the ranking is a
-    presentation choice and the indices are the measurement. The same argument carries the global
-    panel: chemical potential, hardness, softness and electrophilicity describe the *molecule*, so
-    they are molecule-level properties beside the site facts rather than repeated onto every atom.
-
-    Publishing them is what makes them queryable at all — `calculation_results` is a cache keyed on
-    an opaque payload and refuses any predicate on it, so "every compound whose most electrophilic
-    carbon is a nitrile" is a question only the result store can answer.
+    Every per-atom index is published (the ranking is presentation); the global panel describes the
+    molecule and is published once. The cache cannot be queried by payload, so this is what makes
+    these questions answerable at all.
     """
     smiles = payload.get("smiles")
     subject = Subject(
@@ -1601,10 +1367,9 @@ def _site_reactivity(
     facts = _kept(
         _fact("atom_count", payload.get("total_atoms"), ""),
         _text("fukui_mode", payload.get("mode")),
-        # Units on every one, because an electron-volt descriptor quoted bare is the thing a reader
-        # a year from now cannot check. `softness_per_ev` is the reciprocal of a hardness, so its
-        # unit really is 1/ev rather than ev. Lower-case, because that is the spelling the registry
-        # already uses for `homo`/`lumo` and a unit string is matched, not parsed.
+        # Units on every value. `softness_per_ev` is a reciprocal hardness, so its unit is 1/ev.
+        # Lower
+        # case, matching the registry's spelling (units are matched, not parsed).
         _fact("ionization_potential", panel.get("ionization_potential_ev"), "ev"),
         _fact("electron_affinity", panel.get("electron_affinity_ev"), "ev"),
         _fact("chemical_potential", panel.get("chemical_potential_ev"), "ev"),
@@ -1639,20 +1404,15 @@ def _optimization(
         _fact("initial_energy", payload.get("initial_energy_hartree"), "hartree"),
         _fact("relaxation", payload.get("relaxation_kcal"), "kcal/mol"),
         _fact("optimization_steps", payload.get("steps"), ""),
-        # None under GFN-FF, which reports no gradient. Absent stays absent.
-        #
-        # **Reported in Hartree/Angstrom, not in the registry's canonical Hartree/bohr.**
-        # `OptimizationResult.max_gradient` says so in its own comment and the server derives it
-        # that way; this call site passed the canonical unit, so `to_canonical` returned the number
-        # unchanged and every `max_gradient` this system has published was 1.89x too large with a
-        # correct-looking unit string beside it. Exactly the failure `_fact`'s docstring predicted
-        # for "the first projector reporting a value in a non-canonical unit".
+        # None under GFN-FF, which reports no gradient. Reported in Hartree/Angstrom (as
+        # `OptimizationResult.max_gradient` holds it), not the canonical Hartree/bohr, so
+        # `to_canonical`
+        # converts it.
         _fact("max_gradient", payload.get("max_gradient"), "hartree/angstrom"),
         _fact("displacement_rms", payload.get("displacement_rms_angstrom"), "angstrom"),
     )
-    # The geometry the optimization *produced*, as an address. Not a subject member: the subject is
-    # what was asked about, and the relaxed structure is the answer. Published as a fact for the
-    # same reason the scan's is — see `_scan`.
+    # The geometry the optimization produced, as an address fact, not a subject member (see
+    # `_scan`).
     produced = structure.get("structure_id") or payload.get("structure_id") or ""
     facts = [*facts, *_kept(_text("produced_structure", produced))]
     extra: dict[str, Any] = {"properties": facts}
@@ -1699,39 +1459,20 @@ def _pka(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
 def _microstate_pka(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """A pKa computed from two sampled macrostates — the same property as `_pka`, differently made.
+    """A pKa computed from two sampled macrostates: the same property as `_pka`, differently made.
 
-    It is a *separate* projector rather than a reuse of `_pka`, and the reason is the record rather
-    than the shapes: the two pipelines carry separate calibrations and separate ledger histories
-    (`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`), so a query that could not tell them
-    apart would average a rule-enumerated single conformer against a sampled macrostate and call the
-    result "the computed pKa". The `method` string is what keeps them distinguishable in the store,
-    and it names the sampler.
+    Separate from `_pka` because the two pipelines carry separate calibrations; `method` names the
+    sampler so they are never averaged together. Four facts beyond the number:
 
-    Four facts beyond the number, each answering something the value alone cannot:
+    - `pka_site`: which equilibrium (`acid` HA -> A- + H+, or `base` BH+ -> B + H+), the same
+      fact and name `_pka` publishes.
+    - `ionised_microstate`: the winning microstate's perceived constitution (which proton); absent
+      when perception declined.
+    - `microstates_within_rt`: more than one means no single conjugate base;
+      `species_enumerated` is how many the search found.
+    - `deprotonation_free_energy`: the computed quantity, which a recalibration leaves unchanged.
 
-    - `pka_site` is which equilibrium was computed — `acid` (HA -> A- + H+) or `base`
-      (BH+ -> B + H+, so the number is the *conjugate acid's* pKa). **The same fact `_pka`
-      publishes under this name**, from `PkaResult.site`, which carries the same two values for
-      the same reason. It reached the registry as a second name, `pka_branch`, and that would have
-      split one property in two — every "which base pKas have we computed" query answering over
-      one pipeline while looking complete, which is the exact failure `property_definition` exists
-      to prevent.
-    - `ionised_microstate` is the winning microstate's *perceived* constitution — which proton this
-      is about. Absent when perception declined, which is a real state and not a missing value. Its
-      own name because it is not the fact above: one says which equilibrium, the other says which
-      proton, and storing a SMILES under `pka_site` would have made that column mean two things.
-    - `microstates_within_rt` is why the number is a macrostate's: more than one and the molecule
-      has no single conjugate base, so a site-resolved pKa is a different question.
-      `species_enumerated` beside it is how many the search found at all — the same quantity a
-      ranked-species enumeration publishes, reused rather than named again.
-    - `deprotonation_free_energy` is the quantity actually computed; the pKa is a linear map of it,
-      and a refit changes the second without changing the first.
-
-    The solvent and the temperature are **conditions**, not properties: an aqueous pKa at 298 K and
-    the same free energy in acetonitrile are different rows of one table, and `_pka`'s own subject
-    shape (one molecule) is right here too — the ensembles are how it was computed, not what it is
-    about.
+    Solvent and temperature are conditions, not properties.
     """
     return (
         Subject(
@@ -1763,9 +1504,7 @@ def _microstate_pka(
                 _text("pka_site", payload.get("branch")),
                 _text("ionised_microstate", payload.get("site_smiles")),
             ),
-            # Published as flags, exactly as every other projector here publishes a calculator's
-            # warnings — "two microstates within RT" is the caveat that decides how the number may
-            # be read, and it was the one shape dropping them.
+            # Published as flags, as every projector publishes a calculator's warnings.
             "flags": _warnings(list(payload.get("warnings") or [])),
         },
     )
@@ -1774,10 +1513,7 @@ def _microstate_pka(
 def _solubility(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A predicted aqueous solubility, carrying its applicability-domain flag.
 
-    `estimate.in_domain` is the field `CALCULATION_EPOCH` was bumped for: a pre-change row validates
-    back with `estimate=None`, and an out-of-domain salt then degrades silently to "not assessed".
-    Publishing it as `in_domain` on the fact keeps that distinction visible — None is *unknown*,
-    never *yes*.
+    `in_domain` is published so None (unknown, from an older row) is never read as yes.
     """
     estimate = payload.get("estimate") or {}
     fact = _fact(
@@ -1858,13 +1594,9 @@ def _single_point(
 def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A stored DFT energy. The basis set is part of the level, not a condition.
 
-    **Backfill-only, and kept deliberately.** The `qm` bundle that stamped `dft` rows is gone
-    (`D-2026-08-26-semiempirical-is-the-whole-tier`), so nothing can write one again — but
-    `calculation_results` is never pruned, so a deployment upgrading into this release still holds
-    every row it ever wrote. That is exactly the `xtb.scan` case the `_CALC_TYPE_PROJECTORS` note
-    below states the rule for: a retired calculator keeps its projector. What did *not* survive is
-    the `PAYLOAD_PROJECTORS` entry beside it, because that half is keyed by a pydantic model name
-    and `QMJobResult` no longer exists to be stated.
+    Backfill-only: nothing writes `dft` rows any more, but `calculation_results` is never pruned,
+    and
+    a retired calculator keeps its `calc_type` projector.
     """
     smiles = payload.get("molecule_smiles")
     subject = Subject(kind="molecule", members=[_molecule(smiles)], label=smiles or "")
@@ -1890,10 +1622,8 @@ def _atomic_descriptors(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """The binary-only per-atom panel: polarisability, dispersion, coordination and multipoles.
 
-    Every value is per atom and none is normalised per molecule, so unlike a Fukui index these
-    compare across compounds — which is exactly what makes them worth putting in a store that can
-    be queried. "Every analogue whose halogen is more polarisable than chlorine" is the question the
-    calculation cache structurally cannot answer.
+    Per-atom and not normalised per molecule, so they compare across compounds, which is what makes
+    them worth a queryable store.
     """
     smiles = payload.get("smiles")
     subject = Subject(
@@ -1934,8 +1664,7 @@ def _surface_potential(
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """The electrostatic-potential extrema on a molecular surface.
 
-    Two molecule-level numbers rather than a grid: the grid is thousands of points that nothing
-    downstream reads, and the extrema are what a sigma-hole or a lone-pair question turns on.
+    Two molecule-level numbers rather than the grid, which nothing downstream reads.
     """
     smiles = payload.get("smiles")
     subject = Subject(
@@ -1959,17 +1688,14 @@ def _surface_potential(
     return subject, conditions, level, {"properties": facts, "sites": []}
 
 
-# What each projector is keyed by. Two vocabularies reach this module and they are deliberately
-# kept apart:
+# What each projector is keyed by. Two vocabularies, kept apart:
 #
-# - `PAYLOAD_PROJECTORS` is keyed by the **pydantic model name**, which is what a durable job's
-#   envelope and a caller holding a typed result can state exactly.
+# - `PAYLOAD_PROJECTORS` is keyed by the **pydantic model name**, which a job envelope or typed
+#   caller can state exactly.
 # - `_CALC_TYPE_PROJECTORS` is keyed by the **`calc_type` prefix** of a stored cache row, which is
-#   all the backfill path has: `calculation_results` holds an untyped JSONB whose only clue to its
-#   shape is the key it was stored under.
+#   all the backfill path has.
 #
-# Both resolve to the same functions, so the live path and the backfill path cannot disagree about
-# what a payload means.
+# Both resolve to the same functions, so the live and backfill paths cannot disagree.
 _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]]
 
 
@@ -2003,23 +1729,11 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "XtbResult": _single_point,
 }
 
-# Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being
-# swallowed by a shorter `xtb.` entry.
+# Longest prefix wins, so `xtb.properties` is not swallowed by a shorter `xtb.` entry.
 #
-# **An entry here is a `calc_type` something has actually stamped** — today's server, or a release
-# whose rows a deployment still holds. Four entries met neither test and were deleted:
-# `descriptors`, `logd`, `xtb.thermo` and `xtb.energy` name spellings that no version of this
-# system ever wrote (checked against `XtbTask` and each engine's `CALC_TYPE` before and after
-# `D-2026-08-16-the-physics-leaves-the-cache-stays`; the descriptor panel has always stamped
-# `developability`, and logD has never had a cache row at all). The cost was not the dead rows —
-# it was that `descriptors` *looked* like the descriptor panel's route, so every
-# `predict_developability_profile` result was dropped by `enqueue_payload` with a debug line while
-# `test_publish_projection.py` exercised the dead spelling and never the live one.
-#
-# `xtb.scan` stays and is the reason the rule is not simply "what the server stamps now": `scan`
-# was an `XtbTask` before the move and is not one today, and `calculation_results` is never
-# pruned, so those rows are still there for the backfill to find. A retired calculator keeps its
-# projector; a spelling that never existed does not get one.
+# An entry must name a `calc_type` something has actually stamped, now or in a release whose rows a
+# deployment still holds (`xtb.scan` stays for that reason). A spelling nothing ever wrote gets no
+# entry: it would only hide a missing route behind a test of the dead one.
 _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
     ("xtb.atomic", _atomic_descriptors),
     ("xtb.surface", _surface_potential),
@@ -2041,10 +1755,9 @@ _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
 def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
     """The projector for a stored row, or None when nothing here can read it.
 
-    `payload_kind` wins when it is given, because a model name is exact while a `calc_type` prefix
-    is an inference. Returning None rather than raising is deliberate: a deployment may hold rows
-    from a calculator this release no longer ships (`calculation_results` is never pruned), and a
-    backfill must skip those rather than abort on the first one.
+    `payload_kind` wins when given (exact, where a prefix is an inference). None rather than
+    raising,
+    so a backfill skips rows from retired calculators.
     """
     if payload_kind and payload_kind in PAYLOAD_PROJECTORS:
         return PAYLOAD_PROJECTORS[payload_kind]
@@ -2071,9 +1784,8 @@ def project(
 ) -> ResultRecord:
     """Project one stored calculation into its canonical published record.
 
-    Raises `ProjectionError` when nothing here can read the payload — which is a code gap, and is
-    reported as one rather than silently producing a record with no facts in it. A caller walking a
-    whole corpus asks `projector_for` first and skips what it cannot read.
+    Raises `ProjectionError` when nothing here can read the payload (a code gap), rather than
+    producing a record with no facts. A corpus walker asks `projector_for` first.
     """
     projector = projector_for(calc_type, payload_kind)
     if projector is None:
@@ -2083,17 +1795,11 @@ def project(
             "add one to `PAYLOAD_PROJECTORS` and `_CALC_TYPE_PROJECTORS`"
         )
     subject, conditions, level, extra = projector(payload)
-    # **What rides along, which is the payload itself unless a projector says otherwise.** The rule
-    # is still "the payload rides along untouched", because that is what makes a projection safe to
-    # be wrong — every fact can be rebuilt by re-projecting. The one exception is a payload field
-    # that is *not science but bytes*: a packed array whose re-projection could not produce a fact
-    # this projector missed, and whose size (megabytes, for a Hessian) would otherwise sit in a
-    # queue nobody prunes. `_hessian` is the only projector that narrows, and its docstring carries
-    # the argument. Anything a projector does not remove is still here, unmodified.
+    # The payload rides along unless a projector narrows it; only `_hessian` does, dropping packed
+    # arrays that are bytes, not science. Anything not removed is carried unmodified.
     carried = extra.get("payload", payload)
-    # A geometry-keyed calculation records the structure it ran *on*. The server's own answer wins
-    # when the caller has one; otherwise the subject's member carries it, which is the same value by
-    # construction for every projector above.
+    # The structure a geometry-keyed calculation ran *on*: the server's answer if given, else the
+    # subject member's, which is the same value for every projector above.
     ran_on = structure_id or next(
         (member.structure_id for member in subject.members if member.structure_id), ""
     )
@@ -2131,14 +1837,10 @@ def records_from_solvent_screen(
 ) -> list[ResultRecord]:
     """A solvent screen as its comparison **plus** one record per solvent it compared.
 
-    **Never store an aggregate whose parts are not also stored.** A screen that published only its
-    spread and its winner would leave "what was ΔG in acetonitrile" unanswerable even though the
-    run computed it — and, worse, would make "compare this reaction across solvents" answer only
-    over screens, missing every solvent run on its own. Emitting the parts as ordinary reaction
-    records at their own conditions is what makes the cross-solvent question answer over the union.
-
-    Each part is edged back to the comparison through `depends_on`, so the aggregate can be traced
-    to the numbers behind it.
+    Never store an aggregate whose parts are not also stored: the parts are ordinary reaction
+    records
+    at their own conditions, so cross-solvent questions answer over the union of screened and
+    unscreened runs. Each part links to the comparison through `depends_on`.
     """
     comparison = project(
         calc_ref=calc_ref,
@@ -2156,9 +1858,7 @@ def records_from_solvent_screen(
             "temperature_k": payload.get("temperature_k"),
             "level": payload.get("level"),
             "solvent": effect.get("solvent"),
-            # Each row's own reference state, taken from the row rather than from the comparison:
-            # the gas entry is quoted at 1 atm and every solution entry at 1 mol/L, so a single
-            # value for the whole screen would be wrong for all but one of the parts.
+            # Each row's own reference state: the gas entry is 1 atm, solution entries 1 mol/L.
             "standard_state": effect.get("standard_state"),
             "delta_e_kcal": effect.get("delta_e_kcal"),
             "delta_h_kcal": effect.get("delta_h_kcal"),
@@ -2188,15 +1888,8 @@ def records_from_species_solvent_screen(
 ) -> list[ResultRecord]:
     """A species screen as its comparison **plus** one distribution record per medium.
 
-    The same rule and the same shape as `records_from_solvent_screen`: an aggregate whose parts are
-    not also stored makes "which tautomer dominates in DMSO" answerable only over screens that
-    happened to include DMSO, and unanswerable for the medium computed on its own. Each part is a
-    full `SpeciesDistribution` — the payload the single-solvent job publishes — so both routes to
-    that question land on one shape.
-
-    The parts are the distributions verbatim rather than reconstructed, because this composite
-    already holds them whole; the reaction screen has to rebuild its parts only because a
-    `SolventEffect` is narrower than the `ReactionEnergyResult` it came from.
+    Same rule as `records_from_solvent_screen`. Each part is a full `SpeciesDistribution`, the same
+    shape the single-solvent job publishes, taken verbatim from the composite.
     """
     comparison = project(
         calc_ref=calc_ref,
@@ -2223,10 +1916,9 @@ def records_from_species_solvent_screen(
     return records
 
 
-# The payload kinds whose projection is more than one record. Keyed by model name rather than by
-# `calc_type` for the same reason the projector table is: a model name is exact, and a composite's
-# `calc_type` is a route (`<connector>.<job>`) that names no shape.
-# A multi-record emitter: same call shape as `project`, but returning the aggregate *and* its parts.
+# The payload kinds whose projection is more than one record, keyed by model name (a composite's
+# `calc_type` is a route that names no shape). A multi-record emitter: same call shape as
+# `project`, but returning the aggregate *and* its parts.
 _MultiProjector = Callable[..., list[ResultRecord]]
 
 _MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
@@ -2238,13 +1930,9 @@ _MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
 def records_for(
     *, calc_ref: str, calc_type: str, payload: dict[str, Any], payload_kind: str = "", **common: Any
 ) -> list[ResultRecord]:
-    """Every record one stored payload becomes — usually one, sometimes an aggregate and its parts.
+    """Every record one stored payload becomes: usually one, sometimes an aggregate and its parts.
 
-    **The one place that decides one-versus-many**, so no caller has to know which shapes decompose.
-    Before this existed, `records_from_solvent_screen` was reachable only from tests: the three
-    production hooks all called `project()` directly and got the comparison alone, which meant the
-    rule that function's docstring states — never store an aggregate whose parts are not also
-    stored — held nowhere a chemist could observe it.
+    The one place that decides one-versus-many, so no hook needs to know which shapes decompose.
     """
     emitter = _MULTI_RECORD_PROJECTORS.get(payload_kind)
     if emitter is not None:

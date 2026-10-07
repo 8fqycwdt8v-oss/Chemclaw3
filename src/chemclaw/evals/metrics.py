@@ -1,13 +1,11 @@
-"""Seed scientific metrics (plan steps 2b.3, 2b.5 / 1d.6).
+"""Seed scientific metrics.
 
-(Plural `metrics` = the concrete scored functions, registered via `@metric` from the singular
-`chemclaw.evals.metric` module, which holds the interface and registry.)
+(Plural `metrics` = the concrete scored functions; the interface and registry are in
+`chemclaw.evals.metric`.)
 
-Deliberately few, per the plan: green-chemistry **E-factor** and **Process Mass
-Intensity** (mass-efficiency of a process), **prediction accuracy** against a held-out
-reference, and **BO regret** (optimization progress — the metric plan step 1d.6 asks
-Phase 1d to register). Each is a pure function of an `EvalCase`; pass/fail thresholds
-come from the config, never the code (G3). Importing this module registers them.
+Green-chemistry **E-factor** and **Process Mass Intensity**, **prediction error** against a held-out
+reference, **BO regret**, and set-based precision/recall/F1. Each is a pure function of an
+`EvalCase`; thresholds come from config. Importing this module registers them.
 """
 
 from typing import Any
@@ -19,16 +17,14 @@ from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult
 class _ProcessMasses:
     """The mass balance a green-chemistry metric reads from a case's output.
 
-    Kept a plain parser (not a Pydantic model) so a case output carrying extra keys
-    for other metrics is accepted; only the mass fields are read and validated here.
+    A plain parser, not a Pydantic model, so an output carrying keys for other metrics is accepted.
     """
 
     def __init__(self, output: dict[str, Any]) -> None:
         """Validate and hold the input masses and product mass (kg).
 
-        Rejects a mass balance where the product exceeds the total input, which is
-        physically impossible (mass is not created) and would otherwise yield a
-        negative E-factor that silently passes the gate (G4).
+        Rejects a product mass exceeding the total input: physically impossible, and it would yield
+        a negative E-factor that passes the gate.
         """
         self.inputs = _nonnegative_masses(output.get("input_masses_kg"))
         self.product = _positive_scalar(output.get("product_mass_kg"), "product_mass_kg")
@@ -42,8 +38,7 @@ class _ProcessMasses:
 def _nonnegative_masses(raw: Any) -> list[float]:
     """Coerce a non-empty list of non-negative input masses, else `MetricError`.
 
-    Zero is allowed for an individual input entry (an unused feed adds nothing);
-    the product mass, which divides, is separately required to be > 0.
+    Zero is allowed for an input (an unused feed); the product mass, which divides, must be > 0.
     """
     if not isinstance(raw, (list, tuple)) or not raw:
         raise MetricError("output.input_masses_kg must be a non-empty list of masses")
@@ -66,7 +61,7 @@ def e_factor(case: EvalCase) -> MetricResult:
     """Green-chemistry E-factor: kg waste per kg product (Sheldon).
 
     Waste is total input mass minus product mass. Lower is better; the pass limit is
-    `eval_efactor_max`. Computed from the output mass balance alone (no reference).
+    `eval_efactor_max`. Computed from the output mass balance alone.
     """
     masses = _ProcessMasses(case.output)
     waste = sum(masses.inputs) - masses.product
@@ -87,8 +82,7 @@ def e_factor(case: EvalCase) -> MetricResult:
 def process_mass_intensity(case: EvalCase) -> MetricResult:
     """Process Mass Intensity: total input mass per kg product (PMI = E-factor + 1).
 
-    Lower is better; the pass limit is `eval_pmi_max`. Computed from the output mass
-    balance alone (no reference).
+    Lower is better; the pass limit is `eval_pmi_max`. Computed from the output mass balance alone.
     """
     masses = _ProcessMasses(case.output)
     total_input = sum(masses.inputs)
@@ -109,8 +103,8 @@ def process_mass_intensity(case: EvalCase) -> MetricResult:
 def prediction_error(case: EvalCase) -> MetricResult:
     """Absolute error of a predicted value against a held-out reference.
 
-    Reads `output.predicted` and `reference.actual` (same unit). The prediction passes
-    when the error is within `eval_prediction_tolerance`. Requires a reference (G4).
+    Reads `output.predicted` and `reference.actual` (same unit). Passes when the error is within
+    `eval_prediction_tolerance`. Requires a reference.
     """
     if case.reference is None:
         raise MetricError("prediction_error needs a reference with `actual`")
@@ -134,12 +128,10 @@ def prediction_error(case: EvalCase) -> MetricResult:
 def bo_regret(case: EvalCase) -> MetricResult:
     """Optimization regret: distance from the best value found to the known optimum.
 
-    Plan step 1d.6 — Phase 1d's registered scientific metric. Reads `output.best_value`
-    and `reference.optimum`, with `output.direction` ("maximize"/"minimize") giving the
-    sign. Regret is non-negative when the reference is the true optimum; a negative value
-    is meaningful and kept (not clamped) — it flags that the search *beat* the recorded
-    reference, i.e. the reference is too loose. It is a progress metric with no pass
-    threshold (`passed` is None): scale is problem-specific, so a report cites it, not gates.
+    Reads `output.best_value` and `reference.optimum`, with `output.direction`
+    ("maximize"/"minimize") giving the sign. A negative value is kept, not clamped: it means the
+    search beat the recorded reference, i.e. the reference is too loose. Ungated (`passed` is None),
+    since the scale is problem-specific.
     """
     if case.reference is None:
         raise MetricError("bo_regret needs a reference with `optimum`")
@@ -168,11 +160,10 @@ def bo_regret(case: EvalCase) -> MetricResult:
 
 
 def _id_set(raw: Any, field: str) -> set[str]:
-    """Coerce a list of note ids into a set of strings, else a `MetricError` naming it (G4).
+    """Coerce a list of note ids into a set of strings, else a `MetricError` naming it.
 
-    A missing key is an empty set (a retriever that returned nothing, or a case expecting nothing),
-    which is a meaningful score — not an error. A non-list value *is* an error: a bare string would
-    silently become a set of characters and score nonsense.
+    A missing key is an empty set, a meaningful score. A non-list is an error: a bare string would
+    become a set of characters.
     """
     if raw is None:
         return set()
@@ -182,11 +173,10 @@ def _id_set(raw: Any, field: str) -> set[str]:
 
 
 def _classification(case: EvalCase) -> tuple[set[str], set[str]]:
-    """The (predicted, expected) id sets a classification metric scores (F10-F1).
+    """The (predicted, expected) id sets a classification metric scores.
 
-    Predicted ids come from `output.predicted_note_ids` (what the retriever/extractor returned);
-    expected ids from `reference.expected_note_ids` (the ground truth). A case with no reference
-    cannot be scored for precision/recall/F1 — the ground truth is the whole point (G4).
+    Predicted from `output.predicted_note_ids`, expected from `reference.expected_note_ids`; a case
+    without a reference cannot be scored.
     """
     if case.reference is None:
         raise MetricError("classification metrics need a reference with `expected_note_ids`")
@@ -198,10 +188,8 @@ def _classification(case: EvalCase) -> tuple[set[str], set[str]]:
 def precision_recall_f1(predicted: set[str], expected: set[str]) -> tuple[float, float, float]:
     """Return (precision, recall, F1) for a predicted vs expected id set (the shared computation).
 
-    Conventions for the degenerate cases (so the score is defined, never a divide-by-zero): with no
-    predictions, precision is 1.0 iff nothing was expected (a correct empty answer) else 0.0; with
-    nothing expected, recall is 1.0 (there was nothing to miss); F1 is 0.0 when precision+recall is
-    0. Pure and set-based, so it is reused by all three metrics and directly unit-tested.
+    Degenerate cases are defined: with no predictions, precision is 1.0 iff nothing was expected,
+    else 0.0; with nothing expected, recall is 1.0; F1 is 0.0 when precision + recall is 0.
     """
     true_positives = len(predicted & expected)
     if predicted:
@@ -215,10 +203,9 @@ def precision_recall_f1(predicted: set[str], expected: set[str]) -> tuple[float,
 
 @metric("precision", Direction.HIGHER_IS_BETTER)
 def precision(case: EvalCase) -> MetricResult:
-    """Retrieval/extraction precision: fraction of predicted note ids that were expected (F10-F1).
+    """Retrieval/extraction precision: fraction of predicted note ids that were expected.
 
-    A report/drift metric (no config gate): it measures how noisy a retriever's hits are. Reads
-    `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    Ungated report/drift metric. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
     """
     predicted, expected = _classification(case)
     value, _recall, _f1 = precision_recall_f1(predicted, expected)
@@ -236,10 +223,9 @@ def precision(case: EvalCase) -> MetricResult:
 
 @metric("recall", Direction.HIGHER_IS_BETTER)
 def recall(case: EvalCase) -> MetricResult:
-    """Retrieval/extraction recall: fraction of expected note ids that were predicted (F10-F1).
+    """Retrieval/extraction recall: fraction of expected note ids that were predicted.
 
-    A report/drift metric (no config gate): it measures how much of the ground truth a retriever
-    finds. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    Ungated report/drift metric. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
     """
     predicted, expected = _classification(case)
     _precision, value, _f1 = precision_recall_f1(predicted, expected)
@@ -257,10 +243,9 @@ def recall(case: EvalCase) -> MetricResult:
 
 @metric("f1", Direction.HIGHER_IS_BETTER)
 def f1(case: EvalCase) -> MetricResult:
-    """Retrieval/extraction F1: the harmonic mean of precision and recall (F10-F1).
+    """Retrieval/extraction F1: the harmonic mean of precision and recall.
 
-    A report/drift metric (no config gate) — the single number that balances noise against
-    coverage. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    Ungated report/drift metric. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
     """
     predicted, expected = _classification(case)
     p, r, value = precision_recall_f1(predicted, expected)
@@ -274,10 +259,9 @@ def f1(case: EvalCase) -> MetricResult:
 
 
 def _scalar(raw: Any, field: str) -> float:
-    """Coerce a required numeric field, else a `MetricError` naming it (G4).
+    """Coerce a required numeric field, else a `MetricError` naming it.
 
-    Booleans are rejected explicitly: YAML parses `yes`/`no` as bools, and
-    `float(True)` would silently score a non-number as 1.0.
+    Booleans are rejected: YAML parses `yes`/`no` as bools, and `float(True)` would score 1.0.
     """
     if raw is None:
         raise MetricError(f"{field} is required")

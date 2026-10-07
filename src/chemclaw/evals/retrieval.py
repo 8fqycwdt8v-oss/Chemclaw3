@@ -1,28 +1,15 @@
-"""Retrieval-quality metrics over a gold query→expected-source set (audit KM-13).
+"""Retrieval-quality metrics over a gold query→expected-source set.
 
-The scientific metrics in `chemclaw.evals.metrics` are pure functions of a case; retrieval quality
-cannot
-be — "did we surface the right notes?" requires actually running retrieval over a corpus. So this
-metric lives in its own module: it runs `GraphRetriever` against a small versioned gold corpus
-(`eval_retrieval_corpus_dir`, a fixed fixture, not the live `knowledge_dir`) for a case's query and
-scores the returned note ids against `reference.expected_note_ids`.
+Retrieval quality cannot be a pure function of a case, so these metrics run `GraphRetriever` over a
+small versioned gold corpus (`eval_retrieval_corpus_dir`, a fixture, not `knowledge_dir`) and score
+the returned note ids against `reference.expected_note_ids`. A regression in retrieval then moves a
+pinned number. The gold set includes a query the literal substring filter cannot reach, measuring
+that limitation rather than hiding it.
 
-This is the gate the KM-13 gap names: the system's core promise is "surface the right evidence", yet
-retrieval quality was previously unmeasured, so a change to the substring filter or the evidence cap
-could quietly halve recall unnoticed. With this, such a regression moves a pinned number in the test
-suite (as the other scientific metrics are pinned) instead of going silent. The gold set is
-deliberately small — a small corpus is the ideal time to build it — and includes one query whose
-relevant note the literal substring filter cannot reach, which documents (and measures) the KM-4
-literal-matching limitation rather than hiding it.
-
-**It scores `GraphRetriever`, and it now says so — loudly.** `VectorRetriever`, `LexicalRetriever`
-and the RRF fusion have no coverage here, because scoring them needs the derived index built over
-*this fixture corpus*, which needs Postgres; that is the "live-retriever drift" row in
-`DEFERRED.md`, not something to fake. The defect worth fixing today was narrower and worse than the
-gap itself: a deployment switching `retrieval_mode` to `hybrid` — the entire point of F10-A — flips
-the product to an unmeasured path while this kept reporting a graph-only number under the same
-metric name, so the number looked like coverage it was not. It now refuses to report rather than
-mislabel, and every provenance string names the retriever behind the figure.
+Only `GraphRetriever` is scored: the vector and lexical legs and RRF fusion need a derived index
+over this fixture in Postgres (a `DEFERRED.md` row). When a deployment enables those paths, the
+metrics refuse to report rather than mislabel a graph-only number, and every provenance string names
+the retriever.
 """
 
 import asyncio
@@ -43,10 +30,8 @@ _T = TypeVar("_T")
 async def _closing_this_loops_pools(coro: Coroutine[Any, Any, _T]) -> _T:
     """Await `coro`, then close the pools its loop opened — inside that loop, where it is legal.
 
-    A `finally` rather than a success path, because the hang `_run_sync` records is a property of
-    the loop's *teardown* and happens whether the coroutine answered or raised.
-    `close_pools_of_this_loop` is `core/db`'s, because that is the module that knows what a pool is
-    keyed on; this wrapper exists so `evals` does not.
+    In a `finally`, since the teardown hang `_run_sync` describes happens whether the coroutine
+    answered or raised.
     """
     try:
         return await coro
@@ -55,32 +40,15 @@ async def _closing_this_loops_pools(coro: Coroutine[Any, Any, _T]) -> _T:
 
 
 def _run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run a coroutine to completion from this metric's sync interface (`Metric`, KISS over R7).
+    """Run a coroutine to completion from this metric's sync interface.
 
-    `asyncio.run` refuses to nest inside a loop that is already running, but the `Metric` contract
-    (`chemclaw.evals.metric.Metric`) is sync and every registered metric is a pure function —
-    turning it async would ripple through the whole registry and `run_eval` for the sake of the one
-    metric that happens to need live I/O. `chemclaw.durable.eval_drift` already works around this
-    by wrapping the *whole* `run_eval` call in `asyncio.to_thread`, but that is a convention every
-    future caller must remember, not a property this function has on its own — call a registered
-    metric directly from a coroutine (a test, a future async surface) without that wrapper and the
-    bare `asyncio.run` used to raise `RuntimeError: asyncio.run() cannot be called from a running
-    event loop`.
+    The `Metric` contract is sync, and `asyncio.run` cannot nest inside a running loop. With no
+    running loop on this thread (scripts, or the `to_thread` worker `durable/eval_drift` uses), run
+    directly; otherwise run on a fresh loop in a second thread and join it.
 
-    So: when nothing is running (the common, zero-overhead case — a script's `main()`, or the
-    worker thread `to_thread` already lands this call in), run directly. Only when a loop is
-    already running on this thread is a second thread spun up with its own fresh loop, so retrieval
-    still completes instead of raising; the calling thread just blocks on `join` like any other
-    synchronous call.
-
-    **Both arms close the pools their loop opened before that loop ends, and without it the first
-    one hangs** (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` shuts
-    its loop down by cancelling every remaining task and *awaiting* them, and `psycopg_pool`'s
-    background workers are tasks on that loop: measured inside a pooled process, the nested
-    `asyncio.run` never returned on 3 of 8 rounds at the shipped pool defaults and 8 of 8 at
-    `min_size=8`. The first arm is the one production takes —
-    `durable/eval_drift` runs `run_eval` through `asyncio.to_thread` *inside* the background
-    worker's `pooling()`, so the thread this lands in has no running loop and the process has pools.
+    Both paths close the pools their loop opened before the loop ends: `asyncio.run` awaits all
+    remaining tasks at shutdown, and `psycopg_pool`'s background workers would keep it from
+    returning.
     """
     try:
         asyncio.get_running_loop()
@@ -114,24 +82,18 @@ def _expected_ids(case: EvalCase) -> set[str]:
     return set(raw)
 
 
-# Memo of retrieved ids keyed by (corpus dir, corpus signature, query, filters). Recall and
-# precision are both pure functions of the same retrieved-id list, and every gold case names
-# both, so without the memo each case sweeps the corpus twice per eval run for no
-# informational gain. The signature makes an on-disk corpus change a natural miss: the memo
-# lives for the process, and a long-lived process (the scheduled drift worker) must observe
-# corpus edits rather than serve ids retrieved before them. Stale-signature entries are
-# dropped on insert, so the memo stays bounded by the gold case-set size per corpus dir.
+# Memo of retrieved ids keyed by (corpus dir, corpus signature, query, filters), so recall and
+# precision share one retrieval per case. The signature makes an on-disk corpus change a miss, which
+# a long-lived process (the drift worker) needs; stale entries are dropped on insert, bounding the
+# memo by the case-set size.
 _RETRIEVAL_MEMO: dict[tuple[str, tuple[int, int], str, frozenset[tuple[str, str]]], list[str]] = {}
 
 
 def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
     """A cheap content signature of the corpus: (note-file count, newest mtime_ns).
 
-    Stat-only over the same `*.md` set the retriever parses — any add, edit, or delete changes the
-    count or the newest mtime, invalidating the memo without reading a byte. It walks the corpus
-    through `chemclaw.kg.graph.scan_notes_dir` rather than repeating the glob: this used to be its
-    own `rglob` under a comment conceding it was "matching `chemclaw.kg.graph`'s fingerprint
-    tolerance", which is a copy admitting to being one.
+    Stat-only over the same note set the retriever parses (`chemclaw.kg.graph.scan_notes_dir`), so
+    any add, edit or delete invalidates the memo.
     """
     count = 0
     newest = 0
@@ -149,16 +111,10 @@ _SCORED_RETRIEVER = "GraphRetriever"
 def _require_scoreable_retrieval() -> None:
     """Refuse to score when the deployment's retrieval path is not the one this runs.
 
-    `gather_evidence` assembles its retrievers from the data-source registry and, under
-    `retrieval_mode="hybrid"`, fuses their rankings with RRF. This module runs one `GraphRetriever`
-    over a fixture corpus. While those coincide — the shipped default — the number means what its
-    name says. The moment a deployment turns on `vector`/`lexical` or `hybrid`, they diverge, and a
-    graph-only recall reported as "retrieval_recall" is worse than no number: it is a green gate on
-    a path nobody measured.
-
-    Raising is the right failure. `MetricError` names the case and metric that triggered it
-    (`run_eval`), so an operator who enabled hybrid retrieval learns their gate no longer covers
-    their retriever, instead of being reassured by a figure about something else.
+    This module runs one `GraphRetriever`; a deployment with `vector`/`lexical` sources or
+    `retrieval_mode="hybrid"` retrieves differently, and a graph-only number under the same name
+    would be a green gate on an unmeasured path. `MetricError` names the case and metric
+    (`run_eval`).
     """
     extra = NOTE_INDEX_SOURCES & set(settings.data_source_list)
     if settings.retrieval_mode == "graph" and not extra:
@@ -179,11 +135,8 @@ def _require_scoreable_retrieval() -> None:
 def _retrieved_ids(case: EvalCase) -> list[str]:
     """Run `GraphRetriever` over the gold corpus for the case query; return the note ids.
 
-    Reads `output.query` (required) and optional `output.filters` (type/tag), scoring the same
-    retrieval path a report uses. Order is preserved and duplicates collapsed, though at present
-    each note yields at most one chunk. The result is memoized per (corpus, corpus signature,
-    query, filters), so a case scored by both retrieval metrics runs live retrieval once, not
-    once per metric — while an on-disk corpus change invalidates the memo naturally.
+    Reads `output.query` (required) and optional `output.filters` (type/tag). Order is preserved and
+    duplicates collapsed. Memoized per (corpus, signature, query, filters).
     """
     query = case.output.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -208,10 +161,10 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
 
 @metric("retrieval_recall", Direction.HIGHER_IS_BETTER, live=True, gated=True)
 def retrieval_recall(case: EvalCase) -> MetricResult:
-    """Fraction of the gold expected sources that retrieval actually surfaced (KM-13).
+    """Fraction of the gold expected sources that retrieval actually surfaced.
 
-    Recall is the "surface the right evidence" signal — missing a relevant note is the failure
-    this measures — so it is the gated retrieval metric, against `retrieval_recall_min`.
+    Missing a relevant note is the failure this measures, so it is the gated retrieval metric
+    (`retrieval_recall_min`).
     """
     expected = _expected_ids(case)
     hits = expected & set(_retrieved_ids(case))
@@ -230,10 +183,10 @@ def retrieval_recall(case: EvalCase) -> MetricResult:
 
 @metric("retrieval_precision", Direction.HIGHER_IS_BETTER, live=True)
 def retrieval_precision(case: EvalCase) -> MetricResult:
-    """Fraction of retrieved notes that are gold-relevant — a diagnostic, not gated (KM-13).
+    """Fraction of retrieved notes that are gold-relevant — a diagnostic, not gated.
 
-    A broad query legitimately returns many notes (low precision) without being "wrong", so
-    precision reports context alongside recall rather than gating; `passed` is None.
+    A broad query legitimately returns many notes, so precision is context for recall; `passed` is
+    None.
     """
     expected = _expected_ids(case)
     retrieved = _retrieved_ids(case)

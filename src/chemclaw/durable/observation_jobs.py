@@ -1,17 +1,9 @@
 """The observations tier's durable half: mine and retire on a timer, promote on demand (D-161).
 
-Shaped exactly like the memory-synthesis jobs it sits beside — one workflow on the core background
-queue, its activities reading the same corpus the ELN sync ingests — because D-019's constraint
-still holds: a new knowledge layer adds no new infrastructure. The only new thing is a table.
-
-The three steps are the tier's whole lifecycle, and they are split across two workflows because
-only one of them asserts anything. Mining and retirement write rows the knowledge graph never sees
-and stay on a Schedule, in that order — mining first, so `last_seen` is refreshed for everything the
-corpus still supports, retiring second, so only what was *not* re-observed ages out. Promotion
-writes a note into the graph, so it is started on demand (D-2026-08-25); a row cannot be retired in
-the same run that would have promoted it, because no run does both any more. That split was argued
-when promotion opened a pull request — `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
-removed the pull request, and the on-demand start is what is left of the control.
+Shaped like the memory-synthesis jobs, on the core background queue over the same corpus. Mining
+and retirement write rows the graph never sees and run on a Schedule: mining first so
+`last_seen` is refreshed for everything still supported, retiring second so only what was not
+re-observed ages out. Promotion writes a note into the graph, so it is started on demand.
 """
 
 import asyncio
@@ -69,23 +61,13 @@ class MiningReport(BaseModel):
 async def mine_observations_activity() -> MiningReport:
     """Run both miners over the merged corpus and upsert what they found. Returns the count.
 
-    Upsert, not insert: an observation's id is derived from its content, so a finding seen again
-    accumulates the evidence behind it instead of minting a near-duplicate row every night.
-
-    Whether the row may also *shrink* is `read_corpus().complete`, passed straight through to
-    `record`. Both miners derive every observation's evidence and projects from the reaction
-    corpus — the interaction miner too, which attributes projects through `project_of` — so a
-    partial read is exactly the case in which an absent member is not a retraction.
-
-    A note `load_notes` skips does **not** make the pass partial, and that asymmetry is the point:
-    an unparseable note drops its own observation from `found` entirely, so no row is rewritten —
-    it simply stops being re-observed and ages out through `retire_stale`, which is the designed
-    path. A skipped *reaction* is different: the observation is still emitted, with less behind it.
+    Upsert: an observation's id derives from its content, so a repeat finding accumulates evidence.
+    Whether a row may also shrink is `read_corpus().complete`: on a partial read an absent member
+    is not a retraction. An unparseable note just drops its observation, which then ages out
+    through `retire_stale`.
     """
     corpus = await read_corpus()
-    # Off the loop: `load_notes` is a synchronous full parse of the corpus, and an async activity
-    # shares its worker's event loop with every other activity on the queue. Same reason
-    # `retrieval.retrievers` threads it.
+    # Off the loop: `load_notes` is a synchronous full parse of the corpus.
     notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
     found = [
         *mine_corpus(corpus.reactions),
@@ -108,9 +90,7 @@ async def mine_observations_activity() -> MiningReport:
 async def retire_stale_observations_activity() -> int:
     """Retire open observations the corpus has stopped supporting. Returns how many.
 
-    The instrumentation half of "if nothing ever promotes, delete the tier". A retirement rate that
-    approaches the mining rate says the miners are producing noise, which is a fact about this
-    feature that only a number can establish.
+    A retirement rate approaching the mining rate says the miners produce noise.
     """
     retired = await retire_stale()
     if retired:
@@ -123,23 +103,13 @@ async def retire_stale_observations_activity() -> int:
 async def promote_observations_activity() -> list[str]:
     """Record one `playbook` note per observation that has crossed both thresholds.
 
-    **What the thresholds now decide.** D-161 wrote them to choose which candidates were worth a
-    *reviewer's* time; there is no reviewer
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so they now decide what is worth
-    asserting at all — which is a stricter job, not a lighter one, because nothing downstream will
-    catch a promotion that should not have happened. They are unchanged: evidence count says the
-    finding is not a coincidence, project count says it is not one team's local habit.
-
-    There is deliberately no second write path into the graph (D-019/D-078): a promoted observation
-    becomes an ordinary agent-authored `playbook` note through the ordinary `record_note`. The
-    note's body states the reading and cites the reactions behind it, so a chemist meeting it as
-    evidence can check the same record the threshold counted rather than taking the count on trust.
+    Evidence count says the finding is not a coincidence; project count says it is not one team's
+    habit. Nothing reviews a promotion, so the thresholds decide what is asserted at all. The note
+    goes through the ordinary `record_note` and cites the reactions behind it, so a reader can
+    check the evidence.
     """
     references: list[str] = []
-    # The guard reads the *store*, not a pass-local list: a subset promoted last week must be as
-    # visible to this pass as one promoted a minute ago, and an activity retry must re-derive the
-    # same view instead of starting from empty — both holes the local list had
-    # (`promoted_observations` carries the history).
+    # Read from the store, so earlier promotions are visible and a retry sees the same view.
     earlier = [(row.id, frozenset(row.evidence_note_ids)) for row in await promoted_observations()]
     promoted: list[frozenset[str]] = [evidence for _, evidence in earlier]
     merged = {
@@ -150,19 +120,14 @@ async def promote_observations_activity() -> list[str]:
     for observation in sorted(await promotable(), key=lambda o: o.support, reverse=True):
         evidence = frozenset(observation.evidence_note_ids)
         if any(evidence <= larger for larger in promoted):
-            # A promoted row — this pass's or any earlier one's — rests on every note this one
-            # does, and more: `memory.ids`-anchored ids move when a cluster gains a member that
-            # sorts below the anchor, so the same finding can hold two rows over threshold.
-            # Retired rather than promoted: the corpus superseded it, and it is not a finding
-            # the graph should carry twice.
+            # A promoted row already rests on every note this one does (ids can move when a cluster
+            # gains a
+            # member), so this one is retired rather than promoted twice.
             await set_status(observation.id, "retired")
             continue
         new_note_id = f"playbook-{observation.id.removeprefix('observation-')}"
-        # The other direction: this finding *contains* one promoted earlier. Its merged playbook
-        # — which nothing else can retire, because a promoted playbook's id is scope-anchored and
-        # `supersede_updates`' lineage test correctly skips it — is retired by the same
-        # `record_note` call, so the graph never gains the superset while the note it supersedes
-        # is still open.
+        # This finding contains one promoted earlier: the earlier playbook is retired by the same
+        # `record_note` call, so the graph never holds both.
         superseded: list[Note] = []
         for old_id, old_evidence in earlier:
             if old_evidence < evidence:
@@ -187,10 +152,8 @@ async def promote_observations_activity() -> list[str]:
                 superseded=superseded,
             )
         )
-        # Marked promoted only after the note write returns. Marking first would lose the
-        # observation if the write failed: it would no longer be open, so nothing would retry it,
-        # and the
-        # finding would be silently dropped at the one moment it had proved itself worth keeping.
+        # Marked promoted only after the note write returns, so a failed write leaves it open for
+        # retry.
         await set_status(observation.id, "promoted")
         promoted.append(evidence)
     return references
@@ -204,15 +167,8 @@ def workflow_safe_today() -> date:
 def _promotion_summary(observation: Observation) -> str:
     """The distilled rule a promoted observation states, in the terms the note's reader needs.
 
-    The support is described as what it is — transcribed runs, not "merged notes". Since
-    D-2026-08-25 a `reaction-<id>` citation names an ungated `reaction_records` row, so any wording
-    implying a human has already vetted the evidence claims a check nobody performed.
-
-    **This docstring used to say the sentence was written in "the reviewer's terms" and that "the
-    reviewer at this gate is the *first* human in the loop".**
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified both: the note lands in the
-    graph the moment it is written, so the first human is whoever *retrieves* it, and the caveat
-    has to be addressed to that reader rather than to a reviewer who will never see it.
+    The support is described as transcribed runs, since a `reaction-<id>` citation names an
+    unvetted `reaction_records` row; the caveat is addressed to whoever retrieves the note.
     """
     return (
         f"{observation.statement}\n\n"
@@ -226,31 +182,15 @@ def _promotion_summary(observation: Observation) -> str:
 
 
 @durable_workflow("background")
-# **Deliberately left able to park** (D-2026-08-27), unlike its promotion sibling below. The
-# discriminator is the starter, not the shape: this half runs only from the `observations`
-# Schedule, which starts it with `schedule_run_timeout_seconds` — so a parked run is bounded at
-# a day rather than forever, nothing polls it, and the pass is a full re-mine with no cursor, so
-# a fire it skips costs a refresh of `last_seen` that the next fire redoes. Within that day a
-# fix redeploys and the parked run finishes; the retirement windows are weeks, so a day-late
-# pass is the same pass. Declaring here would trade nothing anyone can name for a failure state
-# that no surface reported when this was decided — `ScheduleHealth` carries `last_outcome` now,
-# which reopens that trade rather than settling it.
+# Deliberately left able to park: only the `observations` Schedule starts it (bounded by
+# `schedule_run_timeout_seconds`), nothing polls it, and the next fire redoes a full re-mine.
 @workflow.defn
 class ObservationSynthesisWorkflow:
     """Mine, then retire — the observations tier's periodic half.
 
-    **Promotion is not here, and that is the point** (D-2026-08-25). Mining and retirement write
-    rows the graph never sees: what the agent noticed, kept out of the knowledge graph. Promotion
-    puts a note *in* it, and a note nobody asked for is knowledge arriving on a timer — so it moved
-    to `ObservationPromotionWorkflow`, which a chemist or an agent workflow starts when there is a
-    reason to look at what has accumulated. That argument was written when promotion opened a pull
-    request; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the pull request and
-    left the argument stronger, because the on-demand start is now the only thing between a mined
-    coincidence and the corpus.
-
-    The original ordering argument survives intact for the two steps that remain: mining first, so
-    `last_seen` is refreshed for everything the corpus still supports, and retiring second, so only
-    what was *not* re-observed ages out.
+    Promotion is not here: it writes into the graph, so `ObservationPromotionWorkflow` is started
+    on demand. Mining first refreshes `last_seen`; retiring second ages out only what was not
+    re-observed.
     """
 
     @workflow.run
@@ -264,10 +204,9 @@ class ObservationSynthesisWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         if report.corpus_reactions == 0 or not report.complete:
-            # Retirement ages out what mining did not re-observe — so a pass that saw no corpus
-            # (or a partial one) refreshed nothing, and retiring on its strength would erase the
-            # tier because a *source* broke, not because the findings stopped holding
-            # (`MiningReport` carries the incident).
+            # A pass that saw no or a partial corpus refreshed nothing, so retiring on it would
+            # erase the tier
+            # because a source broke.
             workflow.logger.warning(
                 "skipping observation retirement: the mining pass saw %d reaction(s), "
                 "complete=%s — nothing was re-observed, so nothing may age out on it",
@@ -284,20 +223,14 @@ class ObservationSynthesisWorkflow:
 
 
 @durable_workflow("background")
-# Declared, where the synthesis half above is not: `synthesize_memory` starts this one for a
-# named chemist with no `execution_timeout` and returns an id to poll, so a plain exception
-# parks a run `get_durable_job_status` reports as `running` for ever. Re-running is cheap and
-# writes no second commit — a re-written note is byte-identical. D-2026-08-27.
+# Declared: `synthesize_memory` starts this with no execution timeout and returns an id to poll, so
+# a parked run would report `running` forever. Re-running is cheap and idempotent.
 @workflow.defn(failure_exception_types=[Exception])
 class ObservationPromotionWorkflow:
     """Promote the observations that have earned a playbook note — on demand, never on a timer.
 
-    The one step of the tier that asserts anything: it writes a `playbook` note into the graph for
-    each finding that crossed both promotion thresholds. Split out of the periodic workflow so that
-    every note this system asserts is asserted because somebody asked for it. This paragraph
-    shipped reading "it proposes PR-gated notes" and "every note this system opens for review",
-    which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified — nothing is offered to
-    anybody, and the split is what is left of the control.
+    The one step of the tier that asserts anything, so every such note exists because somebody
+    asked for it.
     """
 
     @workflow.run

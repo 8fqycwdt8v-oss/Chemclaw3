@@ -1,124 +1,35 @@
-"""Check that the agent's prose only names capability the agent actually has (gap IDEA-7).
+"""Check that the agent's and operator's prose only names things that actually exist.
 
-Two of this codebase's real defects were the same shape — prose promising something the code could
-not do, invisible to `mypy`, `pytest`, and `make skill-validate` (which only checks frontmatter):
+Prose promising capability the code lacks is invisible to `mypy`, `pytest` and frontmatter checks.
+Each rule is deliberately narrow and names the one namespace it resolves against.
 
-- `skills/experiment-design/SKILL.md` told the agent to "reach for" `BoCampaignWorkflow`, which no
-  tool exposed, so the instruction pointed at an uninvocable capability (gap RCH-2).
-- The agent instructions advertised answers about "purity, impurities" while the canonical reaction
-  schema carried no such field (gap KNW-2).
+Agent prose (every SKILL.md and the built-in instruction blocks):
 
-Both are cheap to catch mechanically, and this is the check that does it. It is also the
-*deterministic half* of the deferred agent-behavior eval (AG-13): AG-13 waits on a live LLM to
-observe tool **selection**, but whether a named tool exists at all needs no model.
+1. Every `` `name(` `` call must be a registered tool, a connector tool, a template launcher, or an
+   allowlisted helper.
+2. Every bare `snake_case` identifier must satisfy the same rule — the instructions name tools
+   bare, and English prose never contains an underscore.
+3. A skill must not direct the agent at a `*Workflow` class; the agent can only call tools.
+4. Every note type prose tells the agent to write (spelled ``type `x` ``) must be in
+   `KNOWN_NOTE_TYPES`.
 
-Four rules, each deliberately narrow so the check stays true rather than noisy:
+Operator prose (guides, reference docs, package READMEs, `Makefile` non-recipe lines,
+`.env.example`; never `docs/decisions/` or `docs/archive/`, which are records):
 
-1. Every `name(`-style call mentioned in a skill or in the agent instructions must be a registered
-   agent tool, a tool an enabled connector advertises, a generated template launcher, or an
-   explicitly allowlisted helper.
-2. Every bare `snake_case` identifier in that prose must satisfy the same rule. This is rule 1's
-   missing half, and until D-117 it was the whole check's blind spot: rule 1's pattern requires a
-   backtick immediately followed by `(`, and `_INSTRUCTIONS` — the single most important piece of
-   agent-facing prose, and the one a tool rename breaks first — names every tool *bare*
-   (`gather_evidence sweeps all internal sources`). It therefore matched **nothing at all** there,
-   and only `SKILL.md` files were ever really validated. An underscore is what makes this safe to
-   apply to English prose: `snake_case` does not occur in it, so the rule is precise rather than
-   heuristic. Measured over the whole corpus at the time it was added, it produced exactly one
-   false positive — an argument name inside a call — which the pattern now excludes.
-3. A skill must not direct the agent at a `*Workflow` class. The agent cannot invoke a workflow;
-   it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
-4. Every note type the prose tells the agent to *write* must be in `KNOWN_NOTE_TYPES`. This is rule
-   1's shape applied to the other half of the write path, and it was missing: two skills instructed
-   `record_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
-   known type, so an agent that followed either opened a PR that `kg-validate` then rejected — the
-   capability was reachable and the artifact was not (D-164). A note type is named in the gated
-   form **`type `x``** (the word, then the backticked slug); write it that way in prose so this
-   rule can see it.
+5. Every backticked path containing a `/` must exist (from the repo root, `src/chemclaw/` or the
+   Helm chart).
+6. Every ADR id must name a decision file, or a sub-decision label an ADR heading defines.
+7. Every `CHEMCLAW_*` key must be a `Settings` field (or a declared credential variable).
+8. Every metric name written as a whole backticked span must be declared in `core/metrics.py`.
+9. Every PromQL series selector (`chemclaw_x{…}`) must be declared too — over all of `docs/`
+   except the archive, since a wrong selector renders an alert that never fires.
 
-**Three more rules, over a second and much larger corpus: the operator-facing documents.** The four
-rules above ask "does the agent's prose name capability the agent has". These ask the same question
-of the prose a *human* operates from, and they exist because that corpus had drifted far further.
-A verification pass over it found roughly 166 lines naming module paths that have not resolved since
-the D-148 package move (`agents/`, `service/`, `workflows/`, `calc/`), a CI workflow file that does
-not exist, and ADR ids with no file — none of which any gate could see.
+Plus: rule 0, the corpus must exist (`check_corpus_is_assembled`); rule 10, each `PromptBlock`
+declares exactly the tools its text names (`check_instruction_blocks`); rule 11, every
+`core/model_prose.ModelProse` marker sits where `marked_prose` can read it. Rules 1-4 do not run
+over marked prose, whose templates name argument fields in `snake_case`.
 
-5. Every backticked **path** must exist on disk (tried from the repo root, from `src/chemclaw/` and
-   from the Helm chart, since the docs use all three spellings and there is exactly one of each).
-   Only paths containing a `/` are checked, so a bare `SKILL.md` used as a noun is not mistaken for
-   a file reference, and placeholder spellings (`sources/<name>/`, `*/SKILL.md`) cannot match.
-6. Every **ADR id** must resolve to a shipped decision — a file in `docs/decisions/`, or a
-   *sub-decision label* that some ADR defines. That second clause is the interesting one:
-   `D-A5a` and `D-A6a` are real labels living inside `D-048`/`D-049`, so they read exactly like
-   citations and resolve to no file. Prose naming one is better off citing the ADR *and* the label,
-   which is what the fix does — so the rule accepts a label an ADR defines, derived by scanning
-   them, and still rejects an invented one.
-7. Every `CHEMCLAW_*` **config key** must be a field on `Settings`. Nothing was broken here — this
-   rule is prophylactic, and that is its value: every key the operator corpus names is currently
-   correct and nothing was keeping it that way. (The count of keys checked is not written here on
-   purpose — it would only go stale the way `.env.example:3` did; if it matters, it is a `len()`
-   in a test, not a number in this docstring.)
-8. Every **metric name** written as a whole backticked span must be one `core/metrics.py` declares.
-9. Every **PromQL series selector** (`chemclaw_x{…}`) must too — over a corpus that includes
-   `docs/decisions/`, which rules 5-8 exclude. A wrong series name is worse than a wrong path,
-   because it does not fail: the alert renders, matches nothing, and reads as healthy forever. That
-   is how `chemclaw_degradations_total{subsystem="log_redaction"}` — the only documented alert for
-   the one *security* degradation in this tree, naming a counter that has never existed — passed
-   every gate. `check_metric_citations` carries the measurement for why the two rules have
-   different reach.
-
-**Rule 0, and it runs before all nine: the corpus has to exist.** Every corpus here is assembled by
-filtering out paths that do not exist, so a `_ROOT` that is not a source checkout — an installed
-wheel, a vendored copy, a relocated package — yields zero documents, zero ADR stems, zero problems
-and the green line. Renaming one shipped document does the same thing one file at a time.
-`check_corpus_is_assembled` refuses that, because a gate that reports success having read nothing is
-the failure this whole module is about, arriving through its own front door.
-
-**`Makefile` and `.env.example` join the operator corpus for the same reason (F17).** Both are
-operator-facing — a contributor reads them before either document above — and both were outside
-the gate rules 5-7 exist to run: `.env.example:3` named the pre-split, bare-filename `config.py`
-and no check saw it, which is exactly the shape rule 5 exists to catch. Two things make them
-different from a `.md` file rather than one more glob entry:
-
-   - **A `Makefile` recipe command's backtick is shell command substitution, not a code span**, so
-     the file cannot be read whole the way `_operator_sources` reads everything else — a future
-     recipe using `` `helm template …` `` would be misread as a path/ADR/key candidate. What is
-     excluded is exactly that: a real recipe command line (`_makefile_prose`), not every line that
-     is not a bare `#` comment — a target's trailing `## help text` is Make syntax the shell never
-     sees, and it is where a real citation already lives (`explain: ## ... (D-166)`), so excluding
-     it too would trade one blind spot for another.
-   - **`.env.example` has no such split** — it is comments and `KEY=VALUE` throughout, with no
-     third kind of line to exclude — so it is read whole.
-
-Rule 5 itself is unchanged: it still only checks backticked spans containing a `/`, and widening it
-to bare filenames is deliberately not how `` `config.py` `` was fixed — that would make
-`` `SKILL.md` `` used as a noun fail too. The fix for that miss is the prose change (spelling the
-path with a `/`, `core/config/fingerprints.py`); the fix for it having *stayed* missed for two
-documents is this wider corpus.
-
-**Why the rules are split by corpus rather than merged.** Rule 2 (every bare `snake_case` token must
-be an agent tool) is safe over skills because that prose talks about tools and almost nothing else.
-Over `SECURITY.md` or the runbook it would fire on every settings name, SQL column, metric and path
-fragment — hundreds of false positives. So agent prose gets rules 1-4, operator prose gets 5-8, the
-one spelling narrow enough to survive a wider corpus gets rule 9, and each rule names the one
-namespace it can resolve. That is also what keeps a new rule cheap to argue
-for: it either has an authoritative resolver or it does not belong here.
-
-**What deliberately stays out.** Counts ("three secrets", "six bundles") are the other half of the
-drift and are *not* mechanically checkable — a number in prose has no syntactic marker. This
-repository has twice discovered the right answer for those and written it down: delete the number
-and let a test assert it. A regex cannot count, and teaching one to try would produce a rule that is
-wrong more often than the prose.
-
-**Rule 11 is about a marker rather than a text.** Prompt prose written as a constant outside
-`agent/chemclaw_agent.py` carries `core/model_prose.ModelProse`, and `marked_prose` is the loader
-the prose guards in `tests/test_prose_contract.py` read it through. The rule here is only that a
-marker sits where that loader can read it. Rules 1-4 are deliberately *not* run over it: these are
-templates that name a job's argument fields in `snake_case` (`subject_note_id`, `sweep_values`),
-which rule 2 would read as unknown tools — the corpus split the paragraph above argues, one class
-over.
-
-Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
+Counts in prose are not checkable; assert them in a test instead. Run via `make prose-validate`.
 """
 
 import argparse
@@ -145,9 +56,8 @@ from chemclaw.core.metrics import declared_histogram_names, declared_metric_name
 from chemclaw.core.model_prose import ModelProse
 from chemclaw.kg.note import known_note_types
 
-# Symbols a skill may legitimately name in call form that are not agent tools: library/graph
-# internals a skill explains conceptually. Kept explicit and short — adding one is a review
-# decision, which is the friction this check exists to create.
+# Symbols a skill may name in call form that are not agent tools. Kept short: adding one is a
+# review decision.
 _ALLOWED_NON_TOOLS = frozenset(
     {
         "neighborhood",  # kg.graph traversal primitive, explained conceptually by the query skill
@@ -156,24 +66,17 @@ _ALLOWED_NON_TOOLS = frozenset(
 
 _CALL = re.compile(r"`([a-z_][a-z0-9_]*)\(")
 _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
-# A bare snake_case identifier: at least one underscore, so English prose cannot produce it.
-# The lookbehind skips anything already carried by another form — a backticked span (rule 1 owns
-# those), a path or dotted attribute, and an argument position inside a call, where the name is a
-# parameter rather than a tool (`similar_reactions(reaction_smiles)`). The lookahead skips a
-# trailing `(`, which is rule 1's pattern, so the two rules never double-report one name.
+# A bare snake_case identifier (at least one underscore). The lookbehind skips backticked spans,
+# paths, dotted attributes and argument positions inside a call; the lookahead skips a trailing `(`
+# (rule 1's form), so no name is reported twice.
 _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
-# A whole backticked `snake_case` span — `` `predict_pka` ``, the form a skill body actually uses
-# to name a tool, and the one neither rule above can see. It is deliberately **not** part of
-# `referenced_tool_names`: measured over this corpus it matches 152 spans of which 75 are not
-# tools at all (`yield_percent`, `valid_from`, `structure_id`), so a rule asking "is this an
-# unknown tool?" would be wrong more often than the prose it checks — the widening
-# D-2026-08-05 measured and rejected. `taught_tool_names` asks the other question, and the
-# asymmetry that ADR names is what makes the loose pattern safe there.
+# A whole backticked `snake_case` span, the form skill bodies use to name a tool. Not part of
+# `referenced_tool_names`: many such spans are result fields, not tools. `taught_tool_names` uses it
+# because there the known-tool set filters the matches.
 _TICKED = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
-# `type `x`` / `types `x``: the one phrasing that means "write a note of this kind". Deliberately
-# anchored on the word rather than matching every backticked slug, which in this prose is mostly
-# tools, fields and chemistry — the narrowness is what keeps the rule true instead of noisy, at
-# the cost of a convention prose has to follow. It is stated in the module docstring and in
+# ``type `x` `` / ``types `x` ``: the one phrasing that means "write a note of this kind", anchored
+# on
+# the word so backticked tools and fields do not match. The convention is stated in
 # `skills/README.md`.
 _NOTE_TYPE = re.compile(r"\btypes?\s+`([a-z][a-z0-9-]*)`")
 
@@ -181,9 +84,7 @@ _NOTE_TYPE = re.compile(r"\btypes?\s+`([a-z][a-z0-9-]*)`")
 def referenced_note_types(text: str) -> set[str]:
     """Every note type `text` tells the model to write, in the one gated phrasing.
 
-    Public for the same reason `referenced_tool_names` is: the test suite asserts the contract
-    from the other side, and a second extractor would let the two disagree about what the prose
-    says.
+    Public so tests share this extractor rather than a second one that could disagree.
     """
     return set(_NOTE_TYPE.findall(text))
 
@@ -191,10 +92,8 @@ def referenced_note_types(text: str) -> set[str]:
 def referenced_tool_names(text: str) -> set[str]:
     """Every tool name `text` promises the model, in either form it can take.
 
-    Public because `tests/test_langgraph_agent.py` asserts the same thing from the other
-    direction — that everything the prose names is actually *available* — and a second extractor
-    there would let the two disagree about what the prose even says. Allowlisted non-tools are
-    excluded, so callers see only names that are meant to resolve to a tool.
+    Public so `tests/test_langgraph_agent.py` shares this extractor. Allowlisted non-tools are
+    excluded.
     """
     names = set(_CALL.findall(text)) | set(_BARE.findall(text))
     return names - _ALLOWED_NON_TOOLS
@@ -203,18 +102,10 @@ def referenced_tool_names(text: str) -> set[str]:
 def taught_tool_names(text: str, known: Collection[str]) -> set[str]:
     """Every tool in `known` that `text` teaches, in any of the three forms prose names one.
 
-    The counterpart to `referenced_tool_names`, and the difference is the direction of the
-    question rather than the corpus. `referenced_tool_names` asks whether a name prose invents
-    resolves to a tool, so an *unknown* name is the finding and the patterns must be strict.
-    This asks whether a tool the system really has is named at all, so `known` does the filtering
-    and a loose pattern costs nothing: a result field like `yield_percent` is not in `known` and
-    simply drops out. That asymmetry — **checking that a known name is present is safe with a
-    loose pattern; checking that an unknown name is absent needs a strict one** — is
-    D-2026-08-05's, which measured the widening and rejected it for rule 2 alone.
-
-    `known` is a parameter rather than a call to `declared_tool_names()` here so the filter is
-    part of the contract instead of a caller's afterthought: there is no way to use this
-    extractor without one.
+    The counterpart to `referenced_tool_names`: that asks whether an invented name resolves, so its
+    patterns must be strict; this asks whether a known tool is named, so a loose pattern is safe —
+    non-tools are not in `known` and drop out. `known` is a required parameter so the filter cannot
+    be forgotten.
     """
     ticked = set(_TICKED.findall(text))
     return (referenced_tool_names(text) | ticked) & set(known)
@@ -225,17 +116,9 @@ def taught_tool_names(text: str, known: Collection[str]) -> set[str]:
 _ROOT = Path(__file__).resolve().parents[3]
 
 # The documents a human operates this system from. `docs/decisions/` and `docs/archive/` are
-# excluded on purpose: a merged ADR is never edited (CLAUDE.md), and an archived document is a
-# record of what was true then — validating either would demand rewriting history to satisfy a
-# gate.
-#
-# **The package READMEs are in the corpus** (via the globs below), because a reader navigates by
-# them exactly as by these: `ARCHITECTURE.md` requires one per directory and GitHub renders it the
-# moment a folder is clicked. They were outside every gate until 2026-08-27, and held nine stale or
-# unresolvable pointers when they were first scanned — one of them (`agent/README.md`'s
-# `workflows/`) at a directory that has never existed under that package. Paths in them are written
-# from the repository root or from `src/chemclaw/`, the same two spellings the rest of the corpus
-# uses, because `_path_resolves` resolves against those and not against the document's own folder.
+# excluded: merged ADRs and archived documents are records and are never edited. Package READMEs are
+# included via the globs below; their paths are written from the repo root or `src/chemclaw/`, which
+# is what `_path_resolves` tries.
 _OPERATOR_DOCS = (
     "README.md",
     "ARCHITECTURE.md",
@@ -246,98 +129,59 @@ _OPERATOR_DOCS = (
     "knowledge/README.md",
     "docs/README.md",
 )
-# `knowledge/README.md` sits beside `skills/README.md` because `ARCHITECTURE.md` puts them in the
-# same position: layers 4 and 3, at the repository root rather than under `src/`, so neither the
-# package-README glob nor the `docs/` sweep reaches either. It was outside every gate until
-# 2026-09-08 while naming `kg/relations.py`, `kg/conflicts.py`, `kg/note.py` and four ADR ids — the
-# `skills/README.md` case exactly, one directory over.
-# `docs/planning/` is maintained (`docs/README.md`) and is deliberately **not** here yet. Turning
-# this on over it reports 175 further mismatches, and they are a different kind of defect: a ticket
-# that says "create `agents/qm_tools.py`" names a file D-118 later deleted, so there is no path to
-# correct it to — the sentence has to be reworded, one judgement at a time. Rewriting them to the
-# nearest surviving module would falsify the build record the tickets exist to be. Tracked as its
-# own backlog row, with the count, so the remainder is visible rather than quietly out of scope.
+# `knowledge/README.md` and `skills/README.md` sit at the repository root (layers 4 and 3), outside
+# the other globs. `docs/planning/` is not here yet: its tickets name since-deleted files that need
+# rewording one by one, tracked as a backlog row.
 _OPERATOR_DOC_GLOBS = ("docs/guides/*.md", "docs/reference/*.md", "src/chemclaw/**/README.md")
 
-# Two more operator documents, handled outside `_OPERATOR_DOCS`'s uniform "read the whole file"
-# path because neither is prose the way a `.md` file is (F17). Their absence is exactly how the
-# `.env.example:3` `config.py` staleness survived a gate built to catch precisely that: the
-# corpus above never looked at either file.
+# Two operator documents read outside `_OPERATOR_DOCS`, because neither is prose the way a `.md`
+# file is.
 _MAKEFILE = "Makefile"
 _ENV_EXAMPLE = ".env.example"
-# A Makefile recipe command is the only line shape that can run a backtick as shell command
-# substitution, so it is the only thing excluded — not "every line that isn't a `#` comment".
-# That distinction matters: a target's trailing `## help text` (e.g. `explain: ## ... (D-166)`)
-# and a bare `#`/`@#` comment are both Make-level syntax the shell never sees (shell treats
-# everything after an unquoted `#` as inert too, same as a recipe's `@# ...` line), so both are
-# safe prose exactly like a `.md` code span — only a real recipe command line is not. Make
-# requires a literal tab to start a recipe line (verified with `cat -A` against this repo's
-# Makefile); a tab immediately followed by `#`/`@#` is still a comment, so the lookahead excludes
-# it from what counts as a "recipe" for this purpose.
+# A Makefile recipe command: the only line where a backtick is shell command substitution, so the
+# only line excluded. A recipe line starts with a literal tab; a tab followed by `#`/`@#` is a
+# comment, and target `## help` text is Make syntax, so both stay in the corpus.
 _MAKEFILE_RECIPE = re.compile(r"^\t(?!@?#)")
 
 
 def _makefile_prose(text: str) -> str:
     """The Makefile's non-recipe lines, joined — the part safe to scan as prose.
 
-    Excludes only an actual shell command; every comment (top-level, a recipe's `@#`, or a
-    target's trailing `## ...`) and every non-recipe line (targets, `.PHONY`, variables) passes
-    through, since none of it is ever handed to a shell.
+    Excludes only actual shell commands; comments, targets, `.PHONY` and variables pass through.
     """
     return "\n".join(line for line in text.splitlines() if not _MAKEFILE_RECIPE.match(line))
 
 
-# A backticked path. Requires a `/`, so a bare filename used as a noun (`SKILL.md`, or a
-# `connector.yaml`)
-# is not read as a reference to one particular file. Placeholder spellings (`sources/<name>/`,
-# `knowledge/{id}.md`, `*/SKILL.md`) cannot match, because the character class excludes their
-# markers — which is what lets prose keep using them.
+# A backticked path. Requires a `/`, so a bare filename used as a noun is not a reference;
+# placeholder spellings (`sources/<name>/`, `knowledge/{id}.md`, `*/SKILL.md`) cannot match.
 _PATH = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[a-z]{2,7})`")
-# An ADR id in either shipped form: the frozen `D-NNN` sequence, or the dated `D-YYYY-MM-DD-<slug>`
-# convention that replaced it. `D-A5a`-style sub-decision labels match the first alternative's
-# neighbourhood deliberately — they look exactly like citations and resolve to nothing.
+# An ADR id: the frozen `D-NNN` form, the dated `D-YYYY-MM-DD-<slug>` form, or a `D-A5a`-style
+# sub-decision label, which reads like a citation and must resolve to a defining ADR.
 _ADR = re.compile(r"\b(D-(?:\d{4}-\d{2}-\d{2}-[a-z0-9-]+|\d{3}|A\d+[a-z]?))\b")
 # A `CHEMCLAW_*` env key. The final character may not be `_`, so a prefix written in prose
 # (`CHEMCLAW_SERVICE_*`) is not read as a key whose name happens to end there.
 _SUB_DECISION = re.compile(r"\b(D-A\d+[a-z]?)\b")
 _ENV_KEY = re.compile(r"\b(CHEMCLAW_[A-Z0-9_]*[A-Z0-9])\b")
-# A metric name cited as a whole code span — `chemclaw_turns_in_flight`, or the same with a label
-# matcher, `chemclaw_tokens_total{profile}`. The span has to *end* at the name (or its matcher),
-# which is what keeps `` `chemclaw_agent.py` `` out: a module path is not a citation of a series.
-# The label names inside the matcher are not checked here; `tests/test_metric_declarations.py`
-# pins those against `_COUNTER_LABELS` at the call sites, and prose writes them in three
-# abbreviated spellings (`{profile}`, `{profile="fast"}`, `by (subsystem)`) that mean the same
-# thing to a reader and nothing to a resolver.
+# A metric name cited as a whole code span, optionally with a label matcher. The span must end at
+# the name (or matcher), which keeps module paths out. Label names are not checked here;
+# `tests/test_metric_declarations.py` pins them.
 _METRIC = re.compile(r"`(chemclaw_[a-z0-9_]+)(?:\{[^`}]*\})?`")
-# A PromQL **series selector**: a metric name immediately followed by a label matcher. This is the
-# one spelling that is unambiguously an instruction to *query*, which is why rule 9 may run it over
-# a corpus rules 5-8 deliberately exclude.
+# A PromQL series selector: a metric name immediately followed by a label matcher — unambiguously an
+# instruction to query, so rule 9 may run it over a wider corpus.
 _METRIC_SELECTOR = re.compile(r"\b(chemclaw_[a-z0-9_]+)\{")
 
-# Metrics a *merged* ADR cites in selector form and the registry no longer declares. Rule 9 reaches
-# into `docs/decisions/` on purpose — that reach caught the one selector naming a series that has
-# never existed — but it thereby takes on the hazard rule 8 refuses: a merged ADR is never edited
-# (CLAUDE.md), so the day a counter is retired or renamed, `make ci` goes red on a document with no
-# legal remedy. Simulated by dropping one counter from `declared_metric_names()`: six merged ADRs
-# carry selectors today and one of them failed immediately. This is that remedy — one reviewed line,
-# the same release valve `_NON_METRIC_NAMES` and `_NON_SETTINGS_ENV` already are. Empty today; an
-# entry is the deliberate act of retiring a series the record still quotes, and it must name a
-# metric no live document depends on, since rule 9 stops checking it everywhere.
+# Metrics a merged ADR cites in selector form that the registry no longer declares. Rule 9 reads
+# `docs/decisions/`, which is never edited, so retiring a quoted series lands here. An entry must
+# name a metric no live document depends on, since rule 9 stops checking it everywhere.
 _RETIRED_METRIC_NAMES: frozenset[str] = frozenset(
     {
-        # The PR-gate's by-state series, retired with the gate itself
-        # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). `D-2026-07-31-a-proposal-is-a-record-
-        # not-a-branch` quotes it in selector form and is merged, so this is the remedy the comment
-        # above describes, taken for the first time. No live document depends on it: the runbook's
-        # alert went with the series in the same commit.
+        # Retired with the note-proposal gate; a merged ADR still quotes it in selector form.
         "chemclaw_note_proposals_total",
     }
 )
 
-# `chemclaw_`-prefixed names in the operator corpus that are not metrics. One entry, and it is a
-# real namespace collision rather than an exception granted to a mistake: `chemclaw_app` is the
-# Postgres role the service connects as. Explicit and short for the same reason
-# `_NON_SETTINGS_ENV` is — adding one is a review decision.
+# `chemclaw_`-prefixed names in the operator corpus that are not metrics: `chemclaw_app` is the
+# Postgres role. Adding one is a review decision.
 _NON_METRIC_NAMES = frozenset({"chemclaw_app"})
 
 # Environment variables that are legitimately not `Settings` fields. Explicit and short, for the
@@ -346,12 +190,10 @@ _NON_SETTINGS_ENV = frozenset(
     {
         "CHEMCLAW_COMPONENT",  # read by deploy/entrypoint.sh to pick a role, never by Settings
         "CHEMCLAW_REVISION",  # a Containerfile build ARG, exported as CHEMCLAW_DEPLOYMENT_REVISION
-        # A live-lane knob read by `infra/live/processes.sh` alone, like the ports beside it. It
-        # names the issuer to mint a probe identity from, and deriving `entra_issuer`,
-        # `entra_jwks_url` and `entra_audience` from it is the whole of what it does — those three
-        # *are* Settings fields, and this is the one endpoint they all resolve from. A Settings
-        # field with no Python reader is the shape D-2026-08-20-a-ui-that-cannot-authenticate-is-
-        # not-a-fallback just deleted three of.
+        # Read only by `infra/live/processes.sh`: the issuer the live lane derives `entra_issuer`,
+        # `entra_jwks_url` and `entra_audience` from. Not a Settings field because nothing in Python
+        # reads
+        # it.
         "CHEMCLAW_LIVE_ENTRA_TOKEN_URL",
         # The knowledge-sync credential: a chart-required Secret key read by
         # `deploy/knowledge-sync.sh` (and redacted by `core/logging.py`), never by Settings.
@@ -369,15 +211,8 @@ _NON_SETTINGS_ENV = frozenset(
 def _block_groups() -> tuple[tuple[str, tuple[PromptBlock, ...]], ...]:
     """Every group of `PromptBlock`s a prompt is assembled from, by the symbol that holds it.
 
-    Two, and the second is the whole reason this is a function rather than one tuple.
-    `_SAFETY_BLOCKS` is the floor appended to a profile that replaces the default prose, and it was
-    a single un-narrowed string until 2026-09-10 — so rule 10 had never seen the text that reaches
-    every specialist, and the `record_knowledge_note` sentence in it was being sent to five shipped
-    profiles that cannot call the tool. A rule that checks one of two groups is a rule with a blind
-    spot the size of the other, which is this file's own recurring subject.
-
-    Read at call time rather than baked into a constant, so a test can substitute either group by
-    patching this module's own name for it.
+    `_INSTRUCTIONS` and `_SAFETY_BLOCKS` (the floor appended to a profile that replaces the default
+    prose); rule 10 must see both. Read at call time so a test can patch either group.
     """
     return (("_INSTRUCTION_BLOCKS", _INSTRUCTION_BLOCKS), ("_SAFETY_BLOCKS", _SAFETY_BLOCKS))
 
@@ -385,10 +220,7 @@ def _block_groups() -> tuple[tuple[str, tuple[PromptBlock, ...]], ...]:
 def _block_origin(symbol: str, index: int, blocks: tuple[PromptBlock, ...]) -> str:
     """How one prompt block is named in a problem line — the symbol, index and opening words.
 
-    The index alone is a coordinate that shifts whenever a block is inserted above; the opening
-    words are what makes a failure findable by search. Both, because either alone is worse: the
-    words are not unique enough to address a block and the index is not stable enough to cite. The
-    symbol joined them once there were two groups to be in.
+    The index addresses a block and the opening words make it searchable; neither alone suffices.
     """
     opening = " ".join(blocks[index].text.split()[:6])
     return f"src/chemclaw/agent/chemclaw_agent.py::{symbol}[{index}] ({opening}…)"
@@ -397,10 +229,8 @@ def _block_origin(symbol: str, index: int, blocks: tuple[PromptBlock, ...]) -> s
 def _prose_sources() -> dict[str, str]:
     """The agent-facing prose to check: every SKILL.md plus the built-in instructions.
 
-    **Block by block rather than as one string**, which is what makes rules 1-4 and rule 10 ask the
-    same question of the same text. `_INSTRUCTIONS` is now an assembly of `PromptBlock`s and the
-    *maximal* one — the log-only traceability block is not in it, so checking the joined string
-    would leave one of the two paragraphs a deployment can be sent outside every rule here.
+    Block by block, so rules 1-4 and rule 10 see the same text, including blocks the maximal
+    `_INSTRUCTIONS` assembly omits.
     """
     sources = {
         _block_origin(symbol, index, blocks): block.text
@@ -429,10 +259,9 @@ def _is_marker_call(node: ast.AST) -> TypeGuard[ast.Call]:
 def _marked_sites(path: Path) -> tuple[list[str], list[int]]:
     """The module-level names `path` marks, and the lines of any marker a loader cannot reach.
 
-    A marker is reachable when it is the value of a module-level assignment or sits inside one —
-    a mapping's value, a tuple's member. Anywhere else (inside a function, a class, a default
-    argument) it is evaluated when code runs, so no loader reads it without running that code, and
-    it would look applied while guarding nothing.
+    A marker is reachable as the value of a module-level assignment or inside one (a mapping value,
+    a
+    tuple member). Anywhere else it is evaluated only when code runs, so it would guard nothing.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names: list[str] = []
@@ -470,14 +299,10 @@ def _marked_files() -> list[Path]:
 def marked_prose() -> dict[str, str]:
     """Every string a module marks as model-facing, by `prose:<module>:<name>[<key>]`.
 
-    **The loader the prose guards read the marked class through**
-    (`tests/test_prose_contract.py::_marked_prose`). The names are found by parsing each module
-    and the values read by importing it, so a template assembled with `+` or `str.format` at module
-    scope is read as the string it evaluates to — which is the text a model is sent, placeholders
-    and all — rather than as the literal pieces in the source.
-
-    A mapping or tuple of markers contributes one entry per member, keyed by its key or index, so a
-    finding names the one hint that carried it rather than the whole table.
+    The loader `tests/test_prose_contract.py` reads marked prose through. Names come from parsing
+    each
+    module and values from importing it, so a template assembled at module scope is read as the text
+    a model is sent. Mappings and tuples contribute one entry per member.
     """
     found: dict[str, str] = {}
     for path in _marked_files():
@@ -507,9 +332,8 @@ def marked_prose() -> dict[str, str]:
 def check_marked_prose_is_reachable() -> list[str]:
     """Rule 11: a `ModelProse` marker sits where `marked_prose` can read it, or it is refused.
 
-    The marker is only a guard if the loader sees it, and the loader reads module-level constants.
-    One written inside a function body is evaluated per call and read by nobody, so it would be the
-    shape this whole module exists to catch: a control that reads as applied and checks nothing.
+    The loader reads module-level constants only; a marker inside a function body would read as a
+    guard and check nothing.
     """
     problems: list[str] = []
     for path in _marked_files():
@@ -525,46 +349,24 @@ def check_marked_prose_is_reachable() -> list[str]:
 def check_instruction_blocks() -> list[str]:
     """Rule 10: a block declares exactly the tools its own text names, from a bindable name space.
 
-    **The rule that makes block-dropping a control rather than a decoration.** A `PromptBlock` is
-    dropped when the graph does not bind everything in its `requires`
-    (`chemclaw_agent.PromptBlock`), so a block that names `screen_hazards` and requires nothing is
-    the original defect with an extra step: it never drops, and it reads — in the declaration, to a
-    reviewer — as though it does. Equality rather than containment, because the other direction is
-    a defect too: a block requiring a tool it does not mention disappears from deployments that had
-    no reason to lose it, and nothing in the text would tell anyone why.
+    A `PromptBlock` is dropped when the graph does not bind everything in its `requires`, so a block
+    naming a tool it does not require never drops, and one requiring a tool it does not name drops
+    for no visible reason — hence equality.
 
-    The second half is about which name space a requirement may come from.
-    `build_langgraph_agent` narrows the prompt against the tools it *binds* — the registry, the
-    connectors and the template launchers — and the three middleware name spaces
-    (`skill_tool_names`, `harness_tool_names`, `subagent_tool_names`) are attached afterwards by
-    middleware, so they are never in that set. A block requiring `read_file` or `task` would
-    therefore pass rules 1-2 (those are real tools) and be silently dropped from every deployment
-    that exists. That is exactly D-117's shape — a name space a checker cannot see — arriving from
-    the other side, so it is named here rather than left to be discovered.
+    Requirements must be bindable: middleware tools (`skill_tool_names`, `harness_tool_names`,
+    `subagent_tool_names`) are attached after the prompt is narrowed, so requiring one would drop
+    the
+    block everywhere. Skill and subagent tools are always attached, so a block may name them without
+    requiring them; harness tools are neither nameable-unrequired nor requirable.
 
-    **The unconditional half of that name space may still be *named*, and the equality is what had
-    to move.** `skill_tool_names()` and `subagent_tool_names()` are attached to every agent this
-    deployment builds — `FilesystemMiddleware` unconditionally, `SubAgentMiddleware` because
-    `_apply_excluded_middleware` refuses to strip it — so a block describing `write_file` and
-    `/scratch/` is not a promise that can fail, and requiring the name would drop the block from
-    everywhere instead. Equality is therefore over `named` minus those two, and requiring one is
-    still refused. `harness_tool_names()` stays out of both halves: `write_todos` is attached only
-    when the harness is on, and the prompt is narrowed against nothing that can tell.
-
-    **And `absent_unless` is checked from the other side, because it fails the other way round.**
-    Its names must be bindable for the same reason `requires` must — a denial keyed on a name
-    nothing can bind never drops — and the two sets must be disjoint, since a block that both
-    requires a tool and is false when that tool is bound is a block no deployment ever sees. What no
-    rule here can check is *coverage*: whether a denial clause somebody writes next year declares
-    the tool that would refute it. A denial names a capability in English, not a function, so there
-    is no authoritative resolver for it and this file does not pretend otherwise
-    (`tests/test_prose_contract.py` asserts the shipped two both ways instead).
+    `absent_unless` names must also be bindable and disjoint from `requires` (otherwise the block is
+    never shown). Whether a denial clause declares every tool that would refute it cannot be checked
+    mechanically; `tests/test_prose_contract.py` asserts the shipped ones.
     """
     always_bound = skill_tool_names() | set(subagent_tool_names())
-    # Declared, for the reason `check_prose_contract` gives: with an opt-in bundle in the tree a
-    # deployment *can* bind these, so a block keyed on one is a control whose condition occurs —
-    # which is exactly what `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-
-    # tree-declares-no-bundle-for` refused when no manifest existed here to make it possible.
+    # Declared, not bound: an opt-in bundle makes these bindable, so a block keyed on one has a
+    # condition
+    # that can occur.
     bindable = declared_tool_names() - always_bound - harness_tool_names()
     problems: list[str] = []
     for symbol, blocks in _block_groups():
@@ -598,10 +400,8 @@ def check_instruction_blocks() -> list[str]:
 def _operator_sources() -> dict[str, str]:
     """The operator-facing documents: the ones a human runs this system from.
 
-    `Makefile` and `.env.example` join the corpus here rather than in `_OPERATOR_DOCS`, because
-    neither can be read whole like a `.md` file: only the `Makefile`'s non-recipe lines are prose
-    (`_makefile_prose`), and `.env.example` has no such split — it is comments plus `KEY=VALUE`
-    throughout, so it is read in full.
+    `Makefile` contributes only its non-recipe lines (`_makefile_prose`); `.env.example` is read
+    whole.
     """
     paths = [_ROOT / name for name in _OPERATOR_DOCS]
     for pattern in _OPERATOR_DOC_GLOBS:
@@ -623,21 +423,9 @@ def _operator_sources() -> dict[str, str]:
 def _selector_sources() -> dict[str, str]:
     """Rule 9's corpus: the operator documents plus all of `docs/`, minus the archive.
 
-    Wider than rules 5-8's corpus on purpose. A PromQL selector in a *merged* ADR is still the
-    sentence an operator builds an alert from — `docs/decisions/` is exactly where the one naming
-    a series that has never existed survived every gate — and the selector spelling is narrow
-    enough to carry that reach. `docs/archive/` stays out for the reason it always has: an
-    archived document is a record of what was true then.
-
-    **Enumerated rather than `rglob`ed from the repository root**, which is what it used to be.
-    That walked the *working directory*, not the repository: `make mutants` copies the whole tree
-    into `mutants/`, so a gitignored copy of the docs joined the gate and one probe file dropped
-    there failed `make prose-validate` on a path no commit contains. Measured on this tree: 425
-    files in the corpus with a mutmut copy present, 424 without, and the same hazard applies to any
-    vendored checkout or tool cache at the root. Both roots below carry every selector-bearing
-    document that walk found — 9 of them, `deploy/README.md` plus eight under `docs/` — so the
-    union costs no reach and cannot be widened by build output. A new *documentation* root is one
-    line here, deliberately.
+    A selector in a merged ADR is still what an operator builds an alert from. Enumerated roots
+    rather than an `rglob` of the working directory, so build output such as `make mutants`' copy
+    cannot join the corpus; a new documentation root is one line here.
     """
     archive = _ROOT / "docs" / "archive"
     paths = [_ROOT / name for name in _OPERATOR_DOCS] + sorted((_ROOT / "docs").rglob("*.md"))
@@ -656,16 +444,8 @@ def _decision_files() -> list[Path]:
 def _sub_decision_labels() -> set[str]:
     """Sub-decision labels an ADR actually defines, e.g. `D-A5a` inside `D-048`.
 
-    Derived rather than allowlisted. These read exactly like citations and resolve to no file, which
-    is the confusion the rule exists to surface — but the labels are real, and prose that names one
-    *while also citing its ADR* is more precise than prose that drops it. So the rule accepts a
-    label some decision document defines and still rejects an invented one.
-
-    **Only the title line counts, and that is not a shortcut.** An ADR that *defines* a label names
-    it in its heading — `D-048 — F5: … (D-A5, D-A5a)`. Scanning the whole body
-    would make every mention definitional, so an ADR discussing a label (this rule's own ADR names
-    an invented `D-A77b` as an example of what must fail) would silently license it. That is not
-    hypothetical: it is how this function's first version was caught.
+    Derived from ADR title lines only: a label is defined in its ADR's heading, and scanning bodies
+    would let any ADR that merely discusses a label license it.
     """
     labels: set[str] = set()
     for path in _decision_files():
@@ -684,9 +464,7 @@ def _adr_resolves(adr_id: str, stems: set[str], labels: set[str]) -> bool:
 def _path_resolves(candidate: str) -> bool:
     """Whether a backticked path names something on disk.
 
-    Tried from the repo root, from `src/chemclaw/` and from the Helm chart, because the docs use
-    all three spellings and each is unambiguous — there is exactly one package and one chart, and
-    a document about the chart naturally writes `templates/podmonitor.yaml`.
+    Tried from the repo root, `src/chemclaw/` and the Helm chart; each spelling is unambiguous.
     """
     return any(
         (_ROOT / base / candidate).exists() for base in ("", "src/chemclaw", "deploy/helm/chemclaw")
@@ -696,23 +474,10 @@ def _path_resolves(candidate: str) -> bool:
 def _connector_token_envs() -> set[str]:
     """The credential variable names this deployment declares, lowercased like a Settings field.
 
-    Three sources, and the second and third are why this docstring no longer says
-    "connector manifests".
-    A server we do not run is reached either as a *connector* — a bundle manifest with an
-    `HttpEndpoint` and a `BearerAuth` — or, for `calc`, as a plain client seam whose address is
-    configuration rather than a manifest (`D-2026-08-16-the-physics-leaves-the-cache-stays` says
-    why: its manifest must stay off `connectors_dirs`). Both name a real, operator-set variable
-    that is genuinely not a `Settings` field, and both must resolve.
-
-    **Derived rather than allow-listed, which is the difference between this and
-    `_NON_SETTINGS_ENV`.** A bundle reached over the network names its bearer with `token_env`
-    (`connectors/manifest.py::BearerAuth`), and that variable is real, operator-set and genuinely
-    not a `Settings` field — the transport reads it from the environment per request. As capability
-    moves out of this tree, every externally-hosted server brings one, so a hand-maintained list
-    would grow by one per migration and be wrong the first time somebody forgot.
-
-    Reading them off the manifests keeps the gate's actual property: a name in operator prose must
-    resolve to something. A typo'd variable still fails, because no manifest declares it.
+    Bearer variables are real, operator-set and not `Settings` fields: each connector manifest's
+    `BearerAuth.token_env`, plus the names held in settings for servers reached without a mounted
+    manifest. Derived rather than allowlisted, so each new external server is covered and a typo'd
+    variable still fails.
 
     Returns:
         The declared names, prefix-stripped and lowercased to match how the caller compares.
@@ -728,19 +493,13 @@ def _connector_token_envs() -> set[str]:
         for endpoint in (manifest.endpoint,)
         if isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
     }
-    # The two out-of-release servers' bearers, whose names are *settings' values* rather than
-    # manifest fields — neither server's manifest is mounted here, deliberately, because these are
-    # internal primitives and mounting them would put them in the agent's prompt. Read off the
-    # declarations, never hard-coded, so renaming either variable in config keeps this gate correct
-    # with no edit here.
+    # Bearers of the internal backend servers (`calc`, `rxnlabel`), whose names are settings' values
+    # because their manifests are deliberately not mounted.
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
     declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
-    # And core's own read-only MCP face, which is the same shape one step further out: it is a
-    # server this deployment *does* run, its bearer is read from the environment per request by the
-    # transport, and its name is a setting's value rather than a manifest field — deliberately,
-    # because the face must never be addressable as a connector
-    # (`D-2026-08-29-a-digest-nobody-receives-is-not-delivered`). Read off the declaration for the
-    # same reason the two above are: renaming the variable keeps this gate correct with no edit.
+    # Core's own read-only MCP face: its bearer name is a setting's value because the face must
+    # never
+    # be addressable as a connector.
     declared.add(settings.mcp_face_token_env.removeprefix("CHEMCLAW_").lower())
     return declared
 
@@ -748,23 +507,10 @@ def _connector_token_envs() -> set[str]:
 def check_corpus_is_assembled() -> list[str]:
     """Refuse a corpus this module could not assemble, rather than checking it and finding it clean.
 
-    **Every corpus here is built by filtering out paths that do not exist** (`if path.is_file()`),
-    which makes a wrong `_ROOT` — an installed wheel (`site-packages/chemclaw/cli/...`), a vendored
-    copy, a relocated package — indistinguishable from a repository in which everything resolves:
-    zero documents produce zero problems and `main` prints "every named tool, note type, path, ADR
-    id, config key and metric resolves". The same silence applies one document at a time, so
-    renaming `SECURITY.md` would quietly stop it being checked rather than fail. This module's own
-    docstring warns against precisely that shape ("an unresolvable tool leaves the argument check
-    silent").
-
-    A separate check rather than a line inside `check_operator_prose`, because the two ask
-    different questions. That one asks "is this prose true"; this asks "is this the checkout".
-    Folding them together also broke every test that legitimately substitutes a one-document
-    corpus to exercise a single rule — the substitution is not a missing file.
-
-    Each name in `_OPERATOR_DOCS` is a document this repository ships, so any one missing is a fact
-    about the checkout rather than a choice, and each is named individually. `_OPERATOR_DOC_GLOBS`
-    is not, since a glob legitimately matches nothing.
+    Every corpus is built by filtering out missing paths, so running from an installed wheel or a
+    relocated package — or renaming a shipped document — would silently check nothing. Each
+    `_OPERATOR_DOCS` entry missing is named; globs may legitimately match nothing. Separate from
+    `check_operator_prose` so tests can substitute a one-document corpus.
     """
     sources = _operator_sources()
     problems = [
@@ -814,12 +560,8 @@ def check_operator_prose() -> list[str]:
 def _declared_including_histogram_series() -> frozenset[str]:
     """Every declared name, plus the three series Prometheus derives from each histogram.
 
-    A histogram's declared name is not the name an operator queries. `histogram_quantile(0.95,
-    rate(chemclaw_turn_duration_seconds_bucket[10m]))` is the correct and only way to write a
-    latency alert, and until this fold existed that line failed this validator — so the runbook and
-    the shipped alerts were written with *base* names instead, which is worse prose defending
-    against a check that was wrong. The fold is exact rather than a blanket suffix strip:
-    `declared_histogram_names()` is consulted so a counter is never granted a `_bucket` spelling.
+    Operators query `<name>_bucket` (e.g. in `histogram_quantile`), so those spellings must resolve.
+    Only `declared_histogram_names()` get the suffixes, never a counter.
     """
     declared = declared_metric_names()
     derived = {
@@ -833,39 +575,15 @@ def _declared_including_histogram_series() -> frozenset[str]:
 def check_metric_citations() -> list[str]:
     """Rules 8-9: a metric name written down for an operator must be one the registry declares.
 
-    The failure this catches is silent in a way the others are not. A path that does not exist is
-    found the moment someone opens it; a series name that does not exist *renders*, as an alert
-    that matches nothing and therefore never fires. `chemclaw_degradations_total{subsystem=
-    "log_redaction"}` was the only documented alert for the one security degradation in this tree
-    and named a counter that has never existed (the counter is `chemclaw_degraded_total`).
+    A nonexistent series name does not fail visibly: the alert renders, matches nothing, and never
+    fires.
 
-    **Two rules, because two spellings carry different amounts of evidence.**
-
-    Rule 8 — a whole backticked span that *is* a metric name — runs over the operator corpus only.
-    Measured there: 13 candidates, 11 declared, and the two that are not are both `chemclaw_app`,
-    the Postgres role.
-
-    Rule 9 — a PromQL series selector, `name{…}` — runs over the operator documents and all of
-    `docs/` outside the archive (`_selector_sources`, which says why that is a list and not a walk).
-    A label matcher means "query this", which no module path, database role or log marker
-    is ever written as. Measured across the whole tree: 10 selectors, 9 declared, and the tenth was
-    the defect above.
-
-    **Rule 8 deliberately does not get rule 9's reach**, and that is not caution — it is measured.
-    `docs/decisions/` holds five backticked `chemclaw_*` spans that no registry declares, and four
-    of them are *correct*: a module (`chemclaw_agent`), the Postgres role, a log marker
-    (`chemclaw_plans_consumed`), and — the decisive one — `chemclaw_tool_latency_seconds` in
-    D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose, an ADR whose subject is that the
-    runbook named a stale metric. Widening rule 8 over that corpus would fail the build on an ADR
-    for correctly quoting the name it exists to say was wrong, and the fix would be editing a
-    merged decision — which CLAUDE.md forbids and which would be the wrong thing anyway.
-
-    **Rule 9 keeps that reach, so it takes on the hazard rule 8 avoids by not reaching, and needs
-    the valve rule 8 does not.** Six merged ADRs carry selectors today: the day a counter is
-    retired or renamed, each of them is a red build on a document nobody may edit. Simulated by
-    dropping one counter from the declared set, exactly one ADR failed.
-    `_RETIRED_METRIC_NAMES` is where such a retirement lands — one reviewed line, the same shape as
-    this module's two other release valves — instead of in the history of a merged decision.
+    Rule 8 (a whole backticked span) runs over the operator corpus only: in ADRs, backticked
+    `chemclaw_*` spans are often correctly something else (a module, the Postgres role, a log
+    marker,
+    or a stale name an ADR is about). Rule 9 (a `name{…}` selector) runs over all of `docs/` except
+    the archive, because a label matcher only ever means "query this". That reach is why
+    `_RETIRED_METRIC_NAMES` exists: retiring a series a merged ADR quotes lands there.
     """
     declared = _declared_including_histogram_series()
     problems: list[str] = []
@@ -883,23 +601,19 @@ def check_metric_citations() -> list[str]:
 
 def check_prose_contract() -> list[str]:
     """Return one problem string per violation; empty means the prose matches the tool surface."""
-    # One definition of the union, shared with the two other validators and the agent itself, so a
-    # tool cannot be "available" to one checker and unknown to another (D-117).
-    #
-    # **Declared rather than bound**, since `ConnectorManifest.default_enabled` exists: prose naming
-    # `mtsr` is a claim about this repository, and an opt-in bundle's tools are absent from
-    # `enabled()` on every checkout that has not turned it on. Checking against the bound set would
-    # report a correct reference as unknown everywhere, which is the D-117 defect with a new cause.
-    # Deletion is still caught: a tool no manifest declares is in neither set.
+    # One definition of the tool union, shared with the other validators and the agent. Declared
+    # rather
+    # than bound, so prose naming an opt-in bundle's tool validates where the bundle is off; a
+    # deleted
+    # tool is in neither set.
     tools = declared_tool_names()
     problems: list[str] = []
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
-        # The *effective* vocabulary — core's set plus what the enabled bundles declare — because
-        # that is what `kg-validate` will accept, and this check exists to predict its verdict.
-        # Against core's half alone, prose naming `bo-candidate` (declared by the `bo` bundle)
-        # would be reported as unknown while the note it produces validates perfectly.
+        # The effective vocabulary — core's plus the enabled bundles' — because that is what
+        # `kg-validate`
+        # accepts.
         for note_type in sorted(referenced_note_types(text) - known_note_types()):
             problems.append(
                 f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
@@ -916,9 +630,8 @@ def check_prose_contract() -> list[str]:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate.
 
-    Parses for the reason the sibling validators do: an argument this cannot honour must be
-    a refusal rather than something discarded under a green line. The corpus is derived
-    from the checkout, not configured, so there is nothing to override here at all.
+    Parses arguments though it declares none, so an unsupported argument is refused. The corpus is
+    derived from the checkout and cannot be overridden.
     """
     argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_prose_contract",

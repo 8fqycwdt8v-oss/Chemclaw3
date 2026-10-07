@@ -1,22 +1,10 @@
 """Writing an agent-authored note into the graph, where it is readable at once.
 
-This replaces the PR-gate (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). D-005 put a
-human in front of everything an agent writes, under a premise
-`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` removed; the
-axis now is whether a thing *changes what the agent does*. Knowledge does not — it arrives labelled
-with its provenance (D-160), it is read as evidence beside its own citations, and it can be
-contradicted (`memory/failure.py`'s `contradicts` edge, `kg/conflicts.py`, `memory/supersede.py`,
-bi-temporal `valid_to`). **Correction, not pre-approval, is the control on knowledge.**
-
-**Why a file write is enough to make it global.** `settings.knowledge_path` is `note_repo_dir /
-knowledge_dir` — the one location `load_notes` reads and the writer below commits into, which is the
-property `chemclaw.core.config.kg` introduced it for. So a note is in the graph the moment its bytes
-land; the commit that follows is durability and history, not publication.
-
-**The vocabulary lives here rather than in a module of its own.** `submission.py` existed because
-the durable proposal record had to hold the files a failed submission would have written, and
-`pr_gate` already imported `proposal`, so the types could not live in either. That record is gone,
-and with it the reason for the split.
+Knowledge is written directly and corrected rather than pre-approved
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): it carries its provenance, is read beside
+its citations, and can be contradicted or superseded. `settings.knowledge_path` is the directory
+`load_notes` reads and the writer commits into, so a note is in the graph once its bytes land; the
+commit provides durability and history.
 """
 
 import asyncio
@@ -64,12 +52,9 @@ class NoteFile(BaseModel):
     amendment: bool = False
 
 
-# What a commit subject may contain, checked here rather than at the subprocess: `git_writer._git`
-# interpolates it into a log record, so a newline forges a log line and an unbounded one stalls
-# every thread behind `SecretRedactingFilter`'s regex scan under the logging lock. That reasoning
-# is inherited verbatim from the branch-name rule this replaces — the subject is built from a
-# `Note.id` this repository validates, so on the shipped path it is redundant, and it is not
-# redundant against a direct construction.
+# What a commit subject may contain: no control characters, bounded length. The writer logs it, so a
+# newline would forge a log line and an unbounded one would stall the redacting log filter.
+# Redundant for validated note ids, not for a direct construction.
 _MESSAGE = re.compile(r"[^\x00-\x1f\x7f]+")
 _MAX_MESSAGE_LENGTH = 255
 
@@ -129,9 +114,8 @@ class WriteOutcome(BaseModel):
 class NoteWriter(Protocol):
     """Puts a note's files in the graph and returns what happened.
 
-    Contract nuance: when every file is byte-identical to what the tree already holds, an
-    implementation returns `written=False` without committing anything — re-recording an unchanged
-    note is an idempotent no-op, not an error.
+    When every file is byte-identical to the tree, an implementation commits nothing and reports
+    `notes=0`: re-recording an unchanged note is an idempotent no-op, not an error.
     """
 
     async def write(self, write: NoteWrite) -> WriteOutcome:
@@ -144,25 +128,10 @@ def _note_file(
 ) -> NoteFile:
     """Where one note lands in the knowledge tree, and what is written there.
 
-    **The rendering is redacted, and this is the only store here that needed saying so.** A note
-    body is model prose over whatever the turn discussed — a pasted credential, an untrusted share
-    document's contents, a chemist's question — and `render_note` serialises it verbatim. Nothing
-    on this path consulted the value inventory that scrubs the *identical strings* out of a log
-    line in the same process. Measured: an LLM key and a warehouse DSN password, both held by this
-    process, were committed into a note.
-
-    Two properties of git make that worse than the log leak it mirrors rather than equal to it.
-    Git is the one store that **leaves the pod** (`deploy/knowledge-sync.sh` pushes to a remote),
-    and it is **append-only in practice** — a secret in a merged commit survives every later
-    correction, so the contradiction/supersession controls that
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as the safety argument for
-    writing knowledge directly cannot reach it.
-
-    **Redaction, not refusal**, and applied to the *rendered* bytes rather than to `note.body`: a
-    frontmatter field carries a secret exactly as easily as the body does, and one call covers
-    both. A note that names its credential `***` is still the record; refusing would fail a turn's
-    knowledge write deep in the writer for a defect the chemist did not cause. A false positive
-    here is visible in the file and correctable by a later note — a committed credential is not.
+    The rendered bytes are redacted against this process's secret inventory, because a note body or
+    frontmatter may carry model prose over pasted credentials, and git both leaves the pod and keeps
+    history forever. Redaction rather than refusal: a false positive is visible and correctable, a
+    committed credential is not.
     """
     return NoteFile(
         path=f"{directory}/{note_relative_path(note.type, note.id)}",
@@ -178,27 +147,13 @@ def _build_write(
     dependencies: list[Note] | None,
     superseded: list[Note] | None = None,
 ) -> NoteWrite:
-    """The files one record writes, **in the order that keeps the graph readable throughout**.
+    """The files one record writes, in the order that keeps the graph readable throughout.
 
-    A PR made this question moot: every file of a submission merged in one commit, so no reader
-    ever saw half of it. Writing directly, a reader can, and `load_notes` runs against whatever is
-    on disk at that instant. So the order is the invariant that replaces "one PR is one reviewable
-    unit" (D-133), and it is:
-
-    **dependencies, then the subject, then the retirements** — because each cites the one before
-    it. A `job-result` cites its `compound`, so the compound is there first and the subject never
-    appears in the graph before what it cites. A retirement cites its *successor* through
-    `superseded-by`, so it lands after the subject exists.
-
-    The cost of that order is stated rather than hidden: between the subject's write and its
-    retirements', the old note and its replacement are both current, and retrieval can serve both.
-    That is the lesser of the two windows. Retiring first would leave `superseded-by` pointing at a
-    note that does not exist yet — a dangling wikilink is what `kg-validate` exists to prevent —
-    and would leave an instant with *no* current note on the subject at all.
-
-    Files are deduplicated by note id: a caller may legitimately list the same dependency twice
-    (two computed properties of one compound), and writing one path twice in a commit is at best
-    noise and at worst two renderings racing.
+    Readers scan whatever is on disk, so the order is: dependencies, then the subject, then the
+    retirements, each citing the one before (a `job-result` cites its `compound`; a retirement names
+    its successor via `superseded-by`). Between the subject and its retirements both old and new
+    notes are current; retiring first would instead leave a dangling link and a moment with no
+    current note. Files are deduplicated by note id.
     """
     seen = {note.id}
     files: list[NoteFile] = []
@@ -208,10 +163,9 @@ def _build_write(
         seen.add(dependency.id)
         files.append(_note_file(dependency, directory, overwrite=False))
     files.append(_note_file(note, directory))
-    # Retirements *do* overwrite: each is the file's own content (human edits included) with
-    # `valid_to` closed and the successor named, and rewriting that copy is the point. They are
-    # also the only files marked `amendment`, which is what keeps a retirement the writer may not
-    # make from taking the subject note down with it.
+    # Retirements overwrite: each is the note's own content with `valid_to` closed and the successor
+    # named. They alone are marked `amendment`, so a retirement the writer may not make does not
+    # take the subject down with it.
     for retired in superseded or ():
         if retired.id in seen:
             continue
@@ -223,38 +177,22 @@ def _build_write(
 
 
 def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[str]:
-    """`note`'s link targets that no note defines — neither on disk nor in this write.
+    """`note`'s link targets that no note defines, neither on disk nor in this write.
 
-    Through `kg.graph.dangling_links`, which is the one definition of "a link pointing at nothing"
-    (the same question `kg-validate` fails a merge on and `analytics` reports as a gap), rather
-    than a fourth spelling of it here. The corpus is read through the parsed-note cache, so this
-    costs a stat scan on a warm process; the sort inside it is over the whole corpus's links, which
-    is nothing against the git subprocess this runs in front of.
-
-    `landing` is every note this write puts on disk, so a subject citing a dependency written
-    beside it resolves — that ordering is `_build_write`'s whole point and warning about it would
-    make the marker noise on the commonest write there is. An external id (`[[reaction-…]]`)
-    resolves in a store rather than in the tree and is not dangling; `dangling_links` already
-    knows that.
+    Uses `kg.graph.dangling_links`, the one definition, over the cached corpus. `landing` is every
+    note this write puts on disk, so a subject citing a dependency written beside it resolves.
+    External ids resolve in a store and are not dangling.
     """
     reported = dangling_links([*load_notes(notes_dir), *landing])
-    # Deduplicated, because a *re-record* puts the subject in the corpus and in `landing` both, and
-    # `dangling_links` walks the list rather than a set of ids — so every target would be named
-    # twice on exactly the write a reader is most likely to be reading.
+    # Deduplicated: on a re-record the subject is in both the corpus and `landing`.
     return list(dict.fromkeys(target for source, target in reported if source == note.id))
 
 
 def count_notes_recorded(outcome: WriteOutcome) -> None:
     """Book what `outcome` put in the graph on `chemclaw_notes_recorded_total`.
 
-    Counted **after** the writer returns, so the number means "a note reached the graph" rather
-    than "we tried" — counting the attempt would show a busy, working system during exactly the
-    outage the metric exists to reveal.
-
-    **Two callers, deliberately.** `record_note` books the ordinary path, and
-    `cli/backfill_corpus` books the final `flush()` — a batch's last commit lands on a call
-    `record_note` never sees, so a run's tail would otherwise be invisible. One function rather
-    than two increments, because the rule about what may be counted is one rule.
+    Counted after the writer returns, so the number means "reached the graph", not "attempted". Also
+    called by `cli/backfill_corpus` for a batch's final `flush()`, which `record_note` never sees.
     """
     if outcome.notes:
         record_metric(lambda m: m.increment("chemclaw_notes_recorded_total", outcome.notes))
@@ -269,42 +207,25 @@ async def record_note(
 ) -> str:
     """Write an agent-authored note, with anything it links to, straight into the graph.
 
-    **Refuses a `human`-authored note, and the reason is not the one it used to be.** The gate
-    refused one because human notes took a different path; now every note takes this path, and the
-    refusal is the only thing keeping `created_by` honest — an agent writing `created_by: human`
-    would be forging the provenance that D-160 put on the evidence sweep, which is what lets a
-    chemist tell curated knowledge from machine-written knowledge at the point of use. A
-    *dependency* that is human-authored stays allowed: it is re-rendered from source data, not
-    authored here, and `overwrite=False` leaves an existing copy exactly as the human left it.
+    Refuses a `human`-authored subject: an agent writing `created_by: human` would forge the
+    provenance chemists rely on. A human-authored dependency is allowed, since it is re-rendered
+    from source data and `overwrite=False` leaves an existing copy untouched.
+
+    Stamps `actor` with the person bound to the current turn or job (the identity the audit trail
+    and authorization read), and refuses a note naming a different person. With no person bound the
+    field stays absent. Only the subject is stamped.
 
     Args:
         note: The note to record; must be `created_by == "agent"`.
         writer: How the files actually land (injected for testability).
         knowledge_dir: Override the configured notes directory.
         dependencies: Notes to write first so its links resolve.
-        superseded: Retired copies of notes this one replaces; written last, and overwritten.
-            A retirement of a note a **human** wrote is left alone rather than made — the writer
-            may not close a curated note's validity window in place — and the subject note lands
-            regardless, marking the untouched note as contradicted. That is a WARNING in the
-            writer's log and nothing this function returns: what a caller is handed is the
-            reference for what landed.
-
-    **Stamps the person the note was written for, and refuses one that names somebody else.**
-    `actor` is half of a note's authorship (`core/authorship.py`,
-    `D-2026-09-27-an-author-is-a-person-and-an-agent`), and this is the one write path every
-    agent-authored note takes — so it is the one place that has to know whose turn or job this is,
-    rather than a dozen callers each remembering to pass it. It reads the same ambient identity the
-    audit trail's actor, the authorization gate and a connector's identity header read, which every
-    driver binds (`api/runner.py`, `durable/interceptor.py`, the memory and report jobs, the CLI).
-    A note that already names a *different* person is refused for the reason a `human` note is: it
-    would be forging the other half of the same provenance. With no person bound — a backfill run
-    from a terminal, a test — the field stays absent, which reads as "not recorded", and nothing is
-    guessed. Only the subject is stamped: a dependency is re-rendered from source data rather than
-    written for anyone, and a retirement is somebody else's note being closed, whose author it
-    keeps.
+        superseded: Retired copies of notes this one replaces; written last, and overwritten. A
+            retirement of a human-written note is skipped by the writer (logged), and the subject
+            still lands.
 
     Returns:
-        The writer's reference for what landed — a commit, or the unchanged tree. A note whose
+        The writer's reference for what landed: a commit, or the unchanged tree. A note whose
         `[[wikilinks]]` name ids nothing defines still lands, and logs a WARNING naming them.
     """
     if not note.authorship.by_agent:
@@ -323,21 +244,10 @@ async def record_note(
         note = note.model_copy(update={"actor": actor})
 
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
-    # **A link at a note nobody wrote used to land in silence, and the write is the one moment
-    # anything can say so.** `compound_dependencies` mints the derived `compound-<hash>` id and
-    # nothing else, so a target the model typed itself is carried by no dependency: the note
-    # commits, `expand_note` on that target then raises "no note with id …" and the citation chip
-    # 404s. `kg-validate` is the check that catches it and it runs over *this* repository's corpus
-    # in CI, never over a deployment's.
-    #
-    # A **WARNING and not a refusal**, which is the same judgement `_note_file` makes about a
-    # redaction one function up: the note is the record either way, the citation is correctable by
-    # writing the note it names, and failing a turn's knowledge write over a typo'd citation would
-    # lose the observation to save the link. It is a log line and not a returned value on purpose —
-    # `record_note` hands its caller the reference for what landed, and a note *did* land — so the
-    # reader is whoever is looking at the pod, which is the same reader `git_writer`'s refusal to
-    # rewrite a person's note already writes for. Offloaded with the write it precedes, because it
-    # reads the corpus.
+    # Warn about links to ids nothing defines: the note would otherwise land silently and its
+    # citation fail later, and `kg-validate` runs only over this repository's corpus. A warning
+    # rather than a refusal, so a typo'd citation does not lose the observation. Offloaded because
+    # it reads the corpus.
     unresolved = await asyncio.to_thread(
         _unresolved_links,
         note,

@@ -103,7 +103,7 @@ _WAITING = (
 
 
 class SessionTurnQueue:
-    """`session_turn_queue`, on the session-store database (D-002)."""
+    """`session_turn_queue`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""

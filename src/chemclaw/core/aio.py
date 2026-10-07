@@ -1,32 +1,11 @@
 """Async primitives that keep working when one process runs more than one event loop.
 
-**A module-level `asyncio.Lock()` is not process-scoped state, although it looks exactly like it.**
-`Lock.acquire` resolves its event loop lazily *and only on the contended path* — the uncontended
-fast path marks the lock held and returns without ever calling `_get_loop()` — so it binds itself
-to the first loop that races on it, which is to say the first time it does its job. Every use
-before that is silent about the binding.
-
-What happens next is not the error it sounds like. A second loop's *waiter* raises
-`RuntimeError: <Lock object ...> is bound to a different event loop`, while the *holder* keeps the
-lock; `asyncio.run` then tries to cancel that holder on its way out and the cancellation does not
-complete, so the observable symptom is a **hang with no exception**, and the lock is left
-permanently `[locked]` for every later user in that process. Measured on `kg/git_writer`'s write
-lock: one `asyncio.run` of two concurrent writes passes in 3.4 s, and the identical second call in
-the same process never returns.
-
-**One loop per process is this deployment's shape and that is not the whole story.** The API
-serves on one loop, a Temporal worker runs one, and a CLI command is one `asyncio.run`. But a test
-harness that calls `pytest.main()` repeatedly is one process with many loops — `mutmut` does
-exactly this, once for stats, once for the clean baseline and once per mutant — and so is any
-command that calls `asyncio.run` twice. The cost of being wrong there is not a slow path, it is a
-wedge.
-
-So a lock here is resolved **per running loop**, created on first use and dropped with the loop
-that owns it. Two loops in one process do not serialize against each other, which is a real
-weakening of "serializes every write in this process" and is stated where each one is declared: it
-is reachable only from two *simultaneous* loops in separate threads, where the callers here are
-already protected by an OS-level `flock` and a connect that costs a second channel rather than
-correctness. Sequential loops — the case that actually occurs — get exactly the old semantics.
+A module-level `asyncio.Lock()` binds to the first loop that contends on it; a later loop's waiter
+then raises while the holder can never be cancelled, so the process hangs with the lock held. One
+process can run many loops in sequence (a test harness calling `pytest.main()` repeatedly, a
+command calling `asyncio.run` twice), so locks here are resolved per running loop. Two
+simultaneous loops in separate threads do not serialize against each other; each declaration
+states why that is acceptable for its callers.
 """
 
 from __future__ import annotations
@@ -38,25 +17,12 @@ from types import TracebackType
 class LoopLocalLock:
     """An `asyncio.Lock` per running event loop, resolved on use rather than at import.
 
-    A drop-in replacement for a module-level `asyncio.Lock` at the call site: it is an async
-    context manager, so `async with _WRITE_LOCK:` is unchanged. The loop is resolved in both
-    `__aenter__` and `__aexit__` rather than remembered between them, because a context manager's
-    two halves run in one task on one loop — so re-resolving is the same dictionary lookup and
-    leaves nothing to get out of step.
+    A drop-in for a module-level lock: `async with _WRITE_LOCK:` is unchanged. Both halves of the
+    context manager run on one loop, so re-resolving in `__aexit__` is safe.
 
-    **A plain dict that discards closed loops, and not a `WeakKeyDictionary`, which cannot work
-    here.** A weak mapping keyed by the loop is the obvious shape and it leaks by construction: the
-    *value* is an `asyncio.Lock`, and a contended one stores a reference to its own loop — its own
-    key — so the entry keeps itself alive forever. Measured over three `asyncio.run` calls, with a
-    collection in between: **0** entries survive when the lock is never contended and **3** when it
-    is, each one's value holding its own key. The contended case is the only one this exists for,
-    so the weak
-    mapping would have released exactly the entries that do not matter.
-
-    Discarding closed loops on resolve holds the same property by a route that is checkable: a
-    closed loop's lock can never be used again, so the map is pruned each time it is read and holds
-    one entry in the shape that actually occurs. The cost is an `is_closed()` per entry on a path
-    that already takes a lock.
+    A plain dict pruned of closed loops on every resolve, not a `WeakKeyDictionary`: a contended
+    lock
+    references its own loop (its key), so a weak mapping would keep exactly those entries alive.
     """
 
     __slots__ = ("_locks", "_name")
@@ -65,9 +31,8 @@ class LoopLocalLock:
         """Create the holder.
 
         Args:
-            name: What this lock serializes, for the error a use outside a running loop raises.
-                A bare `RuntimeError: no running event loop` from inside a library says nothing
-                about which lock was reached from synchronous code.
+            name: What this lock serializes, named in the error raised when it is used outside a
+                running loop.
         """
         self._name = name
         self._locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}

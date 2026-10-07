@@ -1,35 +1,10 @@
 """Walk a bulk reaction corpus into the label index, as cited evidence rather than as knowledge.
 
-A patent corpus is not an ELN, and the difference is not size. An ELN entry is this organisation's
-own record of an experiment it ran: it is transcribed into `reaction_records`, and what anyone
-asserts *about* those runs is still a playbook or a campaign note citing them. A patent reaction is
-*literature*: it is evidence, it cites a document anyone can read, and it belongs to nobody here.
-`D-2026-08-06-a-share-is-mounted-not-called` drew that line for documents; this applies it to
-reactions.
-
-**So a corpus declares no `ingest:` half, and that is a design choice with three separate reasons.**
-Each is a real path in this tree, not a hypothetical:
-
-* `durable/memory_jobs.py::read_corpus` calls `fetch_new_entries(datetime.min)` on **every** active
-  ingest half and materialises every `OrdReaction` into the worker's heap; three memory workflows
-  do it per cycle.
-* `memory/similarity.cluster_by_similarity` is then O(n²) pairwise over that list — the
-  `DEFERRED.md` row whose stated trigger is ~10⁴ reactions.
-* A corpus release is a versioned load addressed by key, not a live feed addressed by datetime. The
-  `ElnAdapter` cursor contract does not fit it.
-
-Declaring no ingest half sidesteps all three with **no edits** to any of them.
-
-This argument was written with five reasons, and
-`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` retired two of them a day later by fixing
-the ingest path itself: `ingest_reaction` no longer ends in `propose_note`, and the per-run parse of
-every merged note body that used to wedge `sync_entries` at ~700k entries is now one indexed lookup
-bounded by the page. Recorded rather than quietly deleted, because the two that went were the
-*review* reasons — so what carries this decision now is scale and cursor shape alone, and a reader
-who assumed the gate was still the reason would be reading a case that no longer exists.
-
-What a corpus source *does* declare is `retrieve:` — so its rows are reachable as evidence — and a
-`corpus:` block in its warehouse binding, which this module drains.
+A patent reaction is literature, not this organisation's record of an experiment, so a corpus source
+declares no `ingest:` half: the memory jobs would load every ingest half's reactions into memory and
+cluster them pairwise, and a versioned release addressed by key does not fit the `ElnAdapter`
+datetime cursor. It declares `retrieve:`, so rows are reachable as evidence, and a `corpus:` block
+in its warehouse binding, which this module drains.
 """
 
 import logging
@@ -65,10 +40,9 @@ logger = logging.getLogger(__name__)
 # adapter uses, and the same word, because a binding author reads both files.
 ROOT = "root"
 
-# Which side of `reactants>agents>products` a species came from, as a recorded `Role` value. The
-# agent slot maps to `reagent` and not to `solvent`: the record form groups solvent, catalyst,
-# ligand and base into one slot, and guessing which is exactly the labeller's job. Calling them all
-# solvents here would be a wrong answer written into the column that says what the source claimed.
+# Which side of `reactants>agents>products` a species came from, as a recorded `Role`. The agent
+# slot maps to `reagent`: it mixes solvents, catalysts, ligands and bases, and telling them apart is
+# the labeller's job.
 _SLOT_ROLES = ("reactant", "reagent", "product")
 
 
@@ -139,35 +113,25 @@ async def drain_corpus(
 ) -> CorpusReport:
     """Read one keyset page of the corpus and write its record phase into the label index.
 
+    Every write is an id-keyed upsert of the record phase only, so re-draining is a no-op, labelled
+    rows keep their labels, and a stopped drain resumes anywhere. Every pass, including an empty
+    one, books its rows on `chemclaw_ingest_records_total{source,outcome}`.
+
     Args:
         warehouse: An open connection to the corpus's warehouse.
         binding: The `corpus:` block naming the relation and its columns.
         index: The label index to write into.
-        source: The registry source name — half of every row's key.
-        molecules: Where each distinct structure is fingerprinted, if similarity search over this
-            corpus is wanted. Written *after* the reactions and from what was actually recorded, so
-            a structure only enters `corpus_molecules` because some reaction row names it — which
-            is what keeps every similarity hit resolvable back to a precedent.
-        reactions: Where each recorded reaction is fingerprinted (DRFP), if *reaction* similarity
-            over this corpus is wanted. The molecule half above has always been written and this
-            one never was, so a bulk source arrived searchable by structure and not by
-            transformation. Written once per page through `add_many`, like the molecules two lines
-            below: a per-row commit was measured at 3.0 ms/row against 1.15 ms/row batched (200
-            rows, pooled, three trials, 2.6x) and bought nothing, because the cursor only advances
-            at the end of a page — so a retried page is re-read from its start either way.
+        source: The registry source name, half of every row's key.
+        molecules: Where each distinct structure is fingerprinted, if structure similarity is
+            wanted. Written after the reactions, from what was recorded, so every hit resolves to a
+            precedent.
+        reactions: Where each recorded reaction's DRFP is written, if reaction similarity is wanted.
+            Batched once per page; the cursor only advances per page anyway.
         after: Resume strictly after this key; empty starts at the beginning.
         limit: Rows this pass may read; defaults to the binding's `fetch_limit`.
 
     Returns:
         Counts, the cursor the next pass resumes after, and whether more rows remain.
-
-    Every write is an id-keyed upsert of the *record* phase only, so re-draining an unchanged
-    release is a no-op and a row already labelled keeps its labels — `LabelIndex.record` holds that
-    rule, and it is what makes a stopped drain resumable at any point with no bookkeeping.
-
-    Every pass — including one that read nothing — books its rows on
-    `chemclaw_ingest_records_total{source,outcome}`; see `_drained` for the outcome vocabulary
-    and why it is the same one the other three ingest passes use.
     """
     report = await _drain_page(
         warehouse,
@@ -196,9 +160,7 @@ async def _drain_page(
 ) -> CorpusReport:
     """Read one page and write it, and account for nothing.
 
-    Split out so that `drain_corpus` has exactly one return and the metric cannot be missed by a
-    path added later — the shape `ingest/documents/sync.py::sync_share` uses `_index_slice` for,
-    and which this file previously argued for in prose while keeping two explicit call sites.
+    Split out so `drain_corpus` has one return and the metric cannot be skipped.
     """
     page = limit if limit is not None else binding.fetch_limit
     statement, params = sql.corpus_statement(binding, warehouse.placeholder, after, page)
@@ -211,29 +173,16 @@ async def _drain_page(
     report = CorpusReport(read=len(rows), cursor=after, has_more=len(rows) == page)
     structures: set[str] = set()
     fingerprints: list[FingerprintRecord] = []
-    # **One matching budget for the page**, because the per-cell `regex` bound does not compose:
-    # `_record` runs a site's transforms on every bound field of up to `corpus_page_size` rows, so
-    # a slow-but-completing pattern is minutes of synchronous CPU the per-cell timeout never sees
-    # and the retry reads the identical page. `expr.pattern_budget` carries the arithmetic; it
-    # charges matching time only, so the awaited writes inside the loop cost it nothing.
+    # One regex matching budget for the page, since the per-cell bound does not compose over many
+    # rows; it charges matching time only, not the awaited writes.
     with pattern_budget():
         for row in rows:
             bundle = {ROOT: row}
             key = _text(row.get(binding.key))
-            # **Read from the pagination column and from nothing else, and only when it holds a
-            # value.** Both halves were wrong here and both failed silently. `as_text` is `str()`
-            # for everything, so a NULL `order_by` became the six characters `"None"` — truthy, so
-            # the `or key` fallback never fired — and the next page resumed at `> 'None'`, skipping
-            # every key that sorts below it: all digits and `A`–`M`, i.e. most of a release. And the
-            # fallback itself compared a *key* against the `order_by` column, which is a second
-            # column with its own domain; substituting one for the other resumes the drain at an
-            # arbitrary point. This is the same defect `_field` documents three functions down, on
-            # the line that decides what the next page reads.
-            #
-            # A row with no value in the pagination column therefore holds the cursor where it is.
-            # That stops the source with `ReactionCorpusWorkflow`'s "no cursor advance" warning
-            # naming `order_by` — the honest outcome, because a NULL there makes the release
-            # un-resumable and no value this side can invent changes that.
+            # Taken from the pagination column only, and only when it holds a value: a NULL must not
+            # become `"None"`, and the key column is a different domain. A row without a value holds
+            # the cursor, which stops the source with a "no cursor advance" warning naming
+            # `order_by`.
             cursor_value = row.get(binding.cursor_column)
             if cursor_value is not None:
                 report.cursor = as_text(cursor_value)
@@ -282,41 +231,11 @@ async def _drain_page(
 def _drained(source: str, report: CorpusReport) -> None:
     """Book what this pass did on `chemclaw_ingest_records_total`, whatever it did.
 
-    **Two outcomes, not three, and they partition `read` exactly**: `_record`'s verdict is binary,
-    so `recorded + skipped == read` by construction and the two series sum to the rows the page
-    saw. The document sync's third outcome — `skipped`, in its vocabulary a candidate the pass
-    deliberately did not process — has no population here: a corpus row is never held back, and
-    re-draining a release re-records it rather than passing over it. Minting a permanently-zero
-    series would be a claim that such a population exists. `ingest/labels/enrich.py` books the same
-    two for the same reason.
-
-    **A dropped row is `rejected`, and that word is load-bearing.** In the vocabulary
-    `ingest/documents/sync.py::_record_pass` fixes, `rejected` is what was reached and could not be
-    turned into a row, and `skipped` is what was deliberately passed over. `CorpusReport.skipped`
-    counts rows carrying no usable reaction SMILES, key or citation — deterministic bad data, which
-    is `rejected` — so booking it under its own field name would make one series mean two different
-    things across the four ingest passes, which is worse than the flat line this closes.
-
-    `unfingerprintable` is deliberately not an outcome: those rows *are* recorded and are already
-    counted under `ingested`. It is a property of a row that landed, not a fate that competes with
-    landing, and adding it would put one row in two series. `tests/test_reaction_corpus.py` asserts
-    the rendered label set is exactly these two rather than asserting the absence of one word, so
-    that mutation fails a test instead of merely contradicting this paragraph — it survived one
-    written the other way.
-
-    Every return of `drain_corpus` passes through `_drained`, including the one that read nothing,
-    so a source with no new rows books a zero rather than nothing: the whole point of the counter
-    is that a silent series means the drain did not run, which it cannot mean if a healthy empty
-    page is also silent. That is structural rather than remembered — `sync_share` extracts
-    `_index_slice` for the same reason, and this used to be two explicit call sites, where a third
-    return added later would have dropped the booking with nothing failing.
-
-    Two `record_metric` calls rather than a loop over a helper. The loop needed one only to satisfy
-    ruff `B023`, and the helper it needed carried a docstring saying it existed because "a lambda
-    closing over a loop variable is bound late — where every update lands on the last outcome".
-    That is false here and was measured false: `record_metric` invokes the callable synchronously
-    inside the iteration, so the inline form books 7 and 3 correctly. Written out, there is no
-    loop, no `B023`, and no rationale to be wrong about.
+    Two outcomes that partition `read`: `ingested` (recorded) and `rejected` (no usable reaction
+    SMILES, key or citation: deterministic bad data). There is no `skipped`, since no corpus row is
+    deliberately passed over. `unfingerprintable` rows were recorded and are counted as `ingested`.
+    Called on every return, so a healthy empty page books a zero and a silent series means the drain
+    did not run.
     """
     record_metric(
         lambda m: m.increment(
@@ -339,31 +258,11 @@ def _collect_fingerprint(
 ) -> None:
     """Add one recorded reaction's DRFP to the page's batch, counting when it has none.
 
-    Synchronous and collecting rather than writing, because the write is one `add_many` per page —
-    see the `reactions` argument for the measurement. What stays here is the *decision* about a
-    single reaction, which is the part with a rule in it.
-
-    Skipping rather than raising, and it is the same asymmetry `CorpusMolecules.add_many`
-    documents one table over: a patent extract is evidence, and refusing a page because one of its
-    reactions is degenerate loses every good precedent beside it. The reaction row is already
-    written by the time this runs, so what a skip costs is a similarity hit, never a wrong answer —
-    and `report.unfingerprintable` is what keeps that visible instead of implied.
-
-    The source rides on the record via `model_copy` rather than through the builder, which is the
-    idiom `ingest_reaction` sets and states the reason for: the builder is the DRFP half — id,
-    label, bits, definition — and the source is who supplied the id, which the fingerprint knows
-    nothing about.
-
-    **`FingerprintInputError` alone, because it is the only thing this path raises**, and that was
-    measured rather than assumed: `standard_smiles` returns a species RDKit cannot parse *unchanged*
-    (`"C(((C"` → `"C(((C"`), so `drfp_bitstring` shingles it and produces bits, and the reaction
-    tier has no unparseable-structure failure at all. The molecule tier does —
-    `ecfp_bitstring("C(((C")` raises — which is why `add_many` catches `InvalidSmilesError` beside
-    it and this does not. Catching one here would be a guard for a case that cannot occur.
-
-    The bits are taken over the transformation form. `transformation_of` says why, and
-    `reaction_definition()`'s own `agents-excluded` token is what would otherwise be false of these
-    rows.
+    Skips rather than raises: one degenerate reaction must not cost the page its good precedents,
+    and the reaction row is already written, so a skip loses only a similarity hit, counted on
+    `report.unfingerprintable`. Only `FingerprintInputError` is caught, since DRFP shingles even
+    unparseable species. The source is set via `model_copy`, as in `ingest_reaction`. Bits are taken
+    over the transformation form (see `transformation_of`).
     """
     try:
         record = record_for_reaction(
@@ -380,9 +279,8 @@ def _record(
 ) -> ReactionLabel | None:
     """One row as a record-phase label, or `None` when it lacks what a precedent needs.
 
-    Three things are required and the rest are optional, which is the honest split: without a key
-    there is no row to write, without a reaction there is nothing to label, and without a citation
-    a hit is a precedent a chemist cannot follow back — which is not a precedent.
+    Key, reaction and citation are required: without a citation a chemist cannot follow the hit
+    back.
     """
     reaction = _field(bundle, binding.smiles)
     citation = _field(bundle, binding.citation)
@@ -406,9 +304,8 @@ def _record(
         reaction_class=_field(bundle, binding.reaction_class) or None,
         rxno_id=_field(bundle, binding.rxno_id) or None,
         mapped_smiles=_field(bundle, binding.mapped_smiles) or None,
-        # `method` says where a carried label came from, and it is set here rather than left to the
-        # enricher because only this side knows: the corpus said so. A chemist reading a frequency
-        # table is entitled to tell "Pistachio's NameRxn classified this" from "our SMIRKS matched".
+        # Only this side knows a carried label came from the corpus, so chemists can tell a source's
+        # classification from our SMIRKS match.
         method="source" if _field(bundle, binding.named_reaction) else None,
     )
 
@@ -416,16 +313,10 @@ def _record(
 def _species(reaction_smiles: str) -> list[SpeciesLabel]:
     """Split `reactants>agents>products` into species rows carrying the slot they came from.
 
-    Returns `[]` for a string that is not a three-part reaction or whose products are empty — a
-    reaction with nothing on the right is not a reaction, and indexing it would put a row in the
-    corpus that no facet query can ever answer usefully.
-
-    A species RDKit cannot standardize is **kept, with its raw SMILES**. That is deliberate and it
-    is the opposite of what the ELN path does: an ELN entry is a claim we are about to put through
-    review, so a structure that will not parse is worth rejecting the entry over; a patent extract
-    is evidence, one of whose fifty species may be a mangled OCR artefact, and dropping the whole
-    reaction over it loses forty-nine good precedents. What it costs is that this species will not
-    join `corpus_molecules` by value, which is a missing similarity hit rather than a wrong one.
+    Returns `[]` for a string that is not a three-part reaction or has no products. A species RDKit
+    cannot standardize is kept with its raw SMILES, unlike on the ELN path: a patent extract is
+    evidence, and dropping a reaction over one mangled species loses the rest. It only misses
+    joining `corpus_molecules`.
     """
     parts = reaction_smiles.split(">")
     if len(parts) != 3 or not parts[2].strip():
@@ -451,12 +342,9 @@ def _standardized(smiles: str) -> str:
 
 
 def _text(value: Any) -> str:
-    """One raw column value as text, `""` when it is NULL — never the string `"None"`.
+    """One raw column value as text, `""` when it is NULL, never the string `"None"`.
 
-    The `None` check `_field` calls load-bearing, for the two paths that read a column *directly*
-    rather than through a field binding: the row's key and its pagination cursor. Without it a NULL
-    key is a six-character id called "None" that `_record`'s `if not key` guard cannot see, so the
-    row is recorded as a precedent under a name no citation resolves.
+    Used for the key and the pagination cursor, read directly rather than through a field binding.
     """
     return as_text(value) if value is not None else ""
 
@@ -464,10 +352,8 @@ def _text(value: Any) -> str:
 def _field(bundle: dict[str, Any], field: FieldBinding | None) -> str:
     """One bound field as text; `""` when the binding omits it or the path resolves to nothing.
 
-    The `None` check is load-bearing and is not defensive: `as_text` is `str()` for everything, so
-    a NULL column becomes the literal string `"None"`. Caught by a test over a corpus row NameRxn
-    could not classify — without it, every unclassified reaction would have been stored as a named
-    reaction *called* "None", and then counted in a frequency table beside the real ones.
+    The `None` check matters: `as_text` would turn NULL into `"None"`, e.g. a named reaction called
+    "None".
     """
     if field is None:
         return ""
@@ -480,20 +366,13 @@ def _number(
 ) -> float | None:
     """One bound field as a float, or `None`. A value that will not convert is `None`, not a zero.
 
-    Zero is a real temperature and a real yield, so coercing an unparseable one to it would put a
-    fabricated number into a column a chemist reads as recorded fact.
-
-    **Refusing to coerce is right and losing it silently was not.** A value the source supplied and
-    this function cannot read is counted on `report.unreadable_fields`, for the reason that field's
-    description gives: the row is written with a NULL that reads exactly like "the source did not
-    record a temperature", and a facet search then excludes it with nothing in the answer saying so.
+    A supplied value that cannot be read is counted on `report.unreadable_fields`, since its NULL
+    would otherwise read as "not recorded".
     """
     if field is None:
         return None
     value = _resolve(bundle, field)
-    # A blank cell is the source recording nothing, exactly like a NULL, so it is not a value this
-    # function failed to read — counting it would put the ordinary case in a counter whose whole
-    # purpose is to be zero when nothing was lost.
+    # A blank cell is the source recording nothing, not an unreadable value.
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
@@ -506,17 +385,12 @@ def _number(
 def _date(bundle: dict[str, Any], field: FieldBinding | None, report: CorpusReport) -> Any:
     """One bound field as whatever its `iso_date` transform produced, or `None`.
 
-    Typed loosely on purpose: the transform vocabulary owns the conversion (`iso_date` /
-    `iso_datetime`), and re-parsing here would be a second, disagreeing definition of what a date
-    in this corpus looks like. Pydantic validates it into a `date` on the way into the model.
+    The transform owns the conversion; pydantic validates the result into a `date`.
     """
     if field is None:
         return None
     value = _resolve(bundle, field)
-    # A date the transform vocabulary could not turn into one is the same loss `_number` counts: the
-    # source wrote something in that column and the record says nothing was written. A blank cell
-    # is not that — it is the source recording nothing, the rule `_number` states — so an undated
-    # row in a text-typed export does not trip a warning telling the site to fix its binding.
+    # A non-blank value that did not become a date is counted as unreadable, like in `_number`.
     raw = resolve_path(field.path, bundle)
     if value is None and raw is not None and not (isinstance(raw, str) and not raw.strip()):
         report.unreadable_fields += 1

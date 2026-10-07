@@ -1,20 +1,10 @@
-"""Eval baseline + drift detection (plan F10-F2): catch silent quality regressions.
+"""Eval baseline + drift detection: catch silent quality regressions.
 
-A committed baseline (`data/evals/baseline.json`) records the aggregate value of each metric over
-the versioned case-set at a known-good point. `detect_drift` re-aggregates a fresh run and flags any
-metric that moved further than a *relative* noise band (`eval_drift_epsilon`, a fraction of the
-baseline value) from that baseline. Relative, not absolute, because the metrics live on
-heterogeneous scales (an `f1` in [0, 1] next to an `e_factor` near 35): one absolute band would be
-loose for the bounded metrics and hair-trigger for the large ones. All logic here is pure and
-file-based (no Temporal, no network), so it is fully unit-tested; `durable/eval_drift.py` is the
-thin durable wrapper that schedules it.
-
-**`compare_to_baseline` is the same comparison as an ordinary command rather than a workflow.**
-For a long time the only caller of any of this was `durable/eval_drift.py`, a Temporal workflow
-that is off by default (`eval_drift_enabled=False`) — so "the case-set scored against the recorded
-baseline" was a number nobody could obtain without a broker. The comparison is pure file-based
-arithmetic; it does not need durability to be *run*, only to be *scheduled*. `evals.harness
---baseline` is the offline front end and this is its logic.
+A committed baseline (`data/evals/baseline.json`) records each metric's aggregate over the versioned
+case-set at a known-good point. `detect_drift` flags any metric that moved further than a *relative*
+band (`eval_drift_epsilon`, a fraction of the baseline value) — relative because metrics live on
+different scales. Pure and file-based: `durable/eval_drift.py` schedules it, and
+`compare_to_baseline` backs `evals.harness --baseline` offline.
 """
 
 from __future__ import annotations
@@ -29,9 +19,8 @@ from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.evals.metric import Direction, direction_of, is_live
 
 if TYPE_CHECKING:  # pragma: no cover - `EvalReport` is needed only as an annotation here.
-    # Deferred on purpose: `harness` imports this module for its `--baseline` mode, and importing
-    # it back at runtime would close the cycle. The dependency really is type-only — nothing here
-    # calls into the harness.
+    # Type-only import, deferred: `harness` imports this module, so a runtime import would be a
+    # cycle.
     from chemclaw.evals.harness import EvalReport
 
 
@@ -62,8 +51,7 @@ class DriftAlert(BaseModel):
 def aggregate_metrics(report: EvalReport) -> dict[str, float]:
     """Mean value of each metric across every case it scored (the comparable per-run summary).
 
-    Averaging over cases collapses a run to one number per metric, which is what a baseline can pin
-    and drift can compare. A metric scored on no case simply does not appear (nothing to average).
+    A metric scored on no case does not appear.
     """
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
@@ -76,11 +64,9 @@ def aggregate_metrics(report: EvalReport) -> dict[str, float]:
 def drift_band(baseline_value: float, epsilon: float) -> float:
     """The half-width of the noise band around `baseline_value` (a move inside it is not drift).
 
-    `epsilon * abs(baseline_value)` — a fraction of the baseline, so one knob means the same
-    *proportional* sensitivity for an `f1` in [0, 1] and an `e_factor` near 35. A baseline of
-    exactly 0 has no proportion to take, so the band falls back to the absolute `epsilon` and a
-    move off zero past it is still caught. Shared by `detect_drift` and the reported comparison so
-    the number an operator reads is the number the verdict used, not a second copy of the formula.
+    `epsilon * abs(baseline_value)`, so one knob gives the same proportional sensitivity on every
+    scale; a baseline of exactly 0 falls back to the absolute `epsilon`. Shared by `detect_drift`
+    and the report so both use one formula.
     """
     return epsilon * abs(baseline_value) if baseline_value else epsilon
 
@@ -88,12 +74,8 @@ def drift_band(baseline_value: float, epsilon: float) -> float:
 def detect_drift(baseline: Baseline, current: dict[str, float], epsilon: float) -> list[DriftAlert]:
     """Flag every baseline metric whose current aggregate moved more than a relative `epsilon`.
 
-    The band is `drift_band(baseline_value, epsilon)` — relative, so one knob is scale-appropriate
-    across metrics of different magnitudes. Only metrics in the baseline are checked — a newly
-    added metric has no known-good point to regress against yet (adding it to the baseline is
-    deliberate). A
-    metric that vanished from the current run (its case removed) is flagged: dropping a scored
-    metric is exactly the regression this guards against.
+    Only metrics in the baseline are checked; a new metric has no known-good point yet. A metric
+    missing from the current run is flagged, since losing a scored metric is a regression.
     """
     alerts: list[DriftAlert] = []
     for metric, baseline_value in sorted(baseline.metrics.items()):
@@ -135,10 +117,8 @@ def save_baseline(baseline: Baseline, path: str) -> None:
 class CaseSetMismatchError(ChemclawError):
     """The run and the baseline scored *different* case-sets, so no comparison exists.
 
-    Not a warning beside a number, because there is no number: a baseline pins the aggregate of one
-    set of cases, and the aggregate of a different set is a different quantity that happens to share
-    a metric name. Reporting "f1 moved -0.12" across two case-sets would be arithmetic on unrelated
-    populations, and it is the more dangerous failure precisely because it looks like a result.
+    An error rather than a warning: an aggregate over a different set of cases is a different
+    quantity, and a delta between them would look like a result while meaning nothing.
     """
 
 
@@ -152,13 +132,9 @@ class MetricComparison(BaseModel):
 
     metric: str
     # Whether scoring this metric ran product code (`live`) or read literals a case file commits
-    # (pinned). Carried on the row because the summary line's "0 of 13 worsened" is otherwise read
-    # as thirteen guarded quantities — eleven of them cannot move for any reason a release can
-    # cause, so a change that halved dense-leg recall passed a CI step that looked comprehensive.
+    # (pinned). Carried so a reader can tell how many rows a release could actually move.
     live: bool = False
-    # None when this build no longer registers the metric at all — it cannot be scored, so it has
-    # no direction to report. Never a stand-in value: a guessed direction next to a real delta is
-    # exactly the confidently-mis-signed verdict `direction_of` refuses to produce.
+    # None when this build no longer registers the metric; never a guessed direction.
     direction: Direction | None
     baseline_value: float
     # None means the metric was not scored by this run at all. Distinct from 0.0, which is a real
@@ -184,10 +160,8 @@ class BaselineComparison(BaseModel):
     def live_rows(self) -> list[MetricComparison]:
         """The rows whose score came from running product code — what this gate actually watches.
 
-        The other rows are not worthless: a pinned metric still catches an edited case file or a
-        changed formula, which is a real review signal. They are simply not what a reader assumes
-        when a CI step reports a count of guarded metrics, and the difference is not visible in the
-        numbers.
+        Pinned rows still catch an edited case file or a changed formula, but no release can move
+        them.
         """
         return [row for row in self.rows if row.live]
 
@@ -195,11 +169,8 @@ class BaselineComparison(BaseModel):
 def is_worsening(alert: DriftAlert) -> bool:
     """Whether a drift alert moved the way that is *bad* for its metric.
 
-    A drift check alone cannot gate a build: `detect_drift` is symmetric by design (an operator
-    watching a schedule wants to know that anything moved), but a command that fails on an
-    improvement would be a command everyone learns to re-run until it passes. The metric's
-    registered `Direction` supplies the sign; a vanished metric is always bad, since a scored metric
-    that stopped being scored is lost coverage regardless of which way it used to point.
+    `detect_drift` is symmetric, but a build gate must not fail on an improvement. The metric's
+    registered `Direction` supplies the sign; a vanished metric is always bad.
     """
     if alert.vanished:
         return True
@@ -211,8 +182,7 @@ def is_worsening(alert: DriftAlert) -> bool:
 def _known_direction(name: str) -> Direction | None:
     """The metric's registered direction, or None if this build no longer has that metric.
 
-    A baseline can outlive a metric (it is a committed file, the registry is code). That is a
-    regression the comparison must still *report* — it just cannot report a direction for it.
+    A committed baseline can outlive a metric; the comparison still reports it, without a direction.
     """
     try:
         return direction_of(name)
@@ -225,12 +195,9 @@ def compare_to_baseline(
 ) -> BaselineComparison:
     """Score a fresh report against the committed baseline, metric by metric.
 
-    Raises `CaseSetMismatchError` when the report and the baseline name different case-sets — the
-    one situation where producing a number would be worse than producing nothing.
-
-    Rows are emitted for every metric *in the baseline* (in `detect_drift`'s order), because that is
-    what has a known-good value to regress against; a metric the run added but the baseline never
-    pinned has nothing to compare to and belongs in the next baseline refresh, not in this verdict.
+    Raises `CaseSetMismatchError` when the report and the baseline name different case-sets. Rows
+    are emitted for every metric in the baseline, in `detect_drift`'s order; a metric the baseline
+    never pinned belongs in the next baseline refresh.
     """
     if report.case_set_version != baseline.case_set_version:
         raise CaseSetMismatchError(
@@ -304,14 +271,9 @@ def render_comparison(comparison: BaselineComparison) -> str:
         f"**{len(worsened)} of {len(comparison.rows)} baseline metric(s) worsened** beyond the "
         f"noise band.",
         "",
-        # **The count a reader takes from this line is what the gate covers, so it has to say
-        # what it covers.** A pinned metric is arithmetic over literals a case file commits, so
-        # nothing a release changes can move it — only editing a case or a formula can. Eleven of
-        # the thirteen shipped baseline metrics are that, and the line above read as thirteen
-        # guarded quantities: a change that halved dense-leg recall or broke the fusion left every
-        # pinned row unchanged by construction and the two live rows untouched (they score
-        # `GraphRetriever` only), and CI was green with nothing able to see it. Individual case
-        # files said so; the gate did not.
+        # The summary states how many rows are live versus pinned: a pinned metric is arithmetic
+        # over committed literals that no release can move, so a bare count would overstate what the
+        # gate covers.
         f"{live} live (scored by running product code), {pinned} pinned (arithmetic over "
         "literals committed in the case files, so only a case or formula edit can move them).",
     ]

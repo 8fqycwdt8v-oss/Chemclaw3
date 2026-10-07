@@ -1,24 +1,14 @@
-"""Ingest one validated reaction into the corpus and the fingerprint index (plan 4.4/4.5).
+"""Ingest one validated reaction into the corpus and the fingerprint index.
 
-The glue that makes an ELN entry both *findable by fingerprint* and *readable once found*. For one
-canonical reaction it: (1) validates structure + mass balance and refuses to ingest an invalid
-record; (2) indexes the reaction (DRFP) and each distinct molecule it names — its compounds *and*
-its identified impurities (ECFP4) — into the fingerprint stores; (3) writes the transcription to
-the reaction record store, which is what a structure hit expands into. Step (2) runs only for a
-structured record: a citation-only one, which names a species without its structure, is stored and
-citable and is indexed nowhere a structure search looks (`ingest_reaction` says why).
+For one canonical reaction: (1) validate structure and mass balance, refusing an invalid record; (2)
+index the reaction (DRFP) and each distinct molecule it names, compounds and identified impurities
+(ECFP4); (3) write the transcription to the reaction record store, which a structure hit expands
+into. Step (2) runs only for a structured record; a citation-only record is stored and citable but
+indexed nowhere a structure search looks.
 
-**All three are deterministic serving indexes, and none of them is PR-gated** (D-2026-08-25). That
-used to be true of the first two only, while the third was proposed as a `created_by: agent` note
-for a human to merge — a reviewer asked to approve a rendering of data the source system had
-already signed off on. The argument the fingerprint half always made now covers the whole function:
-nothing here infers anything, so there is nothing to decide. A knowledge *claim* about these runs
-is still a playbook or a campaign citing these records — and since
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` that is not gated either, which this line
-used to say it was.
-
-Stores are injected, so the flow is testable with in-memory ones. Every write is an id-keyed
-upsert, so re-ingesting is safe and an amended entry simply overwrites its record.
+All of these are deterministic serving indexes: nothing here infers anything, so nothing needs
+review (D-2026-08-25-an-eln-transcription-is-data-not-a-claim). Stores are injected, and every write
+is an id-keyed upsert, so re-ingesting is safe and an amended entry overwrites its record.
 """
 
 import logging
@@ -55,34 +45,13 @@ async def ingest_reaction(
 ) -> ReactionRecord:
     """Validate, index (reaction + compounds + impurities + labels), store the record; return it.
 
-    Raises `IngestError` (listing the problems) if the reaction is invalid, so a corrupt
-    ELN entry never reaches the index or the corpus.
+    Raises `IngestError` listing the problems if the reaction is invalid, so a corrupt entry never
+    reaches the index or the corpus.
 
-    Returns the stored record rather than a reference, because there is no longer anything to refer
-    *to*: the transcription is the row, available the moment this returns instead of whenever
-    somebody got round to merging a pull request.
-
-    `label_index` and `source` are keyword-only and **required**, with no default, which is
-    deliberate: the label index's record phase can only be written here, from the canonical record
-    in hand (`ingest/labels/record.py` says why), so a default of `None` would let a caller quietly
-    stop writing the half of the row that cannot be reconstructed afterwards.
-
-    `source` is the registry source name, and it is the other half of the key of *every* row this
-    writes about the reaction — two ELNs may legitimately use one entry id, and a facet count must
-    not merge two sites' runs any more than one site's transcription may overwrite the other's.
-    Each tier reached that key on its own date and the last one closed the gap this docstring used
-    to name: `reaction_labels` since `051`, the transcription tier since
-    `D-2026-08-26-a-transcription-is-keyed-by-its-source` (it carried the rendered provenance in a
-    `source` column beside a bare-id key, which recorded which site won rather than keeping both),
-    and `reaction_fingerprints` since `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`. Measured
-    before that last one, ingesting `EXP-1001` from two sources left **one** fingerprint row, and
-    searching the index for the losing site's own reaction returned no hits under the verdict "this
-    is a genuine negative result".
-
-    **The molecule index is deliberately not keyed by source**, and that is not the same gap: a
-    molecule record's id is its standardized SMILES, so two sites charging the same reagent are one
-    structure and must share one row. What has a source is a record whose id came from outside this
-    system.
+    `label_index` and `source` are keyword-only and required: the label record phase can only be
+    written here, from the canonical record. `source` is half of the key of every row written about
+    the reaction, since two ELNs may use one entry id. The molecule index is not keyed by source: a
+    molecule's id is its standardized SMILES, and two sites charging one reagent share a row.
     """
     problems = validate_ord(reaction)
     if problems:
@@ -90,22 +59,14 @@ async def ingest_reaction(
 
     if reaction.tier is RecordTier.STRUCTURED:
         await _index_structure(reaction, reaction_store, molecule_store, label_index, source)
-    # **A citation-only record writes nothing to any structural index — no DRFP row, no molecule
-    # row, no label row — only the record**, per
-    # `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`. A reaction
-    # fingerprint of the structured subset would describe a reaction nobody ran, and a similarity
-    # hit on it would cite a record whose defining species has no structure. The molecule rows are
-    # skipped too, although each named structure is real, so that "a citation-only record
-    # contributes no row to any fingerprint store" is one rule a test can hold rather than a
-    # per-store judgement; and the label row is skipped because the labeller derives an atom
-    # mapping and a named reaction from `record_smiles`, which a partial reaction would make into
-    # an inference about a structure nobody gave.
+    # A citation-only record writes nothing to any structural index (no DRFP, molecule or label
+    # row), only the record (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable):
+    # a fingerprint of the structured subset would describe a reaction nobody ran, and the labeller
+    # would infer from a partial structure.
 
-    # The withdrawal is stamped here rather than inside `record_from_ord_reaction`, because that
-    # function maps an `OrdReaction` and a retraction is not in the reaction — it is something the
-    # *source* said about the entry, and `RawEntry` is where the source speaks. Keeping the mapping
-    # pure is also what keeps it the deterministic transcription
-    # `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` argues it is.
+    # The withdrawal is stamped here, not in `record_from_ord_reaction`: it is something the source
+    # said about the entry (`RawEntry`), and keeping the mapping pure keeps it a deterministic
+    # transcription.
     record = record_from_ord_reaction(reaction)
     if retracted_at is not None:
         record = record.model_copy(update={"retracted_at": retracted_at})
@@ -121,44 +82,30 @@ async def _index_structure(
     source: str,
 ) -> None:
     """Write a structured reaction's three structural index rows: DRFP, ECFP4 and its label."""
-    # `transformation_smiles`, never `reaction_smiles`: the row is a fingerprint, and the agent
-    # slot only changes the bits by being *left out* (DRFP folds it back onto the reactants).
-    #
-    # The source is set on the record rather than passed to `record_for_reaction`, because that
-    # builder is the DRFP half — id, label, bits, definition — and the source is who supplied the
-    # id, which the fingerprint knows nothing about. Keeping it out of the builder also keeps the
-    # molecule builder beside it honest: a structure has no source to carry.
+    # `transformation_smiles`, never `reaction_smiles`: DRFP folds the agent slot back onto the
+    # reactants. The source is set on the record rather than passed to the builder, which knows only
+    # the fingerprint.
     fingerprint = record_for_reaction(reaction.reaction_id, reaction.transformation_smiles())
     await reaction_store.add(fingerprint.model_copy(update={"source": source}))
     for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
     await _index_impurities(reaction, molecule_store)
 
-    # The label index's record phase, from the record form — agents kept, conditions and workup in
-    # columns. A fourth deterministic serving index beside the three above, derived from the same
-    # validated record: what `reaction_records` holds is the transcription a hit expands into,
-    # while this holds the facets a hit is *found* by, and neither can be reconstructed from the
-    # other.
+    # The label index's record phase: the facets a hit is found by, derived from the same validated
+    # record; `reaction_records` holds what a hit expands into, and neither is reconstructible from
+    # the other.
     await label_index.record(record_phase(reaction, source))
 
 
 async def _index_impurities(reaction: OrdReaction, molecule_store: FingerprintStore) -> None:
-    """Index the identified impurity structures beside the compounds (gap KNW-2).
+    """Index the identified impurity structures beside the compounds.
 
-    "Have we seen this impurity before?" is a structure question, and the answer used to be no
-    matter what: an impurity's SMILES reached the note *text* only, so it was findable by lexical
-    search and invisible to `similar_molecules`/`substructure_matches` — the exact inverse of what
-    the question needs. Same standardization and same record shape as the compounds, so an
-    impurity in one run and the same molecule charged as a reactant in another land on one row.
+    "Have we seen this impurity before?" is a structure question, so impurities share the compounds'
+    standardization and record shape. Skipped:
 
-    Two kinds of impurity are skipped rather than indexed, both because `Impurity` is deliberately
-    lenient about identification:
-
-    * no `smiles` — an ELN routinely records only a chromatographic name and an RRT; there is no
-      structure to fingerprint and that is not an error.
-    * a `smiles` RDKit cannot parse — `validate_ord` checks the *reaction's* components, not the
-      impurity profile, so a malformed trace-impurity string would otherwise abort ingestion of an
-      entirely valid experiment. Logged, never silent: the run is kept, the bad structure is not.
+    * no `smiles` — an ELN often records only a name and RRT; not an error.
+    * a `smiles` RDKit cannot parse — `validate_ord` does not check the impurity profile, so this is
+      logged and skipped rather than aborting a valid experiment.
     """
     for smiles in {standard_smiles(i.smiles) for i in reaction.impurities if i.smiles}:
         try:

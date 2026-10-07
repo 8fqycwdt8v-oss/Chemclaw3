@@ -77,8 +77,7 @@ def draining() -> Iterator[None]:
 
 
 class ActivityContext:
-    """The three ambient ids one activity execution should run under, and its roles if it has any.
-    """
+    """The three ambient ids one activity execution runs under, and its roles if it has any."""
 
     __slots__ = ("actor", "correlation_id", "roles", "session_id")
 

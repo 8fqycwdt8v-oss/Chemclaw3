@@ -160,7 +160,7 @@ issuer (the `Chemclaw3_mock` tenant, `D-2026-08-20-a-tenant-is-a-jwks-document-a
 and on a local kind cluster (`make kind-up` in its `oidc-mock` auth mode, `deploy/kind/README.md`)
 sign-in enforced over https, Postgres TLS, Temporal mTLS against a self-hosted broker, and the
 chart's NetworkPolicies on a CNI that enforces them. What still needs a real environment, and must be
-validated in a staging tenant/cluster before production (`docs/planning/DEFERRED.md`, "Gated on
+validated in a staging tenant/cluster before production (`docs/planning/BACKLOG.md`, "Gated on
 infrastructure this environment does not have"):
 
 - Browser sign-in against a real Entra tenant (the one unproven hop is browser → tenant).

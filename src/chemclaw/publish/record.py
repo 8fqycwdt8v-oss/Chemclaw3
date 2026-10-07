@@ -1,38 +1,21 @@
 """The canonical shape a computed result takes on its way out of this system.
 
-**Why this exists.** `calculation_results` is a cache: `key TEXT PRIMARY KEY` onto an opaque
-`result JSONB`, and `CalculationQuery`'s own docstring says the opacity is deliberate — *"a
-`total_energy_hartree > x` predicate would put one calculator's schema inside the thing that
-persists all of them."* That is right for a store whose job is exact-key lookup, and it is exactly
-why the cache cannot also be the scientific record. This module is the other shape: the same
-science, projected into something a chemist can put a `WHERE` clause on.
+`calculation_results` is a deliberately opaque cache keyed for exact lookup; this module is the
+same science projected into something a chemist can put a `WHERE` clause on.
 
-**The central abstraction: a calculation is an event with a subject, and results are typed facts
-about that subject.** Three parts, and the split between them is load-bearing:
+A calculation is an event with a subject, and results are typed facts about that subject:
 
 - a **spine** (`ResultRecord`) carrying identity, subject, conditions and provenance;
-- a **governed fact layer** — every fact names a `property` that must exist in the shipped
-  registry, so a value cannot be written under a name nobody defined;
-- the **verbatim payload**, carried untouched. That is what makes the projection safe to be wrong:
-  the truth is retained, and every fact can be rebuilt from it by re-projecting.
+- a **governed fact layer**: every fact names a registered `property`;
+- the **verbatim payload**, so every fact can be rebuilt by re-projecting.
 
-**One subject shape for five cases, rather than five special cases.** A subject is an identity plus
-1..N members with roles. One molecule is one member; a reaction is N members with
-`reactant`/`product` roles; a complex is three (`monomer`, `monomer`, `complex`); an ensemble is one
-member naming the *seed* geometry, because the conformers it found are outputs rather than
-subjects. A continuum solvent is deliberately **not** a member — it is a parameter of the
-Hamiltonian, not a species — while an explicit solvent molecule is, and the two stay
-distinguishable because they are genuinely different calculations.
+One subject shape (an identity plus 1..N members with roles) covers a molecule, a reaction, a
+complex and an ensemble (whose member is the seed geometry). A continuum solvent is a condition,
+not a member; an explicit solvent molecule is a member.
 
-**Subject identity excludes solvent, temperature and method**, and that exclusion is what makes
-"compare ΔG for this reaction across every solvent we ran it in" a `GROUP BY subject_id` rather
-than a fuzzy join over two text arrays that happen to be spelled the same way.
-
-**A calculation's identity excludes who asked for it.** `qm_job_key` already states the rule — *"the
-result of a calculation does not depend on who asked for it, so identical science shares one key
-across users."* So the actor does not live on the record; it lives on `Publication`, of which there
-are N per record. Two chemists running the same calculation produce one `ResultRecord` and two
-publications, which is also what makes re-delivery idempotent.
+Subject identity excludes solvent, temperature and method, so "this reaction across every
+solvent" is a `GROUP BY subject_id`. A calculation's identity excludes who asked: the actor lives
+on `Publication`, N per record, which also makes re-delivery idempotent.
 """
 
 from datetime import datetime
@@ -43,43 +26,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chemclaw.core.ids import stable_hash
 from chemclaw.publish.solvents import canonical_solvent
 
-# The contract version this writer builds records against. Stamped on every record so a consumer
-# can tell an absent *measurement* from an absent *column* — the question "why is `in_domain` NULL
-# for everything before March" is unanswerable without it.
+# The contract version this writer builds records against, stamped on every record so a consumer
+# can tell an absent *measurement* from an absent *column*.
 #
-# Bump when the meaning of an already-published field changes. A field merely *added* does not need
-# one: an older row simply has the default, which reads correctly as "not recorded".
+# Bump when the meaning of an already-published field changes; an added field needs no bump. A
+# bump is also what lets corrected documents enqueue, since the outbox ignores a duplicate
+# `(sink, calc_ref, schema_version)`.
 #
-# **2 — `max_gradient` was published under the wrong unit.** `_optimization` reported it as
-# `hartree/bohr` while `OptimizationResult.max_gradient` holds Hartree/Angstrom, so `to_canonical`
-# saw a canonical unit and passed the number through: every gradient published at version 1 is
-# 1.890x too large, wearing a correct-looking unit string, and therefore silently inside or outside
-# any range filter the column exists for.
-#
-# The bump is what makes the two populations separable *and* what makes the correction deliverable.
-# `result_publications` is keyed `(sink, calc_ref, schema_version)` with `ON CONFLICT DO NOTHING`,
-# so re-projecting a corrected document at the same version is a no-op — measured, the corrected
-# row was dropped even while the original was still `pending`. At a new version it enqueues.
-#
-# A consumer separating them without re-publishing can read `reported_unit`: `hartree/bohr` on a
-# `max_gradient` fact is the old, wrong population, `hartree/angstrom` the corrected one, because
-# `_fact` always records what the calculator actually said.
-#
-# **3 — `subject_id` identified a member by `compound_id`, which cannot tell two species apart.**
-# See `Subject.subject_id` for the measurement. The consequence for already-published rows is that
-# the *same* subject now hashes to a different id, so this is a change in the meaning of a
-# published field and needs the bump for the same reason version 2 did: nothing is deleted and no
-# foreign key dangles — old `calculation` rows still reach their old `subject` and its members —
-# but a subject published on either side of this change carries two ids, so `GROUP BY subject_id`
-# no longer joins them. Re-projecting the corpus is what repairs that (the `calculation` upsert
-# re-points each row at the new subject, leaving the old `subject` rows unreferenced), and at the
-# *same* version the outbox's `ON CONFLICT DO NOTHING` would have dropped every one of those
-# documents. At a new version it enqueues.
+# - **2**: `max_gradient` is converted from Hartree/Angstrom; version-1 rows are 1.89x too large
+#   (their `reported_unit` reads `hartree/bohr`).
+# - **3**: `subject_id` identifies members by SMILES before `compound_id`, so a subject has a
+#   different id on either side; re-projecting the corpus re-points old rows.
 CONTRACT_VERSION = 3
 
-# What a member is to the subject. Closed, because an unknown role is a projection bug rather than
-# a new kind of chemistry, and silently accepting one would put an unqueryable value in the column
-# every reaction query filters on.
+# What a member is to the subject. Closed: an unknown role is a projection bug, and accepting one
+# would put an unqueryable value in the column every reaction query filters on.
 MemberRole = Literal[
     "subject",  # the single molecule or geometry a calculation is about
     "reactant",
@@ -90,30 +51,18 @@ MemberRole = Literal[
     "catalyst",
 ]
 
-# The five subject shapes, named. `system` is the escape hatch for a future multi-component subject
-# that is none of the four specific ones; it is deliberately last and deliberately vague, because a
-# projection reaching for it is a signal that a real kind is missing.
+# The subject shapes. `system` is the escape hatch for a multi-component subject that is none of
+# the others; a projection reaching for it signals a missing kind.
 SubjectKind = Literal["molecule", "geometry", "ensemble", "reaction", "complex", "system"]
 
 # Where a fact attaches. `calculation` is a fact about the whole run (a reaction's ΔG); `member` is
 # a fact about one participant (a species' absolute Gibbs energy). One table answers both.
 FactScope = Literal["calculation", "member"]
 
-# Every model in this document, on the same three terms.
-#
-# `extra="forbid"` and `frozen=True` were already written twelve times over; `allow_inf_nan=False`
-# is the third, and writing all three once is what stops the thirteenth model from carrying two of
-# them. **A published document is JSON, and `NaN`/`±Infinity` are not JSON.** A failed
-# optimization or a division by zero inside a calculator mints them like any other float, and
-# nothing between the calculator and the `jsonb` column said no: the document reached Postgres,
-# which refused it as an `InvalidTextRepresentation` naming a *token*, counted as a transient
-# publish failure for a payload that will fail identically forever.
-#
-# Refused here instead, which is the boundary `records_for` already guards and already counts as
-# `chemclaw_result_projection_failures_total` — the series whose declared meaning is a permanent
-# gap in this release rather than a destination having a bad day. The verbatim payload is untouched
-# by this: it is `dict[str, Any]`, so the calculator's own number is still carried out whole, and
-# the refusal is of the *typed fact* built from it.
+# Every model in this document, on the same three terms. `allow_inf_nan=False` because a published
+# document is JSON and NaN/Infinity are not; refusing here counts the failure as a permanent
+# projection gap rather than a transient publish failure at the database. The verbatim payload is
+# unaffected.
 _STORABLE = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
@@ -130,10 +79,9 @@ class SubjectMember(BaseModel):
 
     ordinal: int = Field(ge=0)
     role: MemberRole
-    # The molecule, as this system already identifies one: `core.chem.compound_id`, a hash over the
-    # *standardized* SMILES. Reused rather than minting an InChIKey, because it is already the join
-    # key between the knowledge graph, the fingerprint search and the QM notes — so a published
-    # result meets the note about the same compound with no second naming scheme.
+    # `core.chem.compound_id`, a hash over the standardized SMILES: the join key the knowledge graph
+    # and
+    # fingerprint search already use.
     compound_id: str = ""
     smiles: str = ""
     # The geometry, when this member is one. Content-addressed and byte-identical on both sides of
@@ -147,8 +95,8 @@ class SubjectMember(BaseModel):
     def _identifies_something(self) -> "SubjectMember":
         """Reject a member that names neither a molecule nor a geometry.
 
-        Such a row would join to nothing and would make every "what do we hold for compound X"
-        query silently under-return, which is the failure this whole module exists to avoid.
+        Such a row would join to nothing and make "what do we hold for compound X" silently
+        under-return.
         """
         if not (self.compound_id or self.smiles or self.structure_id):
             raise ValueError(
@@ -178,27 +126,13 @@ class Subject(BaseModel):
     def subject_id(self) -> str:
         """The content address of this subject, excluding solvent, temperature and method.
 
-        Excluding them is the point: it is what lets one reaction's runs across five solvents be
-        found by grouping on a single column.
-
-        **A member is identified by its own SMILES first, and by `compound_id` only as a last
-        resort.** This read `compound_id` first, which looks like the obvious choice — it is the
-        join key every other subsystem uses — and is the one identifier that *cannot* serve here:
-        it hashes the **standardized** structure, so by design it collapses tautomers, an
-        imine/enamine pair, and a neutral acid onto its conjugate base. Those are exactly the
-        species a `SpeciesDistribution` enumerates, so every tautomer, microstate and stereoisomer
-        set of one substance hashed to a single `subject_id`. Measured on malonic acid: the
-        microstates at pH 4 (`{H2A, HA-}`) and at pH 9 (`{H2A, A2-}`) were one subject, and since
-        `subject_member`'s key is `(subject_id, ordinal)` the second publication silently
-        **overwrote** the first's members — after which `GROUP BY subject_id`, the column this
-        whole query model rests on, grouped two incomparable calculations.
-
-        Precedence, and why not simply hash all three: the SMILES is the most specific chemical
-        identity a member carries, `structure_id` identifies a geometry for a member that names no
-        molecule, and `compound_id` is the fallback for a member that arrived as a bare id. Hashing
-        every field instead would make a member that *gained* a `structure_id` on a later run a
-        different subject from the same chemistry run without one, which is the grouping this id
-        exists to provide.
+        Each member is identified by its own SMILES first, then `structure_id`, then `compound_id`
+        as a
+        last resort: `compound_id` standardizes, so it would collapse the tautomers and microstates
+        a
+        species distribution enumerates into one subject. Precedence rather than hashing all three,
+        so a
+        member that later gains a `structure_id` stays the same subject.
         """
         parts = sorted(
             (
@@ -247,10 +181,9 @@ class Conditions(BaseModel):
     def _canonical_solvent(cls, value: str | None) -> str | None:
         """Resolve an accepted spelling to the one id every query filters on.
 
-        An unrecognized name is normalized and kept rather than refused — a solvent this registry
-        has not heard of is still a fact about the run, and losing a finished calculation to
-        protect a lookup table would be the wrong trade. An empty or whitespace name reads as gas
-        phase, which is what `canonical_solvent` already decides for the calculation layer.
+        An unrecognized name is normalized and kept, not refused (it is still a fact about the run).
+        An
+        empty or whitespace name reads as gas phase.
         """
         return canonical_solvent(value)
 
@@ -258,9 +191,8 @@ class Conditions(BaseModel):
     def condition_id(self) -> str:
         """The content address of this condition set.
 
-        A record with nothing set resolves to one shared id rather than to a null, so "ran in the
-        gas phase with nothing else stated" and "this calculator has no conditions" are one
-        queryable value instead of a `LEFT JOIN` in every consumer.
+        A record with nothing set resolves to one shared id rather than null, so consumers need no
+        `LEFT JOIN`.
         """
         return f"cond_{stable_hash(self.model_dump(mode='json'))}"
 
@@ -321,24 +253,18 @@ class PropertyFact(BaseModel):
     scope: FactScope = "calculation"
     # Which member this is about, at member scope. None at calculation scope.
     member_ordinal: int | None = None
-    # Exactly one of these three carries the value. A numeric fact fills `value`; a boolean
-    # (`converged`, `is_minimum`) fills `value_bool`; a coded string (`site='acid'`) fills
-    # `value_text`.
+    # Exactly one of these three carries the value: `value` (numeric), `value_bool` (`converged`),
+    # or
+    # `value_text` (`site='acid'`).
     value: float | None = None
     value_bool: bool | None = None
     value_text: str = ""
-    # The unit the calculator reported, which is the unit `reported_value` is in — never the unit
-    # of `value`. `value` is always the registry's canonical unit for this property, because
-    # `project._fact` puts it there.
+    # The unit the calculator reported, which `reported_value` is in; `value` is always canonical.
     unit: str = ""
-    # What the calculator actually said, before canonicalization, in `unit`. None where the two are
-    # the same number, which is every projector shipping today.
-    #
-    # **The pair has to travel together or it is not recoverable.** `dialect.py` writes
-    # `reported_value`/`reported_unit` so "the day a conversion is found wrong" the canonical column
-    # can be rebuilt from them — and with only `value` on this model to write there, it filed the
-    # *converted* number under the *reported* unit. Invisible while every call site reports the
-    # canonical unit already, and a silently unrecoverable row the first time one does not.
+    # What the calculator said, before canonicalization, in `unit`; None where the two are the same
+    # number. Carried as a pair with `unit` so the canonical column can be rebuilt if a conversion
+    # is
+    # ever found wrong.
     reported_value: float | None = None
     uncertainty: float | None = None
     uncertainty_kind: str = ""  # Estimate.method: reported | propagated | none
@@ -348,8 +274,7 @@ class PropertyFact(BaseModel):
     def _carries_exactly_one_value(self) -> "PropertyFact":
         """Reject a fact with no value, or with more than one kind of value.
 
-        A fact carrying none is a projection that dropped its number; a fact carrying two is one
-        that could be read two ways. Both are silent in storage and loud here.
+        Both are silent in storage: one dropped its number, the other could be read two ways.
         """
         filled = [self.value is not None, self.value_bool is not None, bool(self.value_text)]
         if sum(filled) != 1:
@@ -442,11 +367,9 @@ class ConformerFact(BaseModel):
 
     ordinal: int = Field(ge=0)  # 0 = lowest, as `ensemble_from_members` orders them
     structure_id: str = Field(min_length=1)
-    # The electronic state this geometry was computed at, when the payload states it. Carried
-    # because `structure_id` is a hash *over* charge and multiplicity and so cannot be read back
-    # for them, and because the `structure` row these become is what "show me every anionic
-    # geometry we have optimised" filters on. `None` is "the payload did not say", which is not
-    # the same as neutral — see `dialect.PRESERVE_ON_BLANK`.
+    # The electronic state this geometry was computed at, when the payload states it. `structure_id`
+    # hashes over it and cannot be read back, and the `structure` row filters on it. `None` means
+    # unstated, not neutral (see `dialect.PRESERVE_ON_BLANK`).
     charge: int | None = None
     multiplicity: int | None = None
     energy_hartree: float | None = None
@@ -458,8 +381,8 @@ class ConformerFact(BaseModel):
     def _at_least_one_energy(self) -> "ConformerFact":
         """Reject a member carrying neither an absolute nor a relative energy.
 
-        A conformer with no energy at all is not a conformer anyone can rank, and storing one would
-        put a row in the ensemble table that every ensemble query has to filter back out.
+        A conformer with no energy cannot be ranked and would have to be filtered out by every
+        query.
         """
         if self.energy_hartree is None and self.relative_kcal is None:
             raise ValueError(
@@ -526,22 +449,19 @@ class Publication(BaseModel):
 
     model_config = _STORABLE
 
-    # **Empty means "whatever the sink calls this deployment", and empty is the normal case.** A
-    # record is sink-agnostic by construction — the same projected record goes to every enabled
-    # sink — so the tenant cannot be known when the record is built, only when it is written.
-    # `dialect.rows_for` substitutes the manifest's `tenant_id` for an empty one. A non-empty value
-    # here is a deliberate override, for a record being republished on behalf of another
-    # deployment.
+    # Empty (the normal case) means "whatever the sink calls this deployment": a record goes to
+    # every
+    # enabled sink, and `dialect.rows_for` substitutes the manifest's `tenant_id`. Non-empty is a
+    # deliberate override.
     tenant_id: str = ""
     actor: str = ""
     session_id: str = ""
     correlation_id: str = ""
     job_id: str = ""
     rationale: str = ""
-    # The knowledge-graph note this run produced, or empty when it produced none — the same value
-    # and the same meaning as `job_records.note_id`, which is where it comes from. **Not** the ELN
-    # run that motivated the calculation: nothing in this system records that, so a field for it
-    # would be one nobody can fill.
+    # The knowledge-graph note this run produced, or empty (as `job_records.note_id`). Not the ELN
+    # run
+    # that motivated the calculation, which nothing records.
     note_id: str = ""
 
 
@@ -556,9 +476,9 @@ class ResultRecord(BaseModel):
     model_config = _STORABLE
 
     # --- identity -------------------------------------------------------------------------
-    # The flat cache key, `calc_type@calc_version:input_hash:params_hash` — the same string a
-    # knowledge note cites and `find_calculations` resolves, so a published row and a note about it
-    # name the calculation identically.
+    # The flat cache key `calc_type@calc_version:input_hash:params_hash`, the same string a
+    # knowledge
+    # note cites, so both name the calculation identically.
     calc_ref: str = Field(min_length=1)
     calc_type: str = Field(min_length=1)
     calc_version: str = ""
@@ -569,9 +489,8 @@ class ResultRecord(BaseModel):
     subject: Subject
     conditions: Conditions = Field(default_factory=Conditions)
     level: TheoryLevel
-    # The geometry the calculation ran **on**, never the one it produced — migration 048's meaning,
-    # kept, because that is the question a chemist holding a conformer's address actually asks.
-    # Empty for a molecule-keyed calculator, which reads as "not recorded" rather than "none".
+    # The geometry the calculation ran **on**, never the one it produced. Empty for a molecule-keyed
+    # calculator ("not recorded").
     structure_id: str = ""
 
     # --- the facts ------------------------------------------------------------------------
@@ -581,30 +500,23 @@ class ResultRecord(BaseModel):
     conformers: list[ConformerFact] = Field(default_factory=list)
     candidates: list[CandidateFact] = Field(default_factory=list)
     flags: list[FlagFact] = Field(default_factory=list)
-    # **No `artifacts` list, deliberately.** One shipped here, with an `ArtifactFact` model, a
-    # `calculation_artifact` table in `TABLE_ORDER` and a row builder to fill it — and no producer
-    # at any layer: no projector returned an `artifacts` key and `project()` never read one, so
-    # the list was empty on every record this system could build while a site was still required
-    # to create the table for delivery to work at all. Deleted rather than left half-wired, on
-    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`'s rule; the local
-    # `calculation_artifacts` table (migration 019) remains this deployment's own record of a
-    # calculation's by-products. Restoring it means shipping the producer in the same change, and
-    # `tests/test_publish_dialect.py` fails whoever does not.
+    # No `artifacts` list: nothing produces one. The local `calculation_artifacts` table holds a
+    # calculation's by-products; restoring the field means shipping its producer in the same change
+    # (`tests/test_publish_dialect.py` enforces it).
 
     # --- provenance -----------------------------------------------------------------------
     provenance: str = "computed"  # computed | measured | imported
     compute_seconds: float | None = None
     computed_at: datetime | None = None
-    # The calculations this one rested on. Published as edges rather than an array column, because
-    # staleness propagation walks them in reverse and no array type indexes that direction — and
-    # because neither Snowflake nor Oracle has one.
+    # The calculations this one rested on, published as edges because staleness propagation walks
+    # them
+    # in reverse and array columns are not portable.
     depends_on: list[str] = Field(default_factory=list)
     publications: list[Publication] = Field(default_factory=list)
 
     # --- the original ---------------------------------------------------------------------
-    # The payload exactly as it was stored, never a predicate. This is what makes the projection
-    # safe to be wrong: every fact above can be rebuilt from it by re-projecting, so a projector bug
-    # is a replay rather than a data loss.
+    # The payload exactly as stored, never a predicate, so a projector bug is a replay, not data
+    # loss.
     payload: dict[str, Any] = Field(default_factory=dict)
     payload_kind: str = ""  # the pydantic model name, for choosing a schema to validate against
     contract_version: int = CONTRACT_VERSION
@@ -618,10 +530,8 @@ class ResultRecord(BaseModel):
     def _facts_address_real_members(self) -> "ResultRecord":
         """Reject a member-scoped fact naming a member the subject does not have.
 
-        Caught here rather than by a foreign key at the far end, because the far end may be a
-        warehouse that does not enforce one — Snowflake accepts a `REFERENCES` clause and never
-        checks it. An off-by-one in a per-species projection would then land silently and make
-        every per-species query under-return.
+        Caught here because the far end may not enforce foreign keys (Snowflake accepts `REFERENCES`
+        and never checks it).
         """
         ordinals = {member.ordinal for member in self.subject.members}
         for fact in self.properties:

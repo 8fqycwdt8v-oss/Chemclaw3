@@ -1,16 +1,8 @@
-"""Standing queries: tell me when something relevant lands (gap IDEA-1).
+"""Standing queries: tell me when something relevant lands.
 
-The system was strictly pull. It already had durable sessions, a push-back mailbox, per-user
-identity and fingerprint search — every ingredient for *push* — and used none of them that way. A
-chemist learned about a relevant new experiment only by asking again at the right moment, which
-means the useful ones were found by luck.
-
-A subscription is a saved query plus a watermark. The digest job (`durable/digest.py`) re-runs
-each one on a cadence and reports only what has appeared since that subscriber was last told, so a
-digest stays a digest rather than becoming a daily re-send of the whole corpus.
-
-Per-*user*, not per-session, deliberately: a standing query outlives the conversation that created
-it, which is the entire point of it being standing.
+A subscription is a saved query plus a watermark. The digest job (`durable/digest.py`) re-runs each
+one on a cadence and reports only what appeared since the subscriber was last told. Per user, not
+per session, because a standing query outlives the conversation that created it.
 """
 
 import logging
@@ -41,10 +33,8 @@ _SELECT_OWNER = f"SELECT {_COLUMNS} FROM subscriptions WHERE owner = %s ORDER BY
 _SELECT_ALL = f"SELECT {_COLUMNS} FROM subscriptions ORDER BY id"
 _DELETE = "DELETE FROM subscriptions WHERE owner = %s AND query = %s"
 
-# Accumulate within the watermark's date, reset when it rolls over (DARK-7). Done in SQL rather
-# than read-modify-write in Python because the date comparison and the write have to be one
-# statement: two digest runs overlapping would otherwise each read the same list and the second
-# would overwrite the first's additions, re-reporting exactly what this is meant to stop.
+# Accumulate within the watermark's date, reset when it rolls over. One SQL statement, so
+# overlapping digest runs cannot overwrite each other's additions and re-report them.
 _TOUCH = """
 UPDATE subscriptions
    SET last_seen_note_ids = CASE
@@ -65,9 +55,8 @@ class Subscription(BaseModel):
     query: str
     note_type: str | None = None
     last_seen_at: datetime | None = None
-    # The note ids already delivered *at `last_seen_at`'s date*. Only that date's, so the list is
-    # bounded by one day of matches: anything older is already excluded by the date comparison
-    # itself, and keeping it would make this grow with the corpus (DARK-7).
+    # The note ids already delivered at `last_seen_at`'s date only; older notes are excluded by the
+    # date comparison, so the list stays bounded by one day of matches.
     last_seen_note_ids: list[str] = Field(default_factory=list)
 
 
@@ -75,11 +64,9 @@ class Subscription(BaseModel):
 async def _connection() -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a connection with the configured per-statement timeout.
 
-    Pooled per process when the process opened a pool (`chemclaw.core.db.pooling`), so a
-    request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
-    down or misconfigured database reports "Postgres unreachable at <host>" rather than a
-    raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
-    activity for its whole budget.
+    Pooled when the process opened a pool (`chemclaw.core.db.pooling`), a dedicated connect
+    otherwise. A down database reports "Postgres unreachable at <host>", and a hung query is
+    cancelled.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         yield conn
@@ -133,15 +120,9 @@ async def remove(owner: str, query: str) -> None:
 async def mark_reported(subscription_id: int, note_ids: list[str]) -> None:
     """Advance a subscription's watermark and remember what it just delivered.
 
-    Advanced *after* delivery, never before: a crash between the two must re-report rather than
-    silently skip, because a duplicate digest line is a nuisance and a missed one defeats the
-    feature.
-
-    `note_ids` is what makes the watermark exact rather than merely approximate. The date
-    comparison alone cannot separate "dated today and already sent" from "dated today and new",
-    because a note's `valid_from` is a date and the digest runs hourly — so `>=` re-sent every
-    same-day note every hour, and `>` would have dropped the ones that arrived later that day.
-    Remembering the ids settles it without choosing between the two failures (DARK-7).
+    Advanced after delivery, never before: a crash re-reports rather than silently skips. `note_ids`
+    makes the watermark exact: `valid_from` is a date and the digest runs more often, so the date
+    alone cannot separate already-sent same-day notes from new ones.
     """
     async with _connection() as conn:
         async with conn.cursor() as cur:
@@ -201,14 +182,9 @@ async def list_watches() -> list[Subscription]:
     Returns:
         Each saved watch and when it last reported.
     """
-    # `query` and `note_type` are free text the model wrote through `watch_for`, out of whatever it
-    # had just read — and a watch is durable by design, so they re-enter a prompt on every later
-    # turn and in every later session. Measured: a query carrying the live closing delimiter came
-    # back verbatim. Defanged rather than framed, for the reason `agent/tool_framing.py` gives a
-    # helper's report: a saved query is this system's own note, not evidence to cite. The
-    # neutralisation is here rather than in `for_owner`, which the digest job also reads and which
-    # writes no prompt. The rest of the row is an integer id, the ambient oid, a timestamp and note
-    # ids from the corpus.
+    # `query` and `note_type` are model-written free text that re-enters prompts in later turns, so
+    # they are defanged (a saved query is this system's own note, not evidence to frame). Done here
+    # rather than in `for_owner`, which the digest job also reads and which writes no prompt.
     return [
         watch.model_copy(
             update={

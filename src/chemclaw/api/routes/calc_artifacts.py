@@ -1,15 +1,9 @@
 """A stored calculation by-product as a download — the bytes behind a geometry artefact's `source`.
 
-**Any authenticated caller, not session-scoped**, the position `GET /notes/{id}` and `GET /jobs`
-take and for the same reason: the calculation cache is shared — one Hessian serves every session
-that asks about that molecule — and an artifact has no owner to scope it to. The artefact that
-*cites* one is session-scoped; the cited bytes are the organisation's cache
-(`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`). What the gate buys is
-that a caller exists and is inside the per-principal rate budget.
-
-**Bounded before it is read.** The store decompresses a whole blob into memory on `open`, so an
-artifact larger than `calc_artifact_max_download_bytes` is refused with 413 from its recorded size,
-never read first.
+Any authenticated caller, not session-scoped: the calculation cache is shared across sessions and an
+artifact has no owner (the artefact citing it is session-scoped). An artifact over
+`calc_artifact_max_download_bytes` is refused with 413 from its recorded size, before the store
+decompresses it into memory.
 """
 
 from __future__ import annotations
@@ -28,8 +22,8 @@ async def get_calc_artifact_content(
 ) -> Response:
     """The artifact's bytes with its stored media type, as an attachment named by its role.
 
-    404 for a reference that is malformed, names nothing, or names a blob evicted between the
-    listing and the read — all three are "there is no file here"; 413 above the download cap.
+    404 for a malformed reference, one naming nothing, or an evicted blob; 413 above the download
+    cap.
     """
     found = await calc_artifact_at(ref)
     if found is None:
@@ -54,7 +48,6 @@ async def get_calc_artifact_content(
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
-    With the app's own decorators rather than an `APIRouter`, for the reason
-    `chemclaw/api/routes/sessions.py`'s `register` gives.
+    App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
     app.get("/calc-artifacts/content")(get_calc_artifact_content)

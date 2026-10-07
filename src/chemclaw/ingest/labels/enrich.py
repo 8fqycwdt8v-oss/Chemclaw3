@@ -1,28 +1,13 @@
 """The enrichment drain: find the rows nothing has labelled, label them, stamp them.
 
-One bounded pass. `stale()` is a `WHERE labeller_version IS DISTINCT FROM $1` — so "as soon as
-entries are identified that miss these things" is a query, and nothing anywhere has to remember to
-mark a row as needing work. A new corpus arrives unlabelled and is found; an upgraded labeller
-changes the version and the whole corpus is found again.
+One bounded pass. `stale()` selects rows whose `labeller_version` differs from the current one, so a
+new corpus and an upgraded labeller are both found by a query rather than by bookkeeping.
 
-**Why a batch failure retries reaction by reaction.** `stale()` is deterministic — same `ORDER BY`,
-same `LIMIT`, the same first batch on every attempt — so one reaction the server chokes on failed
-this activity identically on every retry and stopped labelling *the entire corpus*, permanently.
-That is not a hypothetical: it is what `ingest/documents/sync.py::reembed_stale` was changed to
-prevent after one un-embeddable chunk stalled every share. The isolation is the same here, and so
-is the rule that follows from it: a reaction that genuinely cannot be labelled is still **stamped**
-for the current version, so it leaves the stale set instead of being retried forever. What it
-carries is a row with nothing derived, which the coverage report counts honestly as unlabelled.
-
-**That last sentence was false for as long as it stood here**
-(`D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`). The stamp was the plain current
-version, and
-`coverage` counts `labeller_version = version`, so a pass that derived nothing reported
-"COMPLETE: … counts over this facet are totals rather than lower bounds" over rows whose content
-came from a superseded labeller — `merge` keeps what was already there. It is true now because
-`store_labels` is told which it is: the stamp for a row nothing was derived for carries a marker
-(`science.labels.store.underived_stamp`), which `stale()` accepts as done and every currency
-reader rejects.
+`stale()` is deterministic, so a batch failure is retried reaction by reaction; otherwise one
+reaction the server chokes on would block the whole corpus forever. A reaction nothing could be
+derived for is still stamped so it leaves the stale set, with a marker
+(`science.labels.store.underived_stamp`) that `stale()` accepts as done and every currency reader,
+including coverage, rejects.
 """
 
 import logging
@@ -48,36 +33,23 @@ from chemclaw.science.labels.store import LabelIndex
 
 logger = logging.getLogger(__name__)
 
-# The half of a labelling answer a `_batch` call returns — a representation or a naming. One
-# variable rather than two overloads, because the retry-per-reaction logic is identical for both
-# and duplicating it is how the two halves end up degrading differently.
+# Either half of a labelling answer (representation or naming); one type variable so both halves
+# share the same retry logic.
 _T = TypeVar("_T")
 
-# The policy applied to a row whose source declares none — everything derived, nothing trusted,
-# which is the ordinary case rather than an edge one: of the sources in this tree exactly one
-# declares a `labels:` block, and the other reaction corpora are ELNs that carry no labels at all.
-# The drain therefore reads every source and looks the policy up per row. It used to narrow
-# `stale()` to the declaring sources instead, which meant an ELN corpus was never labelled by any
-# configuration — and the pass reported `has_more=False` while it happened. A `labels:` block says
-# what a source *carries*; it is not permission to label it
-# (`D-2026-08-25-a-label-is-derived-not-recorded`: `provides` is read for the coverage report and
-# the `override` subset check, and nothing else).
+# The policy for a row whose source declares none: derive everything, trust nothing. Most sources
+# declare none, so the drain reads every source and looks the policy up per row. A `labels:` block
+# says what a source carries, not whether it may be labelled.
 _DERIVE_EVERYTHING = LabelPolicy()
 
-# What this drain calls itself on `chemclaw_ingest_records_total{source}` and on its own
-# `ingest.finished` record. Deliberately **not** the corpus source each row came from: those rows
-# were already counted under that name when the ELN sync ingested them, and counting them again
-# here would make one series mean two different passes over the same records. The labelling drain
-# is its own ingest stage — it reads the labelling server, not a corpus — so it is its own source.
+# This drain's own source name on `chemclaw_ingest_records_total` and its `ingest.finished` record:
+# the rows were already counted under their corpus source when ingested, so reusing that name would
+# double-count.
 _LABEL_PASS = "labels"
 
 
-# The index key of a row. The reaction id alone is not one, and that is the whole of why these
-# two helpers exist: `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs
-# may legitimately use one entry id, and `stale()` spans sources, so a single batch can hold both.
-# Keying the labeller's answers on the bare id let the second overwrite the first and gave one
-# reaction the other's atom map, named reaction and — positionally, via `merge._species` — the
-# other's per-species roles. Silently, and stamped as cleanly labelled.
+# The index key of a row is `(source, reaction_id)`: two ELNs may share an entry id and a batch
+# spans sources, so answers keyed on the bare id would cross-assign labels between reactions.
 _Key = tuple[str, str]
 
 
@@ -89,10 +61,7 @@ def _key(row: ReactionLabel) -> _Key:
 def _token(index: int, row: ReactionLabel) -> str:
     """A correlation id for one call: unique within the batch, and readable in a server log.
 
-    The server has no stake in our identity — it echoes whatever id it is handed — so what goes on
-    the wire is a token for this call rather than the reaction's name. The position is what makes
-    it unique; the reaction id rides along so a line in the server's own log still says what was
-    being labelled.
+    The position makes it unique; the reaction id is included for the server's log.
     """
     return f"{index}:{row.reaction_id}"
 
@@ -128,9 +97,8 @@ async def label_stale(
         index: The label index to read stale rows from and write labels back to.
         labeller: The client for the labelling server.
         policies: Per-source label policy, from each source's `datasource.yaml`.
-        version: The labeller version this pass stamps — read once in the planning activity and
-            carried, never re-read here (D-093: a redeploy mid-drain would otherwise shift the
-            stale set under the loop).
+        version: The labeller version this pass stamps, read once in the planning activity and
+            carried, so a redeploy mid-drain cannot shift the stale set under the loop.
         limit: How many rows this pass may take.
 
     Returns:
@@ -139,9 +107,8 @@ async def label_stale(
     started = time.perf_counter()
     stale = await index.stale(version, limit)
     if not stale:
-        # Reported, not returned in silence. "Nothing was stale" is the steady state and it is also
-        # what a broken `stale()` predicate looks like, and until this the two were the same
-        # absence of output — a clean pass logged nothing at all.
+        # Reported even when nothing was stale, so a healthy idle drain is distinguishable from a
+        # broken predicate.
         _record_pass(
             labelled=0, unlabelled=0, has_more=False, duration_s=time.perf_counter() - started
         )
@@ -150,21 +117,16 @@ async def label_stale(
     representations, namings = await _label(labeller, stale)
     labelled = 0
     unlabelled = 0
-    # Which of the server's components ran and failed, over the whole batch rather than per row.
-    # A failed mapper is a property of the *pod*, so every answer in the batch carries it — one
-    # line per row would be `label_batch_size` identical warnings, which is how a real fault gets
-    # scrolled past. See `_degradations`.
+    # Failed server components across the whole batch: a failed mapper is a property of the pod, so
+    # it is reported once rather than per row.
     degraded: set[str] = set()
     for row in stale:
         policy = policies.get(row.source, _DERIVE_EVERYTHING)
         representation = representations.get(_key(row))
         naming = namings.get(_key(row))
-        # "Derived" is *the server answered for at least one half*, read off the answers rather
-        # than inferred from the merged row — because a merged row always has roles: `_species`
-        # falls back to the coarse map of what the source recorded, deliberately, and a check on
-        # the stored value would therefore report every failure as a success. The same boolean
-        # decides the count below and the stamp the row is written with, so the number this pass
-        # reports and the currency the index will claim for that row cannot disagree.
+        # "Derived" means the server answered for at least one half, read off the answers: a merged
+        # row always has roles (the source's coarse fallback). The same boolean drives the count and
+        # the stamp, so they cannot disagree.
         derived = representation is not None or naming is not None
         await index.store_labels(
             merge(row, policy, representation, naming),
@@ -205,11 +167,8 @@ def _degradations(
 ) -> set[str]:
     """Which of the labeller's components ran on this row and failed.
 
-    Read off the answers rather than inferred from what is missing, because the two are different
-    facts and only the server can tell them apart: a `mapped_smiles` of `None` is a pod with no
-    mapper *installed* (normal, and not an error) exactly as often as it is a mapper that ran and
-    threw, and a naming with every field null is the common case where a SMIRKS simply did not
-    match. `degraded` is the server's own statement that something broke.
+    Read from the server's `degraded`, since a missing value may mean a component is not installed
+    or simply did not match, which is not a failure.
     """
     reported = set()
     if representation is not None:
@@ -224,41 +183,16 @@ def _stamp(
     naming: ReactionNaming | None,
     version: str,
 ) -> str:
-    """The labeller version *this row* is stamped with — the answer's own, or the pass's.
+    """The labeller version this row is stamped with: the answer's own, or the pass's.
 
-    The pass-level `version` comes from `plan_label_sync`, which asks the server what it is once and
-    carries the answer for the whole run (D-093: re-reading it mid-drain would shift the stale set
-    under the loop). That string reports the components the server *probed*, which is the right
-    basis for choosing the stale set and the wrong one for stamping a row: a component that was
-    installed, ran on this reaction and failed reaches the answer as `degraded`, and the server
-    re-derives its own version accordingly (`mapper@failed` rather than `mapper@absent`) precisely
-    so the row is stale against a pod where it works. Stamping the pass version instead marked that
-    row current, it left `stale()`, and nothing revisited it until the deployment's component
-    versions moved.
-
-    **An answer's version is preferred only when it names a degradation.** A healthy answer's stamp
-    and the pass's are the same string already, and taking the answer's unconditionally would make
-    the stamp move with whatever the pod reported mid-run — which is the drift D-093 fixed by
-    reading the version once.
-
-    **When both halves degrade, the representation's stamp is taken, and the choice does not matter
-    for what the stamp is *for*.** Each answer's version names only the component that call could
-    degrade — `represent` can fail the mapper, `name` can fail the namer — so neither string is the
-    union when both fail. Both differ from a healthy pass's, which is the whole job of the stamp:
-    the row is re-read next pass. What *is* a structured record of which components failed is
-    `degraded`, which `_degradations` reads and `label_stale` reports.
-
-    The remote string is folded through `labeller.stamped`, the same function `Labeller.version`
-    uses, because a stamp missing `STANDARDIZATION_VERSION` and `VOCABULARY_VERSION` could never
-    match a healthy pass's and the row would be re-labelled forever.
-
-    **A degradation reported with no version falls back to the pass's, and that is the only honest
-    answer available.** Both conditions are required because this module derives no labeller
-    version — `labeller.py`'s header is explicit that a locally-derived one "would be
-    *well-formed* and would match nothing", so re-labelling the whole corpus forever. Such a row is
-    stamped current and will not be revisited, which is a real loss; what stops it being a *silent*
-    one is that `_degradations` reads `degraded` on its own, so `label_stale` still warns that the
-    component failed. A server that reports a failure without naming a version is the thing to fix.
+    The pass version reflects the components the server probed. A component that ran and failed on
+    this reaction makes the server report a different version (`mapper@failed`), so such a row is
+    stamped with the answer's version and stays stale against a healthy pod. Otherwise the pass
+    version is used, so stamps do not drift mid-run. When both halves degrade, the representation's
+    version is taken; either differs from a healthy pass's, which is all the stamp must do. The
+    remote string is folded through `labeller.stamped`, as the pass version is. A degradation
+    reported without a version falls back to the pass version (no version is derived locally); the
+    failure is still reported via `_degradations`.
     """
     for answer in (representation, naming):
         if answer is not None and answer.degraded and answer.version:
@@ -269,11 +203,8 @@ def _stamp(
 def _record_pass(*, labelled: int, unlabelled: int, has_more: bool, duration_s: float) -> None:
     """Emit the one record this drain leaves behind, whatever the pass did.
 
-    **A clean pass used to log nothing**: only the two failure paths spoke, so "the drain is
-    keeping up" and "the drain has not run since Tuesday" were the same silence. The outcomes split
-    the stamped rows by whether anything was actually derived — `rejected` is a row the server
-    answered for with neither half, which the module's own docstring calls out as the population a
-    `labelled` count alone cannot report.
+    Stamped rows split into `labelled` and `rejected` (the server answered for neither half), so a
+    silent drain cannot look like one that is keeping up.
     """
     _count_records("ingested", labelled - unlabelled)
     _count_records("rejected", unlabelled)
@@ -306,10 +237,8 @@ async def _label(
 ) -> tuple[dict[_Key, ReactionRepresentation], dict[_Key, ReactionNaming]]:
     """Both halves for a whole batch, degrading to per-reaction calls when the batch fails.
 
-    The two halves are independent on purpose: a reaction the atom mapper cannot handle may still
-    be named, so a failure of one must not cost the other. And a batch failure is retried one
-    reaction at a time rather than abandoned, because `stale()` is deterministic and abandoning
-    would mean this batch — and therefore every batch behind it — never completes.
+    The halves are independent, so a reaction the mapper cannot handle may still be named. A failed
+    batch is retried per reaction rather than abandoned, since `stale()` would return it again.
     """
     representations = await _batch(
         lambda rows: labeller.represent(
@@ -333,13 +262,9 @@ async def _batch(
 ) -> dict[_Key, _T]:
     """Run one batch call, falling back to one call per reaction if the batch is refused.
 
-    Each row is tagged with a correlation token before the call and the answers are placed back on
-    their rows afterwards, so what the caller receives is keyed by the index key rather than by
-    whatever id went over the wire.
-
-    Only `ChemclawError` is caught — the bad-data contract. A `LabelServerError` is an outage and
-    must propagate, so Temporal retries the activity instead of this drain making 200 doomed
-    single-reaction calls against a server that is not there.
+    Answers are keyed back onto rows by correlation token. Only `ChemclawError` (bad data) is
+    caught; a `LabelServerError` outage propagates so Temporal retries the activity instead of
+    making many doomed per-reaction calls.
     """
     tagged = [(_token(index, row), row) for index, row in enumerate(stale)]
     rows = dict(tagged)
@@ -363,9 +288,8 @@ async def _batch(
 def _placed(answers: dict[str, _T], rows: dict[str, ReactionLabel], what: str) -> dict[_Key, _T]:
     """Re-key one call's answers from their correlation tokens onto the rows they belong to.
 
-    A token this batch did not send is dropped with a warning rather than raised on: the server is
-    versioned separately from this repository, and one answer we cannot place is not a reason to
-    lose the ones we can.
+    An unknown token is dropped with a warning: the server is versioned separately, and one
+    unplaceable answer should not lose the rest.
     """
     placed: dict[_Key, _T] = {}
     for token, answer in answers.items():

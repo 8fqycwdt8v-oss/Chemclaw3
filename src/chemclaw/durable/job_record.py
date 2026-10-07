@@ -99,8 +99,8 @@ class JobRecordSummary(BaseModel):
     rationale: str
     summary: str
     note_id: str = ""
-    # The plan step the run served (D-2026-08-27), in the listing so "which step was this for"
-    # needs no second lookup. Empty when the run was not launched from a plan step.
+    # The plan step the run served, in the listing so "which step was this for" needs no second
+    # lookup. Empty when the run was not launched from a plan step.
     plan_step: str = ""
     # How the run ended, so a failed run in `find_past_jobs` says it failed; the reason is in the
     # full

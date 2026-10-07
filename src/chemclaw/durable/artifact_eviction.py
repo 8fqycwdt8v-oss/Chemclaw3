@@ -136,7 +136,7 @@ async def _evict_cold_artifacts() -> EvictionOutcome:
 # caught up by the next. `ScheduleHealth.last_outcome` reports a parked run as `TIMED_OUT`.
 @workflow.defn
 class ArtifactEvictionWorkflow:
-    """Keep the artifact store within its cost policy on a cadence (STO-6)."""
+    """Keep the artifact store within its cost policy on a cadence."""
 
     @workflow.run
     async def run(self) -> EvictionOutcome:

@@ -1,30 +1,14 @@
-"""Molecules as graph citizens (gaps KNW-7, KNW-4).
+"""Molecules as graph citizens: one `compound` note per standardized structure.
 
-Molecules were indexed by SMILES in a fingerprint table but were **not notes**, with two
-consequences the analysis traced back to the same root:
+A compound note lets a structural hit cite something and gives a species one canonical identity, so
+`DMF` and `CN(C)C=O` are the same thing. The id comes from the standardized SMILES
+(`chemclaw.core.chem.compound_id`, in `core` so connectors can cite without importing the graph),
+and the body is written from the same standardized SMILES, so two spellings sharing an id render
+byte-identically.
 
-- A structural hit could not cite anything. `FingerprintReactionRetriever`'s citation-honesty caveat
-  (CHECKMATE 5b, F3) exists precisely because a substructure or similarity hit returns a SMILES with
-  no note behind it, so the agent had to bridge via `find_notes(smiles)` — a literal substring match
-  over note bodies, the fragile path KM-4 flags.
-- There was no canonical place to record what a species *is*. Solvents, bases and catalysts were
-  free strings or raw SMILES with no controlled vocabulary, so `DMF`, `N,N-dimethylformamide` and
-  `CN(C)C=O` were three unrelated tokens to every lexical path, and the optimization-campaign
-  grouping compared conditions that were textually different and chemically identical (KNW-4).
-
-A compound note is the one identity both needed. The id is derived from the **standardized** SMILES
-(`chemclaw.core.chem.compound_id`, which lives in `core` so a connector can cite a note without
-importing the graph), so the same molecule always maps to the same note from any source — which is
-what makes a citation stable and a vocabulary possible.
-
-The note's *body* is written from that same standardized SMILES, not from a merely canonicalized
-one. Two spellings that share an id must render byte-identically, or re-proposing an already-merged
-note produces a diff and the last spelling ingested wins: `compound_note("CCN")` and
-`compound_note("CCN.Cl")` are one note by id, so they have to be one note by content too.
-
-The note deliberately records only what is *known with certainty*: the standardized structure, the
-recognised name when `chemclaw.core.reagents` knows one, and the synonyms that resolve to it. No
-predicted properties — those live in the calculation cache and would go stale here.
+The note records only what is certain: the structure, a recognised name from
+`chemclaw.core.reagents`, and synonyms. No predicted properties, which belong to the calculation
+cache.
 """
 
 import logging
@@ -44,15 +28,8 @@ STRUCTURAL_COMPOUND_ID = re.compile(r"compound-[0-9a-f]{12}")
 def compound_note(smiles: str) -> Note:
     """Build the `compound` note for a molecule (idempotent: same compound, same note).
 
-    Authored as `agent`, which is how a reader weighs it — there is no gate it passes first
-    (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
-
-    Every field is derived from the **standardized** SMILES, the same key `compound_id` hashes and
-    the same one `ingest.eln.ingest` indexes on. Deriving the id from one notion of sameness and
-    the body from another gave two spellings of one compound a shared id and different bodies, so
-    re-proposing an already-merged note rewrote its structure line and the last spelling ingested
-    won — the opposite of the "renders byte-identically, produces no diff" contract
-    `compound_dependencies` relies on.
+    Authored as `agent`. Every field derives from the standardized SMILES — the key `compound_id`
+    hashes and `ingest.eln.ingest` indexes — so re-proposing an existing note produces no diff.
     """
     standard = require_standard_smiles(smiles)
     name = display_name(standard)
@@ -75,29 +52,16 @@ def compound_note(smiles: str) -> Note:
 
 
 def compound_dependencies(note: Note) -> list[Note]:
-    """The compound notes `note` links to that a submission must carry with it (STO-7).
+    """The compound notes `note` links to that a submission must carry with it.
 
-    The rule that unblocked crosslinking, stated once and applied at the one write path rather
-    than in every note-minting connector: **a note that links a compound note gets that compound
-    note.** Because `compound_id` is derived from the canonical structure, the target is fully
-    determined by the SMILES the note already carries — so the note can honestly write
-    `[[compound-<hash>]]` and `kg/record.py` writes the dependency before the note that cites it,
-    instead of the note avoiding the link because the target might not exist yet (the removed DFT
-    bundle's note builder documented exactly that avoidance).
+    A note that links a compound note gets that compound note: the target is determined by the
+    note's SMILES, so the note can write `[[compound-<hash>]]` and `kg/record.py` writes the
+    dependency first. Empty for a note with no `compound_smiles` or no compound link. Re-writing an
+    existing compound note is a no-op.
 
-    Returns an empty list for a note with no `compound_smiles` or one that links no compound id at
-    all. Re-writing a compound note already in the graph is a no-op: it renders byte-identically,
-    so the write produces no diff for it.
-
-    **A note that links its compound under a pre-bump id still gets its compound.** `compound_id`
-    carries no version, so a note written before a `STANDARDIZATION_VERSION` bump links the id its
-    structure hashed to then; re-derived now, the id differs, and this used to return `[]` — the
-    note re-recorded without its compound and nothing said so. A structure-derived id the note
-    links in place of the current one is taken as that stale spelling: the current compound note is
-    returned, the old link resolves through the `supersedes` link `memory.compound_rekey` writes,
-    and the mismatch is logged. The narrowness, stated: a note carrying one compound's structure
-    while linking only *other* compounds by hash reads the same way, and gets its own compound's
-    note as well — a note about that compound, which is the lesser error than a silent drop.
+    A note linking its compound under a pre-`STANDARDIZATION_VERSION`-bump id still gets the current
+    compound note; the old link resolves through `memory.compound_rekey`'s `supersedes` link, and
+    the mismatch is logged.
     """
     if not note.compound_smiles:
         return []

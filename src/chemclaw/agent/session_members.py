@@ -90,7 +90,7 @@ class MemberStore(Protocol):
 
 
 class SessionMemberStore:
-    """`session_members`, on the session-store database (D-002)."""
+    """`session_members`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""

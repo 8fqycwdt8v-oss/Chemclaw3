@@ -1,9 +1,7 @@
 """Record the architecture programme's baseline: the numbers every later wave is judged against.
 
-The programme plan (`tasks/todo.md`) states each wave's exit criterion as a measurement, so this
-command takes those measurements in one place and writes them as JSON. It is offline: no model,
-no database, no network — the agent is compiled over a scripted chat model, which is enough to
-count middleware and time the build.
+Takes each wave's exit-criterion measurement (`tasks/todo.md`) and writes them as JSON. Offline: the
+agent is compiled over a scripted chat model, enough to count middleware and time the build.
 
 Usage: `make architecture-baseline` (writes `docs/planning/architecture-baseline-<date>.json`).
 """

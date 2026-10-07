@@ -1,32 +1,14 @@
 """One walk over a calculation payload, used twice: keep the geometries, then take them out.
 
-**The measurement this exists for.** A conformer search on a 40-atom drug molecule returns twenty
-geometries, and the whole of that — 2,400 Cartesian coordinates, ~29,000 characters, ~7,300 tokens
-— reached the model's context three times over: as the inline-wait return value, as the mid-turn
-resume message, and as `get_durable_job_status`'s result. The model can do nothing with a
-coordinate. Worse, the *stored* payload is untruncated, so one `xtb.conformers` row is 66,520
-characters and `find_calculations` will return fifty of them — **~830,000 tokens** from one
-read-only call, past every provider's context limit, where `agent/compaction.py` records that the
-failure is a hard error rather than a degradation.
+A model cannot read 3N Cartesians, and an ensemble's coordinates would flood its context (a
+`find_calculations` listing of stored payloads most of all); `structure_id` is what makes a geometry
+referable. One generic walker rather than a projection per model, because `find_calculations` holds
+stored payloads of unknown type.
 
-The rule was already written down one module over and applied to exactly one result shape
-(`OptimizationSummary`): *a model cannot read 3N Cartesians; `structure_id` is what makes a geometry
-referable*. This module is that rule applied everywhere, and the reason it is one generic walker
-rather than a `.of()` per model is that the third caller is `find_calculations`, which holds a
-**stored payload of unknown type** — a `dict` out of a JSONB column. A per-model projection cannot
-help it at all.
-
-**The two halves are one act, and that is what makes the handle trustworthy.** `structures_in`
-finds the geometries so they can be persisted; `without_geometry` replaces those same geometries
-with their addresses. Driven from one shape test, so a payload whose geometry is projected away is
-a payload whose geometry was kept — the invariant `chemclaw.science.calc.structures` states as
-"every `structure_id` the agent is shown resolves".
-
-**Shape, not type.** A geometry is recognised by carrying `elements` and `positions`, and is then
-*validated* as a `Structure` before anything is done with it — so a payload field that happens to
-share those names but is not a geometry is left alone rather than mangled. Validation is also what
-derives the address: `structure_id` is a property of the normalised coordinates, not of whatever
-the caller happened to send.
+`structures_in` finds the geometries so they can be persisted; `without_geometry` replaces those
+same geometries with their addresses, so every `structure_id` shown resolves. A geometry is
+recognised by shape (`elements` and `positions`) and then validated as a `Structure`, which also
+derives the address from normalised coordinates; anything that fails validation is left alone.
 """
 
 import logging
@@ -44,30 +26,22 @@ logger = logging.getLogger(__name__)
 # `elements` is a plausible name for a composition, and a scan carries `positions` of its own kind.
 _GEOMETRY_FIELDS = ("elements", "positions")
 
-# What survives a projection, beyond the address. Each answers a question a chemist asks of a
-# geometry they cannot see: *of what molecule* (`smiles`), *in what electronic state*
-# (`charge`/`multiplicity`), and *produced by what* (`origin`, the key of the calculation that
-# relaxed it — which is also what `record_knowledge_note` takes as a `calc_ref`).
+# What survives a projection beyond the address: which molecule (`smiles`), which electronic
+# state (`charge`/`multiplicity`), and which calculation produced it (`origin`, usable as a
+# `calc_ref`).
 _KEPT_FIELDS = ("smiles", "charge", "multiplicity", "origin")
 
-# The values of those fields that say nothing, and are therefore omitted. A neutral closed-shell
-# singlet is what every reader assumes, and stating it costs a line per geometry — twenty of them in
-# one ensemble, which is the shape this projection exists to bound. The same rule
-# `CalcJobWorkflow`'s `exclude_none` follows one line up: a field whose value is the default is a
-# field the model has to read past.
-#
-# Charge and multiplicity are omitted **together or not at all**: a `[CH3]` radical is
-# `charge=0, multiplicity=2`, and reporting only the multiplicity would read as a partial statement
-# about an electronic state rather than as a complete one about an unusual half of it.
+# Default values omitted from a projection, since a neutral singlet is what every reader
+# assumes. Charge and multiplicity are omitted together or not at all, so a radical's state is
+# always stated whole.
 _DEFAULT_STATE = {"charge": 0, "multiplicity": 1}
 
 
 def _as_structure(node: Any) -> Structure | None:
     """`node` as a `Structure` when it is one, else None.
 
-    A payload that *looks* like a geometry and does not validate as one is not a geometry — a
-    mismatched array length or an impossible electron count is exactly what `Structure`'s validator
-    refuses — so it is left untouched rather than replaced by an address derived from nonsense.
+    Something shaped like a geometry that fails `Structure` validation is left untouched rather than
+    addressed.
     """
     if not isinstance(node, dict) or any(field not in node for field in _GEOMETRY_FIELDS):
         return None
@@ -80,12 +54,8 @@ def _as_structure(node: Any) -> Structure | None:
 def structures_in(payload: Any) -> Iterator[Structure]:
     """Every geometry embedded anywhere in `payload`, in the order it is reached.
 
-    Recursive because a geometry is as likely to be the `structure` of the fourteenth member of an
-    ensemble as a top-level field, and because the payload shapes differ per calculation — an
-    optimization holds one, a scan holds one, an ensemble holds as many as the search found.
-
-    Duplicates are not removed: `put` is content-addressed and idempotent, so de-duplicating here
-    would only move the same work to a set.
+    Recursive because payload shapes differ per calculation. Duplicates are kept: `put` is
+    content-addressed and idempotent.
     """
     structure = _as_structure(payload)
     if structure is not None:
@@ -102,20 +72,10 @@ def structures_in(payload: Any) -> Iterator[Structure]:
 def without_geometry(payload: Any) -> Any:
     """`payload` with every embedded geometry replaced by its address and its identifying fields.
 
-    The model-facing projection. What replaces a geometry is not a bare string: a chemist reading
-    "the lowest conformer" needs to know which molecule and which charge state it is, and a
-    `structure_id` alone says neither. So the replacement carries the address plus the four fields
-    that answer those questions, and drops the 3N numbers that answer none of them.
-
-    An ordinary neutral closed-shell state is left out rather than restated — see `_DEFAULT_STATE`.
-
-    `geometry_omitted` is set on the replacement rather than left implied. This repository's rule is
-    that a silent truncation reads as completeness (`D-2026-08-08-a-partial-answer-must-say-so`),
-    and without it a reader cannot tell a geometry that was projected away from one the calculation
-    never produced.
-
-    Pure, and it has to be: `CalcJobWorkflow` applies it in workflow code, where a replay must
-    produce byte-identical output from the same activity result.
+    The model-facing projection: the address plus the fields that say which molecule and state
+    (default state omitted, see `_DEFAULT_STATE`), with `geometry_omitted` set so a projected
+    geometry is distinguishable from one never produced. Pure, because `CalcJobWorkflow` applies it
+    in workflow code where replay must be byte-identical.
     """
     structure = _as_structure(payload)
     if structure is not None:
@@ -142,30 +102,11 @@ def without_geometry(payload: Any) -> Any:
 def check_server_address(payload: Any) -> None:
     """Count, and say out loud, any geometry whose address we derive differently from the server's.
 
-    **A silent divergence here is a cache that misses forever.** `structure_id` is half of every
-    `xtb.*` key, and the two derivations agree only while two things stay equal: the payload
-    `stable_hash` sees, and the decimal place coordinates are rounded to before it. This repository
-    froze its rounding at a constant precisely because an operator who changed it "was not
-    re-addressing a local cache… they were making every relaxation, Hessian, scan point and CREST
-    search in that deployment miss forever, silently" (`science/calc/models.py`). The server did
-    **not** freeze its side: `xtb_geometry_decimals` is an ordinary ENV-overridable field there. So
-    the cross-repository agreement the constant protects holds on one side only, and nothing
-    anywhere compares the two.
-
-    The server's `Structure.structure_id` is a `computed_field`, so its authoritative answer arrives
-    on every payload — and pydantic drops it on validation, because ours is a plain property and
-    unknown fields are ignored. This reads it before it is dropped.
-
-    Counted through `degraded` rather than through a counter of its own, because that is what
-    the helper is for and because the subsystem label set is pinned (`tests/test_degraded.py`) —
-    which is how this stays visible on a dashboard instead of only in a log search nobody runs.
-
-    **It logs rather than raises, and the local derivation wins.** A divergence means the two sides
-    would key differently from here on; it does not mean the numbers in hand are wrong. Raising
-    would turn one operator's configuration mistake into a total outage of every calculation, which
-    is a worse answer than a loud counter and a degraded line — and the local id is what this
-    deployment's own rows, handles and geometry store are keyed by, so preferring it keeps this side
-    self-consistent while the disagreement is fixed.
+    `structure_id` is half of every `xtb.*` key, so a divergence means a cache that misses forever.
+    The server's rounding is configurable while ours is fixed, so its `computed_field`
+    `structure_id` is read here before validation drops it. Counted through `degraded` (pinned
+    subsystem labels) so it shows on a dashboard. Logs rather than raises, and the local id wins:
+    the numbers in hand are not wrong, and this deployment's rows are keyed by the local id.
     """
     if not isinstance(payload, dict | list):
         return

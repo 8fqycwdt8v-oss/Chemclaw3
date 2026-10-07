@@ -1,23 +1,13 @@
 """The background service that keeps the reaction-label index complete.
 
-Every reaction corpus in this tree — the ELN drops, the warehouse ELN, the patent corpus — lands a
-*record* phase in `reaction_labels` when it is ingested, and nothing else. This job fills in the
-rest: the atom map, the named reaction, the per-species roles and structure features. It finds the
-work by asking, never by being told: a row whose `labeller_version` differs from the current one is
-stale, so a fresh corpus, a re-recorded reaction and an upgraded labeller all produce work through
-the same `WHERE` clause and none of them requires anyone to remember anything.
+Every reaction corpus lands only a record phase in `reaction_labels` on ingest; this job fills in
+the atom map, named reaction, species roles and structure features. A row whose
+`labeller_version` differs from the current one is stale, so new corpora, re-recorded reactions
+and labeller upgrades all produce work through one `WHERE` clause.
 
-Modelled on `document_sync.py`, whose shape this needs exactly: a planning activity that reads the
-live values once, a bounded batch per activity, and `continue_as_new` so a multi-million-row
-backlog drains over many runs without an event history that cannot be replayed.
-
-**`version` and `max_iterations` are read in the planning activity, not in workflow code.** Both
-decide how many commands the run emits, so reading them live makes the command count a function of
-the replaying worker's configuration rather than of history: a redeploy mid-drain then replays
-`continue_as_new` at a different point, which is a non-determinism error, which is a workflow *task*
-failure, which retries forever and wedges the run (D-093). For `version` the consequence is worse
-than a wedge — a labeller upgraded mid-drain would shift the stale set under the loop, so the same
-rows would be selected differently on replay.
+Shaped like `document_sync.py`: a planning activity, a bounded batch per activity, and
+`continue_as_new` to keep history replayable. `version` and `max_iterations` are read in the
+planning activity, because both decide the command stream and a live read would break replay.
 """
 
 from datetime import timedelta
@@ -47,13 +37,9 @@ _labeller = RxnLabelServer
 def label_policies() -> dict[str, LabelPolicy]:
     """Every enabled source that declares a `labels:` block, by name.
 
-    What a source *carries*, looked up per row by the drain — never which sources the drain reads.
-    A source absent from this map is labelled too, under `_DERIVE_EVERYTHING`, which is the
-    ordinary case: only one source in this tree declares a block at all.
-
-    It is deliberately not a `labels_enabled` setting: `CHEMCLAW_DATA_SOURCES` plus a declared
-    block already answers what this asks, and a second flag could only restate it or contradict it
-    — the argument `core/config/sources.py` makes, and the shape `share_sources()` already has.
+    What a source carries, looked up per row; a source absent from the map is labelled under
+    `_DERIVE_EVERYTHING`. No separate `labels_enabled` setting: `CHEMCLAW_DATA_SOURCES` plus a
+    declared block already answers it.
     """
     return {m.name: m.labels for m in active_manifests() if m.labels is not None}
 
@@ -61,9 +47,8 @@ def label_policies() -> dict[str, LabelPolicy]:
 class LabelSyncPlan(BaseModel):
     """The two live values one drain is fixed to, read once and recorded in history."""
 
-    # Asked of the labelling server, never derived here — see `ingest/labels/labeller.py`. Half of
-    # what decides whether a row is stale, so a locally-built one would be well-formed and match
-    # nothing: every row would look stale forever and the drain would never converge.
+    # Asked of the labelling server, never derived here: a locally-built version would match no row,
+    # so every row would look stale forever.
     version: str
     max_iterations: int
 
@@ -91,8 +76,7 @@ class LabelSyncState(BaseModel):
 async def plan_label_sync() -> LabelSyncPlan:
     """Ask the server what version it is, and fix the run's iteration bound.
 
-    Both are live reads that belong in an activity, and neither may be re-read by a replaying
-    worker — see the module docstring.
+    Both are live reads that a replaying worker must not redo — see the module docstring.
     """
     return LabelSyncPlan(
         version=await _labeller().version(),
@@ -100,11 +84,8 @@ async def plan_label_sync() -> LabelSyncPlan:
     )
 
 
-# One batch is `label_batch_size` reactions through an atom-mapping transformer — minutes of remote
-# work with no natural progress point to report — so liveness is time-based: `beating` beats while
-# the batch runs, and Temporal detects a dead worker within the heartbeat timeout instead of waiting
-# out the whole start-to-close. The eager pre-beat is kept because `beating()` waits one interval
-# before its first, and a small batch may finish before that.
+# A batch is minutes of remote atom mapping with no progress point, so liveness is time-based via
+# `beating`; the eager pre-beat covers a batch shorter than one interval.
 @durable_activity("background")
 @activity.defn
 async def label_stale_reactions(version: str) -> LabelReport:
@@ -124,17 +105,14 @@ async def label_stale_reactions(version: str) -> LabelReport:
 
 
 @durable_workflow("background")
-# `failure_exception_types` because without it this workflow cannot fail — it *hangs*. The SDK
-# parks a plain exception in an infinite workflow-task-failure loop, so a genuine bad-data failure
-# would look like a run that is still going, forever (measured; `connector_job.py` records it).
+# Without `failure_exception_types` a bad-data failure would park in an infinite workflow-task
+# retry loop and look like a run still going.
 @workflow.defn(failure_exception_types=[Exception])
 class ReactionLabelWorkflow:
     """Drain the reaction-label index's stale rows until none remain or the run's bound is spent.
 
-    Keeps no cursor between runs, for the same reason `DocumentShareSyncWorkflow` does not: the
-    stale set *is* the cursor. A row leaves it by being stamped, so the next run picks up exactly
-    where this one stopped without anything being written down — and a re-recorded reaction or an
-    upgraded labeller puts rows back into it, which a stored position could not express.
+    Keeps no cursor between runs: the stale set is the cursor, and re-recorded reactions or an
+    upgraded labeller put rows back into it.
     """
 
     @workflow.run

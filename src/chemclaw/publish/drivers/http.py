@@ -1,19 +1,12 @@
 """Publishing to a service that accepts a JSON document.
 
-The second shape a site's results store takes: not a database a DBA runs our DDL on, but a REST
-endpoint — a LIMS, an internal data platform, a queue in front of one. What it receives is the
-canonical record as JSON, the same content the SQL driver spreads across tables, so a site can move
-between the two without the records changing meaning.
+For a site whose results store is a REST endpoint (a LIMS, a data platform) rather than a
+database running our DDL. It receives the canonical record as JSON, the same content the SQL
+driver spreads across tables.
 
-**The URL is configuration, never a default in source.** `tests/test_no_egress.py` bans a
-third-party data *host* baked into a shipped module, and permits an address a deployment configures
-— the same class the LLM endpoint and Temporal are in. There is no default here
-at all: a sink with no URL is a manifest error, not a silent fallback to somebody's service.
-
-**The credential is an environment variable name, read per request.** Reading at request time is
-what makes a rotated secret take effect without a restart; the same discipline
-`connectors/identity.py` applies to a connector's bearer token, and the name is registered with the
-log-redaction inventory so a driver echoing its own configuration cannot leak it.
+The URL is deployment configuration with no default in source; a sink with no URL is a manifest
+error. The credential is an environment variable name read per request (so rotation needs no
+restart) and registered for log redaction.
 """
 
 import logging
@@ -37,12 +30,9 @@ logger = logging.getLogger(__name__)
 def _refuse_plaintext_sink(name: str, url: str, token_env: str) -> None:
     """Refuse a non-loopback `http://` sink under the enforced posture.
 
-    The published records are confidential chemistry and — when `token_env` is set — every POST
-    carries a bearer credential in its `Authorization` header. Over `http://` both cross the wire in
-    cleartext, so a sink that is not `https://` and not loopback is the same plaintext-transport
-    exposure `require_pg_tls`/the Temporal-mTLS guard refuse for the database and the broker, and it
-    is refused on the same terms: only under `entra_required` (the deployment that believes it is in
-    the enforced posture), with loopback dev exempt.
+    The records are confidential and the POST may carry a bearer token, so under `entra_required`
+    a plaintext non-loopback sink is refused, on the same terms as the database and broker TLS
+    guards. Loopback dev is exempt.
     """
     if not settings.entra_required:
         return
@@ -85,16 +75,15 @@ class HttpResultSink:
         Args:
             name: The sink's manifest name, for log lines and errors.
             tenant_id: What this deployment calls itself on every published record.
-            url: Where to POST. Required — there is deliberately no default.
+            url: Where to POST. Required; there is deliberately no default.
             token_env: Environment variable holding a bearer token, read per request. Empty means
-                the endpoint takes no credential, which is only sensible on a loopback or a
-                mesh-authenticated address.
+                the endpoint takes no credential (only sensible on loopback or a mesh-authenticated
+                address).
             timeout_seconds: Per-request ceiling.
-            writer_version: The ChemClaw release stamped on each published record. Defaults to
-                this deployment's own revision; a manifest sets it only to override that.
-            verify_tls: Left settable only so a site with an internal CA can point at its own
-                bundle by other means; **never set this false** — an unverified TLS connection to a
-                results store is an unauthenticated one.
+            writer_version: The ChemClaw release stamped on each record; defaults to this
+                deployment's revision.
+            verify_tls: Never set false: an unverified TLS connection to a results store is an
+                unauthenticated one.
         """
         if not url:
             raise ValueError(
@@ -106,9 +95,7 @@ class HttpResultSink:
         self._url = url
         self._token_env = token_env
         self._timeout = timeout_seconds
-        # Defaulted like the SQL sink's, and for the same reason: nothing computed a writer
-        # version, so this crossed to every endpoint as `''` — a provenance field that reads as
-        # "recorded, and blank". `deployment_revision` is what the audit trail already stamps.
+        # Defaults to the revision the audit trail stamps, so provenance is never recorded blank.
         self._writer_version = writer_version or settings.deployment_revision
         self._verify = verify_tls
         if token_env:
@@ -132,8 +119,9 @@ class HttpResultSink:
     def _document(self, records: Sequence[ResultRecord]) -> dict[str, Any]:
         """The batch as one versioned document.
 
-        `contract_version` rides on the envelope as well as on each record, so a receiver can route
-        on it without unpacking — the same reason the SQL driver stamps it on every row.
+        `contract_version` is on the envelope as well as each record, so a receiver can route
+        without
+        unpacking.
         """
         return {
             "tenant_id": self._tenant_id,
@@ -145,9 +133,7 @@ class HttpResultSink:
     async def aclose(self) -> None:
         """Nothing to release: the client is scoped to a single delivery.
 
-        A no-op with a reason rather than an omission. `deliver` opens its `AsyncClient` inside an
-        `async with`, so the connection pool is already gone by the time the sink is discarded —
-        which is why this sink never had the leak the SQL one did.
+        `deliver` opens its `AsyncClient` in an `async with`, so nothing outlives a call.
         """
 
     def _record(
@@ -159,22 +145,13 @@ class HttpResultSink:
         status: int = 0,
         detail: str = "",
     ) -> None:
-        """Time and name every delivery attempt — the thing this module declared a logger for.
+        """Time and name every delivery attempt.
 
-        **The logger was declared and used zero times.** So a results endpoint that had been dead
-        for a week produced no line and no number anywhere: every row simply spent its
-        `result_publish_max_attempts` and was dead-lettered, and the only evidence was a counter
-        that four unrelated failures share. There is no circuit breaker either, which makes the
-        latency the operative signal — a sink timing out at 30 s per attempt is what turns a
-        15-minute drain into one that never finishes its batch, and until this nothing measured it.
-
-        `outcome` is bounded by construction: `timeout`, `unreachable`, or the response's status
-        *class* — never the status itself, which would put an endpoint's error vocabulary into a
-        log field's value space. The exact code rides as `status`.
-
-        The histogram is labelled by sink and not by outcome: the question it answers is "how long
-        does this destination take", and splitting the distribution by outcome would leave the
-        timeouts — the samples that decide whether a drain finishes — in a series of their own.
+        Without a circuit breaker, latency is the operative signal for a failing destination.
+        `outcome` is bounded by construction (`timeout`, `unreachable` or the status *class*); the
+        exact code rides as `status`. The histogram is labelled by sink, not outcome, so timeouts
+        stay
+        in the distribution they decide.
         """
         record_metric(
             lambda m: m.observe("chemclaw_sink_delivery_seconds", seconds, {"sink": self._name})
@@ -199,10 +176,8 @@ class HttpResultSink:
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """POST the batch, classifying the response into retryable and not.
 
-        The receiver is expected to be idempotent on `calc_ref` — the same promise the SQL driver
-        keeps with content-addressed upserts. The outbox retries, so a receiver that appends
-        instead of upserting will accumulate duplicates on any transient failure; that is stated
-        here because it is the one thing this driver cannot enforce from its side.
+        The receiver must be idempotent on `calc_ref`: the outbox retries, and this driver cannot
+        enforce that from its side.
         """
         if not records:
             return
@@ -238,32 +213,20 @@ class HttpResultSink:
         if 200 <= response.status_code < 300:
             return
         if response.status_code < 400:
-            # **A redirect is a refusal, and it used to be a reported success.** The classification
-            # below was written as two rejections with an implicit `return` for everything else, so
-            # a 3xx — which `follow_redirects=False` (httpx's default, and this fleet's deliberate
-            # posture) leaves as the response — fell through both guards and `deliver()` returned.
-            # Measured end to end: a 302 endpoint received the POST, wrote nothing, and
-            # `result_publications` read `state='delivered'` with `delivered_at` set, while this
-            # module's own `_record` line for that same call said `sink.failed ... -> 3xx`. The row
-            # is then unreachable — `requeue_failed` matches `failed` only — and retention deletes
-            # it. That is the reporting-success-without-delivering class, on the seam carrying the
-            # scientific record.
-            #
-            # **Rejected rather than retried**, because the batch did not land where the manifest
-            # addressed it and no retry to the same URL changes that: the fix is the `url`, and a
-            # dead letter is how an operator is told so. Following it instead is not on the table —
-            # the records are confidential chemistry and the request may carry a bearer token,
-            # neither of which may reach an address no manifest named (the reason
-            # `connectors/registry.py` sets `follow_redirects=False` too).
+            # A redirect is a refusal, never a success: the batch did not land where the manifest
+            # addressed
+            # it. Rejected rather than retried (the fix is the `url`) and never followed, since the
+            # records and
+            # the bearer token must not reach an address no manifest named.
             raise SinkRejectedError(
                 f"result sink {self._name!r} answered {response.status_code} "
                 f"(Location: {response.headers.get('location', '') or 'unset'}); this client does "
                 "not follow a redirect, so the batch was not delivered. Point the sink's `url` at "
                 "the final address."
             )
-        # The body is included because it is the receiver's own account of what was wrong with the
-        # content, and this failure is one an operator has to read to fix. Bounded, because an HTML
-        # error page is not worth a log line of unbounded length.
+        # The receiver's body explains what was wrong with the content; bounded so an HTML error
+        # page
+        # cannot flood a log line.
         raise SinkRejectedError(
             f"result sink {self._name!r} refused the batch with {response.status_code}: "
             f"{response.text[:500]}"

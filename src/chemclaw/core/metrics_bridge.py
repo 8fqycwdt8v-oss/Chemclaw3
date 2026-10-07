@@ -1,40 +1,13 @@
-"""Apply an update to the process metrics registry without letting it break the caller (REV-19).
+"""Apply an update to the process metrics registry without letting it break the caller.
 
-`core/metrics.py` is deliberately strict: `increment` and `observe` raise `KeyError` on an
-undeclared counter name, an undeclared histogram, or a label set that does not match what the
-counter declared. That strictness is right — the failure mode of a metric typo is not a crash but a
-second, silent time series nobody queries — and it is exactly what must not reach a caller's
-request path. A mistyped counter name in the note write path, the connector registry or an audit
-sink would
-otherwise propagate out of `record_metric` and fail the operation being counted.
+`core/metrics.py` raises on an undeclared metric or label set, which is right (a typo would
+otherwise create a silent series) and must never fail the operation being counted. So the one
+swallow lives here, in `record_metric`, and every call site goes through it rather than holding a
+bare `except Exception: pass` of its own.
 
-So this is one swallow, written once, wrapping the *update*: the metric is lost, the caller is not.
-A second copy of a bare `except Exception: pass` is exactly where a real error goes to hide, which
-is why every call site goes through here rather than each holding its own. Counted on `ff0bf6c5`,
-as `ast.Call`s to `record_metric` outside this module: **83 sites across 11 packages**, and every
-`degraded()` call below reaches the swallow through this function too. The sentence said "~10 call
-sites across six packages" until that count was taken — a present-tense number over a surface that
-grew by an order of magnitude, which is exactly the failure the measured paragraph in `degraded()`
-is written the way it is to avoid.
-
-**What this is no longer.** Until the R2 layering move the registry lived in `chemclaw.api`, so the
-import was lazy and this module read as a way around the "`core` imports no sibling" rule. Two
-docstrings and an ADR (D-2026-08-01) had already established that the lazy import never protected
-anything — `core/metrics.py` is stdlib-only, so it imports successfully in the background worker
-and in every connector worker, and always did. The registry is kernel material now and the import
-is an ordinary one; the swallow is what it always actually was, and stays.
-
-This began as a private helper in `agent/audit.py` with two callers (the audit-sink failure
-counter, the tool-latency histogram) and moved here at the fourth, rather than being imported
-across modules by its underscore name.
-
-**`degraded()` lives here rather than in `core/metrics.py`, and that is not filing.** It is the
-same shape as `agent/audit.py`'s pattern — count it, then log it under a stable marker — and it is
-called from inside `except` blocks, which is the one place a raising metric update is worst: a bad
-label name there would replace the degradation the caller was reporting with a `KeyError` from the
-reporting itself. So it has to go *through* `record_metric`, and `core/metrics.py` cannot import
-this module without a cycle. The registry declares; this module records without endangering the
-caller; `degraded` is the second thing that needs exactly that guarantee.
+`degraded()` lives here too because it is called from inside `except` blocks, where a raising metric
+update would replace the reported failure with a `KeyError`; it must go through `record_metric`, and
+`core/metrics.py` cannot import this module without a cycle.
 """
 
 import logging
@@ -63,51 +36,23 @@ def degraded(
 ) -> None:
     """Record that `subsystem` failed and the caller continued with less: count it, then log it.
 
-    Every call site is a deliberate swallow — a preference that did not persist, a cost row that
-    was lost, a connector token list that could not be resolved — and each is right to swallow,
-    because the alternative is failing a chemist's turn over telemetry. What was missing is the
-    number. Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
-    `.warning()`/`.warn()` and contains no `raise`: **41 such handlers across 34 modules, of which
-    4 counted anything** (`api/routes/turns.py:173`, `api/state.py:237`, `durable/publish.py:151`,
-    `kg/graph.py:155`). The other 30 modules were invisible to anything but a log search nobody
-    runs. (An earlier revision of this docstring said 42/35/3 and named `kg/record.py` as one of
-    the three; its handler logs and `return`s, and the `record_metric` beside it is on the success
-    path. The re-derivation is in D-2026-08-08-a-rule-with-no-test-is-a-claim.)
-
-    `logger` is the **caller's**, deliberately: a helper that logged under its own name would put
-    `chemclaw.core.metrics_bridge` on every degradation line and throw away the one field that says
-    where it happened.
-
-    `level` defaults to ERROR, following `agent/audit.py`: a degradation is not a caution about
-    something that might matter later, it is a thing that definitely did not happen. Counted the
-    same way on `ff0bf6c5`, as `ast.Call`s to `degraded` carrying a `level=`: **7 of the 41 sites
-    pass `WARNING`**, and one more (`agent/compaction.py::_degrade_once`) passes
-    `ERROR if first else DEBUG` so a repeating degradation is not re-reported as news. The lowered
-    level is for the case where the lost function is cosmetic or is already gated in CI, and four
-    of the seven argue exactly that where they pass it (`agent/skill_manifest.py::_declared_pair`,
-    `publish/drivers/sql.py::SqlResultSink._report_dropped`, `api/tool_results.py::session_sink`,
-    `core/db.py::_redact`). `publish/outbox.py::refresh_backlog` is the one that is neither
-    cosmetic nor CI-gated — it asks an operator to re-enable a sink or discard the rows, at a level
-    that says nobody need act — and `core/db.py::_merged_options` lowers it without saying why.
-    Stated as a count with a commit and a method, like the paragraph above it: "the two sites" was
-    the same claim with neither, and it was wrong by five before anyone read it again.
+    For deliberate swallows (a preference that did not persist, a lost cost row, an unresolved token
+    list): each is right not to fail the turn, and each must leave a number on
+    `chemclaw_degraded_total`. `logger` is the caller's so the line names the module that degraded.
+    `level` defaults to ERROR, since the function definitely did not happen; a site lowering it
+    should argue why where it passes it (cosmetic loss, or already gated in CI).
 
     Args:
         logger: the calling module's logger, so the record names the module that degraded.
-        subsystem: a short, source-fixed name for what lost function; becomes the metric label and
-            the log marker. Must be a literal at the call site — `tests/test_degraded.py` reads
-            them out of the source and pins the set.
+        subsystem: a short, source-fixed name for what lost function; becomes the metric label
+            and the log marker. Must be a literal at the call site — `tests/test_degraded.py`
+            reads them out of the source and pins the set.
         message: a `%`-style format string describing the degradation, as any log call.
         *args: the format arguments for `message`.
         level: the log level; ERROR unless the site argues otherwise.
         exc_info: attach the active exception, as these sites are inside `except` blocks.
     """
     record_metric(lambda m: m.increment(_DEGRADED_COUNTER, labels={"subsystem": subsystem}))
-    # G003 (no `+` in a logging call) is right in general and wrong here, which is why the
-    # suppression carries a reason rather than a shrug. The rule's fix is to interpolate — `"%s",
-    # message % args` — and that formats *eagerly*, at the call site, inside an `except` block, in
-    # the one function whose contract is that it never endangers the caller: a caller whose format
-    # string and arguments disagree would get a `TypeError` raised over the failure it was
-    # reporting. Concatenating the prefix keeps one lazy format string, so a malformed pair is
-    # reported by logging's own error path, exactly as it is everywhere else in this codebase.
+    # G003 suppressed: interpolating eagerly inside an `except` would raise a format mismatch over
+    # the failure being reported. Concatenating the prefix keeps one lazy format string.
     logger.log(level, "degraded[%s]: " + message, subsystem, *args, exc_info=exc_info)  # noqa: G003

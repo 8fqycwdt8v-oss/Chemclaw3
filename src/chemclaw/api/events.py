@@ -1,10 +1,8 @@
-"""The turn event contract (plan step F2-T3): one typed schema every surface shares.
+"""The turn event contract: one typed schema every surface shares.
 
-A turn does not just return a final string — the experience is watching the agent *work*: its plan,
-its tool calls, streamed tokens, a launched async job, an approval prompt, then the answer. Modeling
-these as a discriminated union (on `type`) means the web UI now — and Slack/mobile later — render
-the same events instead of each parsing a bespoke stream. The runner emits these; the app serializes
-each as one SSE `data:` line via `model_dump_json()`.
+A turn streams its plan, tool calls, tokens, launched jobs, approval prompts and answer. A
+discriminated union on `type` lets every surface render the same events; the app serializes each as
+one SSE frame via `model_dump_json()`.
 """
 
 from typing import Literal
@@ -82,31 +80,19 @@ class PlanEvent(BaseModel):
 
     type: Literal["plan"] = "plan"
     todos: list[str]
-    # Defaulted so a stored or replayed event from before this field cannot fail to parse. An empty
-    # string means "this event predates the hash", which a client must treat as "fetch it" rather
-    # than as a hash — never as one that will match.
+    # Defaulted so older stored events parse. Empty means "predates the hash": fetch the plan, never
+    # treat it as matching.
     plan_hash: str = ""
-    # Defaulted for the same reason, and an empty list is *ambiguous* in a way the empty hash is
-    # not: a plan whose every step declares nothing genuinely authorizes nothing, and an event from
-    # before this field carries the same `[]`. A surface that must tell those apart reads
-    # `plan_hash` — an event carrying a hash and no scope is a plan that declared nothing.
+    # Defaulted likewise. `[]` is ambiguous between "declares nothing" and "predates this field"; an
+    # event with a hash and no scope is the former.
     scope: list[str] = []
 
 
-# Which agent raised an event, when it was not the one the chemist is talking to (M9).
-#
-# **Empty means the main agent**, and that is what keeps the field additive: every event emitted
-# before teams existed came from the single agent, so an existing consumer that ignores this reads
-# exactly what it read before. The only other value produced today is the literal `"subagent"`:
-# the graph namespace says an event came from below the root and carries no name to read
-# (`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`), and the one carrier that did hold
-# a name went with its producer in
-# `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`. A surface must therefore
-# treat this as "not the main agent", never as an agent's identity.
-#
-# Only the events a specialist can actually raise carry it. A `queued` or `capability_degraded`
-# event is a property of the *turn*, decided before any routing happens, so attributing it to an
-# agent would be inventing a fact.
+# Which agent raised an event, when it was not the one the chemist is talking to. Empty means the
+# main
+# agent, which keeps the field additive. The only other value is `"subagent"`: the graph namespace
+# carries no name, so a surface must read this as "not the main agent", never as an identity. Only
+# events a helper can raise carry it.
 _AGENT_FIELD = Field(
     default="",
     description="The specialist that raised this event; empty for the main agent.",
@@ -156,9 +142,9 @@ class JobStartedEvent(BaseModel):
     # What kind of durable job this is ("calc", "report", "campaign"), so a surface can label it
     # without parsing the id. Defaulted so the field is additive for any existing consumer.
     kind: str = "job"
-    # The plan step the launch served — the todo's bare content, so a surface can badge the
-    # matching checklist item (D-2026-08-27). Empty when the job was not launched from a plan
-    # step. Defaulted so the field is additive for any existing consumer.
+    # The plan step the launch served (the todo's content), so a surface can badge it. Empty when
+    # not
+    # launched from a plan step.
     plan_step: str = ""
 
 
@@ -295,9 +281,8 @@ class AwaitingAnswerEvent(BaseModel):
 
     type: Literal["awaiting_answer"] = "awaiting_answer"
     request_id: str
-    #: `waiting` on the open and on every reminder; `expired` when the deadline passed unanswered.
-    #: The stream collapses a repeat of a state already sent on one connection, so a month of daily
-    #: reminders arrives as one `waiting` and, once it lapses, one `expired`.
+    # `waiting` on the open and on every reminder; `expired` when the deadline passed unanswered. A
+    # repeated state is collapsed per connection.
     state: str = "waiting"
     subject: str = ""
     #: The service's own vocabulary for what kind of answer is wanted (`measurement`, …). One of
@@ -368,40 +353,24 @@ class AnswerEvent(BaseModel):
 
     type: Literal["answer"] = "answer"
     text: str
-    # Which honesty checks ran on this answer — `[]` means none did. **Not the shipped default any
-    # more**: `answer_shape_gate_enabled` ships on, and `score_answer` appends `answer-shape`
-    # whenever it does, so a shipped deployment carries one entry on every answer and `[]` marks
-    # the deployment that turned the gate off. A surface built on the old reading has the common
-    # case and the exception the wrong way round.
-    # Additive and defaulted, like `ToolFailedEvent.reason` and for the same reason: this shape is
-    # a contract two other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`), so a surface that
-    # ignores it is unchanged and one that switches on it can be exhaustive.
-    #
-    # The vocabulary is `agent.verifier`'s own, imported rather than restated: the list is written
-    # by `score_answer`, and a second spelling of the same closed set here is a contract that can
-    # drift from the code that fills it.
+    # Which honesty checks ran on this answer; `[]` means none. With the shipped defaults it
+    # includes
+    # `answer-shape`. Additive and defaulted for the surfaces in `Chemclaw3_ui` and
+    # `Chemclaw3_mock`; the
+    # vocabulary is imported from `agent.verifier`.
     checks_run: list[AnswerCheck] = []
     confidence: float | None = None
     unsupported_claims: list[str] = []
     review_required: bool = False
-    # Which check produced `confidence`, when one did. `None` means verification was off.
-    #
-    # The routing flag alone cannot carry this: a degraded turn and a genuinely low-confidence turn
-    # both arrive as `review_required=True`, and a reviewer needs to know whether the judge was
-    # even reachable. It is on the wire because the surface is where "this was scored by the weaker
-    # check" has to be legible; the flag is the safety property and this is the transparency.
+    # Which check produced `confidence`, if any; `None` means verification was off. A reviewer needs
+    # to
+    # know whether a flagged answer was scored by the weaker citation gate.
     verified_by: Literal["judge", "citation-gate"] | None = None
-    # Whether an independent review panel agreed on a stated objection to this answer
-    # by an in-graph review gate, after the model had spent its revision budget trying to answer
-    # them. Distinct from `review_required`, which any of the three checks can raise on its own: a
-    # confidence score under a threshold and a quorum of agents that each went and checked are
-    # different weights of evidence, and a surface that renders them identically is throwing away
-    # the more expensive one.
+    # Whether a review panel upheld an objection to this answer, as distinct from `review_required`.
     challenged: bool = False
-    # **Both this and `challenged` above are permanently at their defaults** since the challenge
-    # panel was removed (D-2026-08-15). They stay declared because removing a member of this union
-    # is a coordinated change across `Chemclaw3_ui` and `Chemclaw3_mock`, and they go in the same
-    # cut that moves the transcript route off `session_messages`.
+    # This and `challenged` are always at their defaults since the challenge panel was removed. Kept
+    # because removing a union member is a coordinated change with `Chemclaw3_ui` and
+    # `Chemclaw3_mock`.
     review_hold_id: str | None = None
 
 
@@ -417,27 +386,15 @@ class ToolFailedEvent(BaseModel):
     tool: str
     message: str
     agent: str = _AGENT_FIELD
-    # Which *kind* of failure this is, where the kind is a decision someone made rather than a
-    # fault. A refusal is the control working, and a consumer that folds it in with a database
-    # outage reports a correctly-gated turn as a broken one — which is what `evals/live.py` did, by
-    # matching one phrase of the refusal *sentence*, so a reword would have flipped the finding
-    # with every test still green.
-    #
-    # **All five gates, not one.** This said `plan_gate` alone while `agent/audit.refusal_reason`
-    # already classified five, so the other four — a dry-run refusal the chemist themselves asked
-    # for, a role denial, a write no narrowed agent was given, a repeat the guard stopped — reached
-    # every surface indistinguishable from an unreachable pod. The set here IS that table's
-    # vocabulary — imported from `core.turn_signals`, not restated, so the two cannot drift.
-    #
-    # `None` is "an ordinary failure", which is every failure that was ever emitted before this
-    # field existed. Additive, defaulted and a closed set, because this shape is a contract two
-    # other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`): a surface that ignores it is
-    # unchanged, and one that switches on it can be exhaustive.
+    # Which kind of deliberate refusal this is, if any — a gate working, not a fault, so a consumer
+    # must
+    # not report it as an outage. The vocabulary is `core.turn_signals`', the same table
+    # `agent/audit.refusal_reason` uses. `None` is an ordinary failure. Additive, defaulted and
+    # closed
+    # for the two consuming repositories.
     reason: RefusalReason | None = None
-    # The provider's id for the failed call — the `call_id` its `exhibit_draft` frames carried — so
-    # a surface drops exactly the draft that will now never be settled, rather than every draft of
-    # that tool. `""` when the failure is not attributed to one call (`ToolFailureSignal.call_id`).
-    # Additive and defaulted, for `reason`'s reason above.
+    # The provider's id for the failed call, matching its `exhibit_draft` frames, so a surface drops
+    # exactly that draft. `""` when not attributed to one call.
     call_id: str = ""
 
 
@@ -554,61 +511,38 @@ class ToolResultEvent(BaseModel):
     agent: str = _AGENT_FIELD
 
 
-# The closed taxonomy. Each member is a *different thing for the user to do* — retry, wait, fix the
-# input, ask an operator — not a different place the traceback came from, which is why it is this
-# short. Named here beside the event rather than in the runner, because a surface switching on it
-# needs the type as much as the producer does.
+# The closed taxonomy. Each member is a different thing for the user to do — retry, wait, fix the
+# input, ask an operator — not a different origin. Beside the event because surfaces switch on it.
 ErrorCode = Literal[
     "internal",
     "storage_unavailable",
     "llm_timeout",
     "turn_timeout",
     "budget_exhausted",
-    # The *process* had no admission permit within `service_turn_admission_timeout_seconds`, so
-    # this turn was shed. Its own member rather than `budget_exhausted`, because the two are the
-    # opposite instruction: this one says "we are busy, retry in a moment" (`retryable=True`) and
-    # that one says "your budget is spent, stop retrying until an operator raises the cap"
-    # (`retryable=False`). They shared a code, so a surface switching on it — the documented way to
-    # choose the next step — had to fall back to `retryable` or to matching the prose, and a retry
-    # loop keyed on the code either hammered a saturated pod or gave up on a transient one.
+    # No admission permit within `service_turn_admission_timeout_seconds`: "busy, retry shortly"
+    # (`retryable=True`), the opposite instruction to `budget_exhausted`.
     "at_capacity",
     "loop_cap_reached",
-    # `loop_cap_reached`'s sibling in the other unit: the turn was inside its iteration ceiling and
-    # reached its billed-token ceiling instead. Its own code rather than `budget_exhausted`,
-    # because the two say different things to a surface — `budget_exhausted` is a *session* or
-    # *user* refused before the turn started and has no answer with it, while this one stops a turn
-    # mid-flight and its partial answer still arrives.
+    # The turn reached its billed-token ceiling mid-flight; its partial answer still arrives. Unlike
+    # `budget_exhausted`, which refuses before a turn starts.
     "spend_cap_reached",
     "bad_tool_arguments",
-    # The model endpoint refused the request because the conversation no longer fits its context
-    # window (`agent/llm_provider.classify_model_failure`'s `context_length`). Its own code rather
-    # than `internal`, because nothing is broken and the remedy is the chemist's: a new session or
-    # a narrower question. Reported as `internal` until 2026-09-27, which told a chemist "internal
-    # error" about the one failure a shorter thread fixes.
+    # The conversation no longer fits the model's context window. Nothing is broken; the remedy is a
+    # new
+    # session or a narrower question.
     "context_length",
-    # The model gateway refused this deployment's credential — HTTP 401 or 403 from
-    # `CHEMCLAW_LLM_BASE_URL` (`classify_model_failure`'s `auth`). Its own code rather than
-    # `internal` or `llm_timeout`, because the instruction differs from both: nothing in this
-    # system's code is broken, and asking again cannot work until an operator fixes
-    # `CHEMCLAW_LLM_API_KEY`. Reported as `internal` until 2026-10-04, so an operator could not
-    # tell a rotated key from a code fault by the code a chemist quoted. Never retryable.
+    # The model gateway refused this deployment's credential (401/403). Only an operator can fix it
+    # (`CHEMCLAW_LLM_API_KEY`). Never retryable.
     "llm_auth",
-    # A message that waited in the session's line and never ran: its sender withdrew it, the owner
-    # did, the sender was removed from the session while it waited, or the session was deleted
-    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). Its own code because nothing
-    # failed and nothing was spent — the stream ends having done nothing, which is the one thing a
-    # surface must not render as an error in the turn.
+    # A queued message that never ran: withdrawn by its sender or the owner, its sender removed, or
+    # the
+    # session deleted. Nothing failed or was spent; a surface must not render it as an error.
     "queue_cancelled",
-    # A *view* of a turn fell a full buffer behind and was cut off; the turn itself runs on. Only
-    # ever on the stream that lagged — every other participant's view is untouched, which is the
-    # point of cutting one rather than slowing all. Retryable: reopen the view, or read the answer
-    # from the transcript when it lands.
+    # One view of a turn fell a full buffer behind and was cut off; the turn and other views run on.
+    # Retryable: reopen the view, or read the answer from the transcript.
     "stream_lagged",
-    # The turn ran to completion and wrote nothing. Its own code rather than `internal`, because
-    # nothing broke: the model simply never produced prose, and a surface should offer "ask
-    # something narrower" rather than "an internal error occurred". Added after a live turn made
-    # 29 tool calls over 197 s and emitted an empty answer with no error at all — the silent death
-    # every live pass since 2026-07 has found, and the one shape a user cannot even report.
+    # The turn completed and wrote nothing. Nothing broke; a surface should suggest a narrower
+    # question.
     "empty_answer",
 ]
 
@@ -640,13 +574,9 @@ class ErrorEvent(BaseModel):
 
     type: Literal["error"] = "error"
     message: str
-    # `internal` is the honest default: an unclassified failure is one nobody has decided the
-    # user-facing meaning of yet, and guessing a friendlier code would be a worse answer than
-    # admitting the classification is missing.
+    # `internal` is the default: an unclassified failure has no decided user-facing meaning.
     code: ErrorCode = "internal"
-    # Whether asking again, unchanged, could plausibly succeed. A transient outage is retryable; a
-    # malformed tool argument is not, and telling a user to retry it wastes their time and the
-    # deployment's tokens.
+    # Whether asking again, unchanged, could plausibly succeed.
     retryable: bool = False
     correlation_id: str = ""
 
@@ -742,9 +672,9 @@ class ExhibitEvent(BaseModel):
     op: Literal["created", "revised"]
     author_kind: Literal["agent", "human"]
     author: str
-    # The provider tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this
-    # revision — the id its `exhibit_draft` frames carried, so a surface settles a draft by it.
-    # `""` for a person's write, a report's artefact and every push on `/events`.
+    # The tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this revision, so a
+    # surface settles its draft. `""` for a person's write, a report's artefact and every `/events`
+    # push.
     call_id: str = ""
 
 
@@ -807,16 +737,8 @@ Event = (
 def sse_frame(event: Event) -> dict[str, str]:
     """One turn event as the `dict` sse-starlette writes as a single SSE frame.
 
-    The wire format — `event:` from the discriminant, `data:` from `model_dump_json()` — is the
-    contract three surfaces parse, and it was spelled out at nine call sites across two route
-    modules (`api/routes/turns.py`, `api/routes/streams.py`), each an independent chance to write
-    `e.model_dump()` or to name the event something other than its own `type`. There is nothing to
-    decide here, which is exactly why it belongs in one place: a frame shape every surface
-    switches on is a contract, and a contract restated nine times is nine chances to restate it
-    wrong.
-
-    It lives beside the union rather than in either route module because both routes are callers
-    and neither is the owner — `api/routes/streams.py` already imports four members from here.
+    `event:` from the discriminant, `data:` from `model_dump_json()` — the frame shape every surface
+    parses, defined once for every route that streams.
     """
     return {"event": event.type, "data": event.model_dump_json()}
 
@@ -829,19 +751,9 @@ TURN_EVENT_REF = f"#/components/schemas/{TURN_EVENT_SCHEMA}"
 def event_schemas() -> dict[str, object]:
     """Every OpenAPI component this union needs, keyed by component name.
 
-    **Why the SSE contract has to reach the document at all**
-    (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`). The
-    fixture in `tests/fixtures/turn_events_contract.json` holds this union against the *models*,
-    which makes a change here loud on this side. What it cannot do is give the other side anything
-    to read: `Chemclaw3_ui`'s `shared/events.ts` is hand-mirrored and has been wrong nine times,
-    and `scripts/check-openapi.mjs` fetches the one artefact this service publishes. Measured
-    2026-09-14, that artefact declared **2 of 17** members and **0 of 10** error codes, because a
-    `text/event-stream` response is a body FastAPI cannot infer.
-
-    `TypeAdapter` rather than a hand-built `oneOf`: the union is already discriminated on `type`,
-    and pydantic emits the `discriminator` mapping an OpenAPI client generator needs. The
-    `ref_template` points at `components/schemas`, which is where these are merged, so every
-    `$ref` pydantic writes resolves in the merged document rather than at `#/$defs`.
+    The SSE body is `text/event-stream`, which FastAPI cannot describe, so the union is merged into
+    the published document for `Chemclaw3_ui`'s contract check. `TypeAdapter` emits the
+    `discriminator` mapping; `ref_template` points at `components/schemas`, where these are merged.
 
     Returns:
         The union's own component plus every member component it references.

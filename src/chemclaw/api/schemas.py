@@ -1,18 +1,10 @@
 """The front door's HTTP request/response shapes, plus the pure projections that fill them.
 
-These models are the wire contract a browser (or the companion UI repo) programs against, kept
-apart from the routes that serve them (R3.2) because a shape change is an API-compatibility
-decision while a route change is a behavior one — a reviewer should see each kind of diff on its
-own. Nothing here touches `app.state`, the database or Temporal: the functions beside the models
-(`_transcript` and its helpers) are pure projections from stored records onto these shapes, which is
-what lets `tests/test_jobs_api.py` drive them without an app. That list named a second projection,
-`_proposal_summary`, until the PR-gate it summarised was deleted
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
-
-`content_address` is imported for the same reason and is no exception to it: it is `hashlib` over a
-string, and the *decision* it feeds — whether a past tool call's full result is still fetchable —
-is a set of refs the route reads and passes in. Naming a result and finding out whether it still
-exists are two questions, and only the second one needs a database.
+These models are the wire contract a browser programs against, kept apart from the routes so a shape
+change (API compatibility) and a route change (behaviour) review separately. Nothing here touches
+`app.state`, the database or Temporal: `_transcript` and its helpers are pure projections, so tests
+drive them without an app. `content_address` is just a hash; whether a ref is still fetchable is a
+set the route reads and passes in.
 """
 
 from collections.abc import Collection, Sequence
@@ -34,14 +26,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.result_handle import without_handle_line
 from chemclaw.exhibits.models import ExhibitRef
 
-# How much of a tool's arguments or result the transcript carries. The same bound the audit trail
-# applies for the same reason: a tool argument can be a whole optimization problem or an evidence
-# sweep, and a reload must not ship one per call.
+# How much of a tool's arguments or result the transcript carries — the audit trail's bound, so a
+# reload never ships a whole evidence sweep per call.
 _TRANSCRIPT_ARG_CHARS = 400
 
-# How much of the opening message becomes the session's name. Sized so a client can truncate to
-# whatever its sidebar is wide enough for — a server that pre-truncated to 40 would have thrown away
-# what a wider surface wanted, and nothing downstream can put it back.
+# How much of the opening message becomes the session's name; generous, so each client truncates to
+# its own width.
 _TITLE_CHARS = 120
 
 
@@ -49,14 +39,11 @@ class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
 
     message: str
-    # Plan the turn without launching anything expensive (gap IDEA-4). Every expensive path is
-    # idempotent and cached, but there was no way to ask "what would you do, what would it cost"
-    # without doing it — a natural primitive for a deployment whose default autonomy is
-    # `plan_only`.
+    # Plan the turn without launching anything expensive: "what would you do, what would it cost".
     dry_run: bool = False
-    # Artefacts the chemist points at in this message ("Ask about this"). Each is resolved within
-    # the session before the turn starts — an unknown one is a 422, never a silently dropped
-    # reference — and copied, framed and bounded, into the turn's note (`agent/exhibit_notes`).
+    # Artefacts the chemist points at in this message. Each is resolved within the session before
+    # the turn starts (unknown is a 422) and copied, framed and bounded, into the turn's note
+    # (`agent/exhibit_notes`).
     exhibit_refs: list[ExhibitRef] = Field(default_factory=list)
 
     @field_validator("exhibit_refs")
@@ -70,10 +57,10 @@ class MessageIn(BaseModel):
     @field_validator("message")
     @classmethod
     def _bounded(cls, value: str) -> str:
-        """Reject a message past the configured cap (SEC-4) — a clean 422, not an unbounded read.
+        """Reject a message past the configured cap — a clean 422, not an unbounded read.
 
-        Read from `settings` at validation time (not as a frozen `Field(max_length=…)`) so the cap
-        is genuinely config-driven and adjustable per deployment.
+        Read from `settings` at validation time rather than a frozen `Field(max_length=…)`, so the
+        cap is configurable per deployment.
         """
         if len(value) > settings.service_max_message_chars:
             raise ValueError(f"message exceeds the {settings.service_max_message_chars}-char limit")
@@ -83,9 +70,8 @@ class MessageIn(BaseModel):
 class SessionIn(BaseModel):
     """Options for a new session; all optional, so a bodyless `POST /sessions` still works."""
 
-    # Which configured agent this conversation talks to (`agents.profile_discovery`). `None` is
-    # the default profile — today's global agent — so an existing client that sends no body is
-    # unaffected.
+    # Which configured agent this conversation talks to (`agents.profile_discovery`); `None` is the
+    # default profile, so a client that sends no body is unaffected.
     profile: str | None = None
 
 
@@ -111,8 +97,7 @@ class SessionSummary(BaseModel):
     session_id: str
     created_at: datetime
     updated_at: datetime
-    # Null for a session whose first turn predates this field, so a client can tell "never named"
-    # from "named with an empty string" — only one of those is a bug worth reporting.
+    # Null when the session was never named, as distinct from named with an empty string.
     title: str | None = None
 
 
@@ -240,23 +225,17 @@ class TranscriptMessage(BaseModel):
     role: str
     text: str
     tool_calls: list[TranscriptToolCall] = []
-    # The turn that stored this message (`session_messages.correlation_id`), so a client whose
-    # stream detached recovers that turn's answer by identity rather than by matching its text.
-    # `None` for a row stored off the request path or before the column existed. Optional and
-    # additive: a client that does not read it sees the contract it always did.
+    # The turn that stored this message, so a detached client recovers that turn's answer by
+    # identity. `None` for rows stored off the request path or before the column. Optional and
+    # additive.
     correlation_id: str | None = None
-    # Who wrote this message: the person it was written for and the agent that wrote it, `agent`
-    # null for the chemist's own words (`session_messages.actor`/`agent`, `core/authorship.py`).
-    # What a transcript needs before a session can hold two people — whose words each bubble is —
-    # and the same pair the audit trail and a knowledge note carry. `None` for a row that records
-    # neither half. Optional and additive, like `correlation_id` above.
+    # Who wrote this message: the person it was written for and the agent that wrote it (`agent`
+    # null for the chemist's own words; `core/authorship.py`). `None` when neither is recorded.
+    # Optional and additive.
     author: Authorship | None = None
-    # How the turn this *question* opened has ended so far
-    # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): `running` while it
-    # runs, then `done`, `failed`, `stopped`, or `interrupted` when its process died mid-turn — the
-    # question is written ahead of the turn now, so a reader sees what the model will see and is
-    # told how it ended rather than finding it missing. `None` on every other message, and on a
-    # question stored before the column existed. Optional and additive, like the two above.
+    # How the turn this question opened has ended so far: `running`, then `done`, `failed`,
+    # `stopped`, or `interrupted` when its process died. `None` on every other message and on older
+    # questions. Optional and additive.
     turn_status: TurnStatus | None = None
 
 
@@ -290,11 +269,11 @@ class WorkflowSummaryOut(BaseModel):
     name: str
     summary: str = ""
     step_count: int = 0
-    # The subset that costs compute, so a listing can show what still needs a decision without a
-    # second request per row.
+    # The steps that cost compute, so a listing shows what needs a decision without a request per
+    # row.
     job_steps: list[str] = Field(default_factory=list)
-    # Whether this version's job steps may run. Derived, not stored: a row whose document changed
-    # after approval is not approved, and a listing that reported the stored flag would say it was.
+    # Whether this version's job steps may run; derived, so a document changed after approval is not
+    # approved.
     approved: bool = False
 
 
@@ -302,9 +281,7 @@ class WorkflowListOut(BaseModel):
     """A caller's own composed workflows, most recently changed first."""
 
     workflows: list[WorkflowSummaryOut] = Field(default_factory=list)
-    # Says this is a page rather than the whole set, the way `PendingRequestsOut` does: the store
-    # clamps at `composed.MAX_PER_OWNER`, and a caller that could not tell would report a truncated
-    # list as a complete one.
+    # Says this is a page clamped at `composed.MAX_PER_OWNER`, not the whole set.
     truncated: bool = False
 
 
@@ -320,14 +297,12 @@ class WorkflowStepOut(BaseModel):
 
     id: str
     kind: str
-    # The tool or job this step calls, empty for a reasoning step. **The field that makes an
-    # approval an approval**: it is what the run will actually invoke.
+    # The tool or job this step calls (empty for a reasoning step) — what the run will actually
+    # invoke.
     calls: str = ""
-    # The arguments as written, `${…}` references and all, so a reader sees what is passed and
-    # what is carried from an earlier step.
+    # The arguments as written, `${…}` references and all.
     arguments: dict[str, Any] = Field(default_factory=dict)
-    # An agent step's prompt. Shown because a reasoning step is where the model's judgment enters
-    # a procedure a person is being asked to stand behind.
+    # An agent step's prompt, where the model's judgment enters the procedure.
     prompt: str = ""
 
 
@@ -341,22 +316,16 @@ class WorkflowApprovalOut(BaseModel):
     steps: list[WorkflowStepOut] = Field(default_factory=list)
     # The ids of the subset that costs compute — what approving this actually releases.
     job_steps: list[str] = Field(default_factory=list)
-    # Whether *this* version's job steps may run. Derived like `WorkflowSummaryOut.approved`, and
-    # for a sharper reason here: `approved_by` and `approved_at` describe whichever version
-    # `approved_fingerprint` names, which a re-composed document no longer is. A client rendering
-    # the two person-fields on their own would show "approved by Alice" over a document Alice never
-    # saw — so the comparison ships as a field rather than as something every client re-derives.
+    # Whether this version's job steps may run. Derived: `approved_by`/`approved_at` describe the
+    # version `approved_fingerprint` names, which a re-composed document no longer is, so a client
+    # must not infer approval from them.
     approved: bool = False
-    # Which conversation this procedure was composed in, so an approver looking at steps they did
-    # not write can find the exchange that asked for them. Empty off the service path, where there
-    # is no session.
+    # The conversation this procedure was composed in, so an approver can find what asked for it.
+    # Empty off the service path.
     composed_in_session: str = ""
-    # Who approved that version and when, kept beside `approved_fingerprint` rather than alone.
-    # Read at all so the audit the row *is* has a reader: a column written and never selected is an
-    # attribution nothing can see.
+    # Who approved the `approved_fingerprint` version, and when.
     approved_at: datetime | None = None
-    # What to post back. The approval binds to this, so a client that renders one version and posts
-    # another gets a 409 rather than a silent approval of the version it did not show.
+    # What to post back; a client that posts a version it did not show gets a 409.
     fingerprint: str = ""
     approved_fingerprint: str = ""
     approved_by: str = ""
@@ -465,9 +434,8 @@ class PlanStatusOut(BaseModel):
     mode: str
     approved: bool
     decided_by: str | None = None
-    # Whose turn last wrote this plan — the one person who may decide on it
-    # (`D-2026-09-27-in-a-shared-session-the-sender-governs`). `None` when no author is recorded, in
-    # which case the session's owner decides, as before authorship existed.
+    # Whose turn last wrote this plan — the one person who may decide on it. `None` when unrecorded,
+    # in which case the session's owner decides.
     author: str | None = None
 
 
@@ -491,15 +459,11 @@ class PendingPlan(BaseModel):
     updated_at: datetime
     plan_hash: str
     plan: list[str]
-    # What approving this plan would authorize — see `PlanStatusOut.scope`. The inbox carries it
-    # for the same reason the card does: it is the half of the plan a person is deciding about
-    # that the steps do not say.
+    # What approving this plan would authorize; see `PlanStatusOut.scope`.
     scope: list[str] = []
-    # Whose conversation the plan is in: the session owner's actor id — the caller's own for their
-    # sessions, somebody else's for one they were let into. The inbox lists both kinds, and opening
-    # a shared one has to adopt it as shared, so a surface needs the owner on the row rather than
-    # by matching `session_id` against `GET /sessions/shared` (Chemclaw3 #503). `None` where the
-    # membership store keeps no owner. Defaulted, so it is additive on the wire.
+    # The session owner's actor id — the caller's own, or somebody else's for a shared session — so
+    # a surface can open a shared one as shared. `None` where no owner is kept. Defaulted, so
+    # additive.
     owner: str | None = None
 
 
@@ -532,24 +496,15 @@ class PendingPlansOut(BaseModel):
     gated: int
     # Gated sessions whose plan was not read, so `plans` is short by an unknown amount.
     unread: int
-    # Whether the listing walk itself stopped short of the caller's history (see above). Defaulted
-    # so it is additive on the wire: a surface that does not know the field reads the same answer
-    # it read before, and one that does can say "older conversations were not checked".
+    # Whether the listing walk stopped short of the caller's history. Defaulted, so additive.
     truncated: bool = False
 
 
 def session_title(message: str) -> str:
     """A session's name, from the message that opened it.
 
-    Here, in the pure-projections half of this module, because that is what it is: the turn route
-    hands over the user's message as a plain string and gets back the string to store. Deriving it
-    from the *stored* message instead would mean interpreting the serialization in
-    `session_messages`, which `infra/sql/008_sessions.sql` is explicit the store must not do.
-
-    Collapsed and bounded, not summarised. A title that paraphrases is a title that can be wrong,
-    and this one names a row a chemist navigates by. The cap is generous — enough that a surface can
-    truncate to its own width without the server having pre-truncated to a narrower one, which is
-    the mistake that cannot be undone downstream.
+    Derived from the plain message string, not the stored serialization, which the store must not
+    interpret. Collapsed and bounded, never paraphrased: a paraphrase can be wrong.
     """
     return " ".join(message.split())[:_TITLE_CHARS]
 
@@ -559,55 +514,26 @@ def _transcript(
 ) -> list[TranscriptMessage]:
     """Flatten stored messages into the transcript contract, pairing calls with their results.
 
-    Results arrive in a *later* message than the call they answer — an assistant message carries
-    `tool_calls` and a following `ToolMessage` carries the answer — so pairing needs one pass over
-    the whole transcript before any message can be rendered. `tool_call_id` is the join.
+    Results arrive in a later message than their call, so pairing (on `tool_call_id`) takes a pass
+    over the whole transcript first. Plan snapshots and attachment references are never persisted,
+    so they are not recovered here.
 
-    **What this recovers, and what it cannot.** Tool calls and their outcomes were always in
-    storage and merely discarded by the route, so they come back for free. Plan snapshots,
-    attachment references are **never persisted** — they are turn-time events computed and
-    streamed, and nothing writes them to `session_messages`. The answer's
-    `confidence`/`review_required` are the one line of this that changed: `turn_costs` has kept
-    them since migration 082, keyed by *correlation id*, so they are recoverable for a turn and
-    still not for a message. This reader is per-message and joins on nothing that would reach that
-    row. Recovering any of it here is a change to what a turn *stores*, not to how it is read, so
-    it is a separate decision rather than something this can quietly approximate.
-
-    **The ref is computed here, not looked up.** A stored result's handle is the SHA-256 of the
-    result's own text (`api/tool_results.py::content_address`), and the text is sitting in the
-    message this is reading. The two sides agree by construction rather than by coincidence:
-    `api/graph_stream.py` hashes what `message_text` returns for the same `ToolMessage`, and the
-    durable row is that message's JSON round trip — so the read side is not reimplementing the
-    write side's flattening, it is calling it. That makes the pairing *identity of bytes* rather
-    than a guess from `(session, tool, correlation_id, created_at)`: those four cannot separate two
-    calls of one tool in one turn, and a link row's timestamp is the last time those bytes were
-    produced by anything, which is not a key at all. A mispaired result would be worse than an
-    absent one, and content addressing is the reason there is no pairing step to get wrong.
-
-    `fetchable` is the set of refs the store can serve for this session
-    (`tool_results.fetchable_refs`), and a computed ref outside it is reported as `""`. Passed in
-    rather than queried here so this stays a pure projection the tests can drive without an app,
-    and so the one database read happens once per transcript rather than once per tool call.
+    A result's ref is computed, not looked up: it is the SHA-256 of the result's text as
+    `message_text` flattens it, the same flattening `api/graph_stream.py` hashed when storing, so
+    the pairing is identity of bytes. `fetchable` (`tool_results.fetchable_refs`) is passed in,
+    keeping this pure and the database read to one per transcript; a ref outside it is reported as
+    `""`.
     """
     results: dict[str, tuple[str, str, bool]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
         if not call_id:
             continue
-        # `message_text`, not the raw attribute: it is the same flattening `graph_stream` hashed
-        # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
-        # result that came back empty gets no ref here: there is nothing for a surface to fetch,
-        # and `fetchable` is what decides in every other case.
-        #
-        # **A cut result names its full text by the stamp, not by hashing** — the text in this
-        # row is the model's cut, and the stream named the full text the cut kept
-        # (`tool_result_size.FULL_RESULT_REF_KEY`, which the row's JSON round trip preserves).
-        # Falling back to the hash when the stamp is empty is the stream's own fallback: the full
-        # text was not kept, so the stream stored the cut, and this names that.
-        # **A stamped result names its stored bytes by the stamp too**: the row's text ends in the
-        # handle line the model read (`core.result_handle`), which is not what was stored, so the
-        # hash of the row would name nothing. The line is removed before the text is shown, and
-        # the hash is the fallback for a row written before results were stamped.
+        # `message_text` is the flattening `graph_stream` hashed, so the computed ref matches a
+        # stored blob. An empty result gets no ref. A cut or stamped result names its stored bytes
+        # by the stamp (`FULL_RESULT_REF_KEY` or the handle stamp), since the row holds the model's
+        # cut or a trailing handle line; the hash is the fallback for unstamped rows. The handle
+        # line is removed before display.
         text = without_handle_line(message_text(message))
         ref = (
             full_result_ref(message)
@@ -634,8 +560,8 @@ def _transcript(
                     result_cut=cut,
                 )
             )
-        # A tool message is the carrier for a result that has already been attached to its call,
-        # so surfacing it as its own bubble would render every tool twice.
+        # A tool message's result is already attached to its call; a bubble of its own would show it
+        # twice.
         role = message_role(message)
         if role == "tool" and not calls:
             continue
@@ -653,18 +579,15 @@ def _transcript(
     return transcript
 
 
-# LangChain's message `type` to the role the transcript contract names. The two agree except for
-# `human`/`ai`, and the contract's names are the ones a surface already renders — changing them
-# would be a UI break for a rename.
+# LangChain's message `type` to the role names surfaces already render.
 _ROLES = {"human": "user", "ai": "assistant"}
 
 
 def message_role(message: Any) -> str:
     """The word a human reads for who said this, from LangChain's `type`.
 
-    Public because `chemclaw.cli.explain` renders the same conversation for the audit join and must
-    call it the same thing: a transcript that says `assistant` in the browser and `ai` in the audit
-    reconstruction makes two records of one turn look like two turns.
+    Public because `chemclaw.cli.explain` renders the same conversation and must name roles the same
+    way.
     """
     return str(_ROLES.get(message.type, message.type))
 
@@ -672,13 +595,9 @@ def message_role(message: Any) -> str:
 def message_text(message: Any) -> str:
     """The prose of one message, whether its content is a string or a list of blocks.
 
-    Public for two readers beyond this module, and the second one makes it load-bearing rather than
-    convenient: `chemclaw.cli.explain` renders the same rows, and `api/graph_stream.py` hashes what
-    this returns to name a stored tool result. A second implementation of the flattening would mean
-    a ref computed on read that no longer matches the one computed on write — a result that exists
-    and cannot be fetched.
-
-    Blocks carrying no `text` (an image, a tool-use block) contribute nothing rather than a `repr`.
+    Public and the single implementation: `api/graph_stream.py` hashes its output to name a stored
+    result, so a second flattening would produce refs that cannot be fetched. Blocks without `text`
+    contribute nothing.
     """
     content = message.content
     if isinstance(content, str):

@@ -1,30 +1,12 @@
 """What a tool result *is*, given that one tool does not return a `ToolMessage`.
 
-Every `wrap_tool_call` middleware in this repository that rewrites what the model reads was written
-against one shape — `ToolMessage` in, `ToolMessage` out — and guarded itself with
-`if not isinstance(result, ToolMessage): return result`. That guard is correct and it is not
-complete: **`task` returns a `langgraph.types.Command`**, because a spawned helper has to write its
-report *and* the channels that cross the subagent boundary (`model_calls`, `billed_tokens`, the
-helper's `files`) into the caller's state in one act. Measured on the compiled graph, the object
-that reaches the tool middleware chain for `task` is
-`Command(update={'files': …, 'model_calls': …, 'messages': [ToolMessage(…)]})`.
-
-So the guard silently excused the one tool whose result is **unbounded prose a model wrote**, and
-two controls whose own docstrings say they apply to every tool did not apply to it
-(`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`):
-
-- `agent/tool_framing.py` left a helper's report undefanged, so a report reproducing the envelope
-  delimiter — which a helper can *copy* rather than guess, having just read it around its own
-  evidence — reached the caller's thread with a live one.
-- `agent/tool_result_size.py` did not bound it. Upstream's `FilesystemMiddleware` evicts a result
-  over `tool_token_limit_before_evict` (20,000 tokens × 4 chars = **80,000 chars**), and this
-  repository's own ceiling is `agent_max_tool_result_chars` (**60,000**) — so a report
-  measured at **70,048 characters** landed in the caller's thread whole, with neither control
-  applied.
-
-This module is the seam that fixes both in one place rather than two, which is the point: a third
-middleware that rewrites a result will reach for the same function and inherit the same coverage,
-where a second copy of the `isinstance` guard would inherit the same hole.
+Middlewares that rewrite what the model reads were written for `ToolMessage` in and out, but `task`
+returns a `langgraph.types.Command` whose update carries the helper's report in `messages` alongside
+the channels that cross the subagent boundary (`model_calls`, `billed_tokens`, `files`). An
+`isinstance(result, ToolMessage)` guard would silently exempt the one tool whose result is unbounded
+model-written prose from both defanging (`agent/tool_framing.py`) and bounding
+(`agent/tool_result_size.py`). This module is the single seam both use, so a future rewriting
+middleware inherits the coverage.
 """
 
 import dataclasses
@@ -46,36 +28,19 @@ logger = logging.getLogger(__name__)
 def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMessage]) -> Any:
     """Apply `rewrite` to every `ToolMessage` in `result`, for the shapes a tool here returns.
 
-    Three shapes, and the third is why this exists:
+    - a bare `ToolMessage`: rewritten and returned;
+    - a `Command` with a dict `update["messages"]`: each `ToolMessage` is rewritten and every other
+      update key is preserved, since those carry a helper's spend into the caller's channels;
+    - anything else (a string, a routing-only `Command`): returned untouched.
 
-    - a bare `ToolMessage` — rewritten and returned, which is what every caller did before;
-    - a `Command` carrying `update["messages"]` — each `ToolMessage` in that list is rewritten and
-      the command is rebuilt with **every other key of the update preserved**, because those keys
-      are how a helper's `model_calls` and `billed_tokens` reach the caller's channels. Dropping
-      them would take a fan-out's spend off the one budget it shares, which is a defect the shape
-      of `tests/test_state_channels.py`'s whole subject: a write the graph never sees;
-    - anything else — returned untouched. A tool may return a plain string or a `Command` that
-      only routes, and neither is a result to rewrite.
-
-    **`Command.update` is typed `Any`, and only its dict form is rewritten here.** LangGraph's own
-    `Command._update_as_tuples` also accepts a sequence of `(key, value)` pairs and an annotated
-    object, and a `Command` in either of those forms passes through this function with **both**
-    controls unapplied — which is the defect this module exists to close, one shape further out.
-    That is deliberate rather than overlooked: upstream's `_build_task_tool` builds a dict, and so
-    does upstream's own `FilesystemMiddleware._intercept_large_tool_result`, so handling a form
-    nothing produces would be a branch no test could reach honestly. What makes it safe is that the
-    assumption is *asserted* rather than believed — `tests/test_upstream_surface.py` fails if the
-    `task` tool stops returning a dict-shaped update, naming this module as the one that breaks.
-
-    **Rebuilt only when something changed.** `dataclasses.replace` on an unchanged command would
-    return a new object every call for no reason, and identity is the cheapest way for a caller to
-    say "nothing to do" — which is what `bound_tool_results` relies on to leave a result it did not
-    truncate exactly as it found it.
+    Only the dict form of `Command.update` is handled, because that is what upstream's `task` and
+    `FilesystemMiddleware` produce; `tests/test_upstream_surface.py` fails if that changes. A
+    command is rebuilt only when something changed, so identity tells a caller nothing was done.
 
     Args:
         result: Whatever the tool handler returned.
-        rewrite: How to transform one `ToolMessage`. Must return a `ToolMessage`; returning the
-            same object is how a rewrite declines to change anything.
+        rewrite: How to transform one `ToolMessage`. Must return a `ToolMessage`; returning the same
+        object is how a rewrite declines to change anything.
 
     Returns:
         The same shape, with its tool messages rewritten.
@@ -93,22 +58,15 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
 
 
-#: Where the one entry naming a dropped set lands. A path rather than a per-file marker, because
-#: the whole point is that the count is what had to be bounded: one notice for the set keeps the
-#: total bounded, where a marker each is the 44N the cap exists to stop.
+# Where the one entry naming a dropped set lands: a single notice for the whole set keeps the total
+# bounded, where a marker per file would not.
 _DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"
 
 
 def _notice_path(taken: Any) -> str:
     """`_DROPPED_PATH`, or the first free variant of it if something already holds that name.
 
-    **A fixed literal here overwrites whatever is at it, silently.** Driven: a caller holding a
-    real file at `/scratch/_files_the_budget_could_not_hold.md` got its content replaced by the
-    `[system]` text. Contrived — nothing this system writes picks that name — but a module whose
-    whole subject is that a cut must never be silent may not destroy a document to say so.
-
-    The suffix keeps the name predictable in the case that matters (nothing holds it, so the path
-    is the literal) and merely unusual in the case that does not.
+    A fixed literal would silently overwrite a file the caller already holds there.
     """
     if not isinstance(taken, dict) or _DROPPED_PATH not in taken:
         return _DROPPED_PATH
@@ -126,21 +84,11 @@ def _notice_path(taken: Any) -> str:
 def _dropped_head(count: int) -> str:
     """The part of the dropped-set notice that is a fact rather than a sample.
 
-    Separated from the sample because it is what the caller has to *reserve* room for before it
-    spends anything: the notice is itself an entry in the channel it is explaining, and a bound
-    that forgets its own notice is the defect `bounded_content` fixed one level down by charging
-    its notice against the limit rather than adding it on top.
-
-    The only variable is the count, so its length grows monotonically with it — which is what lets
-    a caller reserve against the number of files that *could* be dropped and be sure the notice for
-    the number actually dropped fits.
-
-    **"this call's share" rather than "the budget".** What is spent here is what
-    `agent/tool_result_size._files_budget` handed over, which is the channel's remaining allowance
-    divided by the calls in this superstep that name this tool — and that divisor charges siblings
-    that wrote nothing, which `batch_siblings` argues is the only arithmetic available before their
-    results exist. An absolute "the budget cannot hold them" is therefore false in the commonest
-    case of all: a lone writer among seven silent siblings.
+    Separate so the caller can reserve room for it before spending anything: the notice is itself an
+    entry in the channel it explains. Its length grows monotonically with the count, so reserving
+    for the worst case is enough. It says "this call's share" because the budget is the remaining
+    allowance divided across sibling calls in the superstep
+    (`agent/tool_result_size._files_budget`), not the whole budget.
     """
     return (
         f"[system] {count} file(s) a helper wrote were **not stored**: this call's share of the "
@@ -152,17 +100,9 @@ def _dropped_head(count: int) -> str:
 def _reverted_head(count: int) -> str:
     """The same fact for a file the caller *already held*, where the outcome is the opposite.
 
-    **A dropped path is not always a missing file.** deepagents' channel reducer is
-    `result[key] = value`, so omitting a key leaves whatever the caller had there — which for a
-    document the helper *edited* means `read_file` succeeds and returns the **pre-edit** text. That
-    is the silent stale read this module exists to prevent, and the notice used to tell the model
-    the opposite ("reading one back will fail"), which is worse than saying nothing: a model that
-    retries the read gets confirmation of the stale content.
-
-    Driven at an exhausted channel: a chemist's `/notes/mine.md` came back as `'STALE VERSION'`
-    after a helper wrote `'FRESH VERSION THE HELPER WROTE'` to it, under a notice claiming the read
-    would fail. These paths are served *first* now, so this sentence is rare; it is here because
-    rare is not never.
+    The channel reducer is `result[key] = value`, so omitting a key leaves the caller's previous
+    text: a dropped edit reads back stale rather than failing. Such paths are served first, so this
+    sentence is rare.
     """
     return (
         f"[system] {count} file(s) the helper edited were **left as this caller already had "
@@ -174,19 +114,9 @@ def _reverted_head(count: int) -> str:
 def _dropped_notice(new: list[str], reverted: list[str], budget: int) -> str:
     """The one entry that stands for every file the channel could not represent.
 
-    Two sentences rather than one, because the two outcomes are opposite and a caller acts on them
-    differently — see `_dropped_head` and `_reverted_head`.
-
-    **The sample is cut to fit `budget`, and it used to be cut to ten paths.** That bounded the
-    count of the sample and not its length, and a path is not text this system wrote: it is the
-    string a *model* passed to `write_file`. Measured through the shipped middleware at a
-    200,000-character budget, ten dropped paths of 1,000 characters each put the stored total at
-    201,517 — the notice being the unbounded thing this docstring's own previous version said it
-    must not be.
-
-    What it never drops is the counts and what happens on a read, because those are what a caller
-    cannot act correctly without. The sample is the part that is nice to have, so the sample is the
-    part that shrinks.
+    Two sentences because the two outcomes (missing vs stale) are opposite; see `_dropped_head` and
+    `_reverted_head`. The path sample is cut to fit `budget` (paths are model-written and
+    unbounded); the counts and the read consequences are never dropped.
     """
     heads = [
         head
@@ -222,75 +152,31 @@ def rewritten_command_files(
 ) -> Any:
     """Apply `rewrite` to every file a `Command` **changes** in its caller's state.
 
-    **The other half of what `task` hands back, and nothing bounded it.**
-    `rewritten_tool_messages` above covers the report — the part a model reads — and
-    `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` established that the
-    caller's *thread* stays tiny: driven, a helper reading 2 MB leaves its caller 57 characters.
-    That measurement is right and it is about one of the two things a helper returns. Upstream's
-    `_return_command_with_state_update` copies **every** non-excluded key of the helper's final
-    state into the caller's update, and `files` is one of them — so the same probe puts
-    **2,000,137 characters** of the helper's scratch filesystem into the caller's checkpointed
-    state, where the thread shows 57.
+    The other half of what `task` hands back: upstream copies the helper's whole `files` channel
+    into the caller's update, which can be very large even when the report is tiny. This bounds it
+    against checkpoint cost rather than context.
 
-    It is a *storage* blow-out rather than a context one, and the two need different arithmetic.
-    The report is bounded against `agent_max_tool_result_chars` because it is sent to a model; a
-    file is bounded against what a checkpoint costs, because LangGraph writes the whole channel
-    per superstep and per version.
+    Only *changed* files are bounded: the command carries the caller's whole channel (deepagents
+    excludes only `messages`, `todos` and `structured_response`), and re-delivering unchanged text
+    is a no-op under the reducer, so the caller's own documents are never charged or truncated. The
+    remainder is divided over the changed set.
 
-    **Changes, not writes — and the difference is the caller's own documents.** deepagents hands a
-    subagent every non-excluded key of its caller's state and copies them all back
-    (`_EXCLUDED_STATE_KEYS` is `messages`, `todos`, `structured_response`), so the `files` this
-    `Command` carries is the caller's **whole** channel, not the helper's contribution to it.
-    Cutting all of it charged a chemist's own `/scratch/` documents against a budget that bounds
-    what a *helper* adds, and at an exhausted channel it destroyed them: measured, a chemist's
-    200,000-character file came back as 45 characters because a helper had returned, with the
-    truncation logged as "a file a helper wrote".
-
-    **A cap on each file's size is not a cap on the command, because the cut has a floor.**
-    `bounded_content` never returns less than the notice that says it cut — a bound paid for by
-    saying nothing is not what this module is for — so N files each cut to that notice is 44N, and
-    past a crossover the total grows linearly in N again. Driven before this loop spent a
-    remainder: eight concurrent `task` calls of 600 changed files each landed 206,400 characters
-    against a 200,000-character budget, and one call of 5,000 files landed 215,000. The per-file
-    share had already floored, so dividing it further could not help.
-
-    So the count is bounded too — by the budget running out rather than by a count derived from it.
-    A file the remainder cannot pay for is **omitted** rather than stored empty, and one entry at
-    `_DROPPED_PATH` names how many went and why. Omitting is the louder failure of the two: reading
-    a dropped path back fails with "no such file", where an empty one hands a chemist a document
-    that simply stops — the silent cut this module exists to prevent. One notice covers the whole
-    dropped set, which is what keeps the total bounded rather than moving the problem.
-
-    **A path is charged too, and for a while nothing charged it.** The budget's subject is the
-    caller's `files` channel, and a channel is its keys as much as its values — LangGraph writes
-    the mapping. `agent/tool_result_size._files_already_held` summed `content` and never read a
-    key, this loop divided a budget that had never seen one, and the sweep that was supposed to
-    hold the bound measured the same half. Driven through the shipped middleware at a
-    200,000-character budget, one call of 5,000 changed files landed 191,517 characters of text
-    under 83,370 characters of ordinary `/scratch/w0-4443.md` keys — **274,887 in the channel, 37%
-    over, with no adversary at all** — and since a key is a string the *model* passed to
-    `write_file`, 1,000-character paths took the same command to 4,728,887. So a file's share is
-    reduced by its own key, and a key the remainder cannot pay for is what drops the file.
-
-    Skipping them is not merely kinder, it is what the channel does anyway. Upstream's reducer is
-    `result[key] = value`, so re-delivering a file whose text is unchanged is a no-op on the
-    channel — the bound could only ever have cost bytes, never saved any. What is left to bound is
-    exactly the set of paths whose text differs from what the caller already holds, and the loop
-    divides the remainder over that set, so a helper that changed one file gets the whole budget
-    instead of a share diluted by every document its caller happened to be carrying.
+    The count is bounded too, because each cut has a floor (the notice), so per-file shares alone
+    cannot bound many files. A file the remainder cannot pay for is omitted rather than stored
+    empty, and one entry at `_DROPPED_PATH` names what went. Keys are charged as well as text, since
+    a channel is its keys too and paths are model-written.
 
     Args:
         result: Whatever the tool handler returned.
-        rewrite: Takes one file's text and how many characters this file may occupy, and returns
-            the text to store. Returning the same string is how a rewrite declines to change
-            anything — which the loop relies on, since identity is how it tells a cut from a pass.
-        existing: The caller's `files` before this command lands. Files whose text it already holds
-            unchanged are passed through untouched. `None` bounds every file, which is the old
-            behaviour and is kept only for a caller that has no state to compare against.
-        budget: How many characters this command may add to the caller's `files` channel, keys
-            and text together. `None` bounds nothing and passes 0 as every share, which is how
-            `agent_subagent_files_max_chars = 0` switches the cap off — `bounded_content` treats a
-            non-positive limit as no cap, so the off switch has one spelling rather than two.
+        rewrite: Takes one file's text and how many characters this file may occupy, and returns the
+        text to store. Returning the same string declines to change anything; the loop uses identity
+        to tell a cut from a pass.
+        existing: The caller's `files` before this command lands; files it already holds unchanged
+        pass through untouched. `None` bounds every file.
+        budget: How many characters this command may add to the caller's `files` channel, keys and
+        text together. `None` bounds nothing and passes 0 as every share (`bounded_content` treats a
+        non-positive limit as no cap), which is how `agent_subagent_files_max_chars = 0` disables
+        it.
 
     Returns:
         The same shape, with its changed files rewritten.
@@ -300,11 +186,8 @@ def rewritten_command_files(
     files = result.update.get("files")
     if not isinstance(files, dict) or not files:
         return result
-    # `FileData` is a mapping carrying `content` beside its timestamps, and treating it as one
-    # rather than importing upstream's constructor is what keeps `created_at` intact — rebuilding
-    # a file would restamp it. `tests/test_upstream_surface.py` asserts the shape, which is this
-    # repository's discipline for every assumption about a library's data that the library does
-    # not promise.
+    # `FileData` is treated as a mapping rather than rebuilt with upstream's constructor, which
+    # keeps `created_at` intact; `tests/test_upstream_surface.py` asserts the shape.
     held = existing if isinstance(existing, dict) else {}
 
     def _is_unchanged(path: str, content: str) -> bool:
@@ -319,14 +202,11 @@ def rewritten_command_files(
         and isinstance(data.get("content"), str)
         and not _is_unchanged(path, str(data["content"]))
     ]
-    # **A path the caller already holds is served first**, because its failure mode is the opposite
-    # of a new file's and strictly worse: omitting it leaves the caller's *previous* text in the
-    # channel, so a document the helper edited reads back pre-edit rather than failing. Stable, so
-    # the order within each group is still the command's own.
+    # Paths the caller already holds are served first, since omitting one leaves stale pre-edit text
+    # rather than a clean failure. Stable sort, so the command's order is otherwise kept.
     ordered = sorted(changed_paths, key=lambda path: path not in held)
-    # Room for the one entry that names what did not fit, taken off the top before anything is
-    # spent. Both heads, because either sentence may be the one needed, and their lengths grow
-    # monotonically with their counts — so reserving against every changed file is enough.
+    # Reserve room for the dropped-set notice before spending anything; both heads grow
+    # monotonically with their counts, so reserving against every changed file is enough.
     reserve = (
         0
         if budget is None
@@ -342,10 +222,8 @@ def rewritten_command_files(
     reverted: list[str] = []
     for path in ordered:
         content = str(files[path]["content"])
-        # The share is what is left divided by the files still to come, less this file's own key.
-        # Dividing the *remainder* rather than the budget is what makes the bound exact: a file
-        # that came in under its share hands what it did not spend to the ones after it, and a
-        # file that floored has already been charged in full.
+        # The share is the remainder divided over the files still to come, less this file's own key;
+        # a file under its share passes the surplus on, which keeps the bound exact.
         share = 0 if remaining is None else max(remaining // max(left, 1) - len(path), 1)
         left -= 1
         bounded = rewrite(content, share)
@@ -384,10 +262,9 @@ def rewritten_command_files(
     return dataclasses.replace(result, update={**result.update, "files": rewritten})
 
 
-#: The turn limits that can stop a helper before it finishes, by the state flag its `Command`
-#: carries back and the name the caller's model is told. `loop_capped` and `spend_capped` are the
-#: two `TurnFlag` channels that cross the subagent boundary *on purpose* (`agent/state.py`), which
-#: is what makes them readable here without a second channel saying the same thing.
+# The turn limits that can stop a helper, by the state flag its `Command` carries back and the name
+# the caller's model is told. `loop_capped` and `spend_capped` cross the subagent boundary on
+# purpose (`agent/state.py`).
 _HELPER_STOPS: tuple[tuple[str, str], ...] = (
     ("loop_capped", "step limit"),
     ("spend_capped", "token budget"),
@@ -406,13 +283,9 @@ HELPER_CUT_SHORT = ModelProse(
 def helper_stopped_by(result: Any) -> str | None:
     """Which turn limit stopped the helper whose `task` result this is, or `None` if it finished.
 
-    **The report alone cannot say, and that is the defect.** deepagents builds a helper's report
-    from its *last non-empty assistant text* (`_return_command_with_state_update`), so a helper the
-    cap stopped mid-sweep reports its last sentence of narration as though it were its findings.
-    Driven live against a real model (dl-01, 2026-09-27): three reports read "Let me look at the
-    aryl chloride compounds found…", "Let me also check one more thing…" and the start of a
-    report, and nothing told the caller which of the three had finished. The flags the helper's
-    final state carries back do say it, and they are already on the `Command` this seam handles.
+    deepagents builds the report from the helper's last non-empty assistant text, so a capped
+    helper's narration ("Let me also check…") would read as its findings. The flags its final state
+    carries back say whether it finished.
     """
     if not isinstance(result, Command) or not isinstance(result.update, dict):
         return None
@@ -425,12 +298,9 @@ def helper_stopped_by(result: Any) -> str | None:
 def cut_short_report(report: str, limit: str) -> str:
     """A stopped helper's report, led by this system's marked statement that it is partial.
 
-    Led rather than trailed, because the head is what a bounded cut keeps and what a reader reads
-    first: a caller that stops at "Let me also check…" must already know the check never happened.
-    Marked with `SYSTEM_SPEECH_MARK` because it is this system's sentence inside a result that is
-    otherwise a model's prose — the caller has to be able to tell the two apart, and the mark is
-    the one anchor the report itself cannot forge (`agent/tool_framing.py` defangs it out of the
-    helper's text before this is added).
+    Led rather than trailed, because the head is what a bounded cut keeps and what a reader sees
+    first. Marked with `SYSTEM_SPEECH_MARK`, which the helper's own text cannot forge
+    (`agent/tool_framing.py` defangs it out first).
     """
     findings = report.strip() or "(it had written nothing)"
     return f"[{HELPER_CUT_SHORT.format(limit=limit)}] {SYSTEM_SPEECH_MARK}\n\n{findings}"
@@ -447,10 +317,8 @@ EMPTY_TOOL_RESULT = ModelProse(
 def _is_blank(content: Any) -> bool:
     """Whether a `ToolMessage.content` carries nothing a model could read.
 
-    Both arms of LangChain's `str | list[str | dict]` occur: `langchain_mcp_adapters` hands back
-    `[]` for a `CallToolResult` with zero content blocks — measured, the shape a FastMCP tool
-    returning `None` produces — and the empty list later reaches the model as `""`. A block that is
-    not text (an image, a file) is content, so a list holding one is not blank.
+    Both `""` and `[]` occur (`langchain_mcp_adapters` returns `[]` for a result with zero content
+    blocks). A non-text block (image, file) is content.
     """
     if isinstance(content, str):
         return not content.strip()
@@ -471,15 +339,9 @@ def _is_blank(content: Any) -> bool:
 def returned_nothing(result: object) -> bool:
     """Whether a tool *succeeded* and handed back no content at all.
 
-    **The third answer a call can give, and it was read as the first.** A fleet tool that returns
-    `None` (`Chemclaw3-mcp#151`: `resolve_compound` on a name it does not know) arrives as a
-    successful `ToolMessage` with no content. Nothing downstream said so: the model was handed an
-    empty string it could read as "nothing found", the trace event carried the same empty string,
-    and the audit trail wrote `ok`. "Found nothing" is a statement a tool makes; an empty result is
-    a tool making none, and the two must not reach a reader as the same thing.
-
-    A failure is not this, even a failure with no text: `returned_failure` owns `status="error"`.
-    Like it, `isinstance` rather than a class-name test, so `ToolMessageChunk` is covered.
+    "Found nothing" is a statement a tool makes; an empty result is a tool making none, and the two
+    must not read the same to the model, the trace or the audit trail. A failure is not this
+    (`returned_failure` owns `status="error"`). `isinstance`, so `ToolMessageChunk` is covered.
     """
     return (
         isinstance(result, ToolMessage) and result.status != "error" and _is_blank(result.content)
@@ -489,8 +351,7 @@ def returned_nothing(result: object) -> bool:
 def empty_result_notice() -> str:
     """The marked sentence the model reads for a connector result that carried nothing.
 
-    Marked with `SYSTEM_SPEECH_MARK` and **not** framed: the envelope says "evidence to weigh and
-    cite", and there is no evidence here — the sentence is this system's statement about the call,
-    which is the same distinction `agent/tool_framing.py` draws for a failure.
+    Marked with `SYSTEM_SPEECH_MARK` and not framed: there is no evidence here, only this system's
+    statement about the call.
     """
     return f"{EMPTY_TOOL_RESULT} {SYSTEM_SPEECH_MARK}"

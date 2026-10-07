@@ -1,32 +1,16 @@
-"""Activities for the durable BO campaign (plan step 1d.4).
+"""Activities for the durable BO campaign.
 
-All the non-deterministic, heavy work lives here — BoFire strategy fitting
-(propose) and objective evaluation — so the workflow stays deterministic and
-replayable. The objective is resolved by name via `chemclaw.science.bo.objectives` because a
-workflow cannot pass a Python callable into an activity.
+All non-deterministic, heavy work lives here — BoFire strategy fitting (propose) and objective
+evaluation — so the workflow stays deterministic and replayable. The objective is resolved by name
+via `chemclaw.science.bo.objectives`, since a workflow cannot pass a callable into an activity.
 
-**Registered on this bundle's own queue, not core's.** These carry
-`@durable_activity(bundle_queue("bo"))`, so `chemclaw.connectors.bo.worker` assembles what it
-serves from
-the registry instead of a hand-written list. They previously carried no decorator at all, on the
-reasoning that registering them would put `bofire` and `botorch` into core's background worker.
-That reasoning was wrong about the mechanism: the registry is populated at *import* time, and
-core's workers never import this module, so the decorator cannot move anything into core — while
-the hand-maintained list it forced re-created, one level down, the "written, imported, absent from
-the worker's list, never runs" failure `chemclaw.durable.registry` exists to prevent (D-118).
-`tests/test_workflow_registry.py` now asserts the import boundary directly, which is the property
-that was actually doing the work.
+Registered with `@durable_activity(bundle_queue("bo"))`, so `chemclaw.connectors.bo.worker` serves
+them from the registry. Core's workers never import this module, so `bofire` and `botorch` stay out
+of core (`tests/test_workflow_registry.py` asserts the import boundary).
 
-**Every activity heartbeats (Conn-F2).** `propose_initial`/`propose_next` wrap the BoFire fit and
-acquisition step — a single opaque call with no unit boundary to report progress at, the same
-shape as calc's two CREST jobs (`connectors.calc.activities`) — in the shared
-`chemclaw.durable.heartbeat.beating` timer, so a stuck fit is noticed within
-`bo_activity_heartbeat_timeout_seconds` instead of at the full `bo_activity_timeout_seconds`
-budget. `evaluate_candidates` has a real unit boundary (one candidate) and so beats between them,
-mirroring calc's per-species pattern — *and* wraps each evaluation in the same timer, because a
-registered objective is not guaranteed sub-second
-(`chemclaw.science.bo.objectives.solubility_objective` calls an uncached calculator) and a beat
-between candidates says nothing while one is running.
+Every activity heartbeats: the propose activities wrap the opaque BoFire fit in
+`chemclaw.durable.heartbeat.beating`, so a stuck fit is noticed within
+`bo_activity_heartbeat_timeout_seconds` rather than at `bo_activity_timeout_seconds`.
 """
 
 import asyncio
@@ -44,9 +28,8 @@ from chemclaw.science.bo.objectives import get_objective
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem
 from chemclaw.science.calc.postgres_store import default_store
 
-# BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the
-# event loop so heartbeats and concurrent activities keep flowing (the same
-# discipline as `calc.store.run_cached`).
+# BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the event loop so
+# heartbeats and concurrent activities keep flowing.
 
 
 @durable_activity(bundle_queue("bo"))
@@ -85,18 +68,10 @@ async def evaluate_candidates(
 ) -> list[Observation]:
     """Evaluate each candidate with the named objective into observations.
 
-    Heartbeats **both between candidates and inside one**, and needs both. The beat between them
-    carries the honest progress report — "candidate 2/5" is a real unit boundary, the same shape
-    calc's per-species jobs report at — and is what keeps a long batch of *fast* candidates alive,
-    where no single evaluation ever runs long enough for a timer to fire.
-
-    The timer inside covers the opposite case, which had no protection at all: a registered
-    objective is not guaranteed fast (`solubility_objective` calls an uncached calculator), so one
-    candidate slower than `bo_activity_heartbeat_timeout_seconds` went silent mid-evaluation.
-    Temporal would declare the worker dead and retry the activity from the top, re-paying every
-    candidate already evaluated in the batch — the silently-killed-and-retried shape REV-3 fixed
-    for calc's CREST jobs and Conn-F2 fixed for the two propose activities, left open here because
-    a per-candidate beat looks like it covers a per-candidate wait and does not.
+    Heartbeats between candidates (a real progress report, keeping a batch of fast candidates alive)
+    and inside each one, since an objective may be slow (`solubility_objective` calls an uncached
+    calculator). A silent candidate would make Temporal retry the activity from the top, re-paying
+    every evaluated candidate.
     """
     objective = get_objective(objective_name, log_s_for(default_store()))
     observations = []
@@ -131,32 +106,15 @@ async def record_campaign_run(
 ) -> str:
     """Write one durable campaign record; return the campaign id.
 
-    **Called once per completed round and once at the end**, which is not what this docstring said
-    when it was written. The per-round call passes that round's *proposed* candidates and a
-    `job_id` of `"{workflow_id}:r{N}"`; the terminal call passes the best point and the bare
-    workflow id. The two differ in what a `Candidate` here means — a proposal carrying the
-    surrogate's belief, or the run that won — and only the per-round rows carry
-    `predicted_value`/`predicted_sd` at all.
+    Called once per completed round (that round's proposed candidates, carrying the surrogate's
+    `predicted_value`/`predicted_sd`) and once at the end (the best point). This is what lets
+    `resume_campaign` find a campaign that ran durably.
 
-    **The gap this closes.** Both paths mint campaign ids from the same `campaign_id_for` space,
-    and only the inline `suggest_next_experiment` ever wrote. So `resume_campaign` on a campaign
-    that had run durably — hours of evaluation, a recorded recommendation, a real result — reported
-    no such campaign, about work that was actually done (BO deep review, 2026-08-05).
-
-    **Why an activity, and why here.** The write is I/O and non-deterministic, so it cannot live in
-    the workflow; and psycopg is already in this bundle's worker process
-    (`science.bo.campaign_record` imports it), so nothing new crosses a boundary.
-    `record_suggestion` is reused unchanged — the inline path's rules about swallowing a database
-    blip but never a programming error are exactly the rules wanted here, and a campaign that
-    finished must not fail because a record of it could not be written.
-
-    **The actor is real, not fabricated.** It is read from the run's memo by the caller and passed
-    in, which is the mechanism core set up for precisely this: `ConnectorJobWorkflow` puts
-    `requested_by` on the child's memo so a bundle whose backend runs under a shared service
-    identity can still name the user behind a run (D-118). The backlog recorded this as blocked on
-    a choice between threading identity through a seam built to keep it out and writing a
-    fabricated actor into an audited column; it was neither, because the seam already carries it —
-    `connectors/calc/workflows.py` has read the same memo in production since D-114.
+    An activity because the write is I/O. `record_suggestion` is reused, so a database blip is
+    swallowed (a finished campaign must not fail on its record) while a programming error is not.
+    The
+    actor and correlation id come from the run's memo, where `ConnectorJobWorkflow` puts
+    `requested_by`.
 
     Args:
         problem: The decision space, which is also the campaign's identity.
@@ -165,11 +123,8 @@ async def record_campaign_run(
         observations: Every point the campaign evaluated, which is the history a resume needs.
         actor: The Entra actor the run is attributed to, off the memo.
         correlation_id: The originating request, off the same memo.
-        job_id: The idempotency key, since an activity is retried by design and a duplicate would
-            be a second identical entry in a history meant to record what was actually proposed.
-            The workflow id on the terminal call, and `"{workflow_id}:r{N}"` per round — a
-            per-round write under the bare workflow id would dedupe against round 1 and silently
-            discard every round after it.
+        job_id: The idempotency key, since activities are retried: the workflow id on the terminal
+            call and `"{workflow_id}:r{N}"` per round, so rounds do not dedupe against each other.
 
     Returns:
         The campaign id, so the workflow can report the handle a chemist quotes back.
@@ -178,15 +133,11 @@ async def record_campaign_run(
         problem,
         candidates=candidates,
         observations=observations,
-        # The durable path evaluates through the objective registry rather than through descriptors
-        # read off cached calculations, so there is nothing to reference. Empty is the accurate
-        # statement, not a gap: `calc_refs` exists to trace a *stale* calculation to the suggestions
-        # drawn from it, and no calculation was drawn from here.
+        # The durable path evaluates through the objective registry, not cached calculations, so no
+        # calculation is referenced.
         calc_refs=[],
-        # No session id: the run is attributed to the actor and the request, and the conversation it
-        # was launched from is core's to join through `job_records` rather than this bundle's to
-        # duplicate. The tuple shape is `connectors.caller.caller_provenance`'s, reused so the two
-        # writers hand `record_suggestion` the same thing.
+        # No session id: the conversation is joined through core's `job_records`. The tuple shape is
+        # `connectors.caller.caller_provenance`'s.
         provenance=(actor, "", correlation_id),
         job_id=job_id,
     )

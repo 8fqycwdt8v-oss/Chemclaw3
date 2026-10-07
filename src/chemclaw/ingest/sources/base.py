@@ -1,18 +1,9 @@
-"""The unified `DataSource` contract: three independent, optional halves (F7-T1; F4 added one).
+"""The unified `DataSource` contract: three independent, optional halves.
 
-A data source is anything the system can *ingest from* (an ELN/LIMS drop), *retrieve evidence
-from* (the knowledge graph, a literature index), or read *committed work* from (a portfolio export).
-The three capabilities are genuinely disjoint — `ElnAdapter`, `SourceRetriever` and
-`CommitmentAdapter` are separate protocols with different methods and DTOs — so this seam does not
-merge them into one fat interface. It **composes** them: a `DataSource` names itself and exposes
-each half optionally, each being the existing protocol verbatim. Only the composition is fixed here;
-the shape of what flows through each half is never re-invented (D-018/D-023).
-
-**The third half is what makes this seam entity-shaped as well as corpus-shaped.** The first two
-turn records into chunks, notes and fingerprints; a portfolio export is not a corpus but a set of
-typed entities with lifecycles, and ingesting one through the corpus halves would land it as
-searchable prose (`D-2026-08-29-a-mirror-is-not-a-plan`). It is composed here rather than given a
-seam of its own precisely because this file already argues that disjoint halves compose.
+A source may be ingested from (`ElnAdapter`, an ELN/LIMS drop), retrieved from (`SourceRetriever`,
+evidence for a query) or read for committed work (`CommitmentAdapter`, a portfolio export of typed
+entities rather than a corpus). The halves are disjoint protocols with their own DTOs, so this seam
+composes them rather than merging them into one interface.
 """
 
 from dataclasses import dataclass
@@ -26,9 +17,7 @@ from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 # is the whole point: a source re-hosts an adapter/retriever unchanged, it does not reimplement one.
 IngestHalf = ElnAdapter  # fetch_new_entries(since) -> [RawEntry]; map_to_ord(raw) -> OrdReaction
 RetrieveHalf = SourceRetriever  # name; retrieve(query, filters) -> [EvidenceChunk]
-# The third half (F4): a source that supplies *entities* rather than a corpus. Composed on the same
-# terms as the other two — its own Protocol, its own DTO, never merged into a fat interface — and
-# added here rather than as a fourth seam because this one was built to compose disjoint halves.
+# The third half: a source that supplies entities rather than a corpus.
 CommitmentHalf = CommitmentAdapter  # fetch_commitments(since) -> [Commitment]
 
 # Re-export the reused DTOs so a source module imports them from the seam, not from two subsystems.
@@ -47,14 +36,8 @@ __all__ = [
 class DataSource(Protocol):
     """A named attachment point exposing any of three optional halves.
 
-    The halves are `ingest`, `retrieve` and `commitments` — a source provides whichever it can and
-    `None` for the rest. This said "an optional ingest and/or an optional retrieve half" with
-    `commitments` declared ten lines below it, which is the wrong place for that gap: the docstring
-    is what a reader writing a new source meets first, and it taught them a commitments-only source
-    is not a source.
-
-    Members are read-only (properties), so a `frozen` implementation like `SourceSpec` satisfies the
-    contract — nothing reassigns a source's halves after it is built.
+    The halves are `ingest`, `retrieve` and `commitments`; a source provides whichever it can and
+    `None` for the rest. Members are read-only properties, so a frozen `SourceSpec` satisfies it.
     """
 
     @property
@@ -82,10 +65,7 @@ class DataSource(Protocol):
 class SourceSpec:
     """The concrete `DataSource` a registry entry builds: a name plus whichever halves it provides.
 
-    Constructing one with no half at all is a programming error — a source that can be neither
-    ingested from, retrieved from nor asked for committed work is not a source — so it is rejected
-    at build time. `__post_init__` below is where the three are checked; do not restate their number
-    here, which is how this docstring came to say "neither" over a three-way test.
+    A source with no half at all is rejected at build time.
     """
 
     name: str

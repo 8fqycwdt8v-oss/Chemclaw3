@@ -1,25 +1,11 @@
-"""Map a BO campaign's recommendation to a knowledge-graph note (plan step 1d.5).
+"""Map a BO campaign's recommendation to a knowledge-graph note.
 
-A finished campaign's best point is the experiment the optimizer recommends running next, and it
-becomes an agent-authored note in the graph — readable the moment the campaign ends, carrying
-`created_by: agent` and its own `calc_refs`.
+A finished campaign's best point becomes an agent-authored note, readable at once and carrying
+`created_by: agent` and its own `calc_refs`; a later campaign over the same space supersedes it.
 
-**There is no reviewer between the two, and this file said there was**
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, which deleted the proposal queue). What
-makes an ungated note safe is the three properties that ADR names — it arrives labelled, it arrives
-with its citations, and it can be contradicted — not a queue nobody drained. The campaign's note has
-all three: `created_by`, `calc_refs`, and a later campaign over the same space that supersedes it.
-
-This module is the *mapping only*, which is the connector split: turning a campaign result into a
-note is the BO domain's knowledge, so it lives in the bundle; the single write path into the graph
-stays in core (`ConnectorJobWorkflow` publishes whatever note the result envelope carries). The
-activity that used to do both is gone — one write path is one place that stamps provenance, and now
-a bundle structurally cannot bypass it.
-
-Core also stamps the run and *why it was started* onto this note on the way through
-(`durable/job_record.py::note_with_run_provenance`, D-157). So this builder answers "what came out
-and over what space", and never has to know the job id or the requester — which is what keeps the
-mapping a pure function of the campaign.
+Mapping only: the single write path stays in core (`ConnectorJobWorkflow` publishes the note the
+result envelope carries, and `durable/job_record.py::note_with_run_provenance` stamps the run and
+its reason), so this stays a pure function of the campaign.
 """
 
 from rdkit import Chem
@@ -42,41 +28,18 @@ def note_from_campaign_result(
 ) -> Note:
     """Map a campaign's best point to an agent-authored `bo-candidate` note.
 
-    The note records the recommended conditions, the achieved objective value and whether
-    it was measured or predicted (`provenance`), and how many evaluations backed the
-    recommendation — the context a reviewer needs before approving a lab run.
-
-    It also records the **space that was searched**, which the earlier version left out (D-157). A
-    recommendation of "1.2 mol% Pd" means one thing when the campaign could have gone to 5 mol% and
-    something else entirely when 1.2 was the ceiling, and the reader of a recorded note has no
-    other copy of the decision space: the spec lives in the durable job record and in Temporal's
-    history, neither of which is in front of someone reading the note.
+    Records the recommended conditions, the achieved objective value and whether it was measured or
+    predicted, the number of evaluations, and the space that was searched — a recommendation means
+    little without its bounds, and the note's reader has no other copy of the decision space.
 
     The id is the objective plus a hash of the recommended parameters, so recording the same
-    recommendation twice is idempotent. The *body* is not quite: core appends the run and its reason
-    (D-157), so a second, differently-motivated campaign that lands on the same point writes the
-    same note id with a different footer — which is a real difference (two runs agreeing, for two
-    reasons) and one a chemist should see. The identical campaign never gets that far: it rejoins
-    the first run's id and never re-executes.
+    recommendation is idempotent; core's appended footer may differ for a differently motivated run.
 
-    **The value comes before the conditions, and carries the surrogate's opinion of it** (F8-T1).
-    Both are the same fix. A retrieval excerpt is a blind character prefix of the body
-    (`retrieval.retrievers._excerpt`, 240 characters by default), and the objective value used to
-    sit *after* the full conditions list — so a campaign over five or six parameters produced an
-    excerpt quoting the recommended conditions with no number attached at all, which is the worst
-    of the possible truncations. Leading with the number puts it, its provenance and the model's
-    own uncertainty about it inside the prefix that actually gets quoted back.
-
-    **The molecules it recommends are written as structures, not as prose** — see `_condition` and
-    `_recommended_molecule`. That is what makes a `bo-candidate`'s structures legible to every
-    by-compound path at all — `kg.conflicts`, `find_notes`, and a chemist reading the note. (It also
-    put them in front of the `kg-validate` hazard gate, which is why they were written this way;
-    that gate was retired by `D-2026-08-15-safety-is-a-tool-not-a-gate` and the structures are
-    worth writing without it.)
-
-    The note carries no `[[wikilink]]` (a dangling link is what `kg.record` warns about at write
-    time and what `make kg-validate` fails the corpus for; this said "on the very PR this opens"
-    until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR).
+    The value, its provenance and the surrogate's belief lead the body, because a retrieval excerpt
+    is
+    a character prefix of the body (`retrieval.retrievers._excerpt`). Molecules are written as
+    structures (`_condition`, `_recommended_molecule`) so by-compound paths can find them. The note
+    carries no `[[wikilink]]`, which `kg.record` would warn about as dangling.
     """
     best = result.best
     by_name = {parameter.name: parameter for parameter in problem.parameters}
@@ -85,10 +48,9 @@ def note_from_campaign_result(
         for name, value in sorted(best.params.items())
     )
     space = "\n".join(f"- {_parameter_range(parameter)}" for parameter in problem.parameters)
-    # The "Searched over:" block describes a box. The moment a constraint reaches the durable path
-    # the campaign searched a *polytope* instead, and a reviewer reading only the bounds would
-    # believe a corner was available that never was — the same defect D-157 fixed one field over,
-    # where the note recorded a recommendation with no decision space at all.
+    # The "Searched over:" block describes a box; with constraints the campaign searched a polytope,
+    # and
+    # a reader seeing only the bounds would believe an unavailable corner was available.
     limits = ""
     if problem.constraints:
         stated = "\n".join(f"- {constraint.describe()}" for constraint in problem.constraints)
@@ -115,28 +77,14 @@ def note_from_campaign_result(
 def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
     """The SMILES a recommended parameter value names, or None when it names no molecule.
 
-    A campaign declares "this choice is a molecule" in one of two ways and both have to be read
-    here, because between them they cover every shipped objective: a featurized categorical carries
-    an explicit label → SMILES map (`CategoricalParameter.structures`), while a `solubility_max`
-    campaign — which reads its candidate from `params[MOLECULE_KEY]` — makes the SMILES *itself*
-    the category label. Only the second needs RDKit, and only to answer "is this label a structure
-    at all" — a
-    heuristic over label spellings would be a second, weaker answer to a question RDKit answers.
+    A featurized categorical maps labels to SMILES (`CategoricalParameter.structures`); a
+    `solubility_max` campaign makes the SMILES itself the label, which RDKit decides.
 
-    **A bare, lenient `Chem.MolFromSmiles`, and deliberately not the strict gate**
-    (`core.chem.require_molecule`, which refuses a string RDKit reads only a prefix of). The two
-    predicates are not the same one and must not be, because they err in opposite directions and
-    only one of these two errors is safe here. A `True` wraps the value in backticks (`_condition`),
-    which is how a molecule stays machine-readable in a merged note. So a level a campaign chose to
-    name `CN=[N+]=[N-] (2 equiv)` — free-form category labels being what they are — would, under
-    the strict predicate, be written into the note as plain prose and be invisible to every reader
-    that looks for structures, while under this one it is backticked and legible as the azide it
-    is. Erring towards "this is a structure" costs a pair of backticks around something that is not
-    one; erring the other way costs the structure.
-
-    `parameter` is optional because the caller looks it up by name from the recommended point: a
-    result whose params do not line up with the problem still has to yield a readable note rather
-    than a `KeyError` that loses a completed campaign.
+    Deliberately the lenient `Chem.MolFromSmiles`, not `core.chem.require_molecule`: a false
+    positive
+    costs backticks around a non-structure, while a false negative hides a structure such as a label
+    `CN=[N+]=[N-] (2 equiv)`. `parameter` is optional so a result whose params do not match the
+    problem still yields a note rather than a `KeyError`.
     """
     if not isinstance(parameter, CategoricalParameter):
         return None
@@ -150,19 +98,11 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
 def _condition(parameter: Parameter | None, name: str, value: ParamValue) -> str:
     """One recommended parameter value, written so any molecule in it stays machine-readable.
 
-    The backticks are load-bearing rather than styling. This line is where a `bo-candidate` names
-    the molecules it is asking a human to put in a flask, and a merged note is read by people and
-    by extractors that look for structures in `compound_smiles` and in inline code spans. Emitted
-    as plain prose — `- molecule: CCN=[N+]=[N-]`, which is what this wrote — a machine-minted
-    candidate named *no* structures at all, organic azides included, and `bo-candidate` is the note
-    type proposing work nobody has run: the one type with no chemist who has already formed a
-    judgment about the mixture. (It was a hazard gate in `kg-validate` that found this, when that
-    gate still existed; it was retired with `D-2026-08-15-safety-is-a-tool-not-a-gate`, and the
-    defect it exposed here is a defect either way.)
-
-    A label that is not a SMILES yields nothing downstream (RDKit arbitrates), so it is left as
-    plain text; a label that *is* one is backticked; and a label with a declared structure behind
-    it gets that structure appended, because "L7" is not something any extractor could resolve.
+    People and extractors find structures in `compound_smiles` and inline code spans, and a
+    `bo-candidate` proposes work nobody has run, so its molecules must be legible. A non-SMILES
+    label is
+    plain text; a SMILES label is backticked; a label with a declared structure gets that structure
+    appended.
     """
     smiles = _molecule_in(parameter, value)
     if smiles is None:
@@ -175,16 +115,9 @@ def _condition(parameter: Parameter | None, name: str, value: ParamValue) -> str
 def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> str | None:
     """The molecule this note is *about*, when the recommendation names exactly one.
 
-    `compound_smiles` is where every by-compound question starts — `kg.conflicts` groups on
-    `(type, compound_smiles)` and `find_notes` searches it — and a `bo-candidate` carried none, so
-    a recommendation to *make a specific molecule* was invisible to both.
-
-    Only when there is exactly one, for the reason `ingest/eln/record.py::_principal_product` gives
-    about the same field: "the molecule this note is about" has no honest answer for a
-    recommendation naming a ligand *and* a substrate, and picking one would file the note under a
-    compound nobody chose. A wrong `compound_smiles` is worse than none — it is what a by-compound
-    search returns, and it would look right. Nothing is lost for a reader either way: every
-    recommended structure is in the body as a code span.
+    `compound_smiles` is where `kg.conflicts` and `find_notes` start. Only set for exactly one
+    molecule: a wrong `compound_smiles` is worse than none, and every structure is in the body
+    anyway.
     """
     named = [
         smiles
@@ -195,22 +128,14 @@ def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> s
 
 
 def _surrogate_belief(best: Observation, history: list[Observation]) -> str:
-    """What the model thought of this point before it was evaluated, in one clause (F8-T1).
+    """What the model thought of this point before it was evaluated, in one clause.
 
-    Two honest readings, and the distinction is the one a reviewer needs. A recorded sd means the
-    surrogate proposed this point and says how sure it was of the region: small is an exploit of
-    chemistry it has learned, large an excursion into chemistry it has not. No sd means no model
-    was involved — the point came from the space-filling seed design — which is a different claim
-    entirely and reads as an endorsement if left unsaid.
-
-    Never phrased as the uncertainty *of* the reported value: that value came from the evaluator,
-    not from the surrogate, and the sd is what the model believed beforehand.
-
-    **The spread comes with it**, because an sd alone is not a reading. ±3 is an exploit when the
-    campaign's values span 40 and an excursion when they span 4, and a reviewer deciding whether to
-    book lab time needs the comparison rather than the raw number. `ExperimentSuggestion.summary`
-    makes the same comparison for the inline tool; they are written together so the note and the
-    tool cannot drift into two answers to one question.
+    A recorded sd means the surrogate proposed the point (small: exploiting, large: exploring); no
+    sd
+    means it came from the seed design, which is said explicitly. The sd is the model's prior
+    belief,
+    never the uncertainty of the reported value, and it is compared against the campaign's value
+    spread, as `ExperimentSuggestion.summary` does for the inline tool.
     """
     if best.surrogate_sd is None:
         return "a space-filling seed point, proposed before any surrogate had an opinion"
@@ -225,18 +150,9 @@ def _surrogate_belief(best: Observation, history: list[Observation]) -> str:
 def _parameter_range(parameter: Parameter) -> str:
     """One decision variable as a single line: its name and what it was allowed to be.
 
-    Categorical options are listed rather than counted — "one of 4 ligands" tells a reviewer
-    nothing about whether the ligand they would have tried was even on the list — but the listing
-    is **bounded**, because one shipped objective makes it unbounded: a `solubility_max` campaign
-    turns a screening library into one categorical whose levels are every SMILES in it, so a
-    500-molecule campaign would write a single 12 KB line into a note whose job is to let a chemist
-    decide on one experiment. Past the budget it says how many were left out, and the complete
-    space stays one lookup away in the run's durable record (D-157), which is the column that
-    exists for exactly this.
-
-    The budget is the shared `note_excerpt_chars` — the one note-excerpt allowance the report
-    harness and the memory layer already spend — so this cannot drift into a second answer to
-    "how much prose belongs in a note".
+    Categorical options are listed, bounded by the shared `note_excerpt_chars` budget — a
+    `solubility_max` campaign makes every library SMILES a level. Past the budget the line says how
+    many were omitted; the full space is in the run's durable record.
     """
     if not isinstance(parameter, CategoricalParameter):
         return f"{parameter.name}: {parameter.lower:g} to {parameter.upper:g}"

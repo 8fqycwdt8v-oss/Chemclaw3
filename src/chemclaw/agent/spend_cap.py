@@ -1,53 +1,19 @@
 """Bound what one turn may **bill**, beside the bound on how many times it may think.
 
-`agent/loop_cap.py` caps a turn's model *calls*. That is a real guard and it is not a cost guard,
-because a call is not a unit of cost: inside one 25-iteration ceiling, a prose turn bills a few
-thousand tokens and a turn that fans out over large tool results against a long context bills
-millions. The iteration cap cannot tell those apart, and nothing else was watching.
+`agent/loop_cap.py` caps model calls, but a call is not a unit of cost: within one iteration ceiling
+a turn can bill a few thousand tokens or millions. `api/budget.py` meters before and after a turn
+and cannot see inside one. This guard caps a turn's billed tokens while it runs, in the same shape
+as the loop cap:
 
-**It is easy to believe something was.** `api/budget.py` meters tokens per session and per user and
-refuses a turn that would breach a cap — but `check()` runs *before* a turn against usage already
-booked, and `record()` books a turn *after* it ended. Both halves sit outside the turn, so the one
-thing neither can observe is a turn spending without a bound while it runs. That module's own
-docstring used to state the belief that leaves the hole — "A single agent turn is already
-iteration-capped (`harness_max_loop_iterations`), so one turn cannot loop forever" — and now states
-the correction instead, because a sentence quoted here as wrong and left standing there is a
-correction nobody reading that module receives. One turn cannot *loop* forever. One turn can *spend*
-without a bound, and the session budget learns about it one turn too late — which is exactly the
-"$400 in twenty minutes" failure that module was written against, arriving through the door it left
-open. **Measured 2026-09-06**: one turn served 25 gateway calls of 10,000 tokens against a
-1,000-token session cap — 250,000 tokens, 250x the cap, refused only on the turn after.
-
-So this is the same guard shape in the other unit, and it is deliberately the same shape rather
-than a new one:
-
-**Enforced in `before_model`.** The whole argument is
-`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`:
-`after_model` hooks run in reverse list order, so any middleware jumping from
-`after_model` short-circuits the rest of the chain — measured there at a cap of 2 letting 4 model
-calls through. `before_model` runs before the model regardless of what any later hook decides.
-
-**Counted in a state channel, not in an ambient.** The count has to cross the subagent boundary or a
-turn that delegates gets one budget per branch — regression 3 in `agent/loop_cap.py`'s list of why
-its own counter is first-party. `ChemclawState.billed_tokens` is a `TurnTotal`, which folds a
-superstep's concurrent writes additively; an ambient contextvar would also have made the cap
-inert wherever no caller had remembered to start a watch, which is the "per-turn is a property of
-every call site" mistake `agent/state.py` records and moved away from.
-
-**Metered in `wrap_model_call`, because that is the only hook that can see the bill.** The number
-lives on the response of the call being wrapped, and `wrap_model_call` is where the response is.
-That it can also *write* state was measured on a compiled graph before this module was written
-rather than read off the documentation — `ExtendedModelResponse` carries a `Command` that LangGraph
-applies through the channel's own reducer — and `tests/test_spend_cap.py` drives the whole path the
-same way, because a hook returning the right dict proves nothing about whether the channel exists
-(`tests/test_state_channels.py` is that lesson as a file).
-
-**Ending the run rather than raising**, for the reason `agent/loop_cap.py` gives: the answer the
-last iteration managed still goes out, and a surface marks it partial. A raised error would discard
-work a chemist is entitled to see, and would discard it *after* the tokens were already spent,
-which is the worst of both. **The loop cap's tool-less wrap-up call is deliberately not inherited**:
-that cap bounds iterations, so one more call to write an answer is a bounded price; this one bounds
-spend, and past it there is no call left to buy.
+- **Enforced in `before_model`**, which no later hook can skip
+  (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`).
+- **Counted in a state channel** (`ChemclawState.billed_tokens`, a `TurnTotal`), so one budget spans
+  subagents and a fan-out's concurrent writes fold additively.
+- **Metered in `wrap_model_call`**, the only hook that sees the response's bill; it writes state
+  through `ExtendedModelResponse`'s `Command`, driven end to end by `tests/test_spend_cap.py`.
+- **Ends the run rather than raising**, so the last iteration's answer still goes out, marked
+  partial. Unlike the loop cap there is no wrap-up call: past the budget there is nothing left to
+  spend.
 """
 
 import logging
@@ -92,10 +58,8 @@ def end_spend_watch(token: object) -> None:
 def spend_hit_cap() -> bool:
     """Whether this turn was stopped by its spend cap.
 
-    `False` off the request path, which is what makes this safe to ask unconditionally. The
-    state-side answer is `spend_capped`; this is the one a streaming driver can reach, for the
-    reason `agent/loop_cap.py::loop_hit_cap` gives — a compiled graph's final state is not
-    something the streaming driver is handed back.
+    `False` off the request path. The state-side answer is `spend_capped`; this one is for a
+    streaming driver, which is not handed the final state.
     """
     watch = _watch.get()
     return watch is not None and watch.capped
@@ -104,9 +68,7 @@ def spend_hit_cap() -> bool:
 def turn_billed_tokens() -> int:
     """What this turn has billed so far, or 0 off the request path.
 
-    The runner reports the number beside the refusal, because "the turn stopped" and "the turn
-    stopped after 1.2 million tokens" are different messages to a chemist and only the second one
-    says what to do about it.
+    The runner reports it beside the refusal, so a chemist sees how much the turn spent.
     """
     watch = _watch.get()
     return watch.billed if watch is not None else 0
@@ -115,19 +77,9 @@ def turn_billed_tokens() -> int:
 def record_spend_cap(billed: int) -> None:
     """Mark this turn as stopped by its spend cap, having billed `billed`.
 
-    The public counterpart to `agent/loop_cap.record_loop_cap`, and it exists for the same two
-    readers that one does: `api/runner._spend_cap_event` asks whether the guard fired, and a test
-    needs to say that it did without standing up a graph that genuinely overspends.
-
-    **`enforce_spend_cap` is its production caller**, which is what makes the two caps the same
-    shape — `record_loop_cap` has always been called from the branch that fires, and this one was
-    reached for through a private helper instead, so the asymmetry the paragraph above calls
-    accidental was still there, inverted: the *test* used the public name and the enforcer did not.
-
-    `billed` is an authoritative absolute reading rather than one more call's bill — the larger of
-    the channel and the turn's own ledger, taken by the caller — so it is folded with `max` against
-    what `_meter` has accumulated instead of being added to it. A cap that fires must not book a
-    turn's whole spend twice.
+    The counterpart to `agent/loop_cap.record_loop_cap`, called by `enforce_spend_cap` and by tests;
+    `api/runner._spend_cap_event` reads the result. `billed` is an absolute reading, so it is folded
+    with `max` against what `_meter` accumulated rather than added.
 
     Args:
         billed: What the turn had billed when the cap fired.
@@ -144,16 +96,8 @@ def record_spend_cap(billed: int) -> None:
 def _meter(billed: int) -> None:
     """Add one model call's own bill to this turn's running total.
 
-    **Added, not `max`ed, because the writers are concurrent and each reports only itself.** Every
-    branch of a fan-out is handed the same `billed_tokens` base — `SubAgentMiddleware` builds each
-    helper's input from the parent's state — so the absolute totals they compute all sit one call's
-    bill above that common base, and keeping the largest of them counts *one* branch. Measured: a
-    parent call of 1,000 followed by two helpers billing 100 and 150 folds to 1,250 in the channel
-    `enforce_spend_cap` reads and read 1,150 on the watch, which is the number
-    `api/runner._spend_cap_event` puts in front of a chemist ("after billing {billed:,}") — so the
-    sentence explaining the refusal understated the spend at the moment it was supposed to explain
-    it. Adding each call's own bill is the same fold `state.TurnTotal` performs, arrived at from
-    the other side.
+    Added, not `max`ed: every branch of a fan-out starts from the same base, so the largest absolute
+    total would count only one branch. This is the same fold `state.TurnTotal` performs.
     """
     watch = _watch.get()
     if watch is None:
@@ -165,25 +109,15 @@ def _meter(billed: int) -> None:
 def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
     """End the turn before a model call that would put it past its billed-token budget.
 
-    Checked *before* the call rather than after the one that crossed the line, which is the only
-    placement that bounds anything: a turn already over its budget is one whose next call is the
-    expensive one, and the request about to go out is the largest the turn has assembled. Asking
-    afterwards would report the overrun and pay for it.
-
-    So the cap is a ceiling on what a turn may spend **before** its next call, not a ceiling on
-    what it ends up having spent — the last allowed call may carry it past the number, by at most
-    one call's bill. Bounding the overshoot exactly would mean predicting a call's cost before
-    making it, and the estimator that could is measured at 0.45x on this payload class
-    (`agent/context_budget.py`). A guard that is one call loose and honest about it beats one that
-    is exact against a number it made up.
-
-    `can_jump_to` is the edge rather than decoration — see `agent/loop_cap.py`, where omitting it
-    made the cap run, decide correctly, and be connected to nothing.
+    Checked before the call, the only placement that bounds anything. The cap therefore bounds spend
+    before the next call; the last allowed call may overshoot by at most one call's bill, since a
+    call's cost cannot be predicted reliably beforehand. `can_jump_to` is what connects the jump to
+    an edge.
 
     Args:
         state: The graph state, carrying `billed_tokens` as this turn's calls have folded it.
         runtime: LangGraph's runtime, unused — the budget is a deployment setting rather than a
-            per-run one.
+        per-run one.
 
     Returns:
         `{"jump_to": "end", "spend_capped": True}` when the turn is over budget, else `None`.
@@ -191,26 +125,11 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
     budget = settings.agent_max_turn_billed_tokens
     if not budget:
         return None
-    # **The larger of the two readings, because each sees calls the other cannot.**
-    #
-    # `billed_tokens` counts what this middleware metered: one figure per model response, folded
-    # across the subagent boundary. One whole class of provider call never reaches it, and it was
-    # measured rather than reasoned about:
-    #
-    # - **A model call inside a tool body is invisible.** `agent/condense.py` makes one per
-    #   protocol, up to `protocol_digest_max_protocols`, and a tool body is not a graph node.
-    #   Measured: 5,200 tokens spent against a 150-token budget with the cap never firing.
-    #
-    # A second class used to sit beside it — a model call the old unparseable-arguments repair took
-    # from inside `wrap_model_call`, booking one bill for two calls (700 booked against 1,200
-    # spent). It is gone with the mechanism: an unparseable call is now promoted onto `tool_calls`
-    # and refused by the tool chain, so the model's correction is an ordinary graph iteration this
-    # middleware meters like any other.
-    #
-    # The turn's own ledger sees both, because both ride the message stream the runner meters
-    # (`agent/turn_usage.metered_turn_tokens`). It is 0 off the request path, where the channel is
-    # the only reading there is — so `max` degrades to today's behaviour exactly where no ledger
-    # exists, and closes both gaps where one does.
+    # The larger of two readings, because each sees calls the other cannot. `billed_tokens` sees
+    # what this middleware metered; a model call made inside a tool body (e.g. `agent/condense.py`)
+    # is not a graph node and never reaches it, but it does reach the turn's own ledger
+    # (`agent/turn_usage.metered_turn_tokens`). Off the request path the ledger is 0 and the channel
+    # is the only reading.
     billed = max(int(state.get("billed_tokens", 0)), metered_turn_tokens())
     if billed < budget:
         return None
@@ -223,9 +142,8 @@ def spend_capped(state: Mapping[str, Any]) -> bool:
     """Whether this turn was stopped by its spend cap — read, not inferred.
 
     Args:
-        state: The state the finished run **returned**. Not `graph.get_state(config).values`:
-            the channel is untracked, so it is deliberately absent from a restored checkpoint and
-            asking there gets a silent `False`.
+        state: The state the finished run **returned**. Not `graph.get_state(config).values`: the
+        channel is untracked, so it is absent from a restored checkpoint and would read `False`.
 
     Returns:
         Whether the run reached its billed-token budget.
@@ -236,47 +154,28 @@ def spend_capped(state: Mapping[str, Any]) -> bool:
 class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
     """Add each model call's bill to the turn's running total, so `before_model` can read it.
 
-    **The write is a state update returned from `wrap_model_call`**, which is not the obvious shape
-    and is the only correct one here. The bill exists on the response, so `before_model` cannot
-    read it and `after_model` can be skipped by any middleware that jumps from there. LangChain's
-    `ExtendedModelResponse` carries a `Command` alongside the response that LangGraph applies
-    through the channel's own reducer — so `TurnTotal`'s additive fold does the accumulating, and a
-    fan-out's branches sum instead of overwriting one another.
+    The bill exists only on the response, so the write is a state update returned from
+    `wrap_model_call` (via `ExtendedModelResponse`'s `Command`), applied through `TurnTotal`'s
+    additive fold so fan-out branches sum.
 
-    **Both hooks, because `create_agent` puts a middleware declaring either into both chains** — an
-    async-only middleware fails every synchronous `graph.invoke()`, which is what
-    `tests/test_spend_cap.py` drives. `RecordContextCompaction` carries the same pair for the same
-    reason, and states it at length.
+    Both sync and async hooks, because `create_agent` puts the middleware in both chains and an
+    async-only one would fail `graph.invoke()`.
 
-    **Never fails a turn.** A response shape carrying no usage meters 0, exactly as
-    `graph_usage_tokens` does everywhere else: a provider that reports nothing must not fail a
-    turn. The cost of that is a cap that cannot bind on such a provider, which is the honest
-    failure — `turn_usage.graph_usage_tokens` counts an unreadable usage block separately so the
-    difference between "reported nothing" and "we could not read it" stays visible.
+    Never fails a turn: a response with no usage meters 0, so the cap cannot bind on a provider that
+    reports nothing; `turn_usage.graph_usage_tokens` counts unreadable usage separately.
     """
 
-    #: Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
-    #:
-    #: **It is belt-and-braces here, not the thing that makes the write land**, and the comment
-    #: that used to sit in this slot claimed otherwise. `build_langgraph_agent` passes
-    #: `state_schema=ChemclawState` to `create_agent`, so the channel exists on every graph this
-    #: repository compiles; removing this attribute changes nothing, measured. The write *would*
-    #: be dropped in silence on a graph that declared neither — which is the failure
-    #: `tests/test_state_channels.py` exists to catch and the one the first probe of this design
-    #: hit — but that graph is not one this repository builds, so no test here can prove it.
+    # Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
+    # `build_langgraph_agent` already passes `state_schema=ChemclawState`, so this is a safeguard
+    # for other graphs.
     state_schema = ChemclawState
 
     def _update(self, request: ModelRequest[Any], response: Any) -> Any:
         """The response, plus a command carrying this turn's new absolute billed total.
 
-        Absolute rather than a delta, because that is what `TurnTotal`'s fold is defined against:
-        it stores `base + max(value - base, 0)`, so a delta would read as a walk backwards and
-        contribute nothing. The ambient watch is the mirror image — it accumulates, so it is handed
-        this call's own bill and nothing else, and the two then agree on a fan-out.
-
-        Guarded end to end. Metering is an observation, and an observation that ended a turn would
-        invert this module's entire purpose — the guard exists to stop a turn *cheaply*, not to be
-        one more thing that can lose one.
+        Absolute rather than a delta, because `TurnTotal` folds `base + max(value - base, 0)`. The
+        ambient watch accumulates instead, so it gets this call's own bill. Guarded end to end:
+        metering is an observation and must never end a turn.
         """
         try:
             message = response.result[0] if getattr(response, "result", None) else response
@@ -285,9 +184,8 @@ class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
                 return response
             prior = cast(int, request.state.get("billed_tokens", 0) or 0)
             total = int(prior) + billed
-            # The channel gets the absolute total and the watch gets this call's own bill, because
-            # the two fold differently and each is given what its fold is defined against — see
-            # `TurnTotal` for the one and `_meter` for the other.
+            # The channel gets the absolute total and the watch gets this call's own bill, each what
+            # its fold is defined against (see `TurnTotal` and `_meter`).
             _meter(billed)
             return ExtendedModelResponse(
                 model_response=response, command=Command(update={"billed_tokens": total})

@@ -1,16 +1,9 @@
-"""Durable memory-synthesis jobs (plan steps 5.3, 5.4) on the background queue.
+"""Durable memory-synthesis jobs on the background queue.
 
-Thin Temporal wrappers over `chemclaw.memory.jobs`: each activity reads the full reaction set from
-the
-configured active ingest sources (`chemclaw.ingest.sources.registry`, the same set the ELN sync
-ingests — no new
-store) and records campaign / playbook notes in the graph. No new infrastructure — only new
-note types produced by reusing existing pieces (Phase 5, G1).
-
-**Started on demand, never on a Schedule** (D-2026-08-25). These three used to fire hourly and open
-pull requests with nobody having asked, which is knowledge arriving on a timer. The mining is
-unchanged — it is the *trigger* that moved — so a chemist or an agent workflow starts one when
-there is a reason to look at what the corpus now supports.
+Thin Temporal wrappers over `chemclaw.memory.jobs`: each reads the full reaction set from the
+configured active ingest sources (the same set the ELN sync ingests) and records campaign or
+playbook notes in the graph. Started on demand, never on a Schedule, so knowledge does not
+arrive on a timer.
 """
 
 import asyncio
@@ -75,47 +68,24 @@ class CorpusRead(BaseModel):
 async def read_corpus() -> CorpusRead:
     """Read and map every reaction from the *configured active* ingest sources (the memory corpus).
 
-    Reads the ingest halves of `settings.data_sources` (via `chemclaw.ingest.sources.registry`),
-    the same source
-    set the durable ELN sync ingests — so toggling `CHEMCLAW_DATA_SOURCES` changes what memory
-    reasons over, and the two subsystems can never disagree on which sources exist (DUP-1). Every
-    ingest half feeds the same canonical schema, so the memory layers reason over the union without
-    knowing any source's shape. Adding a future source is one registry entry + one config token,
-    not a change here (the "keep integrations dumb, put the reasoning above them" line).
+    Uses the same source registry as the ELN sync, so memory and sync never disagree on which
+    sources exist; every source maps to one canonical schema. Returns a `CorpusRead` so skipped
+    entries are reported rather than silent.
 
-    Returns a `CorpusRead` rather than the bare list so a skipped entry is a fact the caller can
-    act on instead of a silence — see that model.
-
-    **Read to the end of each source, not to the end of its first page.** One fetch from
-    `datetime.min` is the whole corpus for a drop directory, which reads its directory in one go,
-    and it is *one page* for a source that pages: measured against the warehouse adapter over a
-    12-row corpus at `fetch_limit: 5`, this saw **5 of 12** and returned `complete=True`, so the
-    three memory miners would distil their notes from the oldest 500 rows of an ELN at the shipped
-    binding default with nothing saying so. The loop advances the fetch floor to the newest
-    watermark it has seen and stops when a page offers nothing new — the same shape the durable
-    sync's chunk loop has, and inclusive-`since` boundary rows are what `seen` filters out.
-
-    **A source that says rows are still waiting and cannot hand them over makes the read
-    incomplete**, on the same rule an unmappable entry does: a corpus this pass could not finish
-    reading must not reach a miner looking like the whole record. That is the warehouse adapter's
-    un-crossable watermark block (`_MAX_TIE_PAGES`), which reports itself truncated forever.
-
-    The cost this makes real is stated rather than hidden: a scheduled memory run now reads the
-    *whole* source three times, once per miner activity, where before it read three pages. That is
-    the scan `docs/planning/BACKLOG.md` carries a row for, and it is the right way round — a
-    complete read that costs what it costs, rather than a cheap one that is wrong.
+    Each source is read to its end, not its first page: the fetch floor advances to the newest
+    watermark seen until a page offers nothing new, and `seen` drops inclusive-boundary repeats. A
+    source that reports rows still waiting but cannot hand them over makes the read incomplete.
+    This reads every source in full once per miner activity.
     """
     reactions: list[OrdReaction] = []
     skipped = 0
     citation_only = 0
     unfinished: list[str] = []
-    # One regex budget for this whole activity, not per page: a drop directory returns its entire
-    # corpus as one page and a warehouse source returns many, so a per-page budget would bound
-    # neither. `expr.pattern_budget` is re-entrant, so the per-entry `map_to_ord` calls below keep
-    # this deadline rather than each opening their own — see it for what the per-cell bound misses.
+    # One regex budget for the whole activity, since a page may be the entire corpus.
+    # `expr.pattern_budget` is re-entrant, so per-entry `map_to_ord` calls share this deadline.
     with pattern_budget():
-        # The bound is on what this activity *holds*, not on what it reads, because that is where
-        # the cost measured: `settings.memory_corpus_max_reactions` and the comment beside it.
+        # The bound is on what this activity holds, not on what it reads (see
+        # `settings.memory_corpus_max_reactions`).
         cap = settings.memory_corpus_max_reactions
         capped = False
         for adapter in active_ingest_sources():
@@ -126,47 +96,38 @@ async def read_corpus() -> CorpusRead:
                 page = await adapter.fetch_new_entries(since)
                 fresh = [raw for raw in page if raw.entry_id not in seen]
                 if not fresh:
-                    # Nothing new: either the source is exhausted, or it is stuck on a page it
-                    # cannot get past. The second is what `fetch_was_truncated` still being true
-                    # means.
+                    # Nothing new: the source is exhausted, or stuck on a page it cannot get past
+                    # (what
+                    # `fetch_was_truncated` still being true means).
                     if fetch_was_truncated(adapter):
                         unfinished.append(getattr(adapter, "name", type(adapter).__name__))
                     break
                 seen.update(raw.entry_id for raw in fresh)
                 for raw in fresh:
-                    # **Inside the per-entry loop, not around the page**, because a drop directory
-                    # returns its whole corpus as one page: measured, a cap of 2,500 checked between
-                    # pages let 10,000 reactions through and marked the read incomplete about a
-                    # corpus it had already materialised — a bound that reports itself and bounds
-                    # nothing.
+                    # Checked per entry, not per page, because a drop directory returns its whole
+                    # corpus as one page.
                     if cap and len(reactions) >= cap:
                         capped = True
                         break
                     try:
                         reaction = adapter.map_to_ord(raw)
                     except ChemclawError as exc:
-                        # A malformed entry is the sync's problem to report, not this job's — skip
-                        # it and move on. Catch only ChemclawError (the bad-data contract), so an
-                        # unexpected error surfaces instead of being silently dropped; log the skip
-                        # so a corpus that quietly loses reactions is diagnosable.
+                        # A malformed entry is the sync's to report: skip and log it. Only
+                        # `ChemclawError` (the bad-data
+                        # contract) is caught, so unexpected errors surface.
                         logger.info("memory job skipped an unmappable ELN entry: %s", exc)
                         skipped += 1
                         continue
                     if reaction.tier is RecordTier.CITATION_ONLY:
-                        # **Not part of the memory corpus, and not a gap in it either.** Every miner
-                        # reading this list works on structure — DRFP clusters, product-to-reactant
-                        # chains, similarity-grouped campaigns — and a citation-only record has no
-                        # reaction SMILES to give them (`OrdReaction.reaction_smiles` refuses). So
-                        # it is left out and counted, and `complete` is untouched: the read saw the
-                        # whole structural corpus, which is what `complete` is a claim about
-                        # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+                        # A citation-only record has no reaction SMILES for the structural miners,
+                        # so it is left out and
+                        # counted without making the read incomplete.
                         citation_only += 1
                         continue
                     reactions.append(reaction)
                 if capped:
-                    # Stop here and say so. Raising would lose the pass entirely; continuing would
-                    # exchange a partial note for a killed worker, which is the trade
-                    # `memory_corpus_max_reactions` exists to refuse.
+                    # Stop here and say so, rather than lose the pass or exhaust the worker's
+                    # memory.
                     break
                 if not fetch_was_truncated(adapter):
                     break
@@ -211,20 +172,10 @@ async def read_corpus() -> CorpusRead:
             reactions=reactions, complete=not skipped and not unfinished and not capped
         )
 
-    # The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP
-    # fingerprinting, O(n²) Tanimoto, NetworkX component analysis *and* a synchronous full corpus
-    # parse (`load_notes` inside `_units`) — and the `background-jobs` queue's single worker shares
-    # one loop across ELN sync, reindex, retention and every other activity, so an inline builder
-    # stalled all of them for the duration, Temporal heartbeats included.
-    # `observation_jobs.mine_observations_activity` threads its parse for exactly this reason; the
-    # three activities that do strictly more blocking work never got the same treatment.
-    #
-    # Completeness travels into the builder (`corpus_complete`), because the retirement half acts on
-    # "this run no longer mints that id" — which is state change, and nothing stands between it and
-    # the graph: it lands when the write does. This line said "gated only by a reviewer who cannot
-    # know the read was partial", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
-    # falsified in the direction that matters — there is no reviewer, so the builder's own care is
-    # the whole control. `memory.jobs._units` says what it does with it.
+    # The builders (DRFP fingerprinting, O(n²) Tanimoto, NetworkX, a full corpus parse) run in a
+    # worker thread so they do not stall every other activity and heartbeat on the shared loop.
+    # `corpus_complete` travels into the builder because retirements land with the write and nothing
+    # reviews them; `memory.jobs._units` says how it is used.
 
 
 @durable_activity("background")
@@ -262,20 +213,10 @@ async def build_optimization_notes_activity() -> list[SynthesisUnit]:
 async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> str:
     """Record one already-built memory note; return its reference (the fan-out publish step).
 
-    Any compound note the note links is minted into the same submission (STO-7). Applying that rule
-    here, at the one write path every machine-written note passes through, is what keeps it out of
-    each connector: a note author states the link, and the write mints what it points at.
-
-    `actor` stamps the ambient identity for the duration of the write. **Its original reader is
-    gone** — it existed so the PR-gate's `NoteProposal.actor` named the chemist a durable job was
-    writing on behalf of, and `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that
-    record. What still reads it is `core/logging.ContextFilter`, which puts the actor and
-    correlation id on every log line the write emits; without the stamp a paged engineer has
-    nothing to grep back to the turn behind a durable note write.
-
-    Empty is the honest default and stays supported: the memory-synthesis jobs are system-triggered
-    (a schedule, no user), and stamping a synthetic actor on them would make an unattributed write
-    look attributed. Absent means absent.
+    Compound notes the note links are minted in the same submission, at the one write path every
+    machine-written note passes through. `actor` stamps the ambient identity for the write, so its
+    log lines carry the turn's actor; empty (system-triggered runs) stays empty rather than
+    inventing an attribution.
     """
     note = unit.note
     if not actor:
@@ -298,21 +239,14 @@ async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> 
 
 
 @durable_workflow("background")
-# Declared because the hour a parked child costs is charged to somebody who is waiting.
-# `fan_out` drops a child that fails, but a child that *parks* is dropped only when its
-# `execution_timeout` expires — `fan_out_child_timeout_seconds`, an hour by default, per batch —
-# and the parent is one of the three synthesis jobs, which a chemist started from
-# `synthesize_memory` and is polling with `get_durable_job_status`. Declaring turns that hour
-# into the immediate drop the fan-out contract already promises, with the same outcome:
-# logged, counted on `chemclaw_fan_out_children_dropped_total`, siblings unaffected.
-# D-2026-08-27 has the per-workflow table.
+# Declared so a failing child is dropped by `fan_out` immediately rather than after its
+# one-hour execution timeout, while the chemist who started the parent is polling it.
 @workflow.defn(failure_exception_types=[Exception])
 class PublishNoteWorkflow:
-    """Record one memory note in the graph — the fan-out unit of a synthesis job (F10-D2).
+    """Record one memory note in the graph — the fan-out unit of a synthesis job.
 
-    Each note is its own child workflow so a single poison note (a bad git write that
-    exhausts its retries) is isolated and dropped by the fan-out (D-030), while the rest of the
-    corpus's notes still land — instead of one note failing the whole synthesis batch.
+    Each note is its own child workflow, so a poison note is isolated and dropped by the fan-out
+    while the rest still land.
     """
 
     @workflow.run
@@ -322,10 +256,9 @@ class PublishNoteWorkflow:
             publish_memory_note_activity,
             unit,
             start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
-            # The fan-out wait rather than core's hour, for the reason
-            # `fan_out_queue_wait_timeout` gives: 3,600 + 120 does not fit a 3,600 ceiling, so a
-            # note parked on an unserved queue ended as a bare child execution timeout instead of
-            # the named activity failure `fan_out` logs and counts.
+            # The fan-out queue wait rather than core's hour, so a note parked on an unserved queue
+            # ends as
+            # a named activity failure that `fan_out` logs and counts.
             schedule_to_start_timeout=fan_out_queue_wait_timeout(),
             retry_policy=note_publish_retry(),
         )
@@ -336,17 +269,8 @@ class PublishNoteWorkflow:
 async def resolve_notes_per_run() -> int:
     """Resolve the per-run note cap outside workflow code, as `resolve_fan_out_limit` does.
 
-    `_slice_for_this_run`'s return value *is* the input list to `fan_out`, so the cap decides how
-    many `StartChildWorkflow` commands the workflow emits. Reading live settings inside workflow
-    code makes that a function of the replaying worker's config rather than of history: measured
-    with `workflow.now()` pinned and the corpus fixed, `cap=25` emitted 25 children
-    (campaign-000..024) and `cap=10` emitted 10 (campaign-000..009). A redeploy that lowers the
-    value mid-fan-out therefore replays 10 starts against 25 recorded child-started
-    events — a non-determinism error, which is a workflow *task* failure, which retries forever
-    ignoring the retry policy and wedges the run (the trap D-093 documents).
-
-    `orchestrator.py` states this rule and captures its own bound through a local activity; the line
-    above it in the same function did not.
+    The cap decides how many child workflows start, so reading settings in workflow code would make
+    the command count depend on the replaying worker's config and break replay after a redeploy.
     """
     return settings.memory_max_notes_per_run
 
@@ -356,23 +280,10 @@ def _slice_for_this_run(
 ) -> list[SynthesisUnit]:
     """Take at most `cap` notes, rotating the window on each daily run.
 
-    These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
-    write. In practice they stay quiet — an id anchored on a cluster's smallest member reuses its
-    branch, a byte-identical note produces no diff and no push — but nothing *bounded* them, and a
-    large corpus import would record a note per cluster on the first night.
-
-    A plain cap would have replaced that with a worse bug. The builders are deterministic over the
-    corpus, so `notes[:cap]` writes the same first N every night and the tail is written *never*
-    — knowledge silently lost, which is exactly what a "silent cap" means here. So the window
-    rotates by the run's own date: consecutive daily runs cover consecutive slices and the whole
-    corpus is reached within one cycle, after which every note is a no-op re-write.
-
-    Sorted by id so the ordering is stable rather than incidental to build order, and
-    `workflow.now()` rather than a wall clock because a workflow must replay identically. `cap` is
-    passed in rather than read here for the same reason — see `resolve_notes_per_run`.
-
-    The window slices *units*, so a retirement can never land in a different day's run from the
-    replacement that carries it — the pairing `SynthesisUnit` exists for.
+    A fixed `notes[:cap]` would never write the tail, since the builders are deterministic; the
+    window rotates by the run's date, so consecutive runs cover the whole corpus. Sorted by id for
+    stability; `workflow.now()` for replay. The window slices units, so a retirement always lands
+    in the same run as its replacement.
     """
     if cap <= 0 or len(units) <= cap:
         return units
@@ -391,14 +302,10 @@ def _slice_for_this_run(
 
 
 async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
-    """Build the notes in one activity, then fan each out to a `PublishNoteWorkflow` child (DRY).
+    """Build the notes in one activity, then fan each out to a `PublishNoteWorkflow` child.
 
-    The three synthesis jobs differ only in which builder runs; the detect-then-fan-out topology is
-    identical, so it lives here once. Detection reads the whole corpus (one activity); publishing is
-    per-note and independent (one child each), so a slow or failing note never blocks the others.
-
-    What one run may write is capped, and what the cap drops is said out loud — see
-    `_slice_for_this_run`.
+    Shared by the three synthesis jobs, which differ only in the builder. What one run may write is
+    capped, and what the cap drops is reported — see `_slice_for_this_run`.
     """
     units = await workflow.execute_activity(
         build_activity,
@@ -418,12 +325,9 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
 
 
 @durable_workflow("background")
-# Declared: this is the job path in everything but its queue name. `synthesize_memory`
-# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
-# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
-# `get_durable_job_status` answering `running` forever for a run that will never finish.
-# Nothing is lost by failing instead: the scan is re-requestable, and a re-written note
-# is byte-identical, so it produces no second commit. D-2026-08-27.
+# Declared: `synthesize_memory` starts this for a chemist with no execution timeout and returns an
+# id to poll, so a parked run would report `running` forever. Failing loses nothing: the scan is
+# re-requestable and re-written notes are byte-identical.
 @workflow.defn(failure_exception_types=[Exception])
 class CampaignSynthesisWorkflow:
     """Run episodic campaign synthesis durably; return the recorded note references."""
@@ -435,12 +339,9 @@ class CampaignSynthesisWorkflow:
 
 
 @durable_workflow("background")
-# Declared: this is the job path in everything but its queue name. `synthesize_memory`
-# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
-# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
-# `get_durable_job_status` answering `running` forever for a run that will never finish.
-# Nothing is lost by failing instead: the scan is re-requestable, and a re-written note
-# is byte-identical, so it produces no second commit. D-2026-08-27.
+# Declared: `synthesize_memory` starts this for a chemist with no execution timeout and returns an
+# id to poll, so a parked run would report `running` forever. Failing loses nothing: the scan is
+# re-requestable and re-written notes are byte-identical.
 @workflow.defn(failure_exception_types=[Exception])
 class PlaybookDistillationWorkflow:
     """Run semantic playbook distillation durably; return the recorded note references."""
@@ -452,12 +353,9 @@ class PlaybookDistillationWorkflow:
 
 
 @durable_workflow("background")
-# Declared: this is the job path in everything but its queue name. `synthesize_memory`
-# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
-# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
-# `get_durable_job_status` answering `running` forever for a run that will never finish.
-# Nothing is lost by failing instead: the scan is re-requestable, and a re-written note
-# is byte-identical, so it produces no second commit. D-2026-08-27.
+# Declared: `synthesize_memory` starts this for a chemist with no execution timeout and returns an
+# id to poll, so a parked run would report `running` forever. Failing loses nothing: the scan is
+# re-requestable and re-written notes are byte-identical.
 @workflow.defn(failure_exception_types=[Exception])
 class OptimizationCampaignWorkflow:
     """Run episodic optimization-campaign grouping durably; return the recorded note refs."""
