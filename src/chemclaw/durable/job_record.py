@@ -45,9 +45,8 @@ class JobRecord(BaseModel):
     connector: str = Field(min_length=1)
     job: str = Field(min_length=1)
     # Why this run was started, in the requester's terms. Empty means a declared procedure launched
-    # by
-    # name (a template, whose own `summary` says what it is for), never a forgotten field. Connector
-    # jobs require a rationale at the launcher (`connectors/jobs.py`), not here.
+    # by name (a template, whose own `summary` says what it is for), never a forgotten field.
+    # Connector jobs require a rationale at the launcher (`connectors/jobs.py`), not here.
     rationale: str = ""
     requested_by: str = Field(min_length=1)
     session_id: str = ""
@@ -63,8 +62,7 @@ class JobRecord(BaseModel):
     # it is copied off the result envelope, and the graph write that follows is best-effort.
     note_id: str = ""
     # The calculation keys the run rested on, from its envelope. A fact about the run, so kept
-    # beside
-    # `result` rather than inside it.
+    # beside `result` rather than inside it.
     calc_refs: list[str] = Field(default_factory=list)
     # Wall-clock seconds the run took, measured by the wrapper across the child workflow. Not
     # node-hours: no launcher reports parallelism back.
@@ -103,8 +101,7 @@ class JobRecordSummary(BaseModel):
     # lookup. Empty when the run was not launched from a plan step.
     plan_step: str = ""
     # How the run ended, so a failed run in `find_past_jobs` says it failed; the reason is in the
-    # full
-    # record.
+    # full record.
     state: str = "completed"
     completed_at: datetime | None = None
 

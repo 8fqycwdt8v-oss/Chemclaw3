@@ -95,21 +95,21 @@ def _store() -> DesignStore:
     return default_design_store()
 
 
-# A figure somebody wrote as a quantity, for relating a stated value to the words quoted for it.
-# Digits welded to letters (SMILES ring closures, `C18`) and the halves of a decimal are not
-# figures; digits beside punctuation (`96-well`, `2 g`, ISO dates) are.
+#: A figure somebody wrote as a quantity, for relating a stated value to the words quoted for it.
+#: Digits welded to letters (SMILES ring closures, `C18`) and the halves of a decimal are not
+#: figures; digits beside punctuation (`96-well`, `2 g`, ISO dates) are.
 _DIGITS = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?(?![A-Za-z])")
 
 
-# Figures written as words, so "five grams" still states a scale the model normalised to `5 g`.
+#: Figures written as words, so "five grams" still states a scale the model normalised to `5 g`.
 _NUMBER_WORDS = frozenset(
     """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
     fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
     ninety hundred thousand dozen half quarter single double triple""".split()
 )
 
-# : Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared
-# as.
+#: Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared
+#: as.
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -918,8 +918,8 @@ class ExperimentArms(BaseModel):
     factors: list[Factor]
     arms: list[ProtocolArm]
     constants: dict[str, str]
-    # : What the translation could not supply, one sentence each — units above all. Read these :
-    # before drafting; none of them is optional and none is checked downstream.
+    #: What the translation could not supply, one sentence each — units above all. Read these :
+    #: before drafting; none of them is optional and none is checked downstream.
     notes: list[str]
 
 

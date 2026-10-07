@@ -121,8 +121,7 @@ class CalculatorSettings(BaseSettings):
     # Extra points each maximum is resolved with, across the two coarse steps around it.
     xtb_rotation_refine_points: int = Field(default=4, ge=0)
     # Released minima closer than this (degrees) are the same rotamer; well below a three-fold
-    # rotor's
-    # 60.
+    # rotor's 60.
     xtb_rotation_merge_degrees: float = Field(default=15.0, gt=0.0, lt=60.0)
     # How far out of line one torsion-profile step must be, as a multiple of the profile's typical
     # step, to be reported as a jump into another basin. A ratio, not an energy, so steep real

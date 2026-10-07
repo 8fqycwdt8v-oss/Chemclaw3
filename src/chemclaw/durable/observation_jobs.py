@@ -121,8 +121,7 @@ async def promote_observations_activity() -> list[str]:
         evidence = frozenset(observation.evidence_note_ids)
         if any(evidence <= larger for larger in promoted):
             # A promoted row already rests on every note this one does (ids can move when a cluster
-            # gains a
-            # member), so this one is retired rather than promoted twice.
+            # gains a member), so this one is retired rather than promoted twice.
             await set_status(observation.id, "retired")
             continue
         new_note_id = f"playbook-{observation.id.removeprefix('observation-')}"

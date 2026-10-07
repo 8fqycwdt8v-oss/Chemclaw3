@@ -327,9 +327,9 @@ def _asked_in_prose(outcome: ProbeOutcome) -> bool:
     return "?" in outcome.answer
 
 
-# How an answer opens when replying to a reviewer rather than the chemist: agreement or thanks as
-# the first words. Anchored at the start, since "you're right to worry" mid-answer is ordinary
-# prose. "Got it" and "Noted" are excluded: they correctly answer a chemist's own instruction.
+#: How an answer opens when replying to a reviewer rather than the chemist: agreement or thanks as
+#: the first words. Anchored at the start, since "you're right to worry" mid-answer is ordinary
+#: prose. "Got it" and "Noted" are excluded: they correctly answer a chemist's own instruction.
 _ACKNOWLEDGING_OPENER = re.compile(
     r"^(?:you['’]?re|you are)\s+(?:absolutely\s+|quite\s+)?(?:right|correct)\b"
     r"|^(?:understood|acknowledged|agreed|point taken|fair (?:point|enough)|good (?:catch|point))\b"

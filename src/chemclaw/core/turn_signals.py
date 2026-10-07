@@ -60,10 +60,10 @@ class NoteRecordedSignal(BaseModel):
     reference: str
 
 
-# The kinds of deliberate refusal a failing tool call can carry. One definition shared by
-# `agent/audit.refusal_reason` (produces it), `ToolFailureSignal` (carries it) and
-# `api/events.ToolFailedEvent` (puts it on the wire for `Chemclaw3_ui` and `Chemclaw3_mock`). In
-# `core` because both the agent and the API may import it. A new gate adds its reason here.
+#: The kinds of deliberate refusal a failing tool call can carry. One definition shared by
+#: `agent/audit.refusal_reason` (produces it), `ToolFailureSignal` (carries it) and
+#: `api/events.ToolFailedEvent` (puts it on the wire for `Chemclaw3_ui` and `Chemclaw3_mock`). In
+#: `core` because both the agent and the API may import it. A new gate adds its reason here.
 RefusalReason = Literal["dry_run", "undeclared_write", "plan_gate", "repeat", "authz"]
 
 
@@ -262,8 +262,7 @@ def record_tool_failure(
     """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming.
 
     `reason` is `agent/audit.refusal_reason`'s verdict when there was an exception, `None`
-    otherwise:
-    gates refuse by raising, so a returned failure names no gate.
+    otherwise: gates refuse by raising, so a returned failure names no gate.
     """
     _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id, reason=reason))
 

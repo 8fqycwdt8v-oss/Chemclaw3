@@ -47,9 +47,8 @@ def _claim(existing: Any, incoming: Any, kind: str, name: str) -> None:
     """Reject a genuine name collision; allow the same definition to re-register.
 
     Compares the defining module rather than object identity, because the workflow sandbox
-    re-imports
-    modules and builds fresh objects. Two modules claiming one name is an error: the worker would
-    silently drop one.
+    re-imports modules and builds fresh objects. Two modules claiming one name is an error: the
+    worker would silently drop one.
     """
     if existing.__module__ != incoming.__module__:
         raise ValueError(
@@ -71,8 +70,7 @@ def durable_workflow(queue: Queue) -> Callable[[_WorkflowT], _WorkflowT]:
         if existing is not None:
             _claim(existing, cls, "workflow", name)
             # Keep the first: the sandbox's re-import builds a new class object, and storing it
-            # would replace
-            # the object the worker modules captured at import time.
+            # would replace the object the worker modules captured at import time.
             return cls
         registered[name] = cls
         return cls

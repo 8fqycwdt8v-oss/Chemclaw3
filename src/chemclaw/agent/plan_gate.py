@@ -251,8 +251,8 @@ async def consume_turn_approval(session_id: str) -> None:
         )
 
 
-# : Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING` :
-# shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
+#: Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING` :
+#: shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
 _PENDING_SPENDS: set[Any] = set()
 
 
@@ -332,9 +332,8 @@ def plan_after_batch(request: Any) -> Any:
 
     A call batched beside a plan rewrite is judged against the plan the batch writes. The canonical
     harness batch (status flip beside the next step's tool) keeps the same identity and passes on
-    its
-    standing approval; a genuine rewrite needs its own approval. `None` (no rewrite, or the message
-    cannot be found) means the pre-batch plan is judged.
+    its standing approval; a genuine rewrite needs its own approval. `None` (no rewrite, or the
+    message cannot be found) means the pre-batch plan is judged.
     """
     items = rewrite_todos_in_batch(request)
     if items is None or items is _UNANSWERABLE:

@@ -186,8 +186,7 @@ class _CritiqueRequest(BaseModel):
     hypothesis: Hypothesis
     evidence: list[str] = Field(default_factory=list)
     # The note ids the sweep returned, so `derive_check` selects a subject rather than recalling
-    # one;
-    # an id that does not resolve is refused.
+    # one; an id that does not resolve is refused.
     subject_note_ids: list[str] = Field(default_factory=list)
     requested_by: str = ""
     correlation_id: str = ""
@@ -288,8 +287,8 @@ async def resolve_field_limits() -> _FieldLimits:
     )
 
 
-# The prompts this module sends, as marked templates so the prose guards read them
-# (`core/model_prose.py`). Every substituted value is `defang`ed text or a computed number.
+#: The prompts this module sends, as marked templates so the prose guards read them
+#: (`core/model_prose.py`). Every substituted value is `defang`ed text or a computed number.
 _DRAFT_ANGLES = ModelProse(
     "You are planning how to attack a chemistry question from several independent "
     "directions, so that competing explanations are generated rather than one.\n\n"
@@ -726,8 +725,7 @@ async def run_computable_check(
 
             if contract is None or target is None:  # pragma: no cover - refused above
                 # Unreachable while `refuse_unless_dispatchable` refuses on a missing contract; a
-                # refusal rather
-                # than an `assert`, which `-O` would delete.
+                # refusal rather than an `assert`, which `-O` would delete.
                 return _refused(check, "unreadable-contract", "the tool's surface is unknown")
             plan = Dispatch(
                 tool=call.tool,
@@ -751,8 +749,7 @@ async def run_computable_check(
             )
     except AuthorizationError as exc:
         # Counted apart from a broken calculator: "not authorized" and "calculator down" need
-        # different
-        # fixes.
+        # different fixes.
         activity.logger.warning("computable check refused for %s: %s", check.hypothesis_id, exc)
         return _refused(check, "tool-not-authorized", f"{call.tool!r} was refused: {exc}")
     except Exception as exc:
@@ -829,8 +826,7 @@ async def ground_check_template(
     launcher = ""
     try:
         # `enabled()`, not `discovered()`: `templates_enabled` is the deployment's off switch, and
-        # only
-        # enabled templates have launchers covered by role gates and the plan gate.
+        # only enabled templates have launchers covered by role gates and the plan gate.
         by_name = {template.name: template for template in enabled_templates()}
         template = by_name.get(call.template)
         if template is None:
@@ -1017,8 +1013,7 @@ async def ground_check_job(
             return _GroundedJob(refusal_code=code, refusal_detail=detail)
 
         # Validates, authorizes and runs the job's precondition through the governed chain, so the
-        # audit
-        # row reads the same as a chemist's launch. A refusal is reported.
+        # audit row reads the same as a chemist's launch. A refusal is reported.
         payload = await audited_launch(
             spec.name,
             params,
@@ -1036,8 +1031,7 @@ async def ground_check_job(
             awaits_answer=spec.awaits_answer,
             payload=payload,
             # Built from the accepted payload, never the model's proposal, so the report describes
-            # the job
-            # that actually ran.
+            # the job that actually ran.
             ran=_job_line(spec.name, payload, call.subjects, structures, fields),
         )
     except Exception as exc:
@@ -1095,8 +1089,8 @@ def _job_line(
     return f"{job}({stated}){axes}" + (f" — defaults: {defaulted}" if defaulted else "")
 
 
-# The longest hypothesis id a run carries. The model-authored id ends up in child workflow ids,
-# and Temporal refuses an over-long id as a bad command, failing the whole workflow task.
+#: The longest hypothesis id a run carries. The model-authored id ends up in child workflow ids,
+#: and Temporal refuses an over-long id as a bad command, failing the whole workflow task.
 _MAX_HYPOTHESIS_ID = 64
 
 
@@ -1417,10 +1411,8 @@ class HypothesisTournamentWorkflow:
                 continue
             produced.extend(batch.hypotheses)
         # Ids must be unique across angles. Suffixes are checked against names already taken,
-        # because a
-        # renamed `x-1` could collide with a natural `x-1`, and a collision silently drops a
-        # hypothesis
-        # from the `by_id` dict.
+        # because a renamed `x-1` could collide with a natural `x-1`, and a collision silently drops
+        # a hypothesis from the `by_id` dict.
         taken: set[str] = set()
         unique: list[Hypothesis] = []
         for hypothesis in produced:
@@ -1548,10 +1540,8 @@ class HypothesisTournamentWorkflow:
                     scores[winner_id] += 1.0 / len(usable)
 
         # Position bias is the first-shown side's win rate `p`, reported as `|2p − 1|` so 0.0 means
-        # no
-        # order effect; a reversal rate cannot separate noise from bias. Uses every decisive
-        # comparison,
-        # and is `None` (absent, not zero) below `_MIN_BIAS_SAMPLE`.
+        # no order effect; a reversal rate cannot separate noise from bias. Uses every decisive
+        # comparison, and is `None` (absent, not zero) below `_MIN_BIAS_SAMPLE`.
         bias = (
             abs(2.0 * (first_position_wins / decisive_comparisons) - 1.0)
             if decisive_comparisons >= _MIN_BIAS_SAMPLE
@@ -1572,8 +1562,8 @@ class HypothesisTournamentWorkflow:
         """One comparison, and whether the winner was the hypothesis shown first.
 
         Returns the winning id, the outcome (1.0, or 0.5 for a tie), and that flag, which makes
-        position
-        bias measurable. Presentation order is a stable hash, reproducible on replay and re-run.
+        position bias measurable. Presentation order is a stable hash, reproducible on replay and
+        re-run.
         """
         first, second = pair
         # The round is mixed in so a Swiss rematch is presented the other way round, making it an
@@ -1652,8 +1642,7 @@ class HypothesisTournamentWorkflow:
         """Run the `computable` checks the budget buys, best-placed first, and say why for the rest.
 
         `order` is the fitted ranking and the budget is spent down it, so the leader's check is
-        never
-        refused for budget in favour of a lower one. One budget covers tool and job checks.
+        never refused for budget in favour of a lower one. One budget covers tool and job checks.
         """
         computable = [
             checks[hypothesis_id]
@@ -1689,8 +1678,7 @@ class HypothesisTournamentWorkflow:
                 "check's decision, not the dispatcher's",
             )
         # A call naming nothing cannot dispatch, so it takes no budget slot. Patched because it
-        # removes a
-        # command older histories recorded; the patch id may never be reused.
+        # removes a command older histories recorded; the patch id may never be reused.
         empty = (
             [check for check in computable if check.call is None or not check.call.named_targets]
             if workflow.patched("tournament-empty-calls-refused-before-budget")
@@ -1802,8 +1790,8 @@ class HypothesisTournamentWorkflow:
                 update={
                     "verdict": reading.verdict,
                     # Celled because model prose enters a note body here (`reading.reason`, and a
-                    # template check's
-                    # `detail`); an unstripped `[[...]]` would mint a graph edge on the field note.
+                    # template check's `detail`); an unstripped `[[...]]` would mint a graph edge on
+                    # the field note.
                     "detail": as_cell(f"{reading.reason} Computed: {outcome.detail}")
                     if reading.reason
                     else as_cell(outcome.detail),
@@ -1820,10 +1808,8 @@ class HypothesisTournamentWorkflow:
         """Ground and launch the checks that need a durable calculation.
 
         These jobs are `expensive: true`; `_settle`'s budget decides how many start. Grounding
-        happens in
-        an activity, launching here (a child workflow is a workflow's to start), and the child gets
-        the
-        payload `prepare_job_launch` validated, never the model's proposal.
+        happens in an activity, launching here (a child workflow is a workflow's to start), and the
+        child gets the payload `prepare_job_launch` validated, never the model's proposal.
         """
         results: list[tuple[DiscriminatingCheck, CheckOutcome]] = []
         if not checks:
@@ -1996,8 +1982,7 @@ class HypothesisTournamentWorkflow:
                     # an enumeration's fan-out.
                     execution_timeout=timedelta(seconds=plan.run_timeout_seconds),
                     # No retry policy, matching `start_template_run`: a retry would re-run the whole
-                    # procedure,
-                    # including an uncached metered model turn.
+                    # procedure, including an uncached metered model turn.
                     result_type=TemplateRunResult,
                 )
                 for check, plan, definition in launches
@@ -2046,8 +2031,8 @@ class HypothesisTournamentWorkflow:
         """Write an `experiment-proposal` note for each physical check, best effort.
 
         `retrieved` maps a hypothesis to the note ids its evidence actually held, so a proposal
-        cites
-        only retrieved notes. Best effort, because a failed note write must not lose the ranking.
+        cites only retrieved notes. Best effort, because a failed note write must not lose the
+        ranking.
         """
         note_ids: list[str] = []
         for row in outcome.ranked[: limits.max_proposals]:
@@ -2072,8 +2057,7 @@ class HypothesisTournamentWorkflow:
                 )
             except ActivityError:
                 # Best effort on the job, but the id is reported only when the write landed, so the
-                # field note
-                # never links to a proposal that does not exist.
+                # field note never links to a proposal that does not exist.
                 workflow.logger.warning(
                     "hypothesis proposal %s failed to write; not reported", note_id
                 )
@@ -2113,8 +2097,7 @@ class HypothesisTournamentWorkflow:
 
         The envelope (ratings, intervals, losers and reasons, position bias) lives nowhere else
         queryable, so `get_durable_job_status` and `find_past_jobs` need this row. Never fails the
-        job:
-        the ranking is already computed.
+        job: the ranking is already computed.
         """
         record = JobRecord(
             job_id=workflow.info().workflow_id,
@@ -2150,8 +2133,7 @@ class HypothesisTournamentWorkflow:
         """Make a degraded run distinguishable from a healthy one from outside.
 
         Every stage catches and continues, so a run whose judge failed still returns a table built
-        from
-        the prior. Guarded on `is_replaying` so replays do not re-count.
+        from the prior. Guarded on `is_replaying` so replays do not re-count.
         """
         if workflow.unsafe.is_replaying():
             return
@@ -2175,8 +2157,7 @@ class HypothesisTournamentWorkflow:
                 )
             )
         # Count why each check did not run (`refusal_code` is a closed vocabulary), so a deployment
-        # can
-        # see which rule is refusing its checks.
+        # can see which rule is refusing its checks.
         for row in outcome.ranked:
             if row.outcome is not None and row.outcome.refusal_code:
                 record_metric(

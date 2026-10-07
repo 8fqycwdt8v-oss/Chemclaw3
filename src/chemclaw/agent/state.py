@@ -28,9 +28,9 @@ from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
 
-# The attribute `agent/turn_graph.py` stamps on a compiled mesh, naming how many namespace frames a
-# turn's own agent sits behind; `api/graph_stream.root_depth` reads it. Defined here because `agent`
-# may not import `api`, and both already import this module.
+#: The attribute `agent/turn_graph.py` stamps on a compiled mesh, naming how many namespace frames a
+#: turn's own agent sits behind; `api/graph_stream.root_depth` reads it. Defined here because
+#: `agent` may not import `api`, and both already import this module.
 PEER_DEPTH_ATTR = "chemclaw_peer_depth"
 
 

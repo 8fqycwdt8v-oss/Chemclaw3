@@ -84,7 +84,6 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     if "tool_calls" in pack.truncated:
         payload["refusals_are_a_lower_bound"] = True
     # Surface degraded turns as correlation ids pointing into `payload["turns"]`, so a degraded
-    # answer
-    # never reads as complete.
+    # answer never reads as complete.
     payload["degraded_turns"] = [turn.correlation_id for turn in pack.degraded_turns]
     return payload

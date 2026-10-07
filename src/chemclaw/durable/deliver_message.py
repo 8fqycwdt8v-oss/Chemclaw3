@@ -154,8 +154,7 @@ async def deliver_best_effort(message: OutboundMessage) -> list[str]:
             message,
             task_queue=settings.background_task_queue,
             # `delivery_timeout_seconds`: the walk over channels is serial and each carries its own
-            # network
-            # timeout.
+            # network timeout.
             start_to_close_timeout=timedelta(seconds=settings.delivery_timeout_seconds),
             # The wait is bounded separately: `start_to_close` begins only once a worker picks the
             # task up.

@@ -20,8 +20,8 @@ from chemclaw.durable import pending_store
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.premise import count_refusals, premise_breaks
 
-# The kinds a chemist-facing ask may take. Narrower than `awaiting.KINDS`: an `approval` is raised
-# by the effector seam and the plan gate, never by the model.
+#: The kinds a chemist-facing ask may take. Narrower than `awaiting.KINDS`: an `approval` is raised
+#: by the effector seam and the plan gate, never by the model.
 AskKind = Literal["measurement", "deliverable", "review"]
 
 

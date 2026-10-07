@@ -451,13 +451,13 @@ def unregister_connection(conn: Any) -> None:
         _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
 
 
-# `pg_endpoint(dsn) -> system_identifier` for every endpoint a borrow has reached. String comparison
-# reads one server spelled two ways (`localhost`/`127.0.0.1`) as two; the identifier is fixed at
-# `initdb` and readable by an unprivileged role. Learned once and cached, so it survives an outage;
-# before the first borrow the string comparison is used.
+#: `pg_endpoint(dsn) -> system_identifier` for every endpoint a borrow has reached. String
+#: comparison reads one server spelled two ways (`localhost`/`127.0.0.1`) as two; the identifier is
+#: fixed at `initdb` and readable by an unprivileged role. Learned once and cached, so it survives
+#: an outage; before the first borrow the string comparison is used.
 _SERVER_IDENTITY: dict[tuple[str, str], int] = {}
 
-# Endpoints whose identity could not be read; tried once, warned once, then string comparison.
+#: Endpoints whose identity could not be read; tried once, warned once, then string comparison.
 _IDENTITY_UNREADABLE: set[tuple[str, str]] = set()
 
 
@@ -575,12 +575,12 @@ def pool_stats() -> dict[str, int]:
     return total
 
 
-# How long one walk of the pools serves later gauge reads, in seconds: a coherence window so the
-# three pool gauges of one render describe one instant, far shorter than a scrape interval.
+#: How long one walk of the pools serves later gauge reads, in seconds: a coherence window so the
+#: three pool gauges of one render describe one instant, far shorter than a scrape interval.
 _POOL_SNAPSHOT_WINDOW_SECONDS = 1.0
 
-# `(taken_at, stats)` of the latest walk, or `None`; guarded by `_POOL_SNAPSHOT_LOCK` so concurrent
-# renders never see a half-built snapshot.
+#: `(taken_at, stats)` of the latest walk, or `None`; guarded by `_POOL_SNAPSHOT_LOCK` so concurrent
+#: renders never see a half-built snapshot.
 _POOL_SNAPSHOT: tuple[float, dict[str, int]] | None = None
 _POOL_SNAPSHOT_LOCK = threading.Lock()
 
@@ -690,6 +690,6 @@ def _iso_stamp(value: Any) -> Any:
     return "" if value is None else value
 
 
-# A `TIMESTAMPTZ` column as the ISO string its readers expect; NULL reads as "" (still waiting,
-# never settled), not `None`.
+#: A `TIMESTAMPTZ` column as the ISO string its readers expect; NULL reads as "" (still waiting,
+#: never settled), not `None`.
 IsoStamp = Annotated[str, BeforeValidator(_iso_stamp)]

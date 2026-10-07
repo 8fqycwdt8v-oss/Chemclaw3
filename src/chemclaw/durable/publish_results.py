@@ -57,16 +57,14 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
     """Claim and deliver one batch for one sink.
 
     One batch per run, not drain-to-empty: it bounds how long one activity holds a connection and
-    how
-    much one failure re-attempts. The backfill CLI drains faster.
+    how much one failure re-attempts. The backfill CLI drains faster.
     """
     outcome = SinkOutcome(sink=manifest_name)
     claimed = await outbox.claim(manifest_name, batch_size)
     if not claimed:
         return outcome
     # Parsed per row, so one unreadable record (from an older writer) does not fail its neighbours.
-    # The
-    # lease travels with the row so every `mark_*` call is fenced (see `outbox.Lease`).
+    # The lease travels with the row so every `mark_*` call is fenced (see `outbox.Lease`).
     leases: list[outbox.Lease] = []
     records: list[ResultRecord] = []
     unreadable: list[outbox.Lease] = []
@@ -91,18 +89,16 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         await sink.deliver(records)
     except SinkUnavailableError as exc:
         # An outage is batch-wide: the whole claim spends one attempt and stays claimable. Never
-        # re-raised;
-        # `result_publications.last_error` records it.
+        # re-raised; `result_publications.last_error` records it.
         await outbox.mark_failed(leases, str(exc))
         outcome.failed += len(leases)
         outcome.reason = str(exc)[:500]
         return outcome
     except Exception as exc:
         # A refusal is about one record, so the batch is re-attempted one record at a time: a single
-        # poison
-        # record must not mark its neighbours failed or hold the head of the queue. Re-sending a
-        # record that
-        # already landed is a no-op, because every far-side write is an upsert onto a content hash.
+        # poison record must not mark its neighbours failed or hold the head of the queue.
+        # Re-sending a record that already landed is a no-op, because every far-side write is an
+        # upsert onto a content hash.
         outcome.reason = str(exc)[:500]
         delivered: list[outbox.Lease] = []
         refused: list[outbox.Lease] = []
@@ -179,10 +175,8 @@ async def _drain_result_publications() -> PublishOutcome:
             await sink.aclose()
 
     # Refresh the backlog gauges once per pass, after every row of every sink is marked (a claim
-    # alone
-    # leaves rows `pending`), outside the per-sink loop so one sink's failure does not cost the
-    # others
-    # their reading. Never raises.
+    # alone leaves rows `pending`), outside the per-sink loop so one sink's failure does not cost
+    # the others their reading. Never raises.
     await outbox.refresh_backlog()
     return outcome
 
@@ -206,8 +200,7 @@ class PublishResultsWorkflow:
             start_to_close_timeout=timedelta(seconds=settings.result_publish_lease_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout a dead worker would go unnoticed for the whole (long)
-            # budget above;
-            # the beat interval derives from this value.
+            # budget above; the beat interval derives from this value.
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),

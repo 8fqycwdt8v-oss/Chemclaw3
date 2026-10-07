@@ -40,8 +40,8 @@ class ProposalStoreError(ChemclawError):
 #: unknown kind is a proposal nobody can act on — the database says the same thing in a CHECK.
 ProposalKind = Literal["skill", "profile"]
 
-# Where a proposal can be in its life. `superseded` is not a decision (no human decided it), which
-# keeps `decided_at` meaningful.
+#: Where a proposal can be in its life. `superseded` is not a decision (no human decided it), which
+#: keeps `decided_at` meaningful.
 ProposalState = Literal["open", "accepted", "rejected", "superseded"]
 
 #: The states a person's decision produces, as opposed to the two the system produces.
@@ -229,10 +229,9 @@ class PostgresProposalStore:
         """Record a proposal, or return the standing one for this exact content.
 
         Invariant: at most one open row per name. All writes run in one transaction under the
-        advisory
-        lock, insert-or-revive then supersede, and only a version that arrived sweeps its siblings.
-        `ON CONFLICT DO NOTHING` keeps a decided row untouched; `_REVIVE` reopens only a superseded
-        one.
+        advisory lock, insert-or-revive then supersede, and only a version that arrived sweeps its
+        siblings. `ON CONFLICT DO NOTHING` keeps a decided row untouched; `_REVIVE` reopens only a
+        superseded one.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -451,7 +450,7 @@ class InMemoryProposalStore:
         return mine[: settings.agent_proposals_list_max]
 
 
-# The one in-process store: a per-call instance would lose proposals between turn and route.
+#: The one in-process store: a per-call instance would lose proposals between turn and route.
 _IN_MEMORY = InMemoryProposalStore()
 
 

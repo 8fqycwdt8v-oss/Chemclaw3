@@ -183,8 +183,7 @@ class _ParseSlots:
         """Claim a slot, waiting up to `seconds` for a busy one to come free.
 
         The wait absorbs a burst (several files dropped at once) instead of shedding it. A freed
-        slot
-        is handed straight to the first waiter, so later arrivals cannot barge past.
+        slot is handed straight to the first waiter, so later arrivals cannot barge past.
         """
         if self.in_flight < settings.attachment_max_concurrent_parses:
             self.in_flight += 1
@@ -226,10 +225,8 @@ class _ParseSlots:
         """Start `work` on a worker thread under an already-taken slot, wiring its release.
 
         Take and give-back live in one method because `run_in_executor` can raise (executor shut
-        down,
-        loop closing); a thread that never started must return its slot immediately, or the
-        singleton
-        fills permanently.
+        down, loop closing); a thread that never started must return its slot immediately, or the
+        singleton fills permanently.
         """
         try:
             future = loop.run_in_executor(None, work)
@@ -291,10 +288,8 @@ async def parse_attachment_off_loop(
     )
     try:
         # Shielded so a timeout cannot cancel the future (which would release the slot while the
-        # thread
-        # still runs). This deadline is a backstop: the worker kills the child at the parse timeout,
-        # and
-        # the extra `attachment_parse_reap_grace_seconds` covers forkserver start-up.
+        # thread still runs). This deadline is a backstop: the worker kills the child at the parse
+        # timeout, and the extra `attachment_parse_reap_grace_seconds` covers forkserver start-up.
         return await asyncio.wait_for(
             asyncio.shield(future),
             timeout=(
@@ -316,8 +311,8 @@ async def parse_attachment_off_loop(
         ) from exc
 
 
-# How many dropped file names one session remembers; a constant, not an operator setting. Bounded
-# because the names go into the model's context; `evicted_total` keeps the full count.
+#: How many dropped file names one session remembers; a constant, not an operator setting. Bounded
+#: because the names go into the model's context; `evicted_total` keeps the full count.
 _EVICTED_NAMES_REMEMBERED = 20
 
 
@@ -352,9 +347,8 @@ def _resident_bytes(item: Attachment) -> int:
     """What one upload's parsed text costs the pod, in bytes rather than in characters.
 
     `attachment_store_max_bytes` is a memory bound, and CPython stores 1, 2 or 4 bytes per
-    codepoint,
-    so `len()` would under-count non-ASCII text. `sys.getsizeof` measures resident bytes without
-    allocating an encoded copy.
+    codepoint, so `len()` would under-count non-ASCII text. `sys.getsizeof` measures resident bytes
+    without allocating an encoded copy.
     """
     return sys.getsizeof(item.text)
 
@@ -481,8 +475,7 @@ class InMemoryAttachmentStore:
         """Everything a session holds and everything it lost, oldest first.
 
         `peek`, not `get`: reads must not refresh the session's eviction recency. Returns a copy,
-        since
-        `add` mutates the stored object in place.
+        since `add` mutates the stored object in place.
         """
         held = self._by_session.peek(session_id)
         if held is None:

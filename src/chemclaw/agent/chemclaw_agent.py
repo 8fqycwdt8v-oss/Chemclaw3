@@ -82,11 +82,11 @@ class PromptBlock:
     trail: str | None = None
 
 
-# Where a turn may write, and where it may not — the one block both groups below hold.
-#
-# The filesystem verbs are bound on every turn and writes outside `/scratch/` and `/memories/`
-# are refused, so every profile must be told the rule. It requires nothing: the names come from
-# always-attached middleware.
+#: Where a turn may write, and where it may not — the one block both groups below hold.
+#:
+#: The filesystem verbs are bound on every turn and writes outside `/scratch/` and `/memories/`
+#: are refused, so every profile must be told the rule. It requires nothing: the names come from
+#: always-attached middleware.
 _WORKING_SURFACE = PromptBlock(
     "Your own working surface: write_file, read_file, edit_file, ls, glob and grep reach two roots "
     "and no others — /scratch/, which holds this conversation's files and dies with it, and "
@@ -97,8 +97,8 @@ _WORKING_SURFACE = PromptBlock(
 )
 
 
-# The default prompt, cut into the pieces a deployment can be missing. Order is reading order;
-# each block carries its own separator, so the full assembly is the uncut paragraph text.
+#: The default prompt, cut into the pieces a deployment can be missing. Order is reading order;
+#: each block carries its own separator, so the full assembly is the uncut paragraph text.
 _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
     PromptBlock(
         "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -204,8 +204,7 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         frozenset({"gather_evidence", "find_notes", "expand_note"}),
     ),
     # Split off because `resolve_compound` is served by the fleet while the search half is
-    # in-process;
-    # each half reads grammatically alone.
+    # in-process; each half reads grammatically alone.
     PromptBlock(
         "Resolve names with resolve_compound, and when resolve_compound returns nothing, look the "
         "name up in the knowledge graph before concluding it is unknown — the graph carries "
@@ -335,8 +334,7 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
     ),
     # "Stability study" denies stability data, not the arithmetic `estimate_stability_trend` does on
     # supplied timepoints. The following two clauses a served fleet refutes are separate blocks
-    # keyed
-    # by `absent_unless`, each one list item so a dropped one leaves the sentence grammatical.
+    # keyed by `absent_unless`, each one list item so a dropped one leaves the sentence grammatical.
     PromptBlock(
         "no mutagenicity, genotoxicity (ICH M7) or nitrosamine rule set; ",
         absent_unless=frozenset({"screen_genotoxic_alerts"}),
@@ -461,10 +459,10 @@ def _assemble(
     )
 
 
-# The maximal default prompt: every block, durable trail. What validators check and what
-# `AgentProfile`'s default `instructions` is compared against. Not what a deployment is sent —
-# `absent_unless` blocks make it state limits a fleet-served deployment has passed; use
-# `instructions_for`.
+#: The maximal default prompt: every block, durable trail. What validators check and what
+#: `AgentProfile`'s default `instructions` is compared against. Not what a deployment is sent —
+#: `absent_unless` blocks make it state limits a fleet-served deployment has passed; use
+#: `instructions_for`.
 _INSTRUCTIONS = _assemble(_INSTRUCTION_BLOCKS, None, durable_trail=True)
 
 
@@ -588,8 +586,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     """
     prof = profile if profile is not None else get_profile(None)
     # Generated launchers are ordinary registry tools, so audit, `tool_role_gates` and the
-    # validators
-    # address them by name. Registered once per process.
+    # validators address them by name. Registered once per process.
     inprocess = _register_generated_tools()
     if prof.tool_names is not None:
         _reject_unknown_tool_names(prof)
@@ -614,8 +611,7 @@ def harness_tool_names() -> set[str]:
     """The tools the plan/execute harness registers on an agent it wraps.
 
     Read off `TodoListMiddleware`'s tool objects so an upstream rename cannot leave it stale. Its
-    own
-    name space, since validators must accept references like `write_todos`.
+    own name space, since validators must accept references like `write_todos`.
     """
     return {tool.name for tool in TodoListMiddleware().tools}
 
@@ -627,8 +623,7 @@ def subagent_tool_names() -> frozenset[str]:
     `SubAgentMiddleware` is required by `create_deep_agent`, so `task` is on every agent. Upstream
     exports no constant for the name, so it is read by building the middleware over a trivial
     runnable (`tests/test_upstream_surface.py` pins the shape). Cached because it depends only on
-    the
-    installed package and is read per tool call.
+    the installed package and is read per tool call.
     """
     from deepagents.backends import StateBackend
     from deepagents.middleware.subagents import SubAgentMiddleware
@@ -767,8 +762,8 @@ def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> l
     return narrowed
 
 
-# Serializes the generated launchers' test-then-insert-then-read; a registry-level lock would not
-# make the whole sequence atomic.
+#: Serializes the generated launchers' test-then-insert-then-read; a registry-level lock would not
+#: make the whole sequence atomic.
 _GENERATED_TOOLS_LOCK = threading.Lock()
 
 

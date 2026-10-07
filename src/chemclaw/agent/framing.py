@@ -43,12 +43,12 @@ _NONCE = _envelope_nonce()
 # The one authoritative envelope tag; public so the agent instructions and tests name exactly it.
 ENVELOPE_TAG = f"retrieved-note-{_NONCE}"
 
-# Marks a sentence in a tool result as this system's own (e.g. a refusal), not a tool's words.
-#
-# A value rather than a spelling, so text from the far side of a tool call cannot forge it; it
-# reuses the envelope nonce, so one secret configures both. Appended rather than prefixed so
-# readers keyed on the `Refused: ` prefix keep working; `bounded_content` keeps head and tail, so
-# the mark survives truncation.
+#: Marks a sentence in a tool result as this system's own (e.g. a refusal), not a tool's words.
+#:
+#: A value rather than a spelling, so text from the far side of a tool call cannot forge it; it
+#: reuses the envelope nonce, so one secret configures both. Appended rather than prefixed so
+#: readers keyed on the `Refused: ` prefix keep working; `bounded_content` keeps head and tail, so
+#: the mark survives truncation.
 SYSTEM_SPEECH_MARK = f"[system {_NONCE}]"
 
 # Any `<` beginning a retrieved-note-like tag (open or close, any case or suffix, padded or not).
@@ -130,8 +130,7 @@ def frame_untrusted(content: str, *, note_id: str) -> str:
 
     The envelope names the source for citation. Content and id are neutralized so neither can close
     it early; the text is otherwise verbatim. Forgery is closed by defanging, not by the nonce
-    alone,
-    so no caller may treat a matching delimiter as proof of provenance.
+    alone, so no caller may treat a matching delimiter as proof of provenance.
     """
     opening, closing = envelope_delimiters(note_id)
     return f"{opening}{_defang(content)}{closing}"

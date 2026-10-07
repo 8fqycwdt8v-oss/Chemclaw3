@@ -419,9 +419,9 @@ class ResumeRequest(BaseModel):
     fingerprint: str = Field(min_length=1)
 
 
-# The recorded ends a relaunch may resume from. A cancelled run's completed steps are as real as a
-# failed one's, and `ALLOW_DUPLICATE_FAILED_ONLY` lets the id start again after either. A terminate
-# or execution timeout runs no workflow code and writes no row.
+#: The recorded ends a relaunch may resume from. A cancelled run's completed steps are as real as a
+#: failed one's, and `ALLOW_DUPLICATE_FAILED_ONLY` lets the id start again after either. A terminate
+#: or execution timeout runs no workflow code and writes no row.
 _RESUMABLE = frozenset({"failed", "cancelled"})
 
 

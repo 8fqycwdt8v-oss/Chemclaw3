@@ -34,8 +34,8 @@ class SourcesSettings(BaseSettings):
     # Where the build baked vendored reference datasets: local by construction, reviewed like any
     # pinned dependency, read from disk at runtime.
     vendored_dataset_dir: str = "data/vendored"
-    # Where the `commitments-json` source reads a portfolio extract from; a setting so a container
-    # whose WORKDIR is not the repo root does not silently read an empty portfolio.
+    #: Where the `commitments-json` source reads a portfolio extract from; a setting so a container
+    #: whose WORKDIR is not the repo root does not silently read an empty portfolio.
     commitment_export_dir: str = "data/commitments"
     # Check `records.csv` against its manifest checksum on load, so shipped data is provably what
     # was reviewed.

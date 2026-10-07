@@ -40,8 +40,8 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
-# The `session_events` kind a digest lands under. Shared with the reader
-# (`api/routes/streams.read_digests`), whose claim is destructive and kind-scoped.
+#: The `session_events` kind a digest lands under. Shared with the reader
+#: (`api/routes/streams.read_digests`), whose claim is destructive and kind-scoped.
 DIGEST_KIND = "digest"
 
 
@@ -274,8 +274,8 @@ class DigestWorkflow:
                 },
             )
             # Only after a successful mailbox delivery — see the module docstring. Acknowledging a
-            # swallowed
-            # failure would advance the watermark past notes the subscriber never received.
+            # swallowed failure would advance the watermark past notes the subscriber never
+            # received.
             if not sent:
                 continue
             await workflow.execute_activity(
@@ -286,13 +286,11 @@ class DigestWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
             # Outbound delivery runs strictly after the acknowledgement and does not affect it: the
-            # mailbox
-            # is the durable handover, and a channel outage must neither block the watermark nor
-            # re-report.
+            # mailbox is the durable handover, and a channel outage must neither block the watermark
+            # nor re-report.
             #
             # Behind a patch: runs opened before it have `deliver_digest_activity` at this position,
-            # and the
-            # off branch emits exactly that.
+            # and the off branch emits exactly that.
             if workflow.patched("digest-outbound-delivery-seam"):
                 await deliver_best_effort(
                     OutboundMessage(

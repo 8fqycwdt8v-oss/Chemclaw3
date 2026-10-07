@@ -68,8 +68,7 @@ _BAD_DATA_TYPES = [
     "BoTranslationError",
     "NoteError",
     # A delivery channel with no folder or a `config:` the driver refuses; an unreachable
-    # destination
-    # raises from the driver instead and stays retryable.
+    # destination raises from the driver instead and stays retryable.
     "DeliveryChannelError",
     "EvalCaseError",
     # A run scored against a baseline recorded on a different case-set; stays impossible until a
@@ -110,9 +109,9 @@ _BAD_DATA_TYPES = [
     # `VectorStoreError` (unreachable) stays retryable.
     "VectorStoreConfigError",
     # The prescriptive-design tier: a plate that cannot hold the arms, an unknown design id, a
-    # revision
-    # derived from a stale head. `RevisionConflict` and `StatusConflict` look transient but are not:
-    # retrying would resolve the race by discarding the revision or decision it did not see.
+    # revision derived from a stale head. `RevisionConflict` and `StatusConflict` look transient but
+    # are not: retrying would resolve the race by discarding the revision or decision it did not
+    # see.
     "LayoutError",
     "RevisionConflict",
     "StatusConflict",
@@ -164,8 +163,7 @@ _BAD_DATA_TYPES = [
     "DryRunRefusal",
     "PlanNotApprovedError",
     # An agent step reached for a write its template did not declare; the declaration is pinned in
-    # the
-    # run's input.
+    # the run's input.
     "UndeclaredWriteRefusal",
     # Deliberately absent: `SubsystemUnavailableError` means an unreachable subsystem, which a retry
     # can ride out. `tests/test_publish.py` asserts its absence.
@@ -345,8 +343,7 @@ def calculation_retry() -> RetryPolicy:
     first = cap / doublings
     if workflow.in_workflow():
         # Downward only: upward jitter would push the last interval past `maximum_interval`, where
-        # the
-        # cap silently removes the spread.
+        # the cap silently removes the spread.
         first *= workflow.random().uniform(1.0 - _CAPACITY_RETRY_JITTER, 1.0)
     return RetryPolicy(
         maximum_attempts=settings.activity_max_attempts,
@@ -362,8 +359,8 @@ def queued_tool_retry() -> RetryPolicy:
 
     A queued call's worker is sized to the server's slots, so a refusal is a race with a slot about
     to free. Unlimited attempts, bounded by the call's own `schedule_to_close`; the one
-    non-retryable
-    type is a fault that already spent `queued_tool_fault_attempts` (`connectors/queued_call.py`).
+    non-retryable type is a fault that already spent `queued_tool_fault_attempts`
+    (`connectors/queued_call.py`).
     """
     cap = settings.queued_tool_retry_max_seconds
     return RetryPolicy(

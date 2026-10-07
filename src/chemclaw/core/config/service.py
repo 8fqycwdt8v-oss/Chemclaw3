@@ -183,10 +183,8 @@ class ServiceSettings(BaseSettings):
     # "postgres"`; there is no separate flag.
     budget_window_hours: float = Field(default=24.0, gt=0)
     # Fraction of any cap at which `chemclaw_budget_warnings_total` increments and a WARNING names
-    # the
-    # scope, once per turn (from `record`). Reaches metrics and logs, not the chemist. 0 disables;
-    # 1.0
-    # is excluded because `_near` (`used >= cap * f and used < cap`) would never fire.
+    # the scope, once per turn (from `record`). Reaches metrics and logs, not the chemist. 0
+    # disables; 1.0 is excluded because `_near` (`used >= cap * f and used < cap`) would never fire.
     budget_warn_fraction: float = Field(default=0.8, ge=0, lt=1)
     # Job push-back: a finished Temporal job writes a `session_events` row and the front door tails
     # the table to wake the owning session. This is the tailer's poll interval.

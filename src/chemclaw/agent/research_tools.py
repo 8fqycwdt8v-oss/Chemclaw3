@@ -183,8 +183,7 @@ async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], int, st
             rejection.model_copy(
                 update={
                     # The content channel, framed as data. The id names the ledger row rather than a
-                    # note,
-                    # because the record is absent.
+                    # note, because the record is absent.
                     "reason": frame_untrusted(
                         rejection.reason,
                         note_id=f"refused-on-ingest:{rejection.source}:{rejection.entry_id}",

@@ -73,9 +73,8 @@ def ended_state(exc: BaseException) -> str:
     """How a run that did not complete ended, as `job_records.state` spells it.
 
     `cancelled` when the exception is a cancellation (`is_cancelled_exception`, the SDK's
-    predicate),
-    `failed` otherwise. A cancellation is a decision, not a defect, so it is stored as one, matches
-    `GET /jobs/{id}`, and is not counted as a failure.
+    predicate), `failed` otherwise. A cancellation is a decision, not a defect, so it is stored as
+    one, matches `GET /jobs/{id}`, and is not counted as a failure.
     """
     return "cancelled" if is_cancelled_exception(exc) else "failed"
 
@@ -128,8 +127,7 @@ class ConnectorJobInput(BaseModel):
     # session to push back to.
     session_id: str = ""
     # The turn that launched this run, so the durable execution joins the conversation's audit
-    # trail.
-    # Empty off the request path.
+    # trail. Empty off the request path.
     correlation_id: str = ""
     # The plan step this run was launched for (the first `in_progress` todo) and its plan revision.
     # Read ambiently at the launch site, never model-authored; empty when not launched from a plan.
@@ -139,9 +137,8 @@ class ConnectorJobInput(BaseModel):
     publish_to_graph: bool = False
     # The job's *declared* ceiling (`JobSpec.timeout_seconds`), copied from the manifest at launch
     # because a workflow may not read it. `None` means none declared. Carried unresolved so the
-    # `min`
-    # against the deployment setting is applied by `child_execution_timeout` when the child starts,
-    # and a lowered setting binds still-queued jobs. Defaulted for the wire.
+    # `min` against the deployment setting is applied by `child_execution_timeout` when the child
+    # starts, and a lowered setting binds still-queued jobs. Defaulted for the wire.
     timeout_seconds: float | None = Field(default=None, gt=0)
     # What this job changes in a system this deployment does not own, copied from the manifest at
     # launch. Empty means the job's writes are this system's own. Defaulted for the wire.
@@ -150,8 +147,8 @@ class ConnectorJobInput(BaseModel):
     # Who may approve an irreversible effect, resolved from configuration at launch (a workflow may
     # not read `settings`). Empty means no approver role, which `_approve_effect` refuses.
     effect_approver: str = ""
-    # How long that approval stays open, already clamped at launch so no timer count depends on
-    # `settings` during replay.
+    #: How long that approval stays open, already clamped at launch so no timer count depends on
+    #: `settings` during replay.
     effect_approval_days: float = 3.0
     # Whether this job suspends on a person (`JobSpec.awaits_answer`), copied from the manifest at
     # launch. `True` means elapsed time is not cost; `child_execution_timeout` is where this and
@@ -189,19 +186,16 @@ class ConnectorJobResult(BaseModel):
     note: Note | None = None
     # The far side's own handle for what this run changed (ticket number, deviation id); recorded on
     # the effect ledger as the handle an operator can undo by hand. Empty for jobs that change
-    # nothing
-    # outside this deployment. Only the connector that made the change knows it.
+    # nothing outside this deployment. Only the connector that made the change knows it.
     external_ref: str = ""
     # The calculation keys this run rested on, so a conclusion drawn from it can cite them and a
-    # stale
-    # calculation can be traced to its conclusions. Defaulted for the wire; empty means "recorded
-    # none", never "used none".
+    # stale calculation can be traced to its conclusions. Defaulted for the wire; empty means
+    # "recorded none", never "used none".
     calc_refs: list[str] = Field(default_factory=list)
     # The name of the pydantic model `data` was dumped from. `chemclaw.publish` dispatches on it
     # (`PAYLOAD_PROJECTORS`); a composite has no `calc_type` to infer a projector from, so without
     # this it would be dropped. Set from `type(result).__name__` where the typed result is still
-    # held.
-    # Defaulted for the wire; empty means "infer".
+    # held. Defaulted for the wire; empty means "infer".
     payload_kind: str = ""
 
 
@@ -286,9 +280,8 @@ def failed_job_record(
 
     A failed run still gets a row, so "what did we try and why" has an answer for it. Separate from
     `job_record_for` because there is no envelope (`ConnectorJobResult.summary` is required).
-    `summary`
-    stays empty and the reason goes in `failure_reason`, so a listing can tell a result from a
-    failure. The caller sets `state` from `ended_state(exc)`.
+    `summary` stays empty and the reason goes in `failure_reason`, so a listing can tell a result
+    from a failure. The caller sets `state` from `ended_state(exc)`.
     """
     return JobRecord(
         job_id=job_id,
@@ -317,9 +310,8 @@ def finish_headroom() -> timedelta:
     Six steps follow `_run_child`: settle the effect ledger, write the durable record, offer the
     composite to the results store, write the note, push back to the session, and send the
     `job-result` copy. Each may take its own `schedule_to_start` plus `start_to_close`, read from
-    the
-    call sites' helpers so a moved bound moves this. Without enough headroom a job whose child hit
-    its ceiling is reaped `TIMED_OUT` before recording its failure or telling the chemist. One
+    the call sites' helpers so a moved bound moves this. Without enough headroom a job whose child
+    hit its ceiling is reaped `TIMED_OUT` before recording its failure or telling the chemist. One
     attempt each, matching every other ceiling here.
 
     Returns:
@@ -358,8 +350,7 @@ def wrapper_execution_timeout() -> timedelta:
     `connector_job_timeout_seconds` plus `finish_headroom`. A wrapper bounded at exactly the child's
     ceiling expires first, and an execution timeout never reaches the failure clause, so the run
     would end with no push-back and no record. The direct path (`connectors/jobs.py`) sets no
-    wrapper
-    timeout; this is for the template path.
+    wrapper timeout; this is for the template path.
 
     Always the global number, even for a job that lowered its own ceiling: a declared ceiling can
     only lower the child's, so the global value clears all of them. A job declaring `awaits_answer`
@@ -412,8 +403,7 @@ class ConnectorJobWorkflow:
 
         `_recorded` lets the failure path ask whether `_finish` already wrote the completed record
         before a later best-effort step raised. Per-execution instance state, deterministic under
-        replay.
-        This workflow is not yet covered by `tests/test_workflow_replay.py`
+        replay. This workflow is not yet covered by `tests/test_workflow_replay.py`
         (`UNCOVERED_BACKGROUND_WORKFLOWS`); the suite holds the effect instead
         (`test_a_run_that_fails_after_recording_is_not_recorded_a_second_time`).
         """
@@ -426,8 +416,7 @@ class ConnectorJobWorkflow:
         The child runs on the connector's own task queue. A child failure propagates (the job really
         failed), unlike the best-effort note publish and push-back, which run after the result is
         durable. A failure is pushed back to the session before it propagates, because the chemist
-        was
-        already told the job is running and silence would read as success.
+        was already told the job is running and silence would read as success.
         """
         # `workflow.now()` and not `time.monotonic()`: a workflow's clock must come from the one
         # Temporal records in history, or a replay would measure the replay rather than the run.
@@ -443,28 +432,21 @@ class ConnectorJobWorkflow:
             return await self._finish(job, result, started_at)
         except BaseException as exc:
             # An eviction (terminate, cache eviction, worker shutdown) closes the coroutine from
-            # outside the
-            # workflow event loop; nothing below can run there, and the run is not lost (another
-            # worker
-            # replays it), so leave.
+            # outside the workflow event loop; nothing below can run there, and the run is not lost
+            # (another worker replays it), so leave.
             if not workflow.in_workflow():
                 raise
             # Settle the ledger first: a failed effect left `attempting` would read as "may have
-            # changed the
-            # far side".
+            # changed the far side".
             await self._settle_effect(job, job_id, "failed", str(exc)[:500])
             # Covers every way the run can end badly, not only a failing child. `BaseException` so a
             # cancellation is announced too; `_notify_failure` never raises, so it cannot replace
-            # the real
-            # reason.
+            # the real reason.
             #
             # The failure record is written before the push-back (the durable copy first), and only
-            # when no
-            # completed record stands: a later best-effort step can raise after `_finish` recorded
-            # the
-            # science, and a second record would double-count the run. `job_record_store` separately
-            # never
-            # lets a failure write erase a stored result.
+            # when no completed record stands: a later best-effort step can raise after `_finish`
+            # recorded the science, and a second record would double-count the run.
+            # `job_record_store` separately never lets a failure write erase a stored result.
             if not self._recorded:
                 await self._record_run(
                     failed_job_record(
@@ -482,14 +464,13 @@ class ConnectorJobWorkflow:
         """For an irreversible effect, suspend until a human approves *this call*.
 
         Per call rather than per plan: an approved plan authorises a kind of work, not this
-        particular
-        act. A refusal or an expiry fails the job; an unanswered approval is not an approval.
+        particular act. A refusal or an expiry fails the job; an unanswered approval is not an
+        approval.
         """
         if job.effect_reversal != "irreversible":
             return ""
         # Fail closed on an unrouted approval, in every environment: an empty `asked_of` would let
-        # any
-        # caller, including the requester, approve an irreversible change.
+        # any caller, including the requester, approve an irreversible change.
         if not job.effect_approver:
             raise ApplicationError(
                 f"{job.job!r} changes {job.effect_system} irreversibly and no approver role is "
@@ -514,11 +495,9 @@ class ConnectorJobWorkflow:
                 id=f"{job_id}:approval",
                 task_queue=settings.background_task_queue,
                 # Not the default `TERMINATE`, which never resumes workflow code and would leave the
-                # approval's
-                # `pending_requests` row `waiting` forever. Not `ABANDON`, which would leave a live
-                # question for a
-                # dead job. `REQUEST_CANCEL` delivers the cancellation the wait handles by settling
-                # its row.
+                # approval's `pending_requests` row `waiting` forever. Not `ABANDON`, which would
+                # leave a live question for a dead job. `REQUEST_CANCEL` delivers the cancellation
+                # the wait handles by settling its row.
                 parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
             )
         )
@@ -575,18 +554,15 @@ class ConnectorJobWorkflow:
             )
         except Exception:
             # An unsettled row is the safe failure (state in doubt); raising would fail a job whose
-            # work
-            # succeeded.
+            # work succeeded.
             workflow.logger.warning("effect ledger not settled for %s", job_id)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Start the bundle's own workflow on its queue, wait for its result, and decode it here.
 
         The result is taken untyped and decoded with `envelope_from_result` inside workflow code:
-        the
-        SDK's `result_type` decode runs outside the coroutine, so a bad payload would fail the run
-        before
-        the failure clause could record it and tell the chemist.
+        the SDK's `result_type` decode runs outside the coroutine, so a bad payload would fail the
+        run before the failure clause could record it and tell the chemist.
         """
         raw = await workflow.execute_child_workflow(
             job.workflow,
@@ -594,10 +570,9 @@ class ConnectorJobWorkflow:
             id=child_workflow_id("run"),
             task_queue=job.task_queue,
             # Actor, correlation id and session id ride on the memo, not in the model-authored
-            # `payload`, so
-            # none of them can be written by the LLM. Bundles read them with `workflow.memo_value`
-            # (e.g.
-            # `BoCampaignWorkflow` uses the session to address its durable waits).
+            # `payload`, so none of them can be written by the LLM. Bundles read them with
+            # `workflow.memo_value` (e.g. `BoCampaignWorkflow` uses the session to address its
+            # durable waits).
             memo={
                 "requested_by": job.requested_by,
                 "correlation_id": job.correlation_id,
@@ -606,10 +581,9 @@ class ConnectorJobWorkflow:
             # One child per parent execution (see `child_workflow_id`), so a duplicate id is a bug.
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             # One attempt: `BAD_DATA_RETRY` cannot classify a child failure (Temporal matches the
-            # outermost
-            # failure name), so retries here would only duplicate compute. The child's activities
-            # already
-            # retry transients, and a dead worker is redelivered without a workflow retry.
+            # outermost failure name), so retries here would only duplicate compute. The child's
+            # activities already retry transients, and a dead worker is redelivered without a
+            # workflow retry.
             retry_policy=RetryPolicy(maximum_attempts=1),
             # See `child_execution_timeout`.
             execution_timeout=child_execution_timeout(job.timeout_seconds, job.awaits_answer),
@@ -621,10 +595,8 @@ class ConnectorJobWorkflow:
 
         The envelope's `data` is a composite with no `calculation_results` row, so this is its only
         path to a results store. `calc_ref` is the deterministic workflow id (a composite's identity
-        is
-        the run), which makes it idempotent. Runs through an activity because a workflow may not
-        touch a
-        database.
+        is the run), which makes it idempotent. Runs through an activity because a workflow may not
+        touch a database.
         """
         if not result.data:
             return
@@ -695,27 +667,22 @@ class ConnectorJobWorkflow:
         )
         # Written before the note publish: this row is the durable copy, while the graph write is
         # best-effort. Best-effort itself so a down database cannot fail a finished job, but logged
-        # at
-        # error because it loses data nothing else holds. The return value tells the failure clause
-        # not
-        # to record the run a second time.
+        # at error because it loses data nothing else holds. The return value tells the failure
+        # clause not to record the run a second time.
         self._recorded = await self._record_run(record)
         # The external results store, if configured; best-effort like its neighbours. This is the
-        # hook
-        # that reaches composites, which have no cache row of their own.
+        # hook that reaches composites, which have no cache row of their own.
         await self._publish_result(job, result)
         if job.publish_to_graph and result.note is not None:
             # The same note-write activity the memory-synthesis jobs use, stamped with the run and
-            # its reason
-            # here so no bundle can forget. `job.requested_by` attributes the write, so its log
-            # lines name
-            # the chemist.
+            # its reason here so no bundle can forget. `job.requested_by` attributes the write, so
+            # its log lines name the chemist.
             await publish_note_best_effort(
                 publish_memory_note_activity,
                 [
                     # A connector job never retires anything, so its unit carries the note alone.
-                    # `ran_on` is
-                    # `workflow.now()` (replay-safe) and dates an undated note so digests see it.
+                    # `ran_on` is `workflow.now()` (replay-safe) and dates an undated note so
+                    # digests see it.
                     SynthesisUnit(
                         note=note_with_run_provenance(
                             result.note, record, ran_on=workflow.now().date()
@@ -737,8 +704,7 @@ class ConnectorJobWorkflow:
                 },
             )
         # Out of the building, addressed to whoever launched it (`requested_by` is always set). Last
-        # and
-        # best-effort: everything durable is already written.
+        # and best-effort: everything durable is already written.
         await deliver_best_effort(
             OutboundMessage(
                 recipient=job.requested_by,
@@ -764,16 +730,14 @@ class ConnectorJobWorkflow:
                 task_queue=settings.background_task_queue,
                 start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
                 # `start_to_close` bounds only the work; this bounds the wait on a busy or unserved
-                # background
-                # queue. The light-write bound, not core's hour, because this write sits in front of
-                # `_notify_failure` (`tests/test_durable_observability.py`).
+                # background queue. The light-write bound, not core's hour, because this write sits
+                # in front of `_notify_failure` (`tests/test_durable_observability.py`).
                 schedule_to_start_timeout=light_write_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError as exc:
             # Counted, so a fleet-wide loss of the durable record shows on a dashboard rather than
-            # looking
-            # like a quiet deployment.
+            # looking like a quiet deployment.
             if not workflow.unsafe.is_replaying():
                 degraded(
                     logger,

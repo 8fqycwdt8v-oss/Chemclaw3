@@ -16,8 +16,8 @@ from chemclaw.evals.ab import ABSummary, TaskScores, compare_tool_utility
 from chemclaw.evals.live_judge import Judgement
 from chemclaw.evals.probe import Probe
 
-# One judge verdict on the A/B axis; higher is better. `fabricated` is negative, below a declined
-# answer.
+#: One judge verdict on the A/B axis; higher is better. `fabricated` is negative, below a declined
+#: answer.
 VERDICT_SCORES: Mapping[str, float] = {
     "served": 1.0,
     "partial": 0.5,

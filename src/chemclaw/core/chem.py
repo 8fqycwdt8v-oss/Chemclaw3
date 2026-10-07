@@ -69,16 +69,16 @@ _METALS = _REACTIVE_METALS | frozenset(
     )
 )
 
-# RDKit's curated salt and solvent list, built once (construction parses a catalogue). Consulted
-# only for neutral spectators; charged ones are recognised by their charge, since this
-# pharmaceutical salt list does not know e.g. tetrafluoroborate.
+#: RDKit's curated salt and solvent list, built once (construction parses a catalogue). Consulted
+#: only for neutral spectators; charged ones are recognised by their charge, since this
+#: pharmaceutical salt list does not know e.g. tetrafluoroborate.
 _KNOWN_SPECTATORS = rdMolStandardize.FragmentRemover()
 
-# Neutral acids that can also be written as their anion and that RDKit's catalogue omits, so a salt
-# gets one `compound_id` whether written ionic or neutral. A small, closed table in place of a
-# pKa-shaped rule. Acids the catalogue carries already agree from both spellings; adducts that
-# cannot ionise (H2O2, BH3, I2, CO2) are not listed and stay. Matched after `Cleanup`, which
-# rewrites perchloric acid into a charge-separated form.
+#: Neutral acids that can also be written as their anion and that RDKit's catalogue omits, so a salt
+#: gets one `compound_id` whether written ionic or neutral. A small, closed table in place of a
+#: pKa-shaped rule. Acids the catalogue carries already agree from both spellings; adducts that
+#: cannot ionise (H2O2, BH3, I2, CO2) are not listed and stay. Matched after `Cleanup`, which
+#: rewrites perchloric acid into a charge-separated form.
 _IONISABLE_NEUTRAL_ACIDS: dict[str, tuple[str, ...]] = {
     "perchloric acid": ("OCl(=O)(=O)=O",),
     "tetrafluoroboric acid": ("F[B-](F)(F)[FH+]",),
@@ -94,16 +94,16 @@ _IONISABLE_NEUTRAL_SPECTATORS = frozenset(
     for spelling in spellings
 )
 
-# A neutral acid beside a fragment is read as its counterion only if the fragment has a site that
-# can take the proton; otherwise the pair is a mixture (a boronic acid beside boric acid) and both
-# are kept. Sites:
-#
-# - an aliphatic amine (not amide, carbamate, urea, sulfonamide, aniline, aromatic, N-N or N-O);
-# - an amidine or guanidine sp2 nitrogen, not acylated or sulfonylated;
-# - a basic aza-aromatic nitrogen (pyridine-type, imidazole N3), two-coordinate and neutral;
-# - or a fragment already carrying a net positive charge.
-#
-# Deliberately coarse and structural: it asks whether a salt could form, not how strong it is.
+#: A neutral acid beside a fragment is read as its counterion only if the fragment has a site that
+#: can take the proton; otherwise the pair is a mixture (a boronic acid beside boric acid) and both
+#: are kept. Sites:
+#:
+#: - an aliphatic amine (not amide, carbamate, urea, sulfonamide, aniline, aromatic, N-N or N-O);
+#: - an amidine or guanidine sp2 nitrogen, not acylated or sulfonylated;
+#: - a basic aza-aromatic nitrogen (pyridine-type, imidazole N3), two-coordinate and neutral;
+#: - or a fragment already carrying a net positive charge.
+#:
+#: Deliberately coarse and structural: it asks whether a salt could form, not how strong it is.
 _BASIC_SITES = tuple(
     Chem.MolFromSmarts(pattern)
     for pattern in (

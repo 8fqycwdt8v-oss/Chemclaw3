@@ -36,8 +36,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.note import cited_ids, is_note_slug
 
-# The push-back kind sent into the requester's mailbox, for the opening notice and every reminder;
-# the payload's `reminders` count distinguishes them, so a surface renders one updating row.
+#: The push-back kind sent into the requester's mailbox, for the opening notice and every reminder;
+#: the payload's `reminders` count distinguishes them, so a surface renders one updating row.
 AWAITING_KIND = "awaiting-answer"
 
 #: What a wait can be for. Bounded so an inbox can group without reading the subject line, and open
@@ -59,8 +59,8 @@ class AwaitRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     correlation_id: str = ""
-    # The knowledge notes this question rests on, derived from the `[[wikilinks]]` in `subject` and
-    # `rationale`. The front door refuses an answer once any of them is superseded or refuted.
+    #: The knowledge notes this question rests on, derived from the `[[wikilinks]]` in `subject` and
+    #: `rationale`. The front door refuses an answer once any of them is superseded or refuted.
     premise_note_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -69,8 +69,7 @@ class AwaitRequest(BaseModel):
 
         Derived here so no producer can omit it. Pure and deterministic, so safe on replay. Filtered
         through `is_note_slug`, which also defangs: the ids are cut from caller-supplied free text
-        and
-        are later shown to the model raw.
+        and are later shown to the model raw.
         """
         cited = cited_ids(f"{self.subject}\n{self.rationale}")
         self.premise_note_ids = [note_id for note_id in cited if is_note_slug(note_id)]
@@ -206,12 +205,11 @@ class _OpenInput(BaseModel):
 
     request_id: str
     request: AwaitRequest
-    # The workflow's clock when it opened the wait. The activity adds the clamped deadline to this,
-    # so the timers are scheduled against a value recorded in history.
+    #: The workflow's clock when it opened the wait. The activity adds the clamped deadline to this,
+    #: so the timers are scheduled against a value recorded in history.
     started_at: str
-    # The Temporal run this projection belongs to, so the store can tell a retry (same run, update
-    # in
-    # place) from a re-ask after a lapsed deadline (new run, reopen the row).
+    #: The Temporal run this projection belongs to, so the store can tell a retry (same run, update
+    #: in place) from a re-ask after a lapsed deadline (new run, reopen the row).
     run_id: str = ""
 
 
@@ -319,16 +317,12 @@ class AwaitAnswerWorkflow:
         activity_timeout = timedelta(seconds=settings.awaiting_activity_timeout_seconds)
 
         # The `try` covers the open as well as the wait: a cancellation while the open activity is
-        # in
-        # flight would otherwise leave a committed `waiting` row nothing will ever settle. Settling
-        # a row
-        # that was never opened is a no-op.
+        # in flight would otherwise leave a committed `waiting` row nothing will ever settle.
+        # Settling a row that was never opened is a no-op.
         try:
             # The activity applies the clamp and returns `due_at`. Computing it here from `settings`
-            # would let
-            # a changed ceiling alter the number of timers on replay (a non-determinism error), and
-            # leaving it
-            # to callers lets one skip it.
+            # would let a changed ceiling alter the number of timers on replay (a non-determinism
+            # error), and leaving it to callers lets one skip it.
             opened = await workflow.execute_activity(
                 open_pending_request_activity,
                 _OpenInput(
@@ -346,10 +340,9 @@ class AwaitAnswerWorkflow:
             await self._wait_until(due_at, request, request_id)
         except (asyncio.CancelledError, ActivityError) as exc:
             # A cancelled wait must stop saying it is open, so the settle runs with `ABANDON`. A
-            # cancellation
-            # arrives as `CancelledError` during `wait_condition` and as
-            # `ActivityError(cause=CancelledError)`
-            # inside an activity; any other activity failure is re-raised and fails the wait.
+            # cancellation arrives as `CancelledError` during `wait_condition` and as
+            # `ActivityError(cause=CancelledError)` inside an activity; any other activity failure
+            # is re-raised and fails the wait.
             if isinstance(exc, ActivityError) and not isinstance(exc.cause, TemporalCancelledError):
                 raise
             await self._settle(request_id, "cancelled", activity_timeout, detached=True)
@@ -439,18 +432,14 @@ class AwaitAnswerWorkflow:
 
         A wait with no session is ordinary (Schedule-resumed campaigns, workflow-raised questions);
         `SessionEventInput` would raise in workflow code, so the session push is skipped. The
-        outbound
-        copy is not skipped: it goes to `asked_of` on the opening notice and every reminder, and to
-        the
-        requester on expiry (see `_awaiting_message`).
+        outbound copy is not skipped: it goes to `asked_of` on the opening notice and every
+        reminder, and to the requester on expiry (see `_awaiting_message`).
         """
         if request.session_id:
             await notify_session_best_effort(request.session_id, AWAITING_KIND, payload)
         # Behind a patch: runs opened before outbound delivery replay without the marker and take
-        # the old
-        # path; a new activity here would otherwise be a non-determinism error that fails an open
-        # wait.
-        # The patch id may never be reused.
+        # the old path; a new activity here would otherwise be a non-determinism error that fails an
+        # open wait. The patch id may never be reused.
         if workflow.patched("awaiting-outbound-delivery"):
             await deliver_best_effort(_awaiting_message(request, payload))
 

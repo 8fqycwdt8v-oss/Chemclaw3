@@ -520,29 +520,30 @@ _OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
 # space, quote, `=` or `:`.
 _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
 
-# The RFC 1421 header lines an encrypted traditional-format PEM carries between `-----BEGIN` and the
-# body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`), each with the bound on its tail.
-# Literals rather than a widened class, because a class containing `-` would walk through
-# `-----END`. The one declaration of the set: the regex, its repeat bound and the pathological
-# payloads in `tests/test_logging.py` all derive from it.
+#: The RFC 1421 header lines an encrypted traditional-format PEM carries between `-----BEGIN` and
+#: the body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`), each with the bound on its tail.
+#: Literals rather than a widened class, because a class containing `-` would walk through
+#: `-----END`. The one declaration of the set: the regex, its repeat bound and the pathological
+#: payloads in `tests/test_logging.py` all derive from it.
 _PEM_RFC1421_HEADERS: tuple[tuple[str, int], ...] = (("Proc-Type:", 40), ("DEK-Info:", 96))
 _PEM_RFC1421 = "|".join(rf"{name}[^\r\n\\]{{0,{bound}}}" for name, bound in _PEM_RFC1421_HEADERS)
 
-# One step of the whitespace gap between a PEM header and its body: a JSON escape as a unit, or one
-# whitespace or backslash character. Header lines are not a branch here; see `_PEM_PREAMBLE`.
+#: One step of the whitespace gap between a PEM header and its body: a JSON escape as a unit, or one
+#: whitespace or backslash character. Header lines are not a branch here; see `_PEM_PREAMBLE`.
 _PEM_GAP = r"(?:\\[nrt]|[\s\\])"
 
-# Everything the format allows between `-----BEGIN … PRIVATE KEY-----` and the body: a whitespace
-# gap, then at most one of each RFC 1421 header line with its own gap after it.
-#
-# The header lines are bounded in number rather than folded into the repeated gap. A header tail and
-# the gap both match whitespace, so inside an enclosing repetition a failing lookahead enumerates
-# their split once per attacker-supplied group — exponential backtracking under the logging lock,
-# reachable from model-authored text and remote error messages. Bounded, the ambiguity is paid at
-# most `len(_PEM_RFC1421_HEADERS)` times.
-#
-# The tails are greedy, not possessive: a possessive tail on a single-line PEM swallows the next
-# header and the body and then fails, leaking the key (`_PEM_SHAPES_THAT_WALKED_PAST` in the tests).
+#: Everything the format allows between `-----BEGIN … PRIVATE KEY-----` and the body: a whitespace
+#: gap, then at most one of each RFC 1421 header line with its own gap after it.
+#:
+#: The header lines are bounded in number rather than folded into the repeated gap. A header tail
+#: and the gap both match whitespace, so inside an enclosing repetition a failing lookahead
+#: enumerates their split once per attacker-supplied group — exponential backtracking under the
+#: logging lock, reachable from model-authored text and remote error messages. Bounded, the
+#: ambiguity is paid at most `len(_PEM_RFC1421_HEADERS)` times.
+#:
+#: The tails are greedy, not possessive: a possessive tail on a single-line PEM swallows the next
+#: header and the body and then fails, leaking the key (`_PEM_SHAPES_THAT_WALKED_PAST` in the
+#: tests).
 _PEM_PREAMBLE = (
     _PEM_GAP
     + r"{0,64}(?:(?:"

@@ -94,8 +94,8 @@ class PostgresAuditSink:
 
         Bounds the buffer against a slow database (`_flush_all` handles a down one). The oldest go
         because every event already reached the stdlib log; what is lost is durability, not the
-        record.
-        Logs one WARNING on entering the bound; `_drained_notice` reports the total on leaving it.
+        record. Logs one WARNING on entering the bound; `_drained_notice` reports the total on
+        leaving it.
         """
         bound = settings.agent_audit_buffer_max_events
         if not bound:

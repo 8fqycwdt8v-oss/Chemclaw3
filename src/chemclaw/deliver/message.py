@@ -54,17 +54,17 @@ def _decode(value: Any) -> bytes:
     raise ValueError(f"attachment content must be bytes or base64 text, not {type(value).__name__}")
 
 
-# An attachment's bytes, base64 on the wire in both directions. The message crosses a Temporal
-# activity boundary, and pydantic's default `bytes` handling (utf-8 decode) would corrupt or
-# reject binary content in a durable payload.
+#: An attachment's bytes, base64 on the wire in both directions. The message crosses a Temporal
+#: activity boundary, and pydantic's default `bytes` handling (utf-8 decode) would corrupt or
+#: reject binary content in a durable payload.
 AttachmentBytes = Annotated[
     bytes,
     PlainValidator(_decode),
     PlainSerializer(lambda value: base64.b64encode(value).decode("ascii"), return_type=str),
 ]
 
-# What a filename may be: no separator, no `..`, no leading dot, so an attachment cannot escape
-# an outbox, hide itself, or overwrite the message file it sits beside.
+#: What a filename may be: no separator, no `..`, no leading dot, so an attachment cannot escape
+#: an outbox, hide itself, or overwrite the message file it sits beside.
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -100,13 +100,13 @@ class Message(BaseModel):
     recipient: str = Field(min_length=1)
     subject: str = Field(min_length=1)
     body: str = ""
-    # What produced this, so a delivery can be joined back to the run that caused it. A `Literal`
-    # because the file driver builds a filename from it; an arbitrary string could escape the
-    # outbox.
+    #: What produced this, so a delivery can be joined back to the run that caused it. A `Literal`
+    #: because the file driver builds a filename from it; an arbitrary string could escape the
+    #: outbox.
     kind: Literal["digest", "awaiting", "job-result", "report", "work-check-in"] = "digest"
     #: The turn or job this came from, for the same join. Never rendered to the recipient.
     correlation_id: str = ""
-    # The files this message carries. Bounded, because a driver writes them outside the cluster.
+    #: The files this message carries. Bounded, because a driver writes them outside the cluster.
     attachments: list[Attachment] = Field(default_factory=list, max_length=8)
 
     def redacted(self) -> "Message":
@@ -114,9 +114,8 @@ class Message(BaseModel):
 
         Applied by the registry immediately before a driver sees it, so no driver can forget it.
         Covers `recipient` too, since drivers put it where they put the body. A rewritten
-        `recipient`
-        is logged (scrubbed form only), because scrubbing an address can re-address a message to
-        nowhere; a redaction in `subject` or `body` only costs words.
+        `recipient` is logged (scrubbed form only), because scrubbing an address can re-address a
+        message to nowhere; a redaction in `subject` or `body` only costs words.
         """
         extra = _connector_secret_envs()
         recipient = redact_secrets(self.recipient, extra_secrets=extra)

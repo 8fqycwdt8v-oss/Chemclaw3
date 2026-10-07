@@ -83,9 +83,9 @@ async def _latest_is_running(client: Any, request_id: str) -> bool:
     return bool(latest.status == WorkflowExecutionStatus.RUNNING)
 
 
-# The share of the activity's `start_to_close` a pass may spend walking pages before it stops, so
-# it returns its report rather than being cancelled mid-page. The next pass resumes from
-# `OrphanSweep.resume_after`.
+#: The share of the activity's `start_to_close` a pass may spend walking pages before it stops, so
+#: it returns its report rather than being cancelled mid-page. The next pass resumes from
+#: `OrphanSweep.resume_after`.
 _PASS_BUDGET_FRACTION = 0.5
 
 
@@ -155,8 +155,7 @@ class OrphanedWaitsWorkflow:
         """Run one sweep from where the previous run stopped, and return what it settled.
 
         The cursor comes from the Schedule's last completion result, read from the start event, so
-        it
-        issues no command; with none, the sweep starts at the oldest row.
+        it issues no command; with none, the sweep starts at the oldest row.
         """
         previous = (
             workflow.get_last_completion_result(OrphanSweep)

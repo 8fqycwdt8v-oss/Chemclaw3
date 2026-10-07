@@ -29,8 +29,8 @@ from chemclaw.core.logging import log_event
 
 logger = logging.getLogger(__name__)
 
-# How many distinct sessions a trajectory must recur in before it is worth proposing. Shared
-# with `trajectory_census`, and applied here to the independent count after the guard.
+#: How many distinct sessions a trajectory must recur in before it is worth proposing. Shared
+#: with `trajectory_census`, and applied here to the independent count after the guard.
 MIN_INDEPENDENT_SESSIONS = 2
 
 #: What a tool name may contribute to a skill name. Everything else becomes a hyphen, because the
@@ -46,7 +46,7 @@ class Candidate:
     #: The sessions counted *after* the guard — never the census's raw count.
     sessions: tuple[str, ...]
     occurrences: int
-    # Sessions the guard removed, so a report can say what was discounted.
+    #: Sessions the guard removed, so a report can say what was discounted.
     self_confirming: tuple[str, ...]
 
     @property
@@ -54,8 +54,7 @@ class Candidate:
         """The skill name a proposal from this candidate takes.
 
         Derived from the trajectory so two runs over the same corpus propose the same name;
-        proposals
-        key on content, so a drifting name would multiply them.
+        proposals key on content, so a drifting name would multiply them.
         """
         return candidate_name(self.tools)
 
@@ -65,8 +64,7 @@ def candidate_name(tools: Sequence[str]) -> str:
 
     Tool names come from persisted model tool calls and are unvalidated, so they are sanitised
     before reaching YAML. The bound is `MAX_SKILL_NAME_LENGTH`, and a truncated name carries a
-    digest
-    of the whole tuple so two trajectories sharing a prefix do not collide.
+    digest of the whole tuple so two trajectories sharing a prefix do not collide.
     """
     slug = "-then-".join(_SAFE.sub("-", tool.lower()).strip("-") for tool in tools).strip("-")
     if not slug:

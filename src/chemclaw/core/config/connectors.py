@@ -72,9 +72,8 @@ class ConnectorSettings(BaseSettings):
     #
     #     15,000  one CREST search at `xtb_job_timeout_seconds`
     #         30  the child's overhead, `activity_timeout_seconds`
-    #     10,170  queue wait, ~1.4x the measured p95 backpressure on `connector-calc`
-    #     ------
-    #     25,200  = 7 h
+    #     10,170  queue wait, ~1.4x the measured p95 backpressure on `connector-calc` ------ 25,200
+    #     = 7 h
     #
     # Raising it requires raising `template_run_timeout_seconds`
     # (`_the_template_run_ceiling_covers_one_step`).
@@ -174,7 +173,7 @@ class ConnectorSettings(BaseSettings):
     # since an old approval describes a situation that has moved. Expiry fails the job and attempts
     # nothing.
     effect_approval_deadline_days: float = Field(default=3.0, gt=0)
-    # The role or security group that may approve an irreversible effect. Empty is not "anybody":
-    # under `entra_required` such a job refuses to run until an approver is named, since otherwise
-    # the requester could approve their own change. Without enforcement it stays open, as in dev.
+    #: The role or security group that may approve an irreversible effect. Empty is not "anybody":
+    #: under `entra_required` such a job refuses to run until an approver is named, since otherwise
+    #: the requester could approve their own change. Without enforcement it stays open, as in dev.
     effect_approval_role: str = ""

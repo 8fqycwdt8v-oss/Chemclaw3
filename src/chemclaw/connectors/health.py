@@ -38,13 +38,13 @@ logger = logging.getLogger(__name__)
 
 ConnectorState = Literal["healthy", "unreachable", "unpolled", "unknown", "unprobed"]
 
-# The states meaning "this capability cannot be used right now"; the gauge and the
-# `connectors_required` gate share this one definition of down.
+#: The states meaning "this capability cannot be used right now"; the gauge and the
+#: `connectors_required` gate share this one definition of down.
 UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unpolled"})
 
-# Worst first: the tie-break `_folded` uses between two verdicts about one connector. Undetermined
-# ranks above healthy because a half that could not be asked is no evidence of health; `unprobed`
-# is last so it only ever describes a bundle with nothing to ask.
+#: Worst first: the tie-break `_folded` uses between two verdicts about one connector. Undetermined
+#: ranks above healthy because a half that could not be asked is no evidence of health; `unprobed`
+#: is last so it only ever describes a bundle with nothing to ask.
 _SEVERITY: tuple[ConnectorState, ...] = (
     "unreachable",
     "unpolled",
@@ -53,8 +53,8 @@ _SEVERITY: tuple[ConnectorState, ...] = (
     "unprobed",
 )
 
-# `_SEVERITY` as a lookup, so ranking an unlisted state cannot raise out of `probe_connectors`,
-# which must never raise. `tests/test_connector_health.py` pins it to `ConnectorState`.
+#: `_SEVERITY` as a lookup, so ranking an unlisted state cannot raise out of `probe_connectors`,
+#: which must never raise. `tests/test_connector_health.py` pins it to `ConnectorState`.
 _SEVERITY_RANK: dict[str, int] = {state: rank for rank, state in enumerate(_SEVERITY)}
 
 
@@ -119,8 +119,8 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) 
     )
 
 
-# What an operator scales when a queue has no poller; the bundle worker and the interactive worker
-# are different Deployments in the chart.
+#: What an operator scales when a queue has no poller; the bundle worker and the interactive worker
+#: are different Deployments in the chart.
 _JOBS_REMEDY = (
     "this bundle's jobs would be accepted and never run — check the connector-worker deployment's "
     "replicas"

@@ -146,8 +146,7 @@ class ArtifactEvictionWorkflow:
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout the beats detect nothing; a dead worker would surface only
-            # when the
-            # start-to-close budget expired.
+            # when the start-to-close budget expired.
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),

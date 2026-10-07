@@ -49,15 +49,15 @@ from chemclaw.evals.tool_utility import VERDICT_SCORES
 
 logger = logging.getLogger(__name__)
 
-# The corpus this suite asks, inside `settings.live_probe_dir`, so a missing file fails at a
-# searchable name.
+#: The corpus this suite asks, inside `settings.live_probe_dir`, so a missing file fails at a
+#: searchable name.
 DELEGATION_PROBE_FILE = "delegation.yaml"
 
-# Which act counts as this arm having taken its treatment.
-#
-# `helper` is a `task` call and `handoff` a `transfer_to_…` call — different acts. `any` is the
-# baseline's: with a peer arm in the run every arm has a peer roster bound, and a baseline that
-# handed off is no more a baseline than one that spawned a helper.
+#: Which act counts as this arm having taken its treatment.
+#:
+#: `helper` is a `task` call and `handoff` a `transfer_to_…` call — different acts. `any` is the
+#: baseline's: with a peer arm in the run every arm has a peer roster bound, and a baseline that
+#: handed off is no more a baseline than one that spawned a helper.
 TREATMENTS = ("helper", "handoff", "any")
 
 
@@ -85,7 +85,7 @@ class ArmSpec(BaseModel):
     mock_behaviour: str = Field(min_length=1)
 
 
-# The four arms, in report order, baseline first.
+#: The four arms, in report order, baseline first.
 ARMS: tuple[ArmSpec, ...] = (
     ArmSpec(
         arm=BASELINE_ARM,
@@ -295,8 +295,8 @@ class ArmRunSet(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runs: list[ArmRun] = Field(default_factory=list)
-    # `<arm>/<task>#<repeat>` for each repeat the judge could not grade. `ungraded` is the absence
-    # of a grade, never a bad one, so such a repeat cannot become an `ArmRun`.
+    #: `<arm>/<task>#<repeat>` for each repeat the judge could not grade. `ungraded` is the absence
+    #: of a grade, never a bad one, so such a repeat cannot become an `ArmRun`.
     ungraded: list[str] = Field(default_factory=list)
     #: `<arm>/<task>#<repeat>` for each repeat with no `turn_costs` row — see `billed_by_session`.
     unbilled: list[str] = Field(default_factory=list)

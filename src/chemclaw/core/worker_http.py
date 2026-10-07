@@ -112,8 +112,7 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
             host=settings.worker_metrics_host,
             port=settings.worker_metrics_port,
             # Logging is already configured process-wide; uvicorn's own would replace it. Access
-            # logs are
-            # off because every line would be a kubelet probe.
+            # logs are off because every line would be a kubelet probe.
             log_config=None,
             access_log=False,
             # No concurrency bound: a liveness probe refused for a full limit restarts a merely busy
@@ -124,10 +123,8 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
     serving = asyncio.create_task(server.serve())
     try:
         # Wait until the port accepts, so an early probe is not a refused connection reading as a
-        # dead
-        # pod. Waiting on both means a failed bind (`bound` never set) ends the wait through
-        # `serving`;
-        # the losing future is cancelled rather than left pending.
+        # dead pod. Waiting on both means a failed bind (`bound` never set) ends the wait through
+        # `serving`; the losing future is cancelled rather than left pending.
         bound = asyncio.ensure_future(server.bound.wait())
         try:
             await asyncio.wait([bound, serving], return_when=asyncio.FIRST_COMPLETED)

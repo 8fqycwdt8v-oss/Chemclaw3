@@ -44,14 +44,14 @@ from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
-# The root a chemist's own skills are mounted at, and the label the model sees in their paths.
-# `mine` rather than an actor digest, so no person identifier appears in prompts or logs.
+#: The root a chemist's own skills are mounted at, and the label the model sees in their paths.
+#: `mine` rather than an actor digest, so no person identifier appears in prompts or logs.
 LOCAL_SKILLS_ROOT = "/mine/"
 
 #: The same label without its slashes, for the skills middleware's source list.
 LOCAL_SKILLS_LABEL = "mine"
 
-# What a refused write to this tier says; the sanctioned path is the owner's route.
+#: What a refused write to this tier says; the sanctioned path is the owner's route.
 _LOCAL_READ_ONLY = routed(
     "your own skills are read-only to a turn — a skill is judgment that reshapes later answers, "
     "so it changes only when you decide it does, not when a turn decides. Nothing was changed.",
@@ -137,8 +137,8 @@ def validated_skill(body: str, *, expected_name: str | None = None) -> str:
     return manifest.name
 
 
-# In-process tools whose only outcome is a personal skill, so they are not bound where
-# `personal_skills_available()` is false.
+#: In-process tools whose only outcome is a personal skill, so they are not bound where
+#: `personal_skills_available()` is false.
 PERSONAL_TIER_TOOLS = frozenset({"propose_skill"})
 
 

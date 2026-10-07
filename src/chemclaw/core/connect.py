@@ -96,9 +96,9 @@ def resolve_driver(reference: str, *, error: type[Exception], what: str = "drive
     return driver
 
 
-# The annotations `option_type_mismatch` judges, and the YAML scalar types each accepts. Only the
-# four scalars: unions, optionals and containers are passed over rather than guessed at. `bool`
-# accepts only `bool` (not `0`/`1`), and `int` refuses `bool`.
+#: The annotations `option_type_mismatch` judges, and the YAML scalar types each accepts. Only the
+#: four scalars: unions, optionals and containers are passed over rather than guessed at. `bool`
+#: accepts only `bool` (not `0`/`1`), and `int` refuses `bool`.
 _ACCEPTED_SCALARS: dict[type, tuple[type, ...]] = {
     bool: (bool,),
     int: (int,),

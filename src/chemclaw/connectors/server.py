@@ -101,9 +101,9 @@ def _ships_a_manifest(name: str) -> bool:
     return (Path(__file__).parent / name / MANIFEST_FILENAME).is_file()
 
 
-# How much of a caller-authored path may reach a log record: enough for every route served, short
-# enough that a caller cannot spend the logging lock on a redaction scan. Separate from the front
-# door's constant because a connector may not import `api`.
+#: How much of a caller-authored path may reach a log record: enough for every route served, short
+#: enough that a caller cannot spend the logging lock on a redaction scan. Separate from the front
+#: door's constant because a connector may not import `api`.
 _MAX_LOGGED_PATH_CHARS = 128
 
 

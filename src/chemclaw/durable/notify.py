@@ -84,12 +84,9 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
         # `start_to_close` bounds only the work once a worker picks the task up; this bounds the
-        # wait for
-        # a slot on a busy or unserved `background-jobs` queue, separately, so slow pickup does not
-        # eat
-        # the retry budget. Shorter than core's hour because this runs at the end of a job, and a
-        # finished
-        # job should not wait an hour to tell anyone.
+        # wait for a slot on a busy or unserved `background-jobs` queue, separately, so slow pickup
+        # does not eat the retry budget. Shorter than core's hour because this runs at the end of a
+        # job, and a finished job should not wait an hour to tell anyone.
         schedule_to_start_timeout=light_write_queue_wait_timeout(),
         retry_policy=BAD_DATA_RETRY,
     )
@@ -114,14 +111,12 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
                 f"the push-back to session {session_id} was cancelled with its workflow"
             ) from exc
         # Name the cause: `SCHEDULE_TO_START` means nothing is polling `background-jobs`, which
-        # needs a
-        # worker, not a retry.
+        # needs a worker, not a retry.
         workflow.logger.warning(
             "session push-back failed for %s: %s", session_id, activity_failure_reason(exc)
         )
         # Counted so a fleet-wide push-back outage shows on a dashboard; guarded so a replay does
-        # not
-        # re-count.
+        # not re-count.
         if not workflow.unsafe.is_replaying():
             record_metric(lambda m: m.increment("chemclaw_pushback_dropped_total"))
         return False

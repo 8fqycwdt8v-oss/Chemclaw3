@@ -134,8 +134,7 @@ async def fan_out(
     # Children run on core's `background-jobs` queue under `BAD_DATA_RETRY` (bounded; Temporal's
     # default retries forever). Only its `maximum_attempts` takes effect here, since a child failing
     # through its activity surfaces as a child failure; acceptable because fan-out children are
-    # small
-    # and independent.
+    # small and independent.
     for batch in _batches(indexed, limit):
         settled = await asyncio.gather(
             *(
@@ -160,8 +159,7 @@ async def fan_out(
                 raise outcome
             if isinstance(outcome, BaseException):
                 # Counted as well as logged, because the parent completes successfully with a short
-                # list; guarded
-                # on `is_replaying` so a replay does not re-count.
+                # list; guarded on `is_replaying` so a replay does not re-count.
                 if not workflow.unsafe.is_replaying():
                     record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
                 workflow.logger.warning(

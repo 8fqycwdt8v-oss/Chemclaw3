@@ -366,9 +366,9 @@ class WarehouseElnAdapter:
                 area = _read(block.area_percent, scope) if block.area_percent else None
                 rrt = _read(block.rrt, scope) if block.rrt else None
                 # An RRT-only row is identified by where it eluted, so it is named rather than
-                # dropped (`Impurity._identifiable`).
-                # Coerced first, since drivers return NUMERIC as `Decimal` and text as `str`; a
-                # value that will not coerce is passed on for `Impurity` to refuse by name.
+                # dropped (`Impurity._identifiable`). Coerced first, since drivers return NUMERIC as
+                # `Decimal` and text as `str`; a value that will not coerce is passed on for
+                # `Impurity` to refuse by name.
                 retention = _rrt(rrt)
                 if not name and not smiles and retention is not None and retention > 0:
                     name = unresolved_peak_name(retention)

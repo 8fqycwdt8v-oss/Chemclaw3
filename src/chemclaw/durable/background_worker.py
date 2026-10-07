@@ -87,16 +87,14 @@ async def main() -> None:
         # `terminationGracePeriodSeconds` must sit above it.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
         # Bounded because this queue's work is almost entirely database work against a pool far
-        # smaller
-        # than temporalio's default of 100 concurrent activities.
+        # smaller than temporalio's default of 100 concurrent activities.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
         # Bounds workflows kept resident between tasks; `tests/test_workers.py` holds it against the
         # chart's memory request.
         max_cached_workflows=settings.worker_max_cached_workflows,
         # Every activity is bound to the turn that asked for it and recorded in and out
         # (`durable/interceptor.py`); with span export on, the SDK's OpenTelemetry interceptor makes
-        # a
-        # durable job a child of the launching turn.
+        # a durable job a child of the launching turn.
         interceptors=worker_interceptors(),
     )
     logger.info(

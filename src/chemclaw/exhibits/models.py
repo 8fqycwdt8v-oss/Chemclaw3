@@ -48,17 +48,17 @@ ExhibitKind = Literal[
     "document", "table", "structures", "chart", "result", "link", "geometry", "html"
 ]
 
-# The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`). Named
-# here because grounding and bindings need the set: an artefact tool's own result is never evidence
-# or bindable, since `read_exhibit` returns the agent's own figures.
+#: The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`). Named
+#: here because grounding and bindings need the set: an artefact tool's own result is never evidence
+#: or bindable, since `read_exhibit` returns the agent's own figures.
 EXHIBIT_TOOLS: frozenset[str] = frozenset({"create_exhibit", "revise_exhibit", "read_exhibit"})
 
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
 PUSH_KIND = "exhibit"
 
-# The minted id shape — `xb-` and sixteen hex digits (frozen wire contract). Every caller-named id
-# is held to it, so a malformed one is refused rather than looked up.
+#: The minted id shape — `xb-` and sixteen hex digits (frozen wire contract). Every caller-named id
+#: is held to it, so a malformed one is refused rather than looked up.
 EXHIBIT_ID = re.compile(r"^xb-[0-9a-f]{16}$")
 
 #: A finite JSON number, and never a boolean: `true` is not a yield, and pydantic's lax mode would
@@ -224,8 +224,8 @@ class LinkSpec(_Spec):
     id: str = Field(min_length=1)
 
 
-# Every element symbol an XYZ line may name, H to Og, as RDKit spells them. A literal set: this
-# package imports no toolkit, and the table does not change.
+#: Every element symbol an XYZ line may name, H to Og, as RDKit spells them. A literal set: this
+#: package imports no toolkit, and the table does not change.
 ELEMENTS: frozenset[str] = frozenset(
     """
     H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br
@@ -559,8 +559,9 @@ def _require_within_counts(spec: Spec) -> None:
             )
 
 
-# What no `text` or `jsonb` column can hold: NUL, C0 controls other than tab and the two line
-# breaks, and unpaired surrogates. Refused rather than stripped, so what is stored is what was sent.
+#: What no `text` or `jsonb` column can hold: NUL, C0 controls other than tab and the two line
+#: breaks, and unpaired surrogates. Refused rather than stripped, so what is stored is what was
+#: sent.
 _UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
 
 

@@ -29,36 +29,36 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
-# The `session_events` kind and `Message.kind` a check-in travels under, distinct from
-# `DIGEST_KIND` so a reader can tell "new knowledge matched your query" from "your own work is
-# still blocked" on the mailbox and on every channel.
+#: The `session_events` kind and `Message.kind` a check-in travels under, distinct from
+#: `DIGEST_KIND` so a reader can tell "new knowledge matched your query" from "your own work is
+#: still blocked" on the mailbox and on every channel.
 CHECK_IN_KIND = "work-check-in"
 
-# Rows one `collect_check_ins` page may carry. Derived from Temporal's 2 MiB activity-result
-# limit: with `_MAX_TEXT_CHARS`, one row is at most ~2.3 kB, so a page stays near a quarter of it.
+#: Rows one `collect_check_ins` page may carry. Derived from Temporal's 2 MiB activity-result
+#: limit: with `_MAX_TEXT_CHARS`, one row is at most ~2.3 kB, so a page stays near a quarter of it.
 _PAGE_ROWS = 200
 
-# The longest `subject`/`rationale` a check-in carries per request. Both are model-authored and
-# unbounded in the table; truncation is named in the text (`_abbreviated`).
+#: The longest `subject`/`rationale` a check-in carries per request. Both are model-authored and
+#: unbounded in the table; truncation is named in the text (`_abbreviated`).
 _MAX_TEXT_CHARS = 1_000
 
-# How many requesters one batch tells at once, so queue waits overlap instead of summing. Bounded
-# because `background-jobs` is shared with heartbeat timers for long-running jobs.
+#: How many requesters one batch tells at once, so queue waits overlap instead of summing. Bounded
+#: because `background-jobs` is shared with heartbeat timers for long-running jobs.
 _CONCURRENT_REQUESTERS = 8
 
-# The share of its Schedule interval one run may spend before deferring the rest. Under SKIP, a
-# run still going when the next fires drops that fire silently; ending early with a warning is
-# better. Pages are ordered by `requested_by`, so the same tail is deferred each night — accepted,
-# since this only bites when nothing serves the queue.
+#: The share of its Schedule interval one run may spend before deferring the rest. Under SKIP, a
+#: run still going when the next fires drops that fire silently; ending early with a warning is
+#: better. Pages are ordered by `requested_by`, so the same tail is deferred each night — accepted,
+#: since this only bites when nothing serves the queue.
 _RUN_BUDGET_FRACTION = 0.5
 
-# Every waiting request a requester is blocked on, oldest first, for one page of requesters.
-#
-# `requested_by <> ''`: a request with no actor cannot be reported to anyone. `due_at > now()`:
-# expired requests already reached their requester through the expiry notice. The keyset cursor
-# is on requester, not row, so one person's questions are never split across two check-ins.
-# `FLOOR` rather than `::int` so a deadline is never overstated. `session_id` is the requester's
-# own session.
+#: Every waiting request a requester is blocked on, oldest first, for one page of requesters.
+#:
+#: `requested_by <> ''`: a request with no actor cannot be reported to anyone. `due_at > now()`:
+#: expired requests already reached their requester through the expiry notice. The keyset cursor
+#: is on requester, not row, so one person's questions are never split across two check-ins.
+#: `FLOOR` rather than `::int` so a deadline is never overstated. `session_id` is the requester's
+#: own session.
 _BLOCKED = """
     SELECT requested_by, request_id, kind, session_id,
            left(subject, %(chars)s) AS subject,
@@ -78,12 +78,12 @@ _BLOCKED = """
     LIMIT %(limit)s
 """
 
-# Drop the check-ins these requesters have not read, so tonight's is the only one in the mailbox.
-#
-# Scoped by `kind` (another consumer's rows), `consumed_at IS NULL` (what was already claimed),
-# and `session_id` (only requesters this run is about to write to, so a deferred requester keeps
-# last night's notice). A requester whose question was since answered keeps one stale unread row
-# until it is read or superseded.
+#: Drop the check-ins these requesters have not read, so tonight's is the only one in the mailbox.
+#:
+#: Scoped by `kind` (another consumer's rows), `consumed_at IS NULL` (what was already claimed),
+#: and `session_id` (only requesters this run is about to write to, so a deferred requester keeps
+#: last night's notice). A requester whose question was since answered keeps one stale unread row
+#: until it is read or superseded.
 _SUPERSEDE = """
     DELETE FROM session_events
     WHERE kind = %(kind)s AND consumed_at IS NULL AND session_id = ANY(%(channels)s)
@@ -98,11 +98,11 @@ class BlockedRequest(BaseModel):
     subject: str
     rationale: str = ""
     asked_of: str = ""
-    # The conversation the question was asked in, or `""` (BO plate runs and connector jobs have
-    # none). Defaulted so an older recorded result still decodes on replay.
+    #: The conversation the question was asked in, or `""` (BO plate runs and connector jobs have
+    #: none). Defaulted so an older recorded result still decodes on replay.
     session_id: str = ""
-    # Whole days open and whole days until expiry, rounded here so no surface computes them
-    # differently.
+    #: Whole days open and whole days until expiry, rounded here so no surface computes them
+    #: differently.
     open_days: int = 0
     days_left: int = 0
 
@@ -112,8 +112,8 @@ class CheckIn(BaseModel):
 
     owner: str
     requests: list[BlockedRequest] = Field(default_factory=list)
-    # Whether this requester has more waiting questions than one page carries. Defaulted so an older
-    # recorded result still decodes on replay.
+    #: Whether this requester has more waiting questions than one page carries. Defaulted so an
+    #: older recorded result still decodes on replay.
     truncated: bool = False
 
 
@@ -232,8 +232,7 @@ async def collect_check_ins(after: str = "") -> CheckInPage:
     if not owners:
         return CheckInPage(check_ins=[], after=after, more=False)
     # The last requester in a full page may have more rows past the cut: drop them and start the
-    # next
-    # page at them, unless they are the only requester here (the walk must advance).
+    # next page at them, unless they are the only requester here (the walk must advance).
     truncated_owner = ""
     if more and len(owners) > 1:
         del grouped[owners[-1]]
@@ -315,10 +314,8 @@ class CheckInWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
             # Patched because superseding per batch moves a command relative to the old per-page
-            # supersede,
-            # which would fail a mid-sweep replay. Asked only for a non-empty page, the one shape
-            # the
-            # versions differ on. The patch id may never be reused.
+            # supersede, which would fail a mid-sweep replay. Asked only for a non-empty page, the
+            # one shape the versions differ on. The patch id may never be reused.
             per_batch = bool(page.check_ins) and workflow.patched("check-in-supersede-per-batch")
             if page.check_ins and not per_batch:
                 dropped += await workflow.execute_activity(
@@ -331,8 +328,7 @@ class CheckInWorkflow:
             for start in range(0, len(page.check_ins), _CONCURRENT_REQUESTERS):
                 batch = page.check_ins[start : start + _CONCURRENT_REQUESTERS]
                 # Immediately before this batch is written and scoped to it, so a deferral mid-page
-                # leaves later
-                # requesters' notices intact. An empty page costs no activity.
+                # leaves later requesters' notices intact. An empty page costs no activity.
                 if per_batch:
                     dropped += await workflow.execute_activity(
                         supersede_unread_check_ins,
@@ -352,8 +348,7 @@ class CheckInWorkflow:
                 break
             if page.after <= after:
                 # Unreachable while `collect_check_ins` keeps at least one requester; guarded so the
-                # walk can
-                # never loop on one page.
+                # walk can never loop on one page.
                 workflow.logger.error(
                     "the check-in page cursor did not advance past %r; stopping rather than "
                     "re-reading the same page for ever",
@@ -372,8 +367,7 @@ class CheckInWorkflow:
                 delivered,
             )
         # Guarded: a replay re-runs this code, and an unguarded increment would count each delivery
-        # once
-        # per replay.
+        # once per replay.
         if not workflow.unsafe.is_replaying():
             record_metric(lambda m: m.increment("chemclaw_work_check_ins_total", amount=delivered))
             # Counted so a run that stopped short is distinguishable from a quiet night.
@@ -386,8 +380,7 @@ class CheckInWorkflow:
 
         Serial within a requester: the mailbox is the durable handover and the channel a courtesy on
         top. `truncated` travels on the mailbox row beside `requests`, so the app can say the list
-        is
-        incomplete.
+        is incomplete.
         """
         sent = await notify_session_best_effort(
             digest_channel(item.owner),

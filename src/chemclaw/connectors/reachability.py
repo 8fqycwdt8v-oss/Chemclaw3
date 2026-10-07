@@ -13,8 +13,8 @@ import time
 
 from chemclaw.core.config import settings
 
-# Last verdict per connector and when (`time.monotonic`, so a clock adjustment cannot make it look
-# fresh). Bounded by the number of enabled connectors.
+#: Last verdict per connector and when (`time.monotonic`, so a clock adjustment cannot make it look
+#: fresh). Bounded by the number of enabled connectors.
 _LAST_SEEN: dict[str, tuple[float, bool]] = {}
 
 

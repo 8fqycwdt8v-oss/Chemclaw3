@@ -118,10 +118,8 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
     """The httpx client kwargs for a client this process builds to reach the model gateway.
 
     - `trust_env=False`, always: an ambient `HTTP(S)_PROXY` would otherwise redirect every prompt
-      and
-      bearer token to a host of the env setter's choosing, re-terminating TLS past the CA pinning
-      and
-      invisibly to the egress guard (the socket only sees the proxy's address).
+      and bearer token to a host of the env setter's choosing, re-terminating TLS past the CA
+      pinning and invisibly to the egress guard (the socket only sees the proxy's address).
     - An `SSLContext`, always, reproducing httpx's `trust_env=True` trust precedence exclusively
       (one
       source, never a union): configured bundle, else `SSL_CERT_FILE`, else `SSL_CERT_DIR`, else

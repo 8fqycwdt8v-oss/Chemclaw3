@@ -325,8 +325,7 @@ class TemplateWorkflow:
 
         summary = run_summary(run.template.name, len(run.template.steps), degradations)
         # Recorded before the push-back, so the id the chemist receives is already answerable. Best
-        # effort:
-        # losing the row must not fail a finished run.
+        # effort: losing the row must not fail a finished run.
         await self._record_run(
             template_job_record(workflow.info().workflow_id, run, results, summary, degradations)
         )

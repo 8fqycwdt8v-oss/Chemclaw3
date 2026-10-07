@@ -49,14 +49,14 @@ from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
-# The root the organisation's skills are mounted at, and the label the model sees in their paths; it
-# names no tenant because it appears in every prompt.
+#: The root the organisation's skills are mounted at, and the label the model sees in their paths;
+#: it names no tenant because it appears in every prompt.
 ORG_SKILLS_ROOT = "/org/"
 
 #: The same label without its slashes, for the skills middleware's source list.
 ORG_SKILLS_LABEL = "org"
 
-# What a refused write to this tier says; the route it names is this tier's own.
+#: What a refused write to this tier says; the route it names is this tier's own.
 _ORG_READ_ONLY = routed(
     "the organisation's skills are read-only to a turn — a skill acts on everyone's answers, so it "
     "changes only when an administrator decides it does. Nothing was changed.",

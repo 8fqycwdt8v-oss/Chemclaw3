@@ -248,9 +248,8 @@ class DocumentShareSyncWorkflow:
                 continue
             if chunk.has_more:
                 # Unreachable with a well-behaved crawl; a bug stops one source with a warning
-                # rather than
-                # looping forever. `has_more` survives into the merged report, which blocks the
-                # sweep.
+                # rather than looping forever. `has_more` survives into the merged report, which
+                # blocks the sweep.
                 workflow.logger.warning(
                     "document sync for %s reported more entries but no cursor advance; stopping",
                     source,

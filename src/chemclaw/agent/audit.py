@@ -152,17 +152,15 @@ class AuditEvent(BaseModel):
     actor: str
     # Which agent made this call: the `AgentProfile` name of the graph it ran on, `UNNAMED_AGENT`
     # (`""`) for the agent the chemist talks to. Beside `actor` (the human), never instead of it, so
-    # a
-    # helper's act is never recorded as the chemist's own. A build-time argument to
+    # a helper's act is never recorded as the chemist's own. A build-time argument to
     # `make_audit_middleware`, not an ambient read, because each helper is a separately compiled
-    # graph
-    # with its own chain. `NOT NULL`: every tool call is some agent's act.
+    # graph with its own chain. `NOT NULL`: every tool call is some agent's act.
     agent: str = UNNAMED_AGENT
     # The plan step this call served — the first `in_progress` todo's content, or empty.
     #
     # Computed by `plan_link_for_call` over the request (see `_plan_step`), not read from the
-    # ambient
-    # link, which is only bound further in; this also names the step a refused call interrupted.
+    # ambient link, which is only bound further in; this also names the step a refused call
+    # interrupted.
     plan_step: str = ""
     tool: str
     arguments: str
@@ -179,8 +177,7 @@ class AuditEvent(BaseModel):
     # issued calls in.
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # The deployment revision (Git SHA / image digest) in effect for this call, tying a result to
-    # its
-    # prompt/skill/config version. "unknown" until `deployment_revision` is set.
+    # its prompt/skill/config version. "unknown" until `deployment_revision` is set.
     revision: str = "unknown"
     # The build of the out-of-process server that answered: `<connector>@<revision>`, from the MCP
     # handshake. `revision` names only the orchestrator, so this is what a reproduction of remote
@@ -363,14 +360,12 @@ async def _recording(
     """
     args = bounded_repr(arguments)
     # The real actor is the turn's authenticated Entra user; fall back to the build-time `actor`
-    # when
-    # there is none (tests, non-service callers).
+    # when there is none (tests, non-service callers).
     event_actor = get_current_actor() or actor
     # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
     event_cid = get_current_correlation_id() or correlation_id
     # Read ambiently like the actor: agents are cached per profile for the process, so anything
-    # bound
-    # at build time would be shared across users. Empty off the request path.
+    # bound at build time would be shared across users. Empty off the request path.
     event_session = get_current_session_id() or ""
     start = time.perf_counter()
     # `start` measures the call; `started_at` dates it for the row (see `AuditEvent.ts`).
@@ -400,20 +395,16 @@ async def _recording(
         """Close out one call: stamp the span, observe the latency, count the outcome.
 
         Written once so no exit path can forget one. The span is stamped inside the `with` (it
-        cannot
-        be marked after ending). `Status(ERROR)` is set for returned failures and cancellations,
-        which
-        OpenTelemetry does not mark itself; refusals are not marked here, and the `outcome`
-        attribute
-        separates them from errors.
+        cannot be marked after ending). `Status(ERROR)` is set for returned failures and
+        cancellations, which OpenTelemetry does not mark itself; refusals are not marked here, and
+        the `outcome` attribute separates them from errors.
         """
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         span.set_attribute("outcome", outcome)
         if outcome in ("error", "cancelled") and detail:
             span.failed(detail)
         # Clamped name for metrics (a cardinality decision); the model's own for span and row.
-        # Passed in
-        # so no library object crosses into this function.
+        # Passed in so no library object crosses into this function.
         labelled = metric_name or name
         _observe_tool_latency(labelled, elapsed_ms)
         _count_outcome(labelled, outcome, reason)
@@ -467,8 +458,7 @@ async def _recording(
             raise
         if recorded.returned_error is not None:
             # A returned failure is recorded exactly like a raised one: raising versus returning is
-            # a
-            # transport detail.
+            # a transport detail.
             detail = recorded.returned_error
             elapsed_ms = finished(span, "error", None, detail)
             logger.warning(
@@ -484,8 +474,7 @@ async def _recording(
             return
         if recorded.returned_empty:
             # WARNING: an empty answer from a fleet tool is almost always that tool's defect,
-            # invisible from
-            # the model's side.
+            # invisible from the model's side.
             elapsed_ms = finished(span, EMPTY, None, _EMPTY_DETAIL)
             logger.warning(
                 "tool %s returned no content after %.0f ms [cid=%s actor=%s] (args=%s)",

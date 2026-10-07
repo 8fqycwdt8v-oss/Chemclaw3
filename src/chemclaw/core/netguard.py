@@ -150,14 +150,14 @@ def _host_from_dsn(dsn: str) -> str | None:
     return None
 
 
-# Bound on `git remote get-url`, which reads `.git/config` and opens no socket: this guards against
-# a wedged filesystem, not the network.
+#: Bound on `git remote get-url`, which reads `.git/config` and opens no socket: this guards against
+#: a wedged filesystem, not the network.
 _GIT_REMOTE_TIMEOUT_SECONDS = 5.0
 
-# What a hostname may contain: letters, digits, dots, hyphens, underscores and the colons of an
-# unbracketed IPv6 literal. Anything else is junk from a malformed remote URL, a comma above all:
-# `netguard_preload.c::parse_allowlist` splits on commas, so one entry would become two hosts on the
-# compiled layer and diverge from this one.
+#: What a hostname may contain: letters, digits, dots, hyphens, underscores and the colons of an
+#: unbracketed IPv6 literal. Anything else is junk from a malformed remote URL, a comma above all:
+#: `netguard_preload.c::parse_allowlist` splits on commas, so one entry would become two hosts on
+#: the compiled layer and diverge from this one.
 _A_PLAUSIBLE_HOST = re.compile(r"\A[A-Za-z0-9._:-]+\Z")
 
 

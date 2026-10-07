@@ -27,8 +27,8 @@ from typing import Any
 
 from chemclaw.kg.note import Note
 
-# The one argument name a dispatchable tool may require. A whitelist of one: a tool naming its
-# structure argument differently refuses.
+#: The one argument name a dispatchable tool may require. A whitelist of one: a tool naming its
+#: structure argument differently refuses.
 STRUCTURE_ARGUMENT = "smiles"
 
 #: The note type a subject must resolve to. A `compound` note carries `compound_smiles` in its
@@ -208,10 +208,10 @@ def defaulted_arguments(contract: ToolContract) -> tuple[str, ...]:
 # nothing is assumed invisibly. The rule: vary nothing you cannot name in the output, and draw
 # values from a vocabulary something else validates.
 
-# Params fields that carry a structure, and how many. Curated because the schema cannot tell a
-# molecule list from another `list[str]`, but fail-closed: an unclassified required field makes the
-# job undispatchable. `tests/test_hypothesis_dispatch.py` classifies every required field of every
-# shipped calc job.
+#: Params fields that carry a structure, and how many. Curated because the schema cannot tell a
+#: molecule list from another `list[str]`, but fail-closed: an unclassified required field makes the
+#: job undispatchable. `tests/test_hypothesis_dispatch.py` classifies every required field of every
+#: shipped calc job.
 STRUCTURE_FIELDS: Mapping[str, str] = {
     "smiles": "one",
     "smiles_a": "one",
@@ -221,9 +221,9 @@ STRUCTURE_FIELDS: Mapping[str, str] = {
     "species": "many",
 }
 
-# Params fields that may be swept, mapped to the vocabulary that validates them. The job's own
-# `precondition` does the validating at launch; the name here lets a refusal say which vocabulary
-# failed.
+#: Params fields that may be swept, mapped to the vocabulary that validates them. The job's own
+#: `precondition` does the validating at launch; the name here lets a refusal say which vocabulary
+#: failed.
 SWEEPABLE_FIELDS: Mapping[str, str] = {
     "solvents": "the solvents this calculator supports",
 }
@@ -338,8 +338,8 @@ def ground_job_params(
 # `tautomer-resolution` pins `level: thorough`), which a hand-rolled chain here would miss. The
 # model still supplies only a name and a subject note.
 
-# The one declared input a dispatchable template may require, as for `STRUCTURE_ARGUMENT`; any other
-# required input would have to be invented.
+#: The one declared input a dispatchable template may require, as for `STRUCTURE_ARGUMENT`; any
+#: other required input would have to be invented.
 TEMPLATE_STRUCTURE_INPUT = STRUCTURE_ARGUMENT
 
 

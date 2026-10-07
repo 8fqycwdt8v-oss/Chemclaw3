@@ -184,8 +184,7 @@ async def deliver(message: Message) -> list[str]:
             driver = build(manifest)
         except Exception as exc:
             # A channel that cannot be built is a configuration fault that fails every message, so
-            # it goes
-            # to the alerted `degraded()` counter rather than the outage counter.
+            # it goes to the alerted `degraded()` counter rather than the outage counter.
             degraded(
                 logger,
                 "delivery_channel_config",

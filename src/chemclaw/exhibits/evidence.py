@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from chemclaw.exhibits.models import EXHIBIT_TOOLS
 
-# The agent's scaffolding, by name; `agent/chemclaw_agent` derives the same set and a test compares
-# them.
+#: The agent's scaffolding, by name; `agent/chemclaw_agent` derives the same set and a test compares
+#: them.
 SCAFFOLDING_TOOLS: frozenset[str] = frozenset(
     {"task", "write_todos", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
 )

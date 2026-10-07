@@ -58,8 +58,8 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
 
 
-# Where the one entry naming a dropped set lands: a single notice for the whole set keeps the total
-# bounded, where a marker per file would not.
+#: Where the one entry naming a dropped set lands: a single notice for the whole set keeps the total
+#: bounded, where a marker per file would not.
 _DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"
 
 
@@ -262,9 +262,9 @@ def rewritten_command_files(
     return dataclasses.replace(result, update={**result.update, "files": rewritten})
 
 
-# The turn limits that can stop a helper, by the state flag its `Command` carries back and the name
-# the caller's model is told. `loop_capped` and `spend_capped` cross the subagent boundary on
-# purpose (`agent/state.py`).
+#: The turn limits that can stop a helper, by the state flag its `Command` carries back and the name
+#: the caller's model is told. `loop_capped` and `spend_capped` cross the subagent boundary on
+#: purpose (`agent/state.py`).
 _HELPER_STOPS: tuple[tuple[str, str], ...] = (
     ("loop_capped", "step limit"),
     ("spend_capped", "token budget"),

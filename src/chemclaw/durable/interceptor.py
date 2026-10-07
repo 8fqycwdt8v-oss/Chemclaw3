@@ -202,8 +202,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
             "run_id": info.workflow_run_id or "",
         }
         # Bound and counted inside the `try`, because the `finally` is what unbinds them; the tokens
-        # are
-        # declared before it so the `finally` can see them.
+        # are declared before it so the `finally` can see them.
         identity_token: tuple[object, object] | None = None
         session_token: object = None
         correlation_token: object | None = None
@@ -232,9 +231,8 @@ class _ObservedActivity(ActivityInboundInterceptor):
             )
             result = await self.next.execute_activity(input)
             # The result upload happens after this method returns, outside this `try`, so the size
-            # is checked
-            # before the return. Inside the `try` so a refusal is counted, logged and reaches the
-            # workflow.
+            # is checked before the return. Inside the `try` so a refusal is counted, logged and
+            # reaches the workflow.
             size = _result_payload_bytes(result)
             if size > settings.activity_result_max_bytes:
                 raise ActivityResultTooLarge(
@@ -246,9 +244,8 @@ class _ObservedActivity(ActivityInboundInterceptor):
         except BaseException as exc:
             elapsed = time.perf_counter() - started
             # One row per attempt, so a retry storm is visible. A cancellation is not a failure (a
-            # graceful
-            # drain would otherwise page `ChemclawActivityRetryStorm`); it has its own counter
-            # below.
+            # graceful drain would otherwise page `ChemclawActivityRetryStorm`); it has its own
+            # counter below.
             if not isinstance(exc, asyncio.CancelledError):
                 record_metric(
                     lambda m: m.increment(
@@ -263,8 +260,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
                     lambda m: m.increment("chemclaw_worker_activities_cancelled_on_drain_total")
                 )
             # WARNING, not ERROR: a failed attempt is usually retried successfully; the job's own
-            # failure
-            # record is the one worth paging on.
+            # failure record is the one worth paging on.
             log_event(
                 logger,
                 "activity.finished",
@@ -298,8 +294,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
         finally:
             _IN_FLIGHT -= 1
             # Unbound in reverse order, each only if it was bound, so one run's identity never leaks
-            # into the
-            # next activity.
+            # into the next activity.
             if correlation_token is not None:
                 reset_current_correlation_id(correlation_token)
             if session_token is not None:

@@ -99,9 +99,9 @@ class CalcBusyError(AtCapacityError):
 # error classification and the wording a chemist reads.
 
 
-# Sessions to the calculation server this process holds open now: the live half of that backend's
-# admission budget. A plain locked counter rather than a registry metric, because it must fall on
-# every exit path, a failed open included, or it climbs during an outage.
+#: Sessions to the calculation server this process holds open now: the live half of that backend's
+#: admission budget. A plain locked counter rather than a registry metric, because it must fall on
+#: every exit path, a failed open included, or it climbs during an outage.
 _IN_FLIGHT = 0
 _IN_FLIGHT_LOCK = threading.Lock()
 
@@ -307,8 +307,8 @@ async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
         return await remote_compute(session, tool, arguments)
 
 
-# The calibrated calculators, and the only tools `remote_version` accepts. A `Literal` rather than
-# `str` so mypy and the sibling-manifest seam walker check every call site against the fleet.
+#: The calibrated calculators, and the only tools `remote_version` accepts. A `Literal` rather than
+#: `str` so mypy and the sibling-manifest seam walker check every call site against the fleet.
 CalibratedTool = Literal["predict_solubility", "predict_pka"]
 
 

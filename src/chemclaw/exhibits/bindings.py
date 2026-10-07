@@ -72,11 +72,11 @@ WHERE l.session_id = %s AND l.content_hash = ANY(%s) AND {evidence_predicate("l.
 """
 
 
-# Parsed result documents by content hash, most recently used last, each with its stored size.
-#
-# Safe to share across sessions because a blob is immutable, but a hit is used only for a ref the
-# session's own links just named, so the cache never authorizes. Per process, bounded by
-# `exhibit_binding_cache_bytes` of stored bytes (the parsed form is several times larger).
+#: Parsed result documents by content hash, most recently used last, each with its stored size.
+#:
+#: Safe to share across sessions because a blob is immutable, but a hit is used only for a ref the
+#: session's own links just named, so the cache never authorizes. Per process, bounded by
+#: `exhibit_binding_cache_bytes` of stored bytes (the parsed form is several times larger).
 _DOCUMENTS: OrderedDict[str, tuple[Any, int]] = OrderedDict()
 
 

@@ -61,11 +61,11 @@ from chemclaw.evals.tool_utility import by_bucket, paired_tasks
 
 logger = logging.getLogger(__name__)
 
-# `_T` is the item type of the index-only `_systematic_sample`. `_AB_BASELINE_PROFILE` is the A/B
-# control arm's shipped profile (`data/evals/profiles/no-tools.yaml`); a constant so "baseline"
-# means one thing. It replaces the default instructions as well as the tools, so it is a prompt
-# contrast, not a tools contrast (`tools-removed` varies only tools). `_M12_SUITES` maps each M12
-# suite to its probe file, so a missing file fails with a searchable name.
+#: `_T` is the item type of the index-only `_systematic_sample`. `_AB_BASELINE_PROFILE` is the A/B
+#: control arm's shipped profile (`data/evals/profiles/no-tools.yaml`); a constant so "baseline"
+#: means one thing. It replaces the default instructions as well as the tools, so it is a prompt
+#: contrast, not a tools contrast (`tools-removed` varies only tools). `_M12_SUITES` maps each M12
+#: suite to its probe file, so a missing file fails with a searchable name.
 _T = TypeVar("_T")
 
 _AB_BASELINE_PROFILE = "no-tools"

@@ -114,10 +114,8 @@ class Condensation(BaseModel):
 
         A string, so the payload is not LangChain's repr of a pydantic model. The honesty notes are
         prose: `complete` means every reference passed was read, never that every protocol on file
-        was
-        seen. Oversized, unreadable and unresolved refs get separate sentences because each sends
-        the
-        reader somewhere different.
+        was seen. Oversized, unreadable and unresolved refs get separate sentences because each
+        sends the reader somewhere different.
         """
         if not self.rows:
             return "No protocols were given to condense."
@@ -134,8 +132,7 @@ class Condensation(BaseModel):
             )
         if self.unresolved:
             # No `expand_note` suggestion: there is nothing to expand. Same explanation as the
-            # tool's refusal
-            # when nothing resolves.
+            # tool's refusal when nothing resolves.
             lines.append(
                 f"\nNot compared, because these resolved to no protocol: "
                 f"{_refs(self.unresolved)} — they are absent from the table above, not merely "
@@ -303,8 +300,7 @@ async def _read_prose(protocol: Protocol, client: Any | None) -> ProtocolDigest:
         )
     if client is None:
         # No client could be built (already reported once per turn); marked like a dead endpoint,
-        # since
-        # "nothing read this" is the same statement either way.
+        # since "nothing read this" is the same statement either way.
         return _unreadable(
             protocol,
             base,
@@ -465,8 +461,7 @@ def _table(protocols: list[Protocol], rows: list[ProtocolDigest]) -> str:
             ),
             ("Impurity area (%)", [cell(c.impurity_area_percent) for c in conditions]),
             # Ahead of the conditions, and headed "(read)" because it is a model's reading of prose,
-            # not a
-            # recorded figure. Dropped when no protocol stated an aim.
+            # not a recorded figure. Dropped when no protocol stated an aim.
             ("Tested (read)", [row.hypothesis or MISSING for row in rows]),
             ("Outcome", [c.outcome or MISSING for c in conditions]),
             ("Solvent", [row.solvent or MISSING for row in rows]),
@@ -513,8 +508,8 @@ async def condense_protocols(
             client = _client()
         except Exception:
             # Misconfigured transport (e.g. a missing CA bundle), not an unreachable endpoint.
-            # Reported once;
-            # `client` stays None, which `_read_prose` treats as "nothing to read with".
+            # Reported once; `client` stays None, which `_read_prose` treats as "nothing to read
+            # with".
             degraded(
                 logger,
                 "protocol_digest",

@@ -37,22 +37,22 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.model_prose import ModelProse
 
-# Tools that change nothing and still reach the person on the other side of the conversation.
-# `ask_clarifying_question` writes a turn signal, so from a helper it would put a question on the
-# chemist's stream from a context the chemist cannot see, with the answer never reaching the helper.
-# `create_exhibit` and `revise_exhibit` write onto the artefact pane the same way; `read_exhibit`
-# reaches nobody and stays. `tests/test_subagents.py` derives this set by scanning for signal
-# writers.
+#: Tools that change nothing and still reach the person on the other side of the conversation.
+#: `ask_clarifying_question` writes a turn signal, so from a helper it would put a question on the
+#: chemist's stream from a context the chemist cannot see, with the answer never reaching the
+#: helper. `create_exhibit` and `revise_exhibit` write onto the artefact pane the same way;
+#: `read_exhibit` reaches nobody and stays. `tests/test_subagents.py` derives this set by scanning
+#: for signal writers.
 SPEAKS_TO_THE_CHEMIST: frozenset[str] = frozenset(
     {"ask_clarifying_question", "create_exhibit", "revise_exhibit"}
 )
 
-# Upstream's default subagent name, claimed so `create_deep_agent` skips inserting its ungoverned
-# one. Pinned against upstream's constant by `tests/test_upstream_surface.py`.
+#: Upstream's default subagent name, claimed so `create_deep_agent` skips inserting its ungoverned
+#: one. Pinned against upstream's constant by `tests/test_upstream_surface.py`.
 GENERAL_PURPOSE = "general-purpose"
 
-# What the helper itself is told, kept beside `general_purpose_helper`'s description of what the
-# caller is told; `tests/test_subagents.py` asserts the two state the same bounds.
+#: What the helper itself is told, kept beside `general_purpose_helper`'s description of what the
+#: caller is told; `tests/test_subagents.py` asserts the two state the same bounds.
 HELPER_BRIEF = ModelProse("""
 
 You are a helper spawned by another Chemclaw agent to work one task in your own context window.

@@ -87,8 +87,7 @@ def message_id(message: Message) -> str:
             "kind": message.kind,
             "correlation": message.correlation_id,
             # The attachment's identity, not its bytes: a regenerated draft is still the same
-            # message,
-            # while a message with and without a file are not.
+            # message, while a message with and without a file are not.
             "attachments": [(one.filename, one.media_type) for one in message.attachments],
         }
     )
@@ -243,21 +242,18 @@ class WebhookDeliveryDriver:
             include={"recipient", "subject", "body", "kind", "attachments"}
         )
         # Sent as a field and as `Idempotency-Key`: a chat or ticketing host reads the header, a
-        # site's
-        # own receiver reads the body.
+        # site's own receiver reads the body.
         identity = message_id(message)
         payload["message_id"] = identity
         headers["Idempotency-Key"] = identity
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
             # One process-wide trust store: the driver is rebuilt per delivery (so it cannot outlive
-            # a
-            # credential rotation), and parsing the CA bundle per client is blocking CPU on the
+            # a credential rotation), and parsing the CA bundle per client is blocking CPU on the
             # event loop.
             verify=default_ssl_context(),
             # Never inherit an ambient proxy: the request carries message content and a bearer
-            # token, and
-            # the destination is the one the manifest states.
+            # token, and the destination is the one the manifest states.
             trust_env=False,
         ) as client:
             response = await client.post(self.url, content=json.dumps(payload), headers=headers)

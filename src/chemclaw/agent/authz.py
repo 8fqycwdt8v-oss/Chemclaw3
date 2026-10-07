@@ -27,8 +27,8 @@ class AuthorizationError(Exception):
     Deliberately not a `ChemclawError`: that means "invalid input", and the same call succeeds for
     another user. It also keeps `surface_domain_errors` (which answers `"Error: ..."`) from
     swallowing it before `surface_authorization_denials` answers `"Refused: ..."`. Registered by
-    name
-    as non-retryable in `durable.publish._BAD_DATA_TYPES`, since a refusal never changes on retry.
+    name as non-retryable in `durable.publish._BAD_DATA_TYPES`, since a refusal never changes on
+    retry.
     """
 
 
@@ -43,8 +43,8 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
         # Raises a durable wait that spends a person's or a lab's time, not just tokens.
         "request_external_input",
         # A tournament is the most expensive thing a turn can start (dozens of structured model
-        # calls),
-        # and its cost scales with `hypothesis_max_field`, a setting rather than the request.
+        # calls), and its cost scales with `hypothesis_max_field`, a setting rather than the
+        # request.
         "rank_competing_hypotheses",
     }
 )
@@ -86,27 +86,22 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # see.
             "request_external_input",
             # Both write `experiment_protocols` and its revision table. Plan-gated rather than
-            # write-gated: a
-            # design is a chemist's working document, not a knowledge claim.
+            # write-gated: a design is a chemist's working document, not a knowledge claim.
             "structure_experiment_request",  # writes the structured ask as revision 1
             "draft_experiment_protocol",  # writes a protocol revision
             # Writes `experiment_arm_results`, an INSERT-only table: an outcome attached wrongly
             # stays.
             "attach_plate_results",  # writes measured outcomes against a revision
             # Both halves of the composed-workflow seam: `compose_workflow` writes a procedure that
-            # later
-            # runs, and `run_composed_workflow` starts a durable run like a `run_<template>`
-            # launcher (listed
-            # here because `template_tool_names()` reads only `data/templates/`).
+            # later runs, and `run_composed_workflow` starts a durable run like a `run_<template>`
+            # launcher (listed here because `template_tool_names()` reads only `data/templates/`).
             "compose_workflow",  # writes composed_workflows
             "run_composed_workflow",  # starts a TemplateWorkflow run
             # Writes a `behaviour_proposals` row; the plan gate should see a turn proposing a
-            # behaviour
-            # change. Being here also removes it from every helper's surface.
+            # behaviour change. Being here also removes it from every helper's surface.
             "propose_skill",  # writes behaviour_proposals
             # Starts a durable tournament that writes notes into the graph. Being here also keeps it
-            # off
-            # helpers, where it would be a fan-out inside a fan-out.
+            # off helpers, where it would be a fan-out inside a fan-out.
             "rank_competing_hypotheses",  # starts a durable tournament that records notes
         }
     )
@@ -155,10 +150,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "ask_clarifying_question",
         # An artefact is part of the answer, not an effect: creating or revising one needs no
-        # approved
-        # plan. Promoting it to a note or protocol goes through the gated tools. The writers are
-        # still kept
-        # off helpers (`agent/subagents.SPEAKS_TO_THE_CHEMIST`).
+        # approved plan. Promoting it to a note or protocol goes through the gated tools. The
+        # writers are still kept off helpers (`agent/subagents.SPEAKS_TO_THE_CHEMIST`).
         "create_exhibit",
         "read_exhibit",
         "revise_exhibit",
@@ -436,8 +429,7 @@ def authorize_trigger(action: str) -> None:
         )
     privileged = settings.entra_privileged_role_set
     # An empty privileged set fails closed, as in `authorize_tool`. Config validation cannot catch
-    # it:
-    # a manifest-declared expensive job needs no entry in either role setting.
+    # it: a manifest-declared expensive job needs no entry in either role setting.
     if not privileged or not _has_required_role(privileged):
         raise AuthorizationError(
             routed(

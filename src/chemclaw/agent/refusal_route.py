@@ -20,18 +20,18 @@ so an interpolated value cannot open a field; `routed` also strips the separator
 `tests/test_refusal_route.py` finds every `routed(code=…)` call by AST and holds the partition.
 """
 
-# The character separating footer fields; field values are prose with commas and semicolons.
+#: The character separating footer fields; field values are prose with commas and semicolons.
 _SEPARATOR_CHAR = "|"
 
-# What a pipe inside a value becomes; substituted rather than escaped so nothing needs decoding.
+#: What a pipe inside a value becomes; substituted rather than escaped so nothing needs decoding.
 _SEPARATOR_REPLACEMENT = "/"
 
 _SEPARATOR = f" {_SEPARATOR_CHAR} "
 
-# The honest value of `sanctioned path` when there is none; tests assert on this constant.
+#: The honest value of `sanctioned path` when there is none; tests assert on this constant.
 NO_PATH = "none from here"
 
-# How the footer opens. Public so tests find the footer without copying the spelling.
+#: How the footer opens. Public so tests find the footer without copying the spelling.
 FOOTER_OPENING = "(refusal"
 
 

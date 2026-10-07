@@ -292,8 +292,8 @@ def _allowed(tools: list[BaseTool], allowed: tuple[str, ...]) -> list[BaseTool]:
     return [tool for tool in tools if tool.name in keep]
 
 
-# Metadata key `_stamped` writes and `agent/audit.py::_served_by` reads; one constant so the
-# provenance column cannot silently stop filling.
+#: Metadata key `_stamped` writes and `agent/audit.py::_served_by` reads; one constant so the
+#: provenance column cannot silently stop filling.
 SERVED_BY = "chemclaw.served_by"
 
 
@@ -362,8 +362,8 @@ def _bounded_description(connector: str, name: str, description: str) -> str:
     return description[:head] + notice + (description[-tail:] if tail else "")
 
 
-# What each connector's advertised tool schemas cost a turn, by connector. A level, not a rate: the
-# last handshake is the truth.
+#: What each connector's advertised tool schemas cost a turn, by connector. A level, not a rate: the
+#: last handshake is the truth.
 _SCHEMA_TOKENS: dict[str, float] = {}
 
 

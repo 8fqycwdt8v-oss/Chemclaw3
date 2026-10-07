@@ -28,9 +28,9 @@ from psycopg.rows import TupleRow
 
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 
-# Why an enqueue was refused. `full`: the session holds its cap of waiting messages. `waiting`: this
-# sender already has one waiting here — one each, so nobody can fill the queue and a retried POST
-# queues at most one duplicate.
+#: Why an enqueue was refused. `full`: the session holds its cap of waiting messages. `waiting`:
+#: this sender already has one waiting here — one each, so nobody can fill the queue and a retried
+#: POST queues at most one duplicate.
 Refusal = Literal["full", "waiting"]
 
 

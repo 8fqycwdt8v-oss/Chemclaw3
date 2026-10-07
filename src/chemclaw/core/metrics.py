@@ -835,8 +835,8 @@ _HISTOGRAMS: dict[str, str] = {
     ),
 }
 
-# Position bias is a fraction on [0, 1], so it gets linear buckets; the interesting region is the
-# top, where the order decides the judgement.
+#: Position bias is a fraction on [0, 1], so it gets linear buckets; the interesting region is the
+#: top, where the order decides the judgement.
 _FRACTION_BUCKETS: tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
 
 _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {

@@ -311,8 +311,8 @@ def _wave_ceiling(
     return sum(max(ceilings[step.kind][0] for step in batch) for batch in batches(wave, limit))
 
 
-# How many of a wave's members the refusal names before stating the width instead; for a very wide
-# wave the full list would bury the width.
+#: How many of a wave's members the refusal names before stating the width instead; for a very wide
+#: wave the full list would bury the width.
 _NAMED_MEMBERS = 4
 
 

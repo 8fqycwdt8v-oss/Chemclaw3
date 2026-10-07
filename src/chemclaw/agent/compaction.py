@@ -155,14 +155,11 @@ class ClearOlderToolResultsEdit(ContextEdit):
         if tokens <= budget:
             return
         # Read citations before the bodies carrying them are cleared: the oldest result is usually
-        # the
-        # evidence sweep, and its note ids decide whether the answer can cite anything.
+        # the evidence sweep, and its note ids decide whether the answer can cite anything.
         #
         # Only from this repository's own retrieval tools, identified by the tool name on the
-        # calling
-        # `AIMessage` (`ToolMessage.name` may not survive middleware rewrites). A connector's text
-        # could
-        # otherwise forge a system-authored citation.
+        # calling `AIMessage` (`ToolMessage.name` may not survive middleware rewrites). A
+        # connector's text could otherwise forge a system-authored citation.
         called = {
             call["id"]: call["name"]
             for message in messages
@@ -241,11 +238,11 @@ def _clear_older_tool_results(
     """Replace older tool results with `placeholder`, oldest first, until enough is reclaimed.
 
     `ClearToolUsesEdit.apply` minus the unused `clear_tool_inputs` and `exclude_tools`, and linear
-    in
-    thread length. The reclaim per result is the difference between the result and its placeholder,
-    not a recount of the whole thread; this is exact because `count_tokens_approximately` is
-    additive per message, and a model-based counter's constant overhead cancels in the difference.
-    `tests/test_compaction.py` holds it to upstream's output and to linear scaling.
+    in thread length. The reclaim per result is the difference between the result and its
+    placeholder, not a recount of the whole thread; this is exact because
+    `count_tokens_approximately` is additive per message, and a model-based counter's constant
+    overhead cancels in the difference. `tests/test_compaction.py` holds it to upstream's output and
+    to linear scaling.
 
     Args:
         messages: The thread, edited in place — the `ContextEdit` protocol.
@@ -310,8 +307,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     What bounds a thread that called no tools. The cut is `max(by_tokens, by_groups)`, the more
     aggressive arm: by tokens via `trim_messages(strategy="last")`, and by `keep` groups when set.
     `agent_keep_last_conversation_groups` ships at 0, since a non-zero `keep` usually binds first
-    and
-    makes the budget irrelevant.
+    and makes the budget irrelevant.
 
     A group is a human message and everything answering it, so a cut on that boundary never
     separates a tool call from its result; `start_on="human"` is what makes `trim_messages` respect
@@ -344,10 +340,9 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         """Cut `messages` in place back to the effective budget or fewer, when over it.
 
         In place per the `ContextEdit` protocol (the middleware hands the same list to each edit),
-        so an
-        index is computed and deleted rather than `trim_messages`' result returned. `self.trigger`
-        is in
-        billed tokens and is reconciled through `effective_trigger`, which also charges the prefix.
+        so an index is computed and deleted rather than `trim_messages`' result returned.
+        `self.trigger` is in billed tokens and is reconciled through `effective_trigger`, which also
+        charges the prefix.
         """
         budget = effective_trigger(self.trigger)
         if count_tokens(messages) <= budget:
@@ -371,8 +366,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         by_tokens = len(messages) - len(kept)
         # `keep == 0` (the shipped value) and `keep` above the group count both mean "no floor":
         # `starts[0] <= by_tokens`, so `max` returns `by_tokens`. Indexing past the count would
-        # raise
-        # inside a middleware.
+        # raise inside a middleware.
         by_groups = starts[-self.keep] if 0 < self.keep <= len(starts) else starts[0]
         # The newest group is the floor on what can be kept, per the clamp in the class docstring.
         cut = min(max(by_tokens, by_groups), starts[-1])
@@ -396,12 +390,10 @@ def disabled_summarizer(model: Any, backend: Any) -> Any:
     """Upstream's summarizer, constructed switched off — it arrives whether or not we want it.
 
     `create_deep_agent` composes a `SummarizationMiddleware` unconditionally, so "no summarizer"
-    must
-    be decided here. A summary is model prose over framed, untrusted content, so the envelope does
-    not survive and injected text would be replayed every turn. `trigger=None` is upstream's own off
-    state (asserted in `tests/test_compaction.py`). Passed through `middleware=` so upstream swaps
-    it
-    into its slot by name; `excluded_middleware` can silently miss.
+    must be decided here. A summary is model prose over framed, untrusted content, so the envelope
+    does not survive and injected text would be replayed every turn. `trigger=None` is upstream's
+    own off state (asserted in `tests/test_compaction.py`). Passed through `middleware=` so upstream
+    swaps it into its slot by name; `excluded_middleware` can silently miss.
 
     Args:
         model: The turn's resolved chat model; required by the constructor, never called.
@@ -425,8 +417,7 @@ def _degrade_once(marker: str, message: str, *args: object, traceback: bool = Tr
 
     These guards run per model call, so logging every occurrence with a traceback at ERROR would
     flood. Every occurrence still increments `chemclaw_degraded_total`. `traceback=False` for the
-    one
-    caller not inside an `except`.
+    one caller not inside an `except`.
     """
     first = marker not in _REPORTED
     _REPORTED.add(marker)
@@ -472,11 +463,10 @@ class OffLoopContextEditing(ContextEditingMiddleware):
     """Upstream's editing middleware, with its synchronous work moved off the event loop.
 
     Upstream's `awrap_model_call` deep-copies and edits inline in the coroutine, and that CPU
-    (mostly
-    the deep copy) blocks every other session on the pod. Rather than copying upstream's method
-    body, this runs the synchronous `wrap_model_call` in a thread with a handler that captures the
-    prepared request, so upstream changes are inherited. If the handler is never called, that is
-    reported rather than silently sending an uncompacted request.
+    (mostly the deep copy) blocks every other session on the pod. Rather than copying upstream's
+    method body, this runs the synchronous `wrap_model_call` in a thread with a handler that
+    captures the prepared request, so upstream changes are inherited. If the handler is never
+    called, that is reported rather than silently sending an uncompacted request.
 
     Safe in a worker thread: the edits only read ambient state (the prefix and ratio, visible via
     the copied context) and only mutate thread-safe process state. `tests/test_upstream_surface.py`
@@ -528,11 +518,9 @@ def context_compaction_middleware() -> list[Any]:
         OffLoopContextEditing(
             edits=[
                 # Both wrapped, so a raising edit costs the reduction rather than the turn (see
-                # `GuardedEdit`).
-                # `agent_keep_last_tool_groups` counts the newest tool *results* despite its name
-                # (kept for ENV
-                # compatibility); `ClearOlderToolResultsEdit` raises `keep` to cover the newest
-                # batch.
+                # `GuardedEdit`). `agent_keep_last_tool_groups` counts the newest tool *results*
+                # despite its name (kept for ENV compatibility); `ClearOlderToolResultsEdit` raises
+                # `keep` to cover the newest batch.
                 GuardedEdit(
                     ClearOlderToolResultsEdit(
                         # Its own trigger, well below the window's budget: clearing is lossless, so
@@ -611,8 +599,7 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
         record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
         turn.peak_reclaimed = float(reclaimed)
         # Announce on each new high-water mark (`delta > 0`), not only the first reduction, so a
-        # later
-        # destructive cut is reported; a mere re-derivation has delta 0.
+        # later destructive cut is reported; a mere re-derivation has delta 0.
         _announce(request, reclaimed, cleared)
 
 
@@ -624,8 +611,7 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
     window edit's own, against `effective_trigger`, which charges the prefix and converts the whole
     budget, so `sent <= trigger` implies the request fits the budget (and a declared window), as
     `tests/test_context_budget.py` sweeps. With a declared window, a tick is a leading indicator of
-    a
-    provider context-length failure. Once per turn, since the overrun is re-derived every call.
+    a provider context-length failure. Once per turn, since the overrun is re-derived every call.
 
     Args:
         request: The model request as it stands after the edits above.

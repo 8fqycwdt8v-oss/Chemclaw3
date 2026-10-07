@@ -129,9 +129,9 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     return {"model_calls": own + 1}
 
 
-# What a graph at the cap is told on its one tool-less call. Added to the request only, never
-# stored. Worded to be obeyed rather than answered, so the reply does not open with an
-# acknowledgement.
+#: What a graph at the cap is told on its one tool-less call. Added to the request only, never
+#: stored. Worded to be obeyed rather than answered, so the reply does not open with an
+#: acknowledgement.
 WRAP_UP_NOTE = ModelProse(
     "[System note, not from the person you are working for — do not reply to it or mention it.] "
     "This turn has reached its step limit, so no further tools can run. Write your final response "

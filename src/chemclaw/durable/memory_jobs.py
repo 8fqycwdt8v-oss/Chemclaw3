@@ -97,8 +97,7 @@ async def read_corpus() -> CorpusRead:
                 fresh = [raw for raw in page if raw.entry_id not in seen]
                 if not fresh:
                     # Nothing new: the source is exhausted, or stuck on a page it cannot get past
-                    # (what
-                    # `fetch_was_truncated` still being true means).
+                    # (what `fetch_was_truncated` still being true means).
                     if fetch_was_truncated(adapter):
                         unfinished.append(getattr(adapter, "name", type(adapter).__name__))
                     break
@@ -257,8 +256,7 @@ class PublishNoteWorkflow:
             unit,
             start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
             # The fan-out queue wait rather than core's hour, so a note parked on an unserved queue
-            # ends as
-            # a named activity failure that `fan_out` logs and counts.
+            # ends as a named activity failure that `fan_out` logs and counts.
             schedule_to_start_timeout=fan_out_queue_wait_timeout(),
             retry_policy=note_publish_retry(),
         )

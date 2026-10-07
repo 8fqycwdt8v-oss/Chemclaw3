@@ -119,8 +119,7 @@ class PostgresJobRecordSink:
         """Insert the record, refreshing what this particular record is entitled to refresh.
 
         A record carrying a result replaces the row entire; one carrying none sets how the run ended
-        and
-        leaves the result columns alone (see `_says_nothing_about_a_result`).
+        and leaves the result columns alone (see `_says_nothing_about_a_result`).
         """
         async with _connect() as conn:
             await conn.execute(

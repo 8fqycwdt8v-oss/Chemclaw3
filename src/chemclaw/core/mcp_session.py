@@ -193,9 +193,8 @@ def cancel_on_timeout(session: ClientSession) -> None:
     On read timeout the SDK raises locally and sends nothing, so the server runs the tool to
     completion (minutes or hours for `calc`) while a retry starts a duplicate. This wraps
     `send_request` to send `notifications/cancelled` for the timed-out request, followed by a
-    `ping`:
-    over streamable HTTP the server does not observe the notification until more traffic moves on
-    the session.
+    `ping`: over streamable HTTP the server does not observe the notification until more traffic
+    moves on the session.
 
     Reads two upstream privates (`session._request_id`, read just before delegating, which is safe
     because no other task can interleave before `send_request`'s first await; and the 408 code),

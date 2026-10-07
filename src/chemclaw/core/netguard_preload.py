@@ -18,22 +18,22 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# The interposer's source, beside the Python half it extends; the image picks it up with `src/`.
+#: The interposer's source, beside the Python half it extends; the image picks it up with `src/`.
 SOURCE = Path(__file__).with_name("netguard_preload.c")
 
-# The shared object the build produces and `LD_PRELOAD` names. The build script and entrypoint hold
-# their own literals (sh and a Containerfile argument);
-# `tests/test_netguard_preload.py::test_the_entrypoint_preloads_the_path_the_image_installs` pins
-# them against this one.
+#: The shared object the build produces and `LD_PRELOAD` names. The build script and entrypoint hold
+#: their own literals (sh and a Containerfile argument);
+#: `tests/test_netguard_preload.py::test_the_entrypoint_preloads_the_path_the_image_installs` pins
+#: them against this one.
 LIBRARY_NAME = "libchemclaw_netguard.so"
 
 #: Where `deploy/Containerfile` installs it. The entrypoint preloads this path; a test pins that the
 #: two agree, because an `LD_PRELOAD` pointing at nothing is ignored in silence.
 LIBRARY_PATH = f"/app/lib/{LIBRARY_NAME}"
 
-# The comma-separated allowlist the interposer reads, written by `deploy/entrypoint.sh` from
-# `chemclaw.cli.egress_preload` (which calls `netguard.derive_allowed`, the one derivation). Absent
-# or empty means loopback only, never disabled.
+#: The comma-separated allowlist the interposer reads, written by `deploy/entrypoint.sh` from
+#: `chemclaw.cli.egress_preload` (which calls `netguard.derive_allowed`, the one derivation). Absent
+#: or empty means loopback only, never disabled.
 ALLOWLIST_VARIABLE = "CHEMCLAW_NETGUARD_PRELOAD_ALLOW"
 
 #: The refusal kinds `chemclaw_netguard_preload_refused` takes, mirroring the C constants.

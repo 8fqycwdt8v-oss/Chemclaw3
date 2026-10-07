@@ -31,11 +31,11 @@ class CommitmentSyncResult(BaseModel):
 
     source: str
     mirrored: int = 0
-    # Of those, how many say what chemistry they are waiting on — the measure of whether this mirror
-    # adds anything over the portfolio tool.
+    #: Of those, how many say what chemistry they are waiting on — the measure of whether this
+    #: mirror adds anything over the portfolio tool.
     linked_to_science: int = 0
-    # Rows this pass removed because the source stopped stating them; reported because a deletion
-    # from a mirror cannot be reconstructed.
+    #: Rows this pass removed because the source stopped stating them; reported because a deletion
+    #: from a mirror cannot be reconstructed.
     withdrawn: int = 0
 
 
@@ -123,8 +123,7 @@ async def _mirror_one_source(source: str) -> CommitmentSyncResult:
     written = await record_commitments(commitments)
     # Sweep only when the adapter declares `snapshot` (duck-typed; absent means no sweep), and never
     # on an empty answer: an empty export is likelier broken than truthful, and a wrongly kept row
-    # is
-    # corrected next pass while a deleted mirror cannot be recovered.
+    # is corrected next pass while a deleted mirror cannot be recovered.
     withdrawn = 0
     if commitments and getattr(adapter, "snapshot", False):
         withdrawn = await sweep_withdrawn(source, marked_at)
@@ -182,8 +181,7 @@ class CommitmentSyncWorkflow:
                 )
             except Exception as exc:
                 # A workflow cancellation arrives as `ActivityError(cause=CancelledError)`; re-raise
-                # it rather
-                # than booking it as a failed source and completing.
+                # it rather than booking it as a failed source and completing.
                 if is_cancelled_exception(exc):
                     raise
                 workflow.logger.warning("commitment mirror failed for source %s", source)

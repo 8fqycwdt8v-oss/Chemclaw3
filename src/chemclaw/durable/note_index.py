@@ -52,8 +52,7 @@ class NoteReindexWorkflow:
             start_to_close_timeout=timedelta(seconds=settings.note_reindex_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout the beats detect nothing; the beat interval is derived
-            # from this
-            # same value (`durable/heartbeat.py::beating`).
+            # from this same value (`durable/heartbeat.py::beating`).
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),

@@ -164,8 +164,8 @@ async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
         settings.corpus_sync_heartbeat_timeout_seconds,
     )
     # Persist after every page that advanced, so an interrupted run resumes where it stopped. Gated
-    # on
-    # `advanced` so `updated_at` means "when this feed last moved" and staleness stays detectable.
+    # on `advanced` so `updated_at` means "when this feed last moved" and staleness stays
+    # detectable.
     if binding.append_only and report.advanced:
         await store_corpus_cursor(source, report.cursor)
     return report
@@ -219,10 +219,9 @@ class ReactionCorpusWorkflow:
                 continue
             if page.has_more:
                 # Unreachable with a well-behaved binding; a mis-declared `order_by` stops one
-                # source with a
-                # warning rather than spinning forever. Uses `page.advanced` because an append-only
-                # source starts
-                # from a stored position while `state.after` is still `""`.
+                # source with a warning rather than spinning forever. Uses `page.advanced` because
+                # an append-only source starts from a stored position while `state.after` is still
+                # `""`.
                 workflow.logger.warning(
                     "reaction corpus %s reported more rows but no cursor advance; stopping. Check "
                     "that its `order_by` column is unique and stable across the release.",

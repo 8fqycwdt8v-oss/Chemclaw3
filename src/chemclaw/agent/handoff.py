@@ -37,13 +37,13 @@ from chemclaw.core.turn_signals import record_handoff
 
 logger = logging.getLogger(__name__)
 
-# The prefix every handoff tool's name carries; the factory, the turn graph and the tests compare
-# against it.
+#: The prefix every handoff tool's name carries; the factory, the turn graph and the tests compare
+#: against it.
 HANDOFF_PREFIX = "transfer_to_"
 
-# What the receiving agent is told, appended to its instructions by `agent/turn_graph.py`; kept
-# beside the tool description so the two texts cannot drift apart. The handover sentence is
-# conditional because the root is a node of the mesh too and may be handed control back.
+#: What the receiving agent is told, appended to its instructions by `agent/turn_graph.py`; kept
+#: beside the tool description so the two texts cannot drift apart. The handover sentence is
+#: conditional because the root is a node of the mesh too and may be handed control back.
 PEER_BRIEF = ModelProse("""
 
 **You are one of several Chemclaw agents on this conversation.** If another agent handed control
@@ -63,9 +63,9 @@ asking another agent for it that you could not have reached yourself. If a tool 
 from your own surface, say so — do not hand over in the hope that somebody else has it.""")
 
 
-# Characters a minted handoff tool name may carry; every other one is folded to `_`. An allow-list,
-# because profile names are unvalidated file stems. Two names that fold together are a collision,
-# which `handoff_tools` refuses.
+#: Characters a minted handoff tool name may carry; every other one is folded to `_`. An allow-list,
+#: because profile names are unvalidated file stems. Two names that fold together are a collision,
+#: which `handoff_tools` refuses.
 _TOOL_NAME_CHARS = re.compile(r"[^0-9A-Za-z_]")
 
 

@@ -69,10 +69,9 @@ def worker_interceptors() -> list[Interceptor]:
     """The interceptor chain every `Worker` in this system adds to the client's own.
 
     One function, so every worker gets the same chain. The tracing interceptor is deliberately
-    absent:
-    the SDK prepends the client's interceptors, and `core/temporal_client.connect_options` already
-    puts one there, so adding it here would trace everything twice. The client's tracing interceptor
-    is therefore outermost and encloses ours.
+    absent: the SDK prepends the client's interceptors, and `core/temporal_client.connect_options`
+    already puts one there, so adding it here would trace everything twice. The client's tracing
+    interceptor is therefore outermost and encloses ours.
     """
     return [ChemclawWorkerInterceptor()]
 

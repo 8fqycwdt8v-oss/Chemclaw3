@@ -290,8 +290,8 @@ class BoundedStoreBackend(StoreBackend):
         )
 
 
-# How many rows one page of the surplus walk reads. A page size, not a deployment posture, so not a
-# `Settings` field; it bounds one query, never the deletion.
+#: How many rows one page of the surplus walk reads. A page size, not a deployment posture, so not a
+#: `Settings` field; it bounds one query, never the deletion.
 _EVICTION_PAGE = 64
 
 

@@ -49,10 +49,10 @@ logger = logging.getLogger(__name__)
 
 Handler = Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]]
 
-# Last backlog read per interactive queue, as `(monotonic time, count)`: one broker read per queue
-# per tick serves every waiting turn.
+#: Last backlog read per interactive queue, as `(monotonic time, count)`: one broker read per queue
+#: per tick serves every waiting turn.
 _BACKLOG: dict[str, tuple[float, int | None]] = {}
-# Set once the broker answers a stats request without stats (too old a server); never asked again.
+#: Set once the broker answers a stats request without stats (too old a server); never asked again.
 _STATS_UNSUPPORTED = False
 
 

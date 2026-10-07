@@ -157,8 +157,7 @@ class _BoundedIngest:
 
     Entries at or before `since` (the overlap re-ingest) pass uncapped and never advance the cursor.
     Entries after it are sorted oldest-first and truncated to `limit`, so each attempt is bounded
-    and
-    every truncated chunk strictly advances the cursor. A source's own truncation
+    and every truncated chunk strictly advances the cursor. A source's own truncation
     (`fetch_was_truncated`) also sets `truncated`, so a short page means "come back" rather than
     "nothing new".
     """
@@ -176,9 +175,8 @@ class _BoundedIngest:
         """Ask the wrapped adapter for entries, offering each capability only if it takes it.
 
         An out-of-tree adapter written to the one-argument `fetch_new_entries` signature must not
-        get
-        arguments it never declared; `accepts_a_limit` and `accepts_a_late_arrival_switch` are the
-        probes. The late-arrival switch is sent only as `False`, since `True` is the default
+        get arguments it never declared; `accepts_a_limit` and `accepts_a_late_arrival_switch` are
+        the probes. The late-arrival switch is sent only as `False`, since `True` is the default
         behaviour.
         """
         extra: dict[str, Any] = {}
@@ -192,14 +190,12 @@ class _BoundedIngest:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
 
         Ordered, split and truncated on `entry_window` (the later of creation and amendment), the
-        same
-        timestamp the stored cursor uses, so the cursor never advances past an entry the cap
+        same timestamp the stored cursor uses, so the cursor never advances past an entry the cap
         dropped.
 
         The bound is also offered to the source, so it can `LIMIT` its own read, but only when
         `since >= self._since` (no overlap rewind): on the first chunk, a limit applied at the
-        overlap
-        floor could be spent entirely on already-ingested entries and stall the cursor.
+        overlap floor could be spent entirely on already-ingested entries and stall the cursor.
         """
         bounded = since >= self._since
         entries = sorted(
@@ -310,8 +306,7 @@ class ElnSyncWorkflow:
 
         Each source syncs in bounded chunks, the cursor advancing (and, when scheduled, persisted)
         after each. After `eln_sync_max_iterations` chunks the run continues as new, so history
-        length
-        depends on the bound rather than the backlog.
+        length depends on the bound rather than the backlog.
 
         `state` is passed only by `continue_as_new`; a scheduled or manual run passes nothing.
         """
@@ -356,12 +351,9 @@ class ElnSyncWorkflow:
                 )
             except ActivityError as exc:
                 # One source's failure is not the run's: sources have separate cursors and backends,
-                # so the rest
-                # still sync. A workflow cancellation arrives as
-                # `ActivityError(cause=CancelledError)` and is
-                # re-raised so the run ends CANCELLED. Bad data never reaches here; it is rejected
-                # inside
-                # `sync_entries`.
+                # so the rest still sync. A workflow cancellation arrives as
+                # `ActivityError(cause=CancelledError)` and is re-raised so the run ends CANCELLED.
+                # Bad data never reaches here; it is rejected inside `sync_entries`.
                 if is_cancelled_exception(exc):
                     raise
                 # Dropped rather than retried in-loop: its cursor is untouched, so the next run
@@ -395,8 +387,7 @@ class ElnSyncWorkflow:
             else:
                 if chunk.has_more:
                     # Unreachable with a well-behaved adapter; a buggy source stops with a warning
-                    # rather than
-                    # looping forever.
+                    # rather than looping forever.
                     workflow.logger.warning(
                         "eln sync for %s reported more entries but no cursor advance; stopping",
                         source,

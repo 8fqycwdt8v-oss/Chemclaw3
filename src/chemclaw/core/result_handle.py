@@ -13,16 +13,16 @@ import re
 
 from chemclaw.core.config import settings
 
-# Hex digits of the content hash the line carries (48 bits); a collision within a session is refused
-# by name rather than guessed (`exhibits.bindings`).
+#: Hex digits of the content hash the line carries (48 bits); a collision within a session is
+#: refused by name rather than guessed (`exhibits.bindings`).
 HANDLE_HEX = 12
 
-# The one line a stamped result ends with: a newline, then the handle in mathematical angle
-# brackets, which no JSON or Markdown payload uses as syntax.
+#: The one line a stamped result ends with: a newline, then the handle in mathematical angle
+#: brackets, which no JSON or Markdown payload uses as syntax.
 _LINE = re.compile(r"\n⟨r:[0-9a-f]{" + str(HANDLE_HEX) + r"}⟩\Z")
 
-# A handle anywhere in text, bracketed or bare (as a model quotes it), 8 to 64 hex digits,
-# word-bounded so a longer token is not cut in half.
+#: A handle anywhere in text, bracketed or bare (as a model quotes it), 8 to 64 hex digits,
+#: word-bounded so a longer token is not cut in half.
 _ANYWHERE = re.compile(r"⟨?(?<![\w])r:[0-9a-f]{8,64}(?![\w])⟩?")
 
 

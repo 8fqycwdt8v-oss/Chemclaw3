@@ -71,8 +71,8 @@ def is_degraded_render(message: BaseMessage) -> bool:
     return DEGRADED_RENDER in message.additional_kwargs
 
 
-# Where a stored message carries the correlation id of the turn that stored it, stamped on read by
-# the durable provider and on save by the in-memory one, so both answer one call.
+#: Where a stored message carries the correlation id of the turn that stored it, stamped on read by
+#: the durable provider and on save by the in-memory one, so both answer one call.
 STORED_CORRELATION_ID = "chemclaw_correlation_id"
 
 
@@ -86,8 +86,8 @@ def stored_correlation_id(message: BaseMessage) -> str | None:
     return str(value) if value else None
 
 
-# Where a stored message carries who wrote it (`core/authorship.py`), stamped the same way as the
-# correlation id.
+#: Where a stored message carries who wrote it (`core/authorship.py`), stamped the same way as the
+#: correlation id.
 STORED_AUTHORSHIP = "chemclaw_authorship"
 
 
@@ -100,12 +100,12 @@ def stored_authorship(message: BaseMessage) -> Authorship | None:
     return Authorship.model_validate(value) if isinstance(value, dict) else None
 
 
-# How the turn a stored question opened has ended so far (`session_messages.turn_status`).
-#
-# Only a chemist's message written ahead of its turn carries one; every other row is `None`.
-# `running` is the write-ahead state; `done`, `failed` and `stopped` are settled by the turn's own
-# process; `interrupted` is written by a different process when the turn's claim lapsed with no live
-# owner (`PostgresHistoryProvider.mark_interrupted`).
+#: How the turn a stored question opened has ended so far (`session_messages.turn_status`).
+#:
+#: Only a chemist's message written ahead of its turn carries one; every other row is `None`.
+#: `running` is the write-ahead state; `done`, `failed` and `stopped` are settled by the turn's own
+#: process; `interrupted` is written by a different process when the turn's claim lapsed with no
+#: live owner (`PostgresHistoryProvider.mark_interrupted`).
 TurnStatus = Literal["running", "done", "failed", "stopped", "interrupted"]
 
 

@@ -40,9 +40,9 @@ class Turn(BaseModel):
 # C = no capability at all; a good answer is an honest refusal plus what it *can* do.
 Bucket = Literal["A", "B", "C"]
 
-# The prefix that marks an `asserts_absent` entry as a capability no tool name reaches. One constant
-# so writer and reader agree; upper case and hyphenated so it cannot collide with a lower-snake-case
-# tool name.
+#: The prefix that marks an `asserts_absent` entry as a capability no tool name reaches. One
+#: constant so writer and reader agree; upper case and hyphenated so it cannot collide with a
+#: lower-snake-case tool name.
 ABSENT_MARKER = "NO-TOOL "
 
 

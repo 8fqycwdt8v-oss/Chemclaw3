@@ -31,8 +31,8 @@ class PendingRequest(BaseModel):
     order: the two are one declaration rather than two that agreed by inspection.
     """
 
-    # `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
-    # ignored.
+    #: `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
+    #: ignored.
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
@@ -49,14 +49,14 @@ class PendingRequest(BaseModel):
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
     created_at: IsoStamp = ""
-    # The knowledge notes the question rests on, so the answer route can check they still hold
-    # (`kg/premise.py`). Read from the row: the premise validated at ask time is the one that
-    # counts.
+    #: The knowledge notes the question rests on, so the answer route can check they still hold
+    #: (`kg/premise.py`). Read from the row: the premise validated at ask time is the one that
+    #: counts.
     premise_note_ids: list[str] = Field(default_factory=list)
 
 
-# The most rows one `open_requests` call serves, however much is asked for; a structural bound,
-# not a deployment setting. Reported as `limit_applied` rather than applied silently.
+#: The most rows one `open_requests` call serves, however much is asked for; a structural bound,
+#: not a deployment setting. Reported as `limit_applied` rather than applied silently.
 _MAX_PAGE = 200
 
 
@@ -251,9 +251,9 @@ _SETTLE_ORPHAN = """
     WHERE request_id = %s AND run_id = %s AND state = 'waiting'
 """
 
-# One keyset page of waiting rows past the grace window, oldest first. A cursor so live waits at
-# the front cannot hide an orphan behind them; `request_id` breaks `created_at` ties so the order
-# is total.
+#: One keyset page of waiting rows past the grace window, oldest first. A cursor so live waits at
+#: the front cannot hide an orphan behind them; `request_id` breaks `created_at` ties so the order
+#: is total.
 _ORPHAN_CANDIDATES = """
     SELECT request_id, run_id, created_at FROM pending_requests
     WHERE state = 'waiting' AND created_at < now() - make_interval(secs => %s)

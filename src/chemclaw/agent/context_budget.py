@@ -93,11 +93,11 @@ class _Calibration:
     only tighten. Per process because the ratio is a property of the endpoint's tokenizer.
     """
 
-    # Weight of a new sample: roughly a twenty-call memory, so one outlier moves the budget by a few
-    # percent.
+    #: Weight of a new sample: roughly a twenty-call memory, so one outlier moves the budget by a
+    #: few percent.
     _ALPHA = 0.1
-    # A single call's ratio outside this range is a measurement fault, not a tokenizer difference,
-    # and is dropped.
+    #: A single call's ratio outside this range is a measurement fault, not a tokenizer difference,
+    #: and is dropped.
     _SANE = (0.2, 8.0)
 
     def __init__(self) -> None:
@@ -120,8 +120,7 @@ class _Calibration:
         """The factor to divide a billed-token budget by, clamped so it can only tighten.
 
         The seed's `(1 - _ALPHA) ** calls` weight is divided back out before the clamp; `calls >= 1`
-        is
-        guaranteed by the sample floor, and a negative numerator clamps to 1.0.
+        is guaranteed by the sample floor, and a negative numerator clamps to 1.0.
         """
         if not settings.agent_context_calibration_enabled:
             return 1.0
@@ -167,8 +166,8 @@ def reset_calibration() -> None:
 METRICS.bind_gauge("chemclaw_context_estimator_ratio", estimator_ratio)
 
 
-# `(configured, prefix, window)` triples whose floored trigger was already reported: a static
-# configuration fault, said once per triple. Capped so arbitrary budgets cannot grow it unbounded.
+#: `(configured, prefix, window)` triples whose floored trigger was already reported: a static
+#: configuration fault, said once per triple. Capped so arbitrary budgets cannot grow it unbounded.
 _REPORTED_FLOORS: set[tuple[int, int, int]] = set()
 _FLOOR_LOCK = threading.Lock()
 _MAX_REPORTED_FLOORS = 64
@@ -267,8 +266,7 @@ def effective_trigger(configured: int) -> int:
 
     - The budget is converted once, whole, and the prefix subtracted in estimator units afterwards,
       so `billed = ratio * (prefix + thread) <= budget` holds with no assumption about how prefix
-      and
-      thread tokenize differently. The residual lag of a running ratio is bounded in
+      and thread tokenize differently. The residual lag of a running ratio is bounded in
       `tests/test_compaction._TRACKING_SLACK`.
     - The prefix is charged only up to `agent_context_prefix_basis`, the surface the defaults were
       derived from; a deployment binding more bundles pays the excess in spend, not thread, and is
@@ -304,9 +302,9 @@ def effective_trigger(configured: int) -> int:
     return trigger
 
 
-# The process's BPE encoding: empty before the one attempt, `[None]` when exact counting is
-# unavailable, `[encoding]` when it is. A list so "not resolved yet" differs from "resolved to
-# nothing", and a failed resolution is not retried every call.
+#: The process's BPE encoding: empty before the one attempt, `[None]` when exact counting is
+#: unavailable, `[encoding]` when it is. A list so "not resolved yet" differs from "resolved to
+#: nothing", and a failed resolution is not retried every call.
 _ENCODING: list[Any] = []
 _ENCODING_LOCK = threading.Lock()
 
@@ -484,13 +482,13 @@ def estimate_tool_schemas(tools: Sequence[Any]) -> int:
     return int(total)
 
 
-# Tool-schema token totals for the life of the process, keyed by the names bound to the call.
-#
-# Process-scoped because `MeasureRequestPrefix` is built per turn, so an instance memo would redo
-# the sweep every turn on the event loop. Entries are bounded by profiles times reachable bundles.
-# Keying by name assumes names determine schemas: a bundle redeployed with changed schemas under
-# unchanged names is measured stale until restart. `tests/test_context_budget.py` asserts one sweep
-# per surface.
+#: Tool-schema token totals for the life of the process, keyed by the names bound to the call.
+#:
+#: Process-scoped because `MeasureRequestPrefix` is built per turn, so an instance memo would redo
+#: the sweep every turn on the event loop. Entries are bounded by profiles times reachable bundles.
+#: Keying by name assumes names determine schemas: a bundle redeployed with changed schemas under
+#: unchanged names is measured stale until restart. `tests/test_context_budget.py` asserts one sweep
+#: per surface.
 _SCHEMA_TOKENS: dict[tuple[str, ...], int] = {}
 
 
@@ -574,10 +572,8 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
         """The path a turn actually takes — measured off the loop, published on it.
 
         A memo miss is pure CPU over every schema, and the front door has one event loop serving
-        every
-        stream and probe. A thread does not remove the work (GIL) but keeps the loop schedulable,
-        which
-        `tests/test_context_budget.py` asserts.
+        every stream and probe. A thread does not remove the work (GIL) but keeps the loop
+        schedulable, which `tests/test_context_budget.py` asserts.
         """
         token = self._publish(await asyncio.to_thread(self._measured, request))
         try:

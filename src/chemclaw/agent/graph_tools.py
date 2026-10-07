@@ -472,8 +472,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # model verbatim. Kept out of the tool docstring, which is resent on every model call.
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     # Graph first, store second: `reaction-` is a prefix, not a reservation, so a human-authored
-    # note
-    # of that name wins. Test for a note, not mere id membership (see `note_in`).
+    # note of that name wins. Test for a note, not mere id membership (see `note_in`).
     if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
     # A compound id a standardization bump superseded resolves to the note that replaced it, and
@@ -702,10 +701,8 @@ async def record_failure(
             "or correct the existing date first"
         )
     # Both files ride in one write, in `record._build_write`'s order, so the retirement never cites
-    # a
-    # successor not yet written. Pass the retirement as `superseded`, not `dependencies`:
-    # dependencies
-    # are skipped when the file exists, and the refuted note always does.
+    # a successor not yet written. Pass the retirement as `superseded`, not `dependencies`:
+    # dependencies are skipped when the file exists, and the refuted note always does.
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )

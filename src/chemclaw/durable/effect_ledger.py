@@ -29,8 +29,8 @@ class EffectRecord(BaseModel):
     are one declaration rather than two that agree by inspection.
     """
 
-    # `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
-    # ignored.
+    #: `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
+    #: ignored.
     model_config = ConfigDict(extra="forbid")
 
     effect_id: str

@@ -165,9 +165,9 @@ class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
     reports nothing; `turn_usage.graph_usage_tokens` counts unreadable usage separately.
     """
 
-    # Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
-    # `build_langgraph_agent` already passes `state_schema=ChemclawState`, so this is a safeguard
-    # for other graphs.
+    #: Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
+    #: `build_langgraph_agent` already passes `state_schema=ChemclawState`, so this is a safeguard
+    #: for other graphs.
     state_schema = ChemclawState
 
     def _update(self, request: ModelRequest[Any], response: Any) -> Any:

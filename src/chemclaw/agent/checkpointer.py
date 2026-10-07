@@ -165,9 +165,9 @@ SELECT (SELECT count(*) FROM pruned_checkpoints),
 """
 
 
-# Raw size of the `messages` blob of the thread's newest root checkpoint. `octet_length` on a
-# `bytea` reads the TOAST header, so this is an index probe. The newest checkpoint is chosen first,
-# so a missing blob reads 0 rather than an older copy's size. Held by `tests/test_thread_size.py`.
+#: Raw size of the `messages` blob of the thread's newest root checkpoint. `octet_length` on a
+#: `bytea` reads the TOAST header, so this is an index probe. The newest checkpoint is chosen first,
+#: so a missing blob reads 0 rather than an older copy's size. Held by `tests/test_thread_size.py`.
 _THREAD_BYTES = """
 SELECT octet_length(b.blob)
   FROM (SELECT checkpoint FROM checkpoints
@@ -276,8 +276,8 @@ def _untracked_channels(state: Any) -> tuple[str, ...]:
     return tuple(sorted(name for name, ann in own.items() if _is_untracked(ann)))
 
 
-# Where `channels_read_without_default` looks: this package, the only code that can name a
-# first-party channel. Module-level so tests can point it at a fixture tree.
+#: Where `channels_read_without_default` looks: this package, the only code that can name a
+#: first-party channel. Module-level so tests can point it at a fixture tree.
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 # The method calls on a state mapping that cannot raise `KeyError` for an absent key, whatever
@@ -338,8 +338,7 @@ def _indexed(wanted: frozenset[str], root: Path) -> frozenset[str]:
             )
             return wanted
         # `state["x"] += 1` has a Store-context subscript but reads first; only the parent
-        # `AugAssign`
-        # says so, so these targets are collected to never count as writes.
+        # `AugAssign` says so, so these targets are collected to never count as writes.
         augmented = {id(node.target) for node in ast.walk(tree) if isinstance(node, ast.AugAssign)}
         for parent in ast.walk(tree):
             for child in ast.iter_child_nodes(parent):
@@ -490,8 +489,7 @@ async def _translating(operation: str, config: RunnableConfig | None) -> AsyncIt
     except psycopg.OperationalError as exc:
         thread_id = ((config or {}).get("configurable") or {}).get("thread_id", "")
         # Counted before re-raising so `chemclaw_degraded_total{subsystem="checkpointer"}` moves;
-        # the
-        # caller must still fail.
+        # the caller must still fail.
         degraded(
             logger,
             "checkpointer",
@@ -559,9 +557,8 @@ class SchemaStampedSaver(AsyncPostgresSaver):
 
         Upstream takes one `asyncio.Lock` per saver before touching the pool, so every checkpointer
         statement in the process runs one at a time and the queue is invisible to pool metrics. The
-        lock
-        has no timeout; only the turn timeout bounds the wait. Counted on entry and exit because
-        `asyncio.Lock` exposes no public waiter count.
+        lock has no timeout; only the turn timeout bounds the wait. Counted on entry and exit
+        because `asyncio.Lock` exposes no public waiter count.
 
         Args:
             pipeline: Passed straight through to upstream; see `AsyncPostgresSaver._cursor`.
@@ -592,8 +589,7 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         `STATE_CHANNELS_KEY` is what this build declared; `CHECKPOINT_VALUES_KEY` is what this
         checkpoint held, read before `super().aput` splits values across stores. Once per turn the
         write is followed by `_prune_superseded`, after the write so a thread is never smaller than
-        the
-        checkpoint replacing it.
+        the checkpoint replacing it.
 
         Raises:
             ConnectionError: The checkpoint could not be written.
@@ -616,13 +612,10 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         """Delete the copies this thread's newest checkpoints have superseded.
 
         Once per turn: on the root namespace's `source == "input"` checkpoint, which LangGraph
-        writes
-        once per `ainvoke`; the statement covers every namespace. This bounds a thread at the
-        retained
-        checkpoints plus one turn's writes; write volume stays quadratic (upstream rewrites
-        `messages`
-        each superstep). A failure is logged at WARNING and never fails the turn: the checkpoint is
-        already committed.
+        writes once per `ainvoke`; the statement covers every namespace. This bounds a thread at the
+        retained checkpoints plus one turn's writes; write volume stays quadratic (upstream rewrites
+        `messages` each superstep). A failure is logged at WARNING and never fails the turn: the
+        checkpoint is already committed.
 
         Args:
             config: The `configurable` of the write, naming the thread and the namespace.
@@ -665,8 +658,7 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         """Load the checkpoint, refusing one that predates a channel this build declares.
 
         Also refuses one whose stored values no longer cover what it was written holding. An absent
-        or
-        unreadable stamp is treated as unstamped and resumed.
+        or unreadable stamp is treated as unstamped and resumed.
 
         Args:
             config: The `configurable` naming the thread (and optionally the checkpoint) to load.
@@ -726,8 +718,7 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         """Page a thread's history, translating an outage the way every other statement here does.
 
         A plain method returning the guarded generator, so the translation wraps the iteration
-        itself
-        rather than starting only at the first `__anext__`.
+        itself rather than starting only at the first `__anext__`.
         """
 
         async def _guarded() -> AsyncIterator[CheckpointTuple]:
@@ -798,8 +789,7 @@ async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
     lock is polled with `pg_try_advisory_lock` rather than awaited, because a waiting lock holds a
     snapshot that `CREATE INDEX CONCURRENTLY` would wait on — a deadlock. It runs on a dedicated
     autocommit connection, since `setup()` uses the saver's pool. A pod that never gets the lock
-    runs
-    `setup()` anyway after the timeout rather than run without a checkpointer.
+    runs `setup()` anyway after the timeout rather than run without a checkpointer.
 
     Args:
         saver: The saver whose `setup()` to run.
@@ -832,8 +822,7 @@ async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
         finally:
             if held:
                 # The lock also dies with the session (covering a killed pod); releasing it lets the
-                # next caller
-                # in this process skip polling.
+                # next caller in this process skip polling.
                 await guard.execute("SELECT pg_advisory_unlock(%s)", (_SETUP_LOCK_KEY,))
 
 
@@ -861,10 +850,9 @@ async def _checkpoint_pool() -> Any:
                 # time, but `AsyncPostgresStore` is genuinely concurrent.
                 max_size=settings.pg_pool_max_size,
                 # Timeout, idle limit and connection check match `core/db._pool_for`, so a saturated
-                # waiter is
-                # refused on the configured timeout and a backend killed from outside is swapped
-                # rather than handed
-                # to a turn. `tests/test_checkpointer_concurrency.py` asserts the two pools agree.
+                # waiter is refused on the configured timeout and a backend killed from outside is
+                # swapped rather than handed to a turn. `tests/test_checkpointer_concurrency.py`
+                # asserts the two pools agree.
                 timeout=settings.pg_pool_timeout_seconds,
                 max_idle=settings.pg_pool_max_idle_seconds,
                 check=AsyncConnectionPool.check_connection,
@@ -872,12 +860,10 @@ async def _checkpoint_pool() -> Any:
             )
             await pool.open()
             # Registered so this process's pool readings (and the fleet connection budget) include
-            # it, though
-            # this module owns its lifecycle.
+            # it, though this module owns its lifecycle.
             register_pool(pool)
             # Bound here: `core/db.py` may not import `agent`, and every process with a checkpointer
-            # has this
-            # queue.
+            # has this queue.
             METRICS.bind_gauge(
                 "chemclaw_checkpointer_statements_waiting", checkpointer_statements_waiting
             )
@@ -901,8 +887,7 @@ async def close_checkpointer() -> None:
     await close_memory_store()
     _saver = None
     # Dropped too: an `asyncio.Lock` belongs to its loop, and the next loop's first caller would
-    # wait
-    # on it forever.
+    # wait on it forever.
     _init_lock = None
     pool, _pool = _pool, None
     if pool is None:

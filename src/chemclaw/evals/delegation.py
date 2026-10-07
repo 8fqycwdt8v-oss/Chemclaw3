@@ -34,8 +34,8 @@ from chemclaw.evals.ab import ABSummary, TaskScores, compare_tool_utility
 #: The arm a task is compared *against*: the model answering without calling `task`.
 BASELINE_ARM = "no-helper"
 
-# How many repeats of one `(task, arm)` pair make an aggregate worth reporting. A floor: below
-# three, a median is one or two observations.
+#: How many repeats of one `(task, arm)` pair make an aggregate worth reporting. A floor: below
+#: three, a median is one or two observations.
 MINIMUM_REPEATS = 3
 
 
@@ -55,8 +55,8 @@ class ArmRun(BaseModel):
     #: The task outcome on one axis where higher is better — `evals/tool_utility.VERDICT_SCORES`
     #: is the scale this is meant to carry, so a fabricated answer scores *below* a declined one.
     quality: float = Field(allow_inf_nan=False)
-    # What the turn actually billed, from `turn_costs`. The cost claim is about where tokens are
-    # billed, so an estimate would measure the wrong thing.
+    #: What the turn actually billed, from `turn_costs`. The cost claim is about where tokens are
+    #: billed, so an estimate would measure the wrong thing.
     billed_tokens: int = Field(ge=0)
     wall_clock_seconds: float = Field(ge=0.0, allow_inf_nan=False)
     #: Whether this run actually spawned a helper.
@@ -114,12 +114,12 @@ class DelegationReport(BaseModel):
     incomplete: list[str]
     #: Tasks where the *arm* never delegated, so the pair compares the baseline with itself.
     undelegated: list[str]
-    # Tasks where the arm delegated in some repeats and not others: still compared
-    # (intention-to-treat), but listed because the aggregate mixes two behaviours.
+    #: Tasks where the arm delegated in some repeats and not others: still compared
+    #: (intention-to-treat), but listed because the aggregate mixes two behaviours.
     partially_delegated: list[str]
-    # Median across compared tasks of `arm / baseline`; below 1.0 means delegation was cheaper.
-    # `None` means every compared task had a zero baseline on this axis, which must not be rendered
-    # as 1.0.
+    #: Median across compared tasks of `arm / baseline`; below 1.0 means delegation was cheaper.
+    #: `None` means every compared task had a zero baseline on this axis, which must not be rendered
+    #: as 1.0.
     median_token_ratio: float | None
     median_wall_clock_ratio: float | None
 

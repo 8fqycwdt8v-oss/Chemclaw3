@@ -46,8 +46,7 @@ class CommitmentReview(BaseModel):
         """The one sentence to read before saying what a programme owes.
 
         A `computed_field` so `model_dump()` carries it. The mirror caveat is unconditional: this is
-        a
-        copy of somebody else's plan, never a commitment being made now.
+        a copy of somebody else's plan, never a commitment being made now.
         """
         mirror = (
             "This is a MIRROR of the organisation's portfolio system, never the plan itself: it "

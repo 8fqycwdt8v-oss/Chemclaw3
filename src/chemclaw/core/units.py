@@ -30,9 +30,9 @@ from typing import Literal, get_args
 import pint
 from scipy import constants as _constants
 
-# The base dimensions this domain writes down, each a `pint` base dimension declared `[name]` in
-# `_DEFS` and checked against this tuple at import. Nothing is derived, which keeps `mg/mL` and `M`
-# incomparable and the registry free of derived-unit algebra.
+#: The base dimensions this domain writes down, each a `pint` base dimension declared `[name]` in
+#: `_DEFS` and checked against this tuple at import. Nothing is derived, which keeps `mg/mL` and `M`
+#: incomparable and the registry free of derived-unit algebra.
 Dimension = Literal[
     "dimensionless",
     "mass",
@@ -86,15 +86,15 @@ class UnitError(ValueError):
 # `tests/test_units.py` pins each against its literal with `==`, so a scipy upgrade carrying new
 # CODATA values is adopted deliberately.
 
-# The thermochemical calorie in joules, exact by definition; read from `scipy.constants` so all
-# three constants share one source.
+#: The thermochemical calorie in joules, exact by definition; read from `scipy.constants` so all
+#: three constants share one source.
 JOULE_PER_CALORIE = _constants.calorie
 
-# One hartree in kcal/mol, from CODATA's `E_h`, `N_A` and the calorie above. The one definition:
-# `science/calc/thermo.py` and `publish/properties.py` import it.
+#: One hartree in kcal/mol, from CODATA's `E_h`, `N_A` and the calorie above. The one definition:
+#: `science/calc/thermo.py` and `publish/properties.py` import it.
 HARTREE_TO_KCAL = _constants.value("Hartree energy") * _constants.N_A / 1000.0 / JOULE_PER_CALORIE
 
-# One electronvolt in kJ/mol: `N_A·e`, both exact under SI-2019.
+#: One electronvolt in kJ/mol: `N_A·e`, both exact under SI-2019.
 ELECTRONVOLT_TO_KJ = _constants.e * _constants.N_A / 1000.0
 
 
@@ -125,8 +125,8 @@ _PREFIX_DEFINITIONS: tuple[str, ...] = (
     "kilo- = 1e3 = k-",
 )
 
-# The one tuple both the concentration and length ladders are built from, so a rung cannot exist on
-# one ladder and not the other; `M` and `m` differ only by case.
+#: The one tuple both the concentration and length ladders are built from, so a rung cannot exist on
+#: one ladder and not the other; `M` and `m` differ only by case.
 _LADDER: tuple[str, ...] = ("centi", "milli", "micro", "nano", "pico")
 
 #: Every unit this domain writes down. One row per *unprefixed* unit: the prefixed rungs are
@@ -185,17 +185,17 @@ _DEFS: tuple[_Def, ...] = (
     _Def("pKa = [acidity]", "pKa"),
 )
 
-# Spellings attached to a generated rung (a pint alias would attach to the base unit and every
-# prefix), such as "micron" for the micrometre. The build refuses a key no rung generated.
+#: Spellings attached to a generated rung (a pint alias would attach to the base unit and every
+#: prefix), such as "micron" for the micrometre. The build refuses a key no rung generated.
 _RUNG_SPELLINGS: dict[str, tuple[str, ...]] = {
     "um": ("micron",),
     "ug": ("mcg",),
 }
 
-# Spellings that state their own basis: an HPLC area percent, a weight percent, a molar percent are
-# one unit and different facts. Mapping spelling to basis lets the distinction survive parsing, so
-# an `area%` cannot compare equal to a `% w/w`. Keyed and looked up lowercase, since `parse_unit` is
-# case-insensitive (`Area%` is the usual printout spelling).
+#: Spellings that state their own basis: an HPLC area percent, a weight percent, a molar percent are
+#: one unit and different facts. Mapping spelling to basis lets the distinction survive parsing, so
+#: an `area%` cannot compare equal to a `% w/w`. Keyed and looked up lowercase, since `parse_unit`
+#: is case-insensitive (`Area%` is the usual printout spelling).
 _BASIS_SPELLINGS: dict[str, str] = {
     "% w/w": "w/w",
     "%w/w": "w/w",
@@ -215,8 +215,8 @@ _BASIS_SPELLINGS: dict[str, str] = {
 _UNITS: dict[str, Unit] = {}
 _FOLDED: dict[str, Unit | None] = {}
 
-# `None`: start empty rather than loading pint's own definitions, then add only
-# `_PREFIX_DEFINITIONS` and `_DEFS`.
+#: `None`: start empty rather than loading pint's own definitions, then add only
+#: `_PREFIX_DEFINITIONS` and `_DEFS`.
 _UREG: pint.UnitRegistry[float] = pint.UnitRegistry(None)
 
 
@@ -468,15 +468,15 @@ def reconcile(value: float, reported: str, expected: str) -> float:
     return measured.to(expected).value
 
 
-# A leading number and a trailing unit, with optional space, sign and exponent. Anchored at both
-# ends: it reads a field whose whole answer is a quantity ("20 kg"), not a number inside a sentence
-# (that is `quantities.labelled_values`'s job).
+#: A leading number and a trailing unit, with optional space, sign and exponent. Anchored at both
+#: ends: it reads a field whose whole answer is a quantity ("20 kg"), not a number inside a sentence
+#: (that is `quantities.labelled_values`'s job).
 _QUANTITY = re.compile(r"^\s*([+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?)\s*([^\s\d].*?)\s*$")
 
-# A comma that could be a thousands separator: one to three digits not starting with 0, a comma,
-# exactly three digits. "1,500" is 1500 or 1.5 depending on the reader, so it is refused rather than
-# guessed (a factor of 1000 in a rescaled protocol). "0,500" reads as a decimal. Matched on the
-# mantissa, so "1,500e3" is refused too.
+#: A comma that could be a thousands separator: one to three digits not starting with 0, a comma,
+#: exactly three digits. "1,500" is 1500 or 1.5 depending on the reader, so it is refused rather
+#: than guessed (a factor of 1000 in a rescaled protocol). "0,500" reads as a decimal. Matched on
+#: the mantissa, so "1,500e3" is refused too.
 _AMBIGUOUS_COMMA = re.compile(r"[+-]?[1-9]\d{0,2},\d{3}")
 
 

@@ -627,10 +627,10 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
         return str(super()._format_skills_list(skills))
 
 
-# What the model is told when its narrowed skills listing is empty. Upstream's text invites creating
-# a skill, which every write verb refuses (`SkillsReadOnlyRefusal`). Empty may mean the deployment
-# ships none or the predicates removed all for this caller; the model cannot tell, so it is told to
-# answer without a procedure and say so.
+#: What the model is told when its narrowed skills listing is empty. Upstream's text invites
+#: creating a skill, which every write verb refuses (`SkillsReadOnlyRefusal`). Empty may mean the
+#: deployment ships none or the predicates removed all for this caller; the model cannot tell, so it
+#: is told to answer without a procedure and say so.
 NO_SKILLS = ModelProse(
     "(None are available to you in this session. This is either a deployment that ships no "
     "skills or a caller whose role reaches none of them; you cannot tell which, and you cannot "
@@ -639,15 +639,15 @@ NO_SKILLS = ModelProse(
     "obviously wants one.)"
 )
 
-# Every passage cut out of upstream's skills prompt, each named as this file refers to it. Removed
-# by substring so the rest of upstream's template keeps arriving on every bump; `_skills_prompt`
-# raises if a passage is no longer found, and `tests/test_upstream_surface.py` pins each one.
-#
-# 1. The Deepagents/Agents provenance sentence: neither label exists here (`_labelled` derives
-#    labels from directories) and there is no machine-wide skills tree.
-# 2. The "Executing Skill Scripts" section: `execute` is withheld (`agent/scratchpad.py`).
-# 3. The example workflow, which instructs running scripts and names a nonexistent skill.
-# 4. The same nonexistent skill again, as an example of a matching request.
+#: Every passage cut out of upstream's skills prompt, each named as this file refers to it. Removed
+#: by substring so the rest of upstream's template keeps arriving on every bump; `_skills_prompt`
+#: raises if a passage is no longer found, and `tests/test_upstream_surface.py` pins each one.
+#:
+#: 1. The Deepagents/Agents provenance sentence: neither label exists here (`_labelled` derives
+#:    labels from directories) and there is no machine-wide skills tree.
+#: 2. The "Executing Skill Scripts" section: `execute` is withheld (`agent/scratchpad.py`).
+#: 3. The example workflow, which instructs running scripts and names a nonexistent skill.
+#: 4. The same nonexistent skill again, as an example of a matching request.
 _SKILLS_PROMPT_REMOVALS: tuple[tuple[str, str], ...] = (
     (
         'Sources labeled "Deepagents" are specific to this agent tool; sources labeled "Agents" '

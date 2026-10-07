@@ -170,8 +170,7 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         )
     except WorkflowAlreadyStartedError:
         # Already running or completed: return the existing id, and send no `job_started` signal,
-        # since
-        # announcing a start would be false.
+        # since announcing a start would be false.
         return workflow_id
     record_job_started(handle.id, "report")
     return handle.id
@@ -258,9 +257,8 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: s
     The input is the whole corpus, so same-day asks share one scan and do not write a finding twice.
     The cost is that a second ask the same day misses data ingested in between; `fresh` forces a
     real re-mine. `discriminator` makes a fresh id a function of its inputs — the tool call id is
-    the
-    same on a replay and different between asks — so a resumed call rejoins rather than duplicates.
-    Empty falls back to the clock.
+    the same on a replay and different between asks — so a resumed call rejoins rather than
+    duplicates. Empty falls back to the clock.
     """
     day = datetime.now(UTC).date().isoformat()
     if not fresh:
@@ -316,10 +314,8 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
     # Neutralised here at the model's edge, not in `job_status`, which also serves `GET /jobs/{id}`
     # where markup would be noise. `rationale` and `summary` are framed (people and models wrote
-    # them,
-    # and `find_past_jobs` exposes every id to everyone). `result` is defanged rather than framed:
-    # it
-    # is structured but carries requester-chosen strings, with no span to wrap.
+    # them, and `find_past_jobs` exposes every id to everyone). `result` is defanged rather than
+    # framed: it is structured but carries requester-chosen strings, with no span to wrap.
     return status.model_copy(
         update={
             "summary": _framed_free_text(status.summary or "", job_id) or None,
@@ -334,9 +330,8 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
 
     Shared by the tool and `GET /jobs/{id}` so chat and UI cannot disagree about a run.
     `wait_seconds` is a Temporal long-poll, used by the tool because a model poll costs a whole
-    turn;
-    the HTTP route passes nothing. A RUNNING run that no worker has started reads `queued`, with the
-    reason as its summary.
+    turn; the HTTP route passes nothing. A RUNNING run that no worker has started reads `queued`,
+    with the reason as its summary.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -349,8 +344,7 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
                 f"the durable subsystem did not answer for job {job_id!r} ({exc.status.name})"
             ) from exc
         # An unknown id usually means the history aged out; consult the durable record before saying
-        # the
-        # job does not exist.
+        # the job does not exist.
         recorded = await _recorded_status(job_id)
         if recorded is None:
             raise ValueError(f"no durable job with id {job_id!r}") from exc
@@ -363,21 +357,18 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
             return await _still_open(client, job_id)
         except Exception:
             # The run ended unsuccessfully while we waited (`handle.result()` raises); re-describe
-            # once and
-            # report it via the no-wait mapping.
+            # once and report it via the no-wait mapping.
             refreshed = await handle.describe()
             ended = _TERMINAL.get(refreshed.status, "running") if refreshed.status else "running"
             return DurableJobStatus(job_id=job_id, status=ended)
         return completed_job_status(job_id, result)
     if status == "running":
         # Still running: return before `failed_job_reason`, whose `handle.result()` would be an
-        # unbounded
-        # long-poll on an open execution.
+        # unbounded long-poll on an open execution.
         return _open_status(job_id, await _not_started_reason(client, description))
     if status != "completed":
         # Render the failure cause, not just the status word, via the shared `failed_job_reason`;
-        # safe
-        # because open runs returned above.
+        # safe because open runs returned above.
         return DurableJobStatus(
             job_id=job_id, status=status, summary=await failed_job_reason(handle) or None
         )

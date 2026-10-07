@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 # Where a skill's frontmatter lives inside its directory — the Agent Skills spec's filename.
 SKILL_FILENAME = "SKILL.md"
 
-# The Agent Skills spec's bounds on the two required fields, imported from the loader that applies
-# them. Upstream truncates over-long values with only a warning; declaring the bounds on
-# `SkillManifest` makes them a validation error instead (a CI failure for the reviewed tree, a 422
-# for a chemist's own tier). `tests/test_upstream_surface.py` pins the truncation assumption.
+#: The Agent Skills spec's bounds on the two required fields, imported from the loader that applies
+#: them. Upstream truncates over-long values with only a warning; declaring the bounds on
+#: `SkillManifest` makes them a validation error instead (a CI failure for the reviewed tree, a 422
+#: for a chemist's own tier). `tests/test_upstream_surface.py` pins the truncation assumption.
 MAX_SKILL_NAME_CHARS = MAX_SKILL_NAME_LENGTH
 MAX_SKILL_DESCRIPTION_CHARS = MAX_SKILL_DESCRIPTION_LENGTH
 
@@ -125,9 +125,9 @@ def _declared_tools(
     return declared, required
 
 
-# The `tools:` declaration given to a skill whose frontmatter could not be read: a name no tool can
-# have, so the skill is scoped to nothing. Not an empty set, which means "declares nothing" and
-# would fail open.
+#: The `tools:` declaration given to a skill whose frontmatter could not be read: a name no tool can
+#: have, so the skill is scoped to nothing. Not an empty set, which means "declares nothing" and
+#: would fail open.
 UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manifest"})
 
 

@@ -33,13 +33,13 @@ from chemclaw.agent.skill_backend import (
 )
 from chemclaw.core.config import settings
 
-# What a mounted tier answers for a path outside what this turn may reach: the same words as
-# `agent/skill_backend.REFUSED`, which do not reveal whether the skill exists.
+#: What a mounted tier answers for a path outside what this turn may reach: the same words as
+#: `agent/skill_backend.REFUSED`, which do not reveal whether the skill exists.
 REFUSED = "This path is not part of the skills available to you."
 
 
-# How many rows one page of a namespace walk asks for. `BaseStore.asearch` defaults to `limit=10`,
-# which would silently truncate a listing.
+#: How many rows one page of a namespace walk asks for. `BaseStore.asearch` defaults to `limit=10`,
+#: which would silently truncate a listing.
 LISTING_PAGE = 100
 
 
@@ -69,8 +69,8 @@ async def paged_items(store: Any, namespace: tuple[str, ...]) -> dict[str, Any]:
     return held
 
 
-# The document that makes a directory a skill, mirroring the reviewed tree, so
-# `/org/<name>/SKILL.md` and `/mine/<name>/SKILL.md` follow the same convention as `skills/`.
+#: The document that makes a directory a skill, mirroring the reviewed tree, so
+#: `/org/<name>/SKILL.md` and `/mine/<name>/SKILL.md` follow the same convention as `skills/`.
 SKILL_FILENAME = "SKILL.md"
 
 #: The transaction-scoped advisory lock a stored tier's writes serialize on — see
