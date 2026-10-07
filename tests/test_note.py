@@ -208,8 +208,7 @@ def test_mentioned_ids_deduplicates_and_keeps_first_seen_order() -> None:
 
 
 def test_external_record_id_strips_whichever_prefix_matched() -> None:
-    """The strip is driven by `EXTERNAL_ID_PREFIXES`, so growing the namespace cannot break the
-    lookup.
+    """The strip is driven by `EXTERNAL_ID_PREFIXES`, so growing the namespace is safe.
 
     A two-entry tuple distinguishes this from a hand-rolled `removeprefix` of the one current value.
     """

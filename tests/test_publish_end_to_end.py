@@ -24,9 +24,9 @@ _STORE = "test_publish_e2e"
 
 
 async def _create_store(dsn: str) -> None:
-    """Apply the shipped DDL and the generated registry seed to a fresh schema, as a site does, so
-    the
-    test cannot drift from what is deployed.
+    """Apply the shipped DDL and the generated registry seed to a fresh schema.
+
+    As a site does, so the test cannot drift from what is deployed.
     """
     from chemclaw.cli.sink_schema import ddl, seed
 
@@ -293,11 +293,11 @@ async def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() ->
 async def test_a_finished_job_publishes_the_note_it_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A finished job publishes the note it produced
-    (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
+    """A finished job publishes the note it produced.
 
-    Driven through the real workflow on a real broker, because the producer is under test; the
-    fixture job returns a note with a known id.
+    `D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`. Driven through the real
+    workflow on a real broker, because the producer is under test; the fixture job returns a note
+    with a known id.
     """
     from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 

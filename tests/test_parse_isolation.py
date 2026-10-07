@@ -86,8 +86,7 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
 
 
 def _in_process_parse_seconds(raw: bytes) -> float:
-    """What `raw` costs to parse in-process, so a deadline can be derived rather than transcribed.
-    """
+    """What `raw` costs to parse in-process, so a deadline can be derived from it."""
     started = time.perf_counter()
     parse_document("slow.csv", raw, None)
     return time.perf_counter() - started

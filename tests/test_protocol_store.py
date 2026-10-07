@@ -636,8 +636,7 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
 def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
     backend: str,
 ) -> None:
-    """`session_id` and `opened_by` are set once, by the write that opened the design, on both
-    backends.
+    """`session_id` and `opened_by` are set once, by the write that opened the design.
 
     `_UPSERT_DESIGN` omits them from `DO UPDATE SET`, and the in-memory store must match, or
     `listing(session_id=…)` differs by backend.

@@ -142,8 +142,9 @@ def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
 
 
 def test_the_symbols_that_absence_test_names_still_exist() -> None:
-    """The symbols the absence test names still exist, so a rename fails the guard rather than
-    satisfying it.
+    """The symbols the absence test names still exist.
+
+    So a rename fails the guard rather than satisfying it.
     """
     from chemclaw.agent import behaviour_proposals, local_skills
 

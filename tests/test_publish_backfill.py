@@ -51,8 +51,9 @@ def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
 
 
 async def _insert_cached(conn: Any, key: str, created_at: datetime, calc_type: str = "pka") -> None:
-    """A cached row whose payload actually projects, so it is a valid control for "was this row
-    queued".
+    """A cached row whose payload actually projects.
+
+    So it is a valid control for "was this row queued".
     """
     await conn.execute(
         "INSERT INTO calculation_results "
@@ -130,8 +131,9 @@ def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
         return [object()]
 
     async def _intruding_enqueue(records: list[Any]) -> int:
-        """The intrusion rides on the walk's own `await`, so it is committed before the next page is
-        read; a background task would race the read.
+        """The intrusion rides on the walk's own `await`.
+
+        So it is committed before the next page is read; a background task would race the read.
         """
         nonlocal intruded
         if not intruded:
@@ -536,11 +538,11 @@ def test_both_entrypoints_of_one_walk_refuse_when_this_deployment_publishes_nowh
 async def test_the_jobs_walk_carries_the_note_the_run_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The jobs walk carries the note the run produced
-    (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
+    """The jobs walk carries the note the run produced.
 
-    A first-time sink gets its whole history through here. A second row with no note is walked
-    beside it, so a hard-coded empty string fails.
+    A first-time sink gets its whole history through here
+    (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`). A second row with no
+    note is walked beside it, so a hard-coded empty string fails.
     """
     _publishing(monkeypatch)
     captured: list[Any] = []

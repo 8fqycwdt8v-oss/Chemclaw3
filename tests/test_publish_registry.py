@@ -31,9 +31,9 @@ from chemclaw.publish.record import (
 
 
 def test_every_canonical_unit_is_reachable_within_its_dimension() -> None:
-    """Properties sharing a dimension agree on a unit or are convertible to one, so a query cannot
-    add
-    hartree to kilocalories.
+    """Properties sharing a dimension agree on a unit or are convertible to one.
+
+    So a query cannot add hartree to kilocalories.
     """
     by_dimension: dict[str, set[str]] = defaultdict(set)
     for definition in REGISTRY.values():
@@ -293,8 +293,9 @@ def test_a_quantity_registered_for_another_table_cannot_be_projected_as_a_scalar
 
 
 def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
-    """Every projected scalar is registered for the scalar table, across every shape this system
-    produces.
+    """Every projected scalar is registered for the scalar table.
+
+    Checked across every shape this system produces.
     """
     from tests.test_publish_projection import _cases
 

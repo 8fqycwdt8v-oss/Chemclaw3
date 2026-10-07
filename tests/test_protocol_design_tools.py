@@ -268,9 +268,7 @@ async def test_a_structured_request_returns_json_the_front_end_can_parse(
 async def test_structuring_the_same_ask_twice_revises_rather_than_forking(
     store: InMemoryDesignStore,
 ) -> None:
-    """Structuring the same ask twice revises rather than forking, and an identical re-reading
-    writes
-    nothing.
+    """Structuring the same ask twice revises one design, and an identical ask writes nothing.
 
     The id is derived from the ask. Any landed revision retires an `approved` status, so an
     unchanged document must not land one.

@@ -41,9 +41,9 @@ def test_every_declared_alias_is_a_name_the_calculator_accepts() -> None:
 
 
 def test_the_canonical_spelling_is_the_one_the_system_already_suggests() -> None:
-    """The canonical spelling is the one `SUGGESTED_SOLVENTS` already uses, so a chemist sees one
-    name
-    for one solvent across refusals and results.
+    """The canonical spelling is the one `SUGGESTED_SOLVENTS` already uses.
+
+    So a chemist sees one name for one solvent across refusals and results.
     """
     groups = known_solvents()
     for suggested in SUGGESTED_SOLVENTS:

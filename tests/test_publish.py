@@ -153,8 +153,7 @@ def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
 def test_bad_data_class_crosses_an_activity_boundary_as_non_retryable(
     error_cls: type[Exception],
 ) -> None:
-    """A bad-data class crosses an activity boundary as non-retryable, under Temporal's real
-    classification.
+    """A bad-data class crosses an activity boundary as non-retryable.
 
     `DefaultFailureConverter` sets `ApplicationError.type` to the exact class name, never an
     ancestor's. `AuthorizationError` is a plain `Exception`, yet registered by name it is classified

@@ -297,8 +297,7 @@ _SURROGATE = "\ud800"
     ],
 )
 def test_a_note_refuses_text_utf8_cannot_encode(field: str, value: object) -> None:
-    r"""Every unconstrained string a note carries is checked for UTF-8 encodability, not only the
-    body.
+    r"""Every unconstrained string a note carries must be UTF-8 encodable, not only the body.
 
     `json.loads('"\ud800"')` yields an unpaired surrogate that later raises `UnicodeEncodeError` in
     whichever writer touches it; refusing at the schema turns that into one rejected note.

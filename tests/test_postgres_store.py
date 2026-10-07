@@ -184,10 +184,10 @@ async def test_find_matches_the_in_memory_backend() -> None:
 
 
 async def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None:
-    """`known` (the `kg-validate` calc_refs probe) returns held keys and not typos, on both
-    backends.
+    """`known` returns held keys and not typos, on both backends.
 
-    The CLI runs Postgres while unit tests run in memory, so they must agree.
+    It is the `kg-validate` calc_refs probe; the CLI runs Postgres while unit tests run in memory,
+    so they must agree.
     """
     store = await _store_or_skip()
     memory = InMemoryStore()

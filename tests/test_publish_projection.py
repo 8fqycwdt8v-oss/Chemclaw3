@@ -129,8 +129,9 @@ def _reaction() -> ReactionEnergyResult:
 
 
 def _distribution(species: list[tuple[str, str, float, float]]) -> SpeciesDistribution:
-    """A ranked species set from `(smiles, label, relative_kcal, population)` tuples, so each test
-    states which species are in it in one line.
+    """A ranked species set from `(smiles, label, relative_kcal, population)` tuples.
+
+    So each test states which species are in it in one line.
     """
     return SpeciesDistribution(
         kind="microstates",
@@ -672,11 +673,10 @@ def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
 def test_a_result_projects_a_fixed_number_of_rows_per_item(
     kind: str, calc_type: str, key: str, table: str, per_item: int
 ) -> None:
-    """How many rows one calculation becomes, as a per-item law
-    (`D-2026-09-14-property-value-is-the-shallow-table`).
+    """How many rows one calculation becomes, as a per-item law.
 
-    The per-item slope is the cost that decides partitioning: one more fact per item multiplies the
-    store by the item count.
+    `D-2026-09-14-property-value-is-the-shallow-table`. The per-item slope decides partitioning: one
+    more fact per item multiplies the store by the item count.
     """
     one = _grown(kind, calc_type, key, 1)
     many = _grown(kind, calc_type, key, 47)

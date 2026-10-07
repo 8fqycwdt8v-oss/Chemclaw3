@@ -672,8 +672,9 @@ async def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_st
 async def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real failure reason outranks the reaper's generic one: the reaper writes `last_error`
-    only when empty.
+    """The real failure reason outranks the reaper's generic one.
+
+    The reaper writes `last_error` only when it is empty.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")

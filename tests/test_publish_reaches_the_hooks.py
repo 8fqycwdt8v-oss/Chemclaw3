@@ -182,8 +182,7 @@ def test_a_route_never_routes_on_its_own(route: str) -> None:
 
 @pytest.mark.parametrize("payload_kind", _ENVELOPE_MEMBERS)
 def test_every_shape_a_calc_job_can_return_routes_to_a_projector(payload_kind: str) -> None:
-    """Every member `XtbJobResult` can carry routes to a projector, or is declared as not yet
-    published.
+    """Every member `XtbJobResult` can carry routes to a projector, or is declared unpublished.
 
     Many jobs share one workflow and envelope, so the envelope's members are the complete set of
     shapes this bundle can publish.
@@ -645,8 +644,7 @@ def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_popula
 def test_a_refined_ensemble_stored_before_the_rename_still_publishes_both_headline_numbers(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A refined ensemble stored before the entropy-field rename still publishes both headline
-    numbers.
+    """A refined ensemble stored before the entropy-field rename still publishes both numbers.
 
     `_refined_ensemble` reads the old and new names, since the rename changed only the label, not
     the arithmetic; the values asserted confirm that. The warning is asserted too, since an operator

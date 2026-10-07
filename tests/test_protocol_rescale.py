@@ -109,8 +109,7 @@ def test_the_reaction_time_is_carried_across_and_said_to_be() -> None:
 
 
 def test_a_target_in_a_dimension_the_protocol_cannot_convert_is_refused() -> None:
-    """A target in a dimension the protocol cannot convert is refused rather than assuming a molar
-    mass.
+    """A target the protocol cannot convert is refused rather than assuming a molar mass.
 
     The refusal names the unit to restate the target in.
     """

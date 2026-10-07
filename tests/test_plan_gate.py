@@ -342,8 +342,9 @@ def _proceed(result: Any) -> bool:
 
 
 def _middleware_names() -> list[str]:
-    """The advertised names of a profile's tool-call middleware chain, read off
-    `tool_call_middleware` without building a graph.
+    """The advertised names of a profile's tool-call middleware chain.
+
+    Read off `tool_call_middleware` without building a graph.
     """
     from chemclaw.agent.audit import NullAuditSink, make_audit_middleware
     from chemclaw.agent.langgraph_agent import tool_call_middleware

@@ -52,8 +52,9 @@ def approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalS
 async def _approve(
     store: InMemoryPlanApprovalStore, session_id: str, steps: list[dict[str, Any]]
 ) -> None:
-    """Record a human approval of `steps`, scoped with `declared_scope` as both decision surfaces
-    do.
+    """Record a human approval of `steps`, scoped as both decision surfaces scope it.
+
+    Uses `declared_scope`, the same derivation the route and the CLI record with.
     """
     plan_hash = plan_identity(steps)
     assert plan_hash is not None

@@ -45,8 +45,7 @@ def _constructor_name(node: ast.AST) -> str | None:
 
 
 def _kind_of(call: ast.Call, constants: dict[str, str] | None = None) -> str | None:
-    """The kind an `OutboundMessage(...)` actually sends: its literal `kind=`, or the model's
-    default.
+    """The kind an `OutboundMessage(...)` sends: its literal `kind=`, or the model's default.
 
     A non-literal `kind=` is not credited (it would be payload-derived, the shape the `Literal`
     refuses). An omitted `kind=` is credited with the default, read off the model, so a producer
@@ -425,10 +424,10 @@ def test_the_report_message_carries_the_draft_and_not_only_its_reference() -> No
 def test_an_attachment_a_workflow_builds_is_checked_where_it_can_be_caught(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`OutboundAttachment` is loose so a bad filename is refused in the activity, not workflow
-    code.
+    """A bad attachment filename is refused in the activity, not in workflow code.
 
-    A `ValidationError` in workflow code would fail the job the notice must never fail.
+    `OutboundAttachment` is loose because a `ValidationError` in workflow code would fail the job
+    the notice must never fail.
     """
     from pydantic import ValidationError
 

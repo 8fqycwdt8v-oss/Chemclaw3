@@ -91,8 +91,7 @@ def _model_facing_descriptions() -> dict[str, str]:
 
 
 def _job_tool_docstrings() -> dict[str, str]:
-    """The durable-job tools' descriptions, assembled as `connectors/jobs.py::_docstring` sends
-    them.
+    """The durable-job tools' descriptions, assembled as `connectors/jobs.py::_docstring` does.
 
     The summary, the `description:` and one line per declared parameter; the `results` bundle's
     whole model-facing surface is these entries.
@@ -109,8 +108,9 @@ def _job_tool_docstrings() -> dict[str, str]:
 
 
 def _shipped_skill_bodies() -> dict[str, str]:
-    """Every `SKILL.md` a turn can load: bundle-local (`registry.skills_dirs`) and the repository's
-    own.
+    """Every `SKILL.md` a turn can load, bundle-local and the repository's own.
+
+    Bundle skills reach a turn through `registry.skills_dirs`.
     """
     import chemclaw
 
@@ -623,8 +623,7 @@ _MISSING_RECIPE = "/".join(("nonexistent", "recipe.py"))
 
 
 def test_the_shipped_operator_documents_name_only_things_that_exist() -> None:
-    """Rules 5-7 over the operator documents: every module path, workflow file and ADR id resolves.
-    """
+    """Rules 5-7: every module path, workflow file and ADR id in the operator docs resolves."""
     assert check_operator_prose() == []
 
 
@@ -1007,9 +1006,9 @@ def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> No
 
 
 def test_the_maximal_prompt_is_what_a_validator_and_a_caller_still_get() -> None:
-    """`available=None` yields every block, so validators and callers without a graph see the
-    maximal
-    prose.
+    """`available=None` yields every block.
+
+    So validators and callers without a graph see the maximal prose.
     """
     profile = get_profile("default")
     maximal = instructions_for(profile)
@@ -1132,8 +1131,9 @@ def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> 
 
 
 def test_the_prompt_does_not_call_recall_preferences_the_only_memory_there_is() -> None:
-    """The prompt does not call `recall_preferences` the only memory there is: `/memories/**` is a
-    durable per-actor store.
+    """The prompt does not call `recall_preferences` the only memory there is.
+
+    `/memories/**` is a durable per-actor store.
     """
     assert "the only memory of them you have" not in _INSTRUCTIONS
 
