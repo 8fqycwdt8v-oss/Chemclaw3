@@ -3,8 +3,8 @@
 Files apply in filename order, each recorded in `schema_migrations` so it runs once; a recorded file
 whose statements later change is refused as drift. Each file is sent whole via the simple-query
 protocol, so `;` inside literals or `DO $$ … $$` blocks needs no client-side splitting. Run by `make
-db-migrate` and by the chart's `pre-install,pre-upgrade` hook Job; nothing migrates at service
-startup.
+db-migrate` and by the chart's `pre-install,pre-upgrade,pre-rollback` hook Job; nothing migrates
+at service startup.
 
 Two locks: `pg_advisory_xact_lock` serialises concurrent migrators for the single transaction, and
 `lock_timeout` bounds each DDL statement's wait for a table lock, because a queued `ACCESS
@@ -207,9 +207,8 @@ async def migrate(dsn: str | None = None) -> list[str]:
         except psycopg.errors.LockNotAvailable as exc:
             # A peer migrator holding the lock past its budget is normal concurrency (the hook Job
             # retries), so it gets a named error rather than a raw `LockNotAvailable` traceback.
-            # Only around this statement:
-            # the same error on a DDL statement below means a table lock queued behind live traffic
-            # and keeps its own error.
+            # Only around this statement: the same error on a DDL statement below means a table lock
+            # queued behind live traffic and keeps its own error.
             raise MigrationError(
                 f"another migrator held the migration lock for the whole "
                 f"{settings.pg_migration_lock_wait_seconds:.0f}s budget "

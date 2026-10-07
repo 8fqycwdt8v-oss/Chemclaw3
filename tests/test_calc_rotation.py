@@ -135,7 +135,7 @@ class TestTheDihedralIsCheckedToo:
     def test_an_index_past_the_molecule_is_refused_before_the_geometry_arithmetic(
         self, server: FakeCalcServer
     ) -> None:
-        """It used to escape as a bare numpy IndexError from inside the dihedral computation."""
+        """Refused by name, not as a numpy IndexError from the dihedral arithmetic."""
         with pytest.raises(ValueError, match="not four atoms"):
             _profile(server, bond=_torsion(atoms=[0, 1, 2, 99]))
 
@@ -520,10 +520,10 @@ class TestARotorWhoseEndCarriesOnlyHydrogens:
     def test_a_dihedral_less_entry_for_a_bond_that_has_one_is_refused_as_malformed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Neither kind: n-butane's central bond has a heavy dihedral, so an empty `atoms` is
-        malformed.
+        """An empty `atoms` on a bond with a heavy dihedral is malformed.
 
-        It must not be answered with the methyl-rotation sentence.
+        n-butane's central bond is neither a top nor an X-H rotor, so it must not be answered with
+        the methyl-rotation sentence.
         """
         install(monkeypatch, FakeCalcServer())
         malformed = _torsion(atoms=[])

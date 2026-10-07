@@ -426,12 +426,10 @@ def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> 
 
 
 def test_a_criterion_other_than_factorial_honours_a_constraint_the_grid_refuses() -> None:
-    """One problem schema, two design families: a non-factorial criterion honours a constraint the
-    grid
-    refuses.
+    """A non-factorial criterion honours a constraint the factorial grid refuses.
 
-    Folded into this tool rather than a separate one, which would have duplicated the
-    `OptimizationProblem` schema in the prompt.
+    One problem schema, two design families: folded into this tool rather than a separate one, which
+    would have duplicated the `OptimizationProblem` schema in the prompt.
     """
     problem = OptimizationProblem(
         parameters=[

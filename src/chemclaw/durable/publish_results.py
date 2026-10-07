@@ -170,8 +170,7 @@ async def _drain_result_publications() -> PublishOutcome:
             )
         finally:
             # A sink is built per run (so rotated credentials take effect) and therefore closed per
-            # run, in a
-            # `finally`, or each pass would leak a connection.
+            # run, in a `finally`, or each pass would leak a connection.
             await sink.aclose()
 
     # Refresh the backlog gauges once per pass, after every row of every sink is marked (a claim
@@ -195,8 +194,7 @@ class PublishResultsWorkflow:
         return await workflow.execute_activity(
             drain_result_publications,
             # The same number `publish/outbox.py` leases a claimed row for, so the lease ends
-            # exactly when this
-            # activity can no longer hold the row.
+            # exactly when this activity can no longer hold the row.
             start_to_close_timeout=timedelta(seconds=settings.result_publish_lease_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout a dead worker would go unnoticed for the whole (long)

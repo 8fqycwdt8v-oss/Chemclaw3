@@ -394,8 +394,7 @@ class AwaitAnswerWorkflow:
                 await workflow.wait_condition(lambda: self._answer is not None, timeout=step)
             except TimeoutError:
                 # `wait_condition` raises on timeout; the loop and the `due_at` check decide whether
-                # this was a
-                # reminder tick or the deadline.
+                # this was a reminder tick or the deadline.
                 pass
             if self._answer is None and workflow.now() < due_at:
                 self._reminders += 1

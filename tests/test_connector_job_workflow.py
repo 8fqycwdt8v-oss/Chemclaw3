@@ -56,8 +56,7 @@ _SESSION = "session-under-test"
 _ACTOR = "oid-under-test"
 _EXPECTED_ID = job_workflow_id("fixture", "run_fixture_job", {"subject": "benzene"})
 
-# One launch input whose job declared a 20 s ceiling — the twenty-second job the fleet-wide
-# ceiling used to bound identically with a four-hour one.
+# One launch input whose job declared a 20 s ceiling, below the fleet-wide one.
 _CEILING_JOB = ConnectorJobInput(
     connector="fixture",
     job="run_fixture_job",
@@ -137,8 +136,7 @@ def test_a_connector_workflow_returns_a_well_formed_envelope(
     assert result.data["subject"] == "benzene" and result.data["ran"] is True
     assert result.note is not None
     assert result.note.id == "fixture-benzene"
-    # `created_by="agent"` is what routes it through the PR-gate rather than straight into the
-    # graph.
+    # `created_by="agent"` is the provenance the note lands with, readable beside its citations.
     assert result.note.created_by == "agent"
 
 
@@ -158,7 +156,7 @@ def _fixture_job_tool(monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole contract in one run: child on its own queue, note PR-gated, session woken."""
+    """The whole contract: child on its own queue, note recorded by core, session woken."""
     published: list[Any] = []
     notified: list[tuple[str, str, dict[str, Any]]] = []
     recorded: list[JobRecord] = []
@@ -270,7 +268,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # So did the session, the key a bundle needs to speak back to the chemist (e.g.
     # `BoCampaignWorkflow._evaluate`'s waiting notices and reminders).
     assert result.data["session_id"] == _SESSION
-    # Core PR-gated the note the connector produced; the connector never touched the graph itself.
+    # Core recorded the note the connector produced; the connector never touched the graph itself.
     assert [note.id for note, _ in published] == ["fixture-benzene"]
     assert published[0][0].created_by == "agent"  # so a human must sign it off at the gate
     # And it went through the gate as a note *with its dependencies* (D-133): the fixture note

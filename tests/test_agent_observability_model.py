@@ -409,12 +409,11 @@ def test_the_promotion_works_on_the_synchronous_hook_too() -> None:
 
 
 def test_a_budget_too_small_for_one_character_still_bounds_the_parse_error() -> None:
-    """`text[-0:]` is the whole string, so a budget too small for one character must be
-    special-cased.
+    """A budget too small for one character still bounds the parse error.
 
-    When no suffix fits, the search leaves `lo` at 0, and `repr(text[-0:])` would return the entire
-    document. Reachable: `agent_audit_max_arg_chars` has no floor and a one-character `repr` is
-    three characters wide.
+    `text[-0:]` is the whole string: when no suffix fits, the search leaves `lo` at 0 and
+    `repr(text[-0:])` would return the entire document. Reachable: `agent_audit_max_arg_chars` has
+    no floor and a one-character `repr` is three characters wide.
     """
     from chemclaw.agent.model_calls import _bounded_reason
 

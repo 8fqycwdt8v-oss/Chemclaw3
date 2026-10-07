@@ -1314,20 +1314,11 @@ def test_a_file_a_helper_hands_back_is_a_mapping_carrying_its_text_under_content
 
 
 async def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
-    """Psycopg's pipeline is a transaction boundary, and two first-party modules reason from it.
+    """A pipeline block on an autocommit connection is still one transaction.
 
-    `AsyncPostgresSaver._cursor(pipeline=True)` opens `conn.pipeline()`, and inside that block an
-    autocommit connection does **not** commit per statement — measured, `txid_current()` is
-    identical across both statements inside the block and differs across two outside it. That is
-    what makes `aput`, `aput_writes` and `adelete_thread` atomic across all their statements, and
-    it is why `agent/checkpointer.py` no longer claims "every checkpointer write is its own
-    transaction" and why the residual `durable/retention.py` states — a turn whose blobs commit
-    before a sweep's snapshot and whose `checkpoints` row commits after it — does not exist by that
-    route.
-
-    Nobody promised this. If psycopg ever commits per statement inside a pipeline, that residual
-    becomes real again with no line of either module rewritten, so the assumption is pinned here
-    rather than believed there.
+    Inside `conn.pipeline()` psycopg does not commit per statement (`txid_current()` matches), which
+    makes `AsyncPostgresSaver`'s `aput`, `aput_writes` and `adelete_thread` atomic.
+    `agent/checkpointer.py` and `durable/retention.py` reason from this.
     """
     import psycopg
 
@@ -1362,25 +1353,11 @@ async def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transac
 
 
 def test_aput_still_writes_its_blobs_and_its_checkpoint_row_in_one_transaction() -> None:
-    """The sibling above pins psycopg's pipeline. This pins that `aput` still *opens* one.
+    """`aput` still writes its blobs and its checkpoint row in one transaction.
 
-    `D-2026-09-13-an-interleaving-whose-mechanism-is-absent-is-not-a-residual`. Three places in
-    `durable/retention.py` and `agent/checkpointer.py` rest on `aput` being atomic across its blob
-    writes and its `checkpoints` row — they say so explicitly, having retracted the opposite claim —
-    and the assertion next door is about **psycopg**: that an autocommit connection inside
-    `conn.pipeline()` does not commit per statement. Upstream could keep that true and stop using
-    it. `AsyncPostgresSaver.aput`'s `self._cursor(pipeline=True)` is the half nothing held: drop the
-    argument there and every sentence in those two modules becomes false with nothing going red.
-
-    **Measured through `xmin`, which is the transaction that inserted a row.** Driving `aput` with
-    two channels and reading `xmin` off the rows it wrote: all three — two `checkpoint_blobs` rows
-    and one `checkpoints` row — carried **one** xid. That is end-to-end rather than a source-shape
-    check, so it fails for any reason `aput` stops being atomic, including ones that have nothing to
-    do with the `pipeline=` keyword.
-
-    Two channels deliberately: one blob row plus one checkpoint row would pass if upstream committed
-    each *table* separately, and the interleaving the retracted residual named is exactly a blob
-    commit separated from a checkpoint commit.
+    The test above pins psycopg's pipeline; this pins that `aput` still opens one. Measured through
+    `xmin`: two `checkpoint_blobs` rows and one `checkpoints` row must share one xid. Two channels,
+    so per-table commits would also fail.
     """
     import asyncio
 
@@ -1442,19 +1419,12 @@ def test_aput_still_writes_its_blobs_and_its_checkpoint_row_in_one_transaction()
 
 
 def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> None:
-    """`agent/compaction.OffLoopContextEditing` reuses upstream's sync method for its request.
+    """The editing middleware hands its edited request to its handler.
 
-    The edits are pure CPU over a message list that grows with the session, and upstream runs them
-    inline in `awrap_model_call` — on the event loop of a pod serving other sessions. Moving them
-    off it without copying upstream's method body (the empty-messages check, the private
-    `_resolve_token_counter`, the `deepcopy`, the edit loop, `request.override`) is done by
-    running the *synchronous* `wrap_model_call` in a worker thread under a handler that captures
-    the request it was about to send. That works only while upstream's own middleware contract
-    holds: the handler is called, once, with the prepared request.
-
-    If it stops holding, the model call goes out uncompacted — the safe direction, and reported
-    rather than silent — but the compaction has stopped running, which is the exact defect
-    `agent/compaction.py` exists to end. So it is pinned here rather than believed.
+    `agent/compaction.OffLoopContextEditing` runs upstream's synchronous `wrap_model_call` in a
+    worker thread with a handler that captures the prepared request, so the CPU-heavy edits leave
+    the event loop without copying upstream's method body. That needs the handler called once with
+    the request.
     """
     from typing import Any, cast
 
@@ -1504,23 +1474,11 @@ def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> Non
 def test_the_skills_prompt_still_contains_every_sentence_this_deployment_removes(
     removal: str, why: str
 ) -> None:
-    """Each substring `_skills_prompt` cuts out of upstream's template, pinned as its exact text.
+    """Each substring `_skills_prompt` cuts from upstream's template is still present.
 
-    `agent/langgraph_agent._skills_prompt` derives the skills system prompt from upstream's own
-    `SKILLS_SYSTEM_PROMPT` minus the passages that are false on this deployment, by substring — so
-    the ~40 lines that are correct keep arriving from upstream and only the removals are this
-    repository's decision. That mechanism *is* the substrings: reword one upstream and the removal
-    silently stops happening, which is why `_skills_prompt` raises rather than passing the text
-    through. This asserts the same shapes from the other side, so a bump names the passage that
-    moved instead of a `RuntimeError` from inside a graph build.
-
-    **Parametrized over the production tuple, because it used to be four hand-copied literals.**
-    Mutation testing put a fifth removal into `_SKILLS_PROMPT_REMOVALS` and reworded one of the
-    four, and this file stayed green at 4 passed both times: a copy asserts the shapes the copy
-    knows, which is "the other side" only for as long as nobody edits either. The underlying
-    invariant was never at risk — `_skills_prompt`'s own `RuntimeError` catches both mutations
-    when a graph is built — so what the copy could go wrong about was only its own claim to be
-    checking this. Importing the tuple makes the claim true and deletes forty lines of duplicate.
+    `agent/langgraph_agent._skills_prompt` derives the skills prompt from `SKILLS_SYSTEM_PROMPT`
+    minus passages false on this deployment, by substring, and raises if one is missing.
+    Parametrized over the production tuple, so a bump names the passage that moved.
     """
     from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
 
@@ -1532,19 +1490,11 @@ def test_the_skills_prompt_still_contains_every_sentence_this_deployment_removes
 
 
 def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> None:
-    """The two `BaseStore` shapes `agent/scratchpad.py`'s eviction is built on, and only those.
+    """A store search still pages by offset and still dates every item.
 
-    `_evict_past_the_cap` pages a namespace whole with `asearch(..., limit=…, offset=len(seen))`
-    and then orders the result by `Item.updated_at` itself. Both halves are upstream's: an
-    `offset` that did not skip would make the walk loop on its first page, and a `SearchItem`
-    without a usable `updated_at` would make the ordering arbitrary and the cap evict at random.
-
-    **What is deliberately *not* asserted is the search's own ordering, and measuring it is why.**
-    The eviction used to read one page over the cap and take the oldest of it, which is a bet that
-    a query-less search answers most-recently-updated first. It does against
-    `AsyncPostgresStore`; `InMemoryStore` answers in *insertion* order, asserted below so the
-    disagreement is on the record rather than rediscovered. Two shipped implementations of one
-    interface ordering differently is the definition of a shape upstream has not promised.
+    `agent/scratchpad._evict_past_the_cap` pages with `offset=len(seen)` and orders by
+    `Item.updated_at` itself. The search's own ordering is not assumed: `InMemoryStore` returns
+    insertion order where `AsyncPostgresStore` returns most-recent first, asserted below.
     """
     from langgraph.store.memory import InMemoryStore
 
@@ -1574,23 +1524,12 @@ def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> No
 
 
 def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None:
-    """The one accessor-less read `tests/test_subagents.py` needs, and why it is a read at all.
+    """The `task` tool still closes over its roster as `subagent_graphs`.
 
-    `SubAgentMiddleware` builds the `task` tool as a closure over a `subagent_graphs` dict and
-    exposes no way to ask a compiled caller what its roster actually holds. That matters because
-    the property worth asserting about a helper is now a *narrowing* rather than an absence — it
-    holds its caller's read-only connector tools and none that act
-    (`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`) — and the edit that
-    would break it is `build_langgraph_agent` no longer handing `_subagents` its connectors. That
-    is an argument, not a behaviour: a test that compiles its own helper to check it would agree
-    with itself forever, which is the failure mode
-    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` names.
-
-    So `tests/test_subagents.py::_helper_of` walks the closure, and the coupling is declared here
-    rather than discovered on a bump — the whole point of this file. Two shapes, not one: that the
-    body is reachable as `coroutine`/`func`, and that the nonlocal is spelled `subagent_graphs` and
-    keyed by subagent name. If upstream ever grows an accessor, this test is what should turn red
-    so the walk can be deleted rather than outlive its reason.
+    `SubAgentMiddleware` exposes no accessor for a compiled caller's roster, so
+    `tests/test_subagents.py::_helper_of` walks the closure to check what a helper holds. Pins that
+    the body is reachable as `coroutine`/`func` and the nonlocal is `subagent_graphs` keyed by name.
+    If an accessor appears, delete the walk.
     """
     import inspect
 
@@ -1623,19 +1562,11 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
 
 
 def test_an_oversized_skill_description_is_still_truncated_rather_than_refused() -> None:
-    """Why `SkillManifest` declares length bounds upstream already has constants for.
+    """An oversized skill description is still truncated rather than refused upstream.
 
-    `agent/skill_manifest.py` imports `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH` and
-    turns them into pydantic bounds, which looks like a duplicate control and is not: upstream's
-    loader **truncates** past either limit and carries on, logging a warning. So without this
-    repository's bounds a chemist posting a 2,000-character description gets a 200, and a model is
-    served half of it with nothing on either surface saying so — and a skill can be stored under one
-    name and listed under another.
-
-    This is an assumption test in the direction that matters. If a bump made upstream *refuse*
-    instead of truncating, the same skill would vanish from the listing with no error anywhere, and
-    this repository's bounds would be the only thing between a person and a silent no-op. Either
-    behaviour is workable; not knowing which one is live is not.
+    So `agent/skill_manifest.py` turns `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH`
+    into pydantic bounds, refusing what upstream would silently truncate. If upstream switched to
+    refusing, the skill would silently vanish instead; either is workable, not knowing is not.
     """
     from deepagents.middleware.skills import (
         MAX_SKILL_DESCRIPTION_LENGTH,
@@ -1670,21 +1601,12 @@ def test_an_oversized_skill_description_is_still_truncated_rather_than_refused()
 
 
 def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
-    """`api/auth.py` overrides `PyJWKClient.fetch_data`, which upstream never published as a seam.
+    """PyJWT still fetches its key set through `fetch_data`.
 
-    PyJWT's own client reaches the tenant with `urllib.request.urlopen` — no `trust_env`, so it
-    follows an ambient `HTTPS_PROXY`, and the key set every bearer token is validated against would
-    come from whatever answered. `api/auth._HttpxJwkClient` closes that by overriding one method,
-    which is the narrowest available seam and also an undocumented one: `fetch_data` is a method of
-    a concrete class, not an interface, and nothing obliges upstream to keep routing the fetch
-    through it.
-
-    **The failure if it moves is silent and total**, which is why this is asserted rather than
-    trusted. A `get_jwk_set` that fetched inline, or a second helper the override does not cover,
-    would leave every assertion in `tests/test_auth.py` and `tests/test_entra_end_to_end.py` green —
-    they drive the client, and the client would still work — while the traffic went back through
-    `urlopen` and the proxy posture stopped holding. So this drives it: a subclass that overrides
-    only `fetch_data` must be able to serve a whole key-set lookup with no network at all.
+    `api/auth._HttpxJwkClient` overrides that one method so the JWKS fetch does not use `urlopen`,
+    which follows an ambient proxy. If upstream fetched elsewhere the auth tests would stay green
+    while the proxy posture lapsed, so a subclass overriding only `fetch_data` must serve a whole
+    lookup with no network.
     """
     from jwt import PyJWKClient
 
@@ -1700,10 +1622,8 @@ def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
         def fetch_data(self) -> Any:
             nonlocal calls
             calls += 1
-            # Typed `Any` rather than as the dict it is, because upstream's `JWKSetCache.put` is
-            # annotated `PyJWKSet` while upstream's own `fetch_data` hands it the parsed dict —
-            # so the runtime contract and the annotation disagree, and it is the runtime one
-            # `api/auth.py` copies.
+            # Typed `Any`: `JWKSetCache.put` is annotated `PyJWKSet` but upstream's `fetch_data`
+            # passes the parsed dict, and `api/auth.py` copies the runtime contract.
             data: Any = {
                 "keys": [
                     {
@@ -1732,16 +1652,10 @@ def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
 
 
 def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
-    """The half of upstream's `fetch_data` that `api/auth.py` has to *reproduce*, not replace.
+    """A PyJWT client still fills its key-set cache from `fetch_data`.
 
-    Upstream's implementation does two things: the HTTP call, and `self.jwk_set_cache.put(...)` of
-    what came back. The override replaces the first and copies the second, because `get_jwk_set`
-    reads that cache *before* it calls `fetch_data` — so an override that returned the key set
-    without filling it would turn PyJWT's five-minute cache off and make every single token
-    validation an outbound request to the tenant. That is a performance and amplification failure
-    with no functional symptom, so no other test in this tree would catch it.
-
-    Driven rather than read off the attribute: the second lookup must cost no fetch.
+    `get_jwk_set` reads the cache before calling `fetch_data`, so the override must fill it or every
+    token validation becomes an outbound request. The second lookup must cost no fetch.
     """
     from jwt import PyJWKClient
 
@@ -1772,17 +1686,10 @@ def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
 
 
 def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> None:
-    """The semantics one line of this tree turns on, asserted against the installed distribution.
+    """A subgraph compiled without a checkpointer inherits its parent's.
 
-    `None` is not "no checkpointer" to LangGraph — it is *inherit*. Every `task` helper this
-    repository ever spawned checkpointed its own thread onto its caller's saver because the call
-    site passed nothing, and `retrieval/fanout.py` did the same with 195 kB of retrieved corpus
-    (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, and the fan-out instance
-    that proved its "the class is closed" bullet wrong).
-
-    Asserted here because it is a *promise upstream makes in a docstring*, which is the weakest
-    kind: if a future version made `None` mean "none", every `checkpointer=False` in this tree
-    would become a no-op that reads as deliberate.
+    `None` means "inherit" to LangGraph, which is why helpers and the fan-out pass
+    `checkpointer=False`. If `None` ever meant "none", those would become silent no-ops.
     """
     import inspect
 
@@ -1808,28 +1715,16 @@ def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> No
 
 
 def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
-    """A bare `.compile()` is a graph that silently adopts whatever saver its caller holds.
+    """Every compiled graph in this tree names its checkpointer.
 
-    **The class, not the instance.**
-    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
-    fixed the helper and its Consequences bullet claimed no shipped path wrote a second namespace
-    any more. `retrieval/fanout.py:299` was `graph.compile()` the whole time, reached from
-    `gather_evidence` on both the caller's and the helper's surface, and measured at 195 kB of the
-    `ranked` channel in its own `n:<uuid>` namespace on the chemist's thread. One instance was
-    fixed and the class declared closed, which is the shape this assertion exists to stop.
-
-    Syntactic on purpose, and that is defensible *here* where an AST reading of a keyword's absence
-    was not: the hazard **is** the default. What this asks is that every compile site states what it
-    wants, so a reviewer sees the choice rather than inheriting one.
+    A bare `.compile()` silently adopts the caller's saver. Syntactic on purpose: the hazard is the
+    default, so every compile site must state its choice.
     """
     import ast
     from pathlib import Path
 
-    # The regular-expression engines, whose `.compile` has nothing to do with graphs. Named as a
-    # class rather than accumulated one skip at a time: `regex` joined `re` when
-    # `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can` put a
-    # site-supplied pattern under a deadline, and a third entry here should be a third *engine*,
-    # not an exception somebody added to make this green.
+    # The regular-expression engines, whose `.compile` has nothing to do with graphs. A new entry
+    # should be a new engine, not an exception added to make this green.
     _PATTERN_ENGINES = {"re", "regex"}
 
     root = Path(__file__).resolve().parent.parent / "src"
@@ -1856,36 +1751,14 @@ def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
 
 
 def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_channel() -> None:
-    """`batch_siblings`'s divisor is sound only while `task` is the single such producer.
+    """Only the subagent middleware returns a `Command` carrying the `files` channel.
 
-    `agent/tool_result_size.py` divides the helper file budget by the batch's calls **naming this
-    tool**, and the argument for not dividing by the whole batch is that nothing else in the
-    installed `deepagents` hands a caller a `Command` whose `update` carries `files`. Two
-    different tools doing it would each divide by their own count and together exceed the budget.
-
-    That claim lived in an ADR and in a walk somebody did once, which is the shape this file
-    exists to end: a dependency bump adding a second producer would red nothing.
-    `deepagents.middleware.subagents._return_command_with_state_update` copies every key not in
-    `_EXCLUDED_STATE_KEYS`, so it is the producer; the assertion is that it stays the only one.
-
-    **Three sites, and only one of them originates anything.** The assertion names all three
-    rather than collapsing them to the one that matters, so a new site is read rather than assumed.
-
-    **It does filter, and this docstring used to say it did not** — `update` must be an `ast.Dict`
-    carrying a `**spread` or a literal `"files"` key, which is what reduces the installed
-    distribution's 19 `Command(...)` constructions to these three. Two `summarization` sites build
-    their update in a local and pass it by name, so they can never be reported here however they
-    change. Both are `wrap_model_call` commands in a middleware this deployment replaces with
-    `disabled_summarizer`, so nothing is unchecked today — but "a filter is where a fourth would
-    hide" was exactly the wrong sentence to write above a filter.
-    `filesystem`'s pair rebuild a wrapped tool's result as `{**update, "messages": …}`, so the
-    `files` they can carry is the wrapped tool's, already counted wherever it came from; they relay
-    a producer and cannot invent one. A **new** entry in this list is the thing to look at.
-
-    **Scoped to `Command`s on purpose.** `FilesystemMiddleware`'s write verbs reach the same
-    channel through `StateBackend`'s `send(...)` and return a plain `ToolMessage`, so they never
-    pass `rewritten_command_files` and this bound never sees them. That is a separate gap with its
-    own `BACKLOG.md` row; what this pins is the population the divisor reasons about.
+    `agent/tool_result_size.py` divides the helper file budget by the batch's `task` calls, which is
+    sound only while `task` is the sole producer. The scan matches `Command(update=...)` dict
+    literals with a spread or a literal `"files"` key and names every site: the subagent producer
+    and the filesystem relays that rebuild a wrapped tool's result. A new entry is the thing to look
+    at. Write verbs reach `files` via `StateBackend` and a plain `ToolMessage`, outside this
+    population.
     """
     import ast
     import importlib
@@ -1940,18 +1813,11 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
 
 
 def test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes() -> None:
-    """`core/chem.standardize` discards a neutral spectator only if RDKit's catalogue knows it.
+    """RDKit's fragment catalogue still carries what `core/chem.standardize` assumes.
 
-    **This is the one upstream shape here that is a *list* rather than a name.** After
-    `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`, whether a hydrate or a
-    solvate collapses is decided by `rdMolStandardize.FragmentRemover`'s catalogue — so upstream
-    dropping water from it would silently stop every hydrate collapsing, and adding
-    tetrafluoroborate would silently change how TBTU is keyed. Neither would red anything, because
-    the identity tests assert what this system answers and that answer would move with the list.
-
-    Two directions, and the absent half is as load-bearing as the present one: the charge clause in
-    `standardize` leads *because* the catalogue omits tetrafluoroborate, which was measured after a
-    list-only spelling regressed TBTU. The day it is added, that argument is worth re-reading.
+    Whether a hydrate or solvate collapses depends on `FragmentRemover`'s catalogue, and identity
+    tests would move with it. Two directions: water must be present, and tetrafluoroborate absent,
+    which is why the charge clause in `standardize` leads.
     """
     from rdkit import Chem
     from rdkit.Chem.MolStandardize import rdMolStandardize
@@ -1986,13 +1852,11 @@ def test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes() -> N
 
 
 def test_pyjwt_refetches_an_unknown_kid_at_once_when_its_own_cooldown_is_off() -> None:
-    """`api/auth.py` builds its JWKS client with `cooldown_duration=0` and owns the cooldown itself.
+    """PyJWT refetches an unknown `kid` at once when its own cooldown is off.
 
-    PyJWT 2.14 put a refresh cooldown of its own inside `get_signing_key` (30 s by default), which
-    silently composed with `entra_jwks_refresh_cooldown_seconds` and outvoted it. If upstream ever
-    stops honouring `0` — renames the keyword, or floors it — a rotated signing key is refused for
-    upstream's window whatever this deployment configured, and nothing else here would say so
-    before `tests/test_entra_end_to_end.py`'s rotation test did.
+    `api/auth.py` passes `cooldown_duration=0` and owns the cooldown via
+    `entra_jwks_refresh_cooldown_seconds`; if upstream stopped honouring `0`, a rotated key would be
+    refused for upstream's window.
     """
     from jwt import PyJWKClient
     from jwt.exceptions import PyJWKClientError
@@ -2023,11 +1887,9 @@ def test_pyjwt_refetches_an_unknown_kid_at_once_when_its_own_cooldown_is_off() -
 async def _absorbs_a_cancellation(hops: int) -> bool:
     """Whether psycopg's async connect wait swallowed one cancel that landed `hops` turns late.
 
-    A fake connection generator waits on one end of a socketpair; a byte lands on it and on a
-    second pair together, so the connect wakes and our own reader on the second pair fires in the
-    same loop iteration. That reader cancels the waiting task after `hops` further `call_soon`
-    turns — sweeping the few iterations in which a `wait_for`-based wait has its inner result ready
-    and has not yet resumed the outer task, which is exactly the window the defect lives in.
+    A fake connection waits on a socketpair; the connect and a second reader wake in the same loop
+    iteration, and the reader cancels the task after `hops` further `call_soon` turns, sweeping the
+    window where a `wait_for`-based wait would drop the cancellation.
     """
     import socket
 
@@ -2074,16 +1936,11 @@ async def _absorbs_a_cancellation(hops: int) -> bool:
 
 
 async def test_a_cancelled_connect_is_not_absorbed_by_psycopg() -> None:
-    """A `task.cancel()` that lands as the connect's socket wakes must still cancel the task.
+    """A `task.cancel()` landing as the connect's socket wakes still cancels the task.
 
-    psycopg before 3.3.6 waited through `asyncio.wait_for`, and on Python 3.11 `wait_for` returns
-    the inner result and drops the cancellation when the two coincide. Measured on a real database:
-    one connect in five absorbed the cancel and carried on — and since `core/db.connection` opens
-    one per call outside a pooled process, every database read in a turn's middleware
-    (`agent/exhibit_notes.ExhibitListing`, `agent/preferences.StandingPreferences`) was a place a
-    stopped or torn-down turn could swallow its own stop and wait on the model for ever. That was
-    `tests/test_turn_write_ahead.py` timing out one run in three. `pyproject.toml` floors psycopg
-    at the release that awaits a plain future instead; this is what fails if that ever regresses.
+    `asyncio.wait_for` on Python 3.11 can drop a coinciding cancellation; psycopg 3.3.6 awaits a
+    plain future instead, and `pyproject.toml` floors it there. A swallowed cancel would let a
+    stopped turn wait on the model forever.
     """
     absorbed = {
         hops: sum([await _absorbs_a_cancellation(hops) for _ in range(10)]) for hops in range(6)

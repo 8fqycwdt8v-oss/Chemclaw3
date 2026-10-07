@@ -286,10 +286,10 @@ def short_connect_client(
     Args:
         read_bound_seconds: The read budget to fall back to when the SDK passes no timeout.
         request_hook: An `httpx` request hook stamping every outbound request — in practice
-            `connectors.identity.turn_identity_hook`, which attaches actor, session, correlation
-            id and `traceparent` and strips them on a foreign origin. A parameter because `core`
-            may not import a sibling package, and the same hook as the connector registry's so
-            the origin-strip control exists once.
+            `core/call_identity.py::turn_identity_hook`, which attaches actor, session,
+            correlation id and `traceparent` and strips them on a foreign origin. A parameter so
+            a caller binds it to its own endpoint URL, and the same hook as the connector
+            registry's so the origin-strip control exists once.
     """
 
     def factory(
@@ -351,7 +351,7 @@ async def open_session(
 ) -> AsyncIterator[ClientSession]:
     """Open one MCP session to `url` with the bearer from `token_env` attached.
 
-    `request_hook` (normally `connectors.identity.turn_identity_hook(url)`) stamps trace and
+    `request_hook` (normally `core.call_identity.turn_identity_hook(url)`) stamps trace and
     identity headers so the remote call joins the turn's trace and logs. The credential is a
     connection header because MCP's per-call header callback does not apply to `initialize()`. One
     session per call, since transport tasks inherit the opener's context and a shared session would

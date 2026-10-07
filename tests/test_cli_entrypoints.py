@@ -20,7 +20,7 @@ def _unreachable(*_args: Any, **_kwargs: Any) -> Any:
 def test_the_schedule_applier_answers_help_without_applying_anything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--help` must print help. It used to apply the Schedules and exit 0."""
+    """`--help` prints help and applies no Schedules."""
     from chemclaw.cli import schedules
 
     monkeypatch.setattr(schedules, "_apply", _unreachable)

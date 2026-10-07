@@ -656,9 +656,7 @@ def test_the_refusal_names_the_parameter_the_value_and_the_levels_that_exist() -
 
 
 def test_the_tool_refuses_a_point_whose_continuous_value_is_not_a_number() -> None:
-    """A continuous value that is not a number is refused, rather than reaching torch as a
-    `TypeError`.
-    """
+    """A continuous value that is not a number is refused rather than reaching torch."""
     with pytest.raises(ValueError, match=r"points\[0\]"):
         asyncio.run(
             predict_outcome(_problem(), _runs(), [{"temperature": "hot", "solvent": "THF"}])

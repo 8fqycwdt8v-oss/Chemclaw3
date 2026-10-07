@@ -1,13 +1,7 @@
-"""The six precedent questions, asked of a seeded corpus — against both index backends.
+"""The six precedent questions, asked of a seeded corpus, against both index backends.
 
-Each test names the question it answers, because that is the acceptance criterion: this subsystem
-exists because none of the six could be answered at all, and a passing assertion on a facet is not
-the same as a chemist's question being answerable.
-
-Both backends run the same body, for the reason `tests/test_label_index.py` gives: the in-memory
-one is the reference and the SQL one is where a predicate quietly means something else. The
-Postgres half skips when no database is reachable — a green local run without `make up` has
-executed half of this file.
+Each test names the chemist's question it answers. Both backends run the same body, as in
+`tests/test_label_index.py`; the Postgres half skips without a database.
 """
 
 import asyncio
@@ -186,11 +180,10 @@ def _both_backends(body: Callable[[LabelIndex, str], Awaitable[None]]) -> None:
 
 
 def test_q1_has_this_substrate_been_used_as_starting_material() -> None:
-    """Question 1, and the role filter is the whole of it.
+    """Question 1: has this substrate been used as a starting material?
 
-    The aryl bromide is a starting material in all four seeded reactions and a ligand in none, so
-    asking for it as a ligand must return nothing — that is what makes the role a filter rather
-    than decoration.
+    The aryl bromide is never a ligand, so asking for it as one must return nothing, which makes the
+    role a filter.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -289,11 +282,9 @@ def test_a_precedent_carries_the_recipe_the_fingerprint_drops() -> None:
 
 
 def test_an_empty_answer_says_which_kind_of_empty_it_is() -> None:
-    """The distinction the whole coverage layer exists for.
+    """An empty answer says which kind of empty it is.
 
-    "We have no precedent for this" and "nothing matching has been labelled yet" are opposite
-    claims, and a bare empty list is both. A live run once made exactly this mistake on the
-    fingerprint index and told a chemist the second as though it were the first.
+    "No precedent" and "nothing matching has been labelled yet" are opposite claims.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -345,11 +336,10 @@ async def test_q2_conditions_that_worked_for_similar_products() -> None:
 
 
 async def test_q4_reactions_whose_product_matches_a_smarts() -> None:
-    """Question 4, over the pattern screen: find the structures, then find their reactions.
+    """Question 4: reactions whose product matches a SMARTS.
 
-    Postgres-only, because the screen is a GIN containment index and there is no in-memory twin —
-    a Python reimplementation would be a second definition of soundness, which is the one property
-    this search rests on.
+    Postgres-only: the screen is a GIN containment index, and a Python twin would be a second
+    definition of soundness.
     """
     await migrated_db_or_skip()
     index = PostgresLabelIndex()
@@ -373,15 +363,10 @@ async def test_q4_reactions_whose_product_matches_a_smarts() -> None:
 
 
 def test_the_partial_verdict_can_never_print_a_share_of_100_or_0() -> None:
-    """The branch whose whole job is to say "not complete" printed "(100%)".
+    """The PARTIAL verdict can never print a share of 100% or 0%.
 
-    `{share:.0f}` rounds, so 4,999 of 5,000 read **"PARTIAL: … (100%)"** and 1 of 100,000 read
-    **"(0%)"** — a reader takes the first as complete and the second as nothing, inside the sentence
-    that exists to tell them it is neither. Floored to a tenth and clamped, so the printed share
-    cannot reach either edge while the branch it is in is true.
-
-    Asserted as a property over the edges rather than on one string, because the defect is the
-    *rounding*, and a single example fixed by hand would pass with `:.0f` and a special case.
+    Rounding would print 4,999 of 5,000 as "(100%)". The share is floored to a tenth and clamped;
+    asserted as a property over the edges.
     """
     from chemclaw.science.labels.records import CorpusCoverage
 
@@ -405,18 +390,11 @@ def test_a_fully_labelled_scope_still_says_complete() -> None:
 
 
 async def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:
-    """Truncation is observed by reading one row past the cap, never inferred from `len == cap`.
+    """A corpus sitting exactly on the cap is not reported as truncated.
 
-    `len(candidates) == limit` cannot tell "there were more" from "that was all of them", so a
-    screen whose matches landed exactly on the cap returned `truncated=True` with nothing cut —
-    and `reactions_with_product_substructure` folds that flag into `PrecedentSearch.truncated`,
-    whose verdict then tells a chemist their complete answer is "a sample rather than the complete
-    set". `molfp.search` reads one row past its own cap for exactly this reason and says so in a
-    comment; this path inferred instead.
-
-    Two selenides rather than the aromatics the tests above use: the screen runs against whatever
-    else the shared database holds, and a query only these rows can match is the only way to assert
-    a *count* rather than a membership.
+    Truncation is observed by reading one row past the cap, as `molfp.search` does; `len == cap`
+    cannot tell "more" from "exactly that many". Two selenides, so only these rows match and a count
+    can be asserted in the shared database.
     """
     await migrated_db_or_skip()
     molecules = CorpusMolecules()
@@ -444,10 +422,8 @@ async def test_the_corpus_molecule_table_is_the_fingerprint_store_pointed_elsewh
     assert not await store.is_empty()
 
 
-# A corpus that is cheap to index and expensive to verify: long acyclic chains have no tautomers
-# to enumerate at write time, and a wildcard-chain SMARTS that can never match has to walk each of
-# them exhaustively before saying so. That asymmetry is what lets these two tests measure the
-# verify step at 300 rows in a few seconds rather than at the 5,000-row cap.
+# Cheap to index and expensive to verify: long chains have no tautomers to enumerate, and a
+# never-matching wildcard SMARTS must walk each one, so the verify step is measurable at 300 rows.
 _CHAIN_CORPUS = ["C" * i + "O" + "C" * (240 - i) for i in range(1, 301)]
 # 48 wildcards ending in a phosphorus no chain carries: every candidate is verified in full and
 # none matches, which is the shape of the query a chemist's "does anything here look like…" takes
@@ -458,9 +434,8 @@ _UNMATCHABLE = "~".join(["[*]"] * 48) + "~[#15]"
 async def _drop_corpus_molecules(structures: list[str]) -> None:
     """Delete the structures a test seeded, so the next test's similarity search never sees them.
 
-    `tests/pg.py` isolates the *run*, not the test, and `corpus_molecules` is ranked by Tanimoto by
-    `conditions_for_similar_products` — three hundred alkanes left behind are three hundred near
-    neighbours of the hexadecane the "no neighbours" assertion above relies on.
+    `tests/pg.py` isolates the run, not the test, and leftover chains would be near neighbours of
+    the hexadecane the "no neighbours" test relies on.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM corpus_molecules WHERE id = ANY(%s)", (structures,))
@@ -472,9 +447,7 @@ async def _worst_tick_gap(
 ) -> tuple[float, float]:
     """Run `work` beside a ticker; return how long `work` took and the ticker's worst gap.
 
-    The honest measurement of "does this stall the loop": a coroutine that only *looks* concurrent
-    still lets a 5 ms ticker keep its beat, and one that computes in-line does not — the ticker's
-    worst gap is the length of the freeze every other session on the pod would have felt.
+    The worst gap is how long every other session on the pod would freeze.
     """
     gaps: list[float] = []
     stop = asyncio.Event()
@@ -498,15 +471,11 @@ async def _worst_tick_gap(
 
 
 async def test_the_substructure_verify_does_not_freeze_the_event_loop() -> None:
-    """The screen's survivors are verified off the loop, so no other session's stream stalls.
+    """The substructure verify does not freeze the event loop.
 
-    This is the property `molfp.find_substructure_matches` states for its own scan and this path
-    did not have: RDKit matching ran in a list comprehension inside `async def`, so the pod's one
-    event loop stopped for the whole verify — measured at 300 rows, a 522 ms freeze of every SSE
-    stream, `/healthz` and every bearer-token validation, and the cap is 5,000 rows.
-
-    Asserted as a number rather than as "it was called in a thread", because a thread that the
-    loop then awaits synchronously would pass the second and fail a chemist.
+    RDKit matching of the screen's survivors runs off the loop, as in
+    `molfp.find_substructure_matches`, so SSE streams, `/healthz` and token validation keep running.
+    Asserted as a measured gap, since a thread the loop awaits synchronously would still freeze it.
     """
     await migrated_db_or_skip()
     molecules = CorpusMolecules()
@@ -543,23 +512,11 @@ async def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_a
 
 
 def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_candidates() -> None:
-    """The bound above releases the caller; this is what makes it true of the worker thread.
+    """A verify past its deadline stops instead of matching the rest of the candidates.
 
-    `asyncio.wait_for` cannot stop a thread, so before this the verify went on matching every
-    remaining candidate — up to `substructure_scan_max_records` of them — against a pattern already
-    known to be pathological.
-
-    **A candidate count, not a ratio of two wall clocks.** This asserted
-    `bounded < unbounded / 4`, and its own docstring claimed machine independence on the grounds
-    that "the deadline is expressed in matches, so a faster machine changes the numbers and not the
-    property" — the same claim its sibling in `tests/test_molfp.py` had to retract after a quarter
-    failed `main` twice in one morning at 0.270 and 0.271. The count was already in hand here:
-    `_verify_within` reads the deadline between candidates, so `examined` is exactly the quantity,
-    and it was going into an exception message and nowhere else. `VerifyDeadlineExceeded` carries
-    it out.
-
-    Two integers that do not move with the machine: a bounded verify reaches a handful of the 300
-    candidates, and a deadline that does not reach the thread reaches all 300 while raising.
+    `asyncio.wait_for` cannot stop a thread, so `_verify_within` checks the deadline between
+    candidates. Asserted as a candidate count (`VerifyDeadlineExceeded.examined`): a handful of the
+    300 when bounded, all 300 when not, independent of machine speed.
     """
     query = compile_query(_UNMATCHABLE)
     molecule = Chem.MolFromSmiles(_CHAIN_CORPUS[0])
@@ -584,13 +541,11 @@ def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_ca
 
 
 def test_an_oversized_substructure_query_is_refused_before_anything_is_scanned() -> None:
-    """A model-supplied SMARTS is bounded in length, the one guard this path had no reader for.
+    """An oversized substructure query is refused before anything is scanned.
 
-    `substructure_query_max_length` existed and only `molfp.search` read it; the pattern screen —
-    reached by the `reactions_making_substructure` tool with a string the model wrote — took any
-    length at all. Asserted through `containing` rather than through `compile_query`, because the
-    claim is that the guard is on the path a tool call takes: no database is needed for this test
-    to pass, which is itself the assertion that nothing was screened and nothing was verified.
+    `substructure_query_max_length` applies on the path the `reactions_making_substructure` tool
+    takes. Asserted through `containing`; no database is needed, which itself shows nothing was
+    screened.
     """
     oversized = "~".join(["[*]"] * settings.substructure_query_max_length)
     with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_QUERY_MAX_LENGTH"):
@@ -619,16 +574,12 @@ async def _reaction_fingerprints(tag: str) -> InMemoryFingerprintStore:
 
 
 def test_q7_has_this_transformation_been_run_and_under_what_conditions() -> None:
-    """The question `corpus_reactions` exists to answer, and why product similarity is not enough.
+    """Question 7: has this transformation been run, and under what conditions?
 
-    The Buchwald and the Suzuki in this fixture share the aryl bromide and make *different*
-    products, so a product-similarity pre-pass would separate them for the wrong reason. Asking in
-    transformation space is what makes "this coupling" mean the coupling: querying with the
-    Buchwald transformation returns the three Buchwalds and never the Suzuki.
-
-    Run against both backends, because `Facet.reaction_keys` is an `unnest(sources, ids)` zip in SQL
-    and a tuple membership test in Python — two expressions of one narrowing, which is exactly where
-    this file's other tests have caught a predicate meaning something else.
+    The Buchwald and Suzuki share the aryl bromide and make different products, so product
+    similarity separates them for the wrong reason; querying in transformation space returns the
+    three Buchwalds and never the Suzuki. Both backends, since `Facet.reaction_keys` is an `unnest`
+    zip in SQL and a tuple membership test in Python.
     """
 
     async def body(index: LabelIndex, tag: str) -> None:
@@ -650,12 +601,10 @@ def test_q7_has_this_transformation_been_run_and_under_what_conditions() -> None
 
 
 def test_no_neighbours_is_not_an_empty_answer_over_the_whole_corpus() -> None:
-    """An empty neighbour set must not leave the facet open — the twin of the product-side guard.
+    """No neighbours is an empty answer, not the whole corpus.
 
-    A `Facet()` with nothing set selects the entire index, so returning `_search` on it would
-    answer "conditions for reactions similar to X" with every reaction on file. The result must be
-    empty hits *with* a coverage sentence, which is how a caller tells "no precedent found" from
-    "nothing was searched".
+    An empty `Facet()` selects the entire index, so the result must be empty hits with a coverage
+    sentence.
     """
 
     async def body(index: LabelIndex, tag: str) -> None:

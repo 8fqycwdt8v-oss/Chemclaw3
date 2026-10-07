@@ -198,12 +198,11 @@ def test_a_failure_note_is_not_current_before_it_was_observed() -> None:
 
 
 def test_retiring_the_refuted_note_ends_the_flag_and_keeps_the_history() -> None:
-    """Retiring the refuted note ends the flag and keeps the history; `close_refuted_note` is
-    opt-in.
+    """Retiring the refuted note ends the flag and keeps the history.
 
-    Closing is right for a claim that stopped being true and wrong for one that never was: the note
-    then answers `is_current` True inside its old window, and the conflict scan stops reporting it.
-    Left open, the disagreement is flagged on every retrieval.
+    `close_refuted_note` is opt-in: closing is right for a claim that stopped being true and wrong
+    for one that never was, since the note then answers `is_current` True inside its old window and
+    the conflict scan stops reporting it. Left open, the disagreement is flagged on every retrieval.
     """
     claim = _note("playbook-x", type="playbook", valid_from=date(2024, 1, 1))
     reported = failure_note("playbook-x", "half the yield", reported_by="a@example.com")

@@ -368,8 +368,7 @@ async def _from_update(
                     )
         plan = _todo_titles(update) if emit_plan else None
         if plan is not None and plan != todos:
-            # Only on change and never empty, like `runner._PlanEmitter`: an empty list is the
-            # harness clearing its plan.
+            # Only on change and never empty: an empty list is the harness clearing its plan.
             todos[:] = plan
             if plan:
                 # Hash the steps (`content` plus `tools` declaration, as `plan_state.session_plan`

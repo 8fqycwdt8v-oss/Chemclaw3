@@ -1,56 +1,18 @@
-"""`model_copy(update=…)` assigns past validation, and a fixture that does it may own its subject.
+"""`model_copy(update=...)` skips validation, so a fixture using it may supply its own subject.
 
-**The defect this file exists for, and the measurement that reshaped it.** A guard for two new
-model fields was green with both fields *deleted*, because its fixture built the answer with
-`model_copy(update=…)` — which writes straight into `__dict__` and therefore supplies a key whether
-or not the model declares it. `tasks/lessons.md` records the rule ("a fixture built past validation
-is a fixture that supplies the subject"), and the review that found it proposed flagging every
-`model_copy(update=…)` in a test whose subject model declares `extra="ignore"` or `extra="forbid"`.
+The `extra=` setting does not separate dangerous sites from harmless ones. Danger is a relation:
+the fixture supplies the very thing the test asserts about, which is not readable from the call
+site. This file derives the two readable halves from the live tree:
 
-**That heuristic was measured and it separates nothing, in both directions.** Every one of the 149
-call sites the suite executed at the time was instrumented — `BaseModel.model_copy` patched for the
-run, the copy re-validated through `model_validate` and compared with what `model_copy` produced.
-The figures in this paragraph are that measurement, not a claim about the tree today; the live
-numbers are what the two assertions below print when they fail. Not one site injects a key the model
-does not declare, not one produces an object `model_validate` refuses, and exactly one produces an
-object that differs from the validated form (`test_structure.py`'s deliberate
-`Structure(**noisy.model_dump())`, which re-crosses the boundary on purpose). Meanwhile
-`extra="ignore"`/`"forbid"` selects 65 of those 149 — and `extra="ignore"` is *pydantic's default*,
-so the 80 sites on models that declare nothing behave identically to the 6 that declare `"ignore"`.
-A property shared by four fifths of the tree, held by every harmless site and by no dangerous one,
-is not a discriminator.
+* a check the constructor runs and the copy does not: a site is flagged when the key it updates is
+  inspected by the subject model's `model_validator(mode="after")`;
+* a boundary production crosses: `src/` obtains the model via `Model.model_validate(`, so a
+  non-validating fixture is not what the system receives.
 
-**So "dangerous" is not a property of the object.** No fixture here builds an impossible one. What
-the found defect actually was is a *relation* between the fixture and the assertion: the fixture
-supplied the very thing whose treatment was under test. That relation is not readable from the call
-site — nothing in `x.model_copy(update={"version": …})` says whether the test is about `version`.
-
-What *is* readable is the narrower proposition that makes the relation possible, and this file
-derives two halves of it from the live tree rather than asserting either:
-
-* **A check the constructor runs and the copy does not.** The subject model's own
-  `model_validator(mode="after")` bodies are read, and a site is flagged when the key it updates is
-  one a validator inspects. `Structure._normalize_and_validate` rounds `positions` and refuses an
-  impossible `multiplicity`; a copy that sets either has skipped that, so the object is inside the
-  model's type but outside its rules.
-* **A boundary production actually crosses.** `src/` is read for `Model.model_validate(` — if the
-  system obtains this model by validating, then a fixture that does not validate is not what the
-  system receives, which is the lesson's own criterion ("the fixture has to cross that boundary the
-  way production crosses it") with the crossing *found* instead of assumed.
-
-Flagged sites are argued in `_ARGUED`, held in both directions so an entry that stops being flagged
-fails too — the same shape as a figure check. A flag is not a verdict: most of
-these are fine, and the entry says why.
-
-**The scope is `tests/` only, and that is a decision rather than an oversight.** `src/` holds dozens
-of `model_copy(update=…)` calls of its own; there the call is production deliberately deriving one
-model from another, and whether that should go through validation is a question about the code, not
-about a fixture owning its subject. Nothing here would separate the two, so this file does not
-claim to.
-
-**The admissibility arm carries no allowlist**, because an object the model would refuse cannot be
-argued for. It is empty today and that is the measurement above, not an absence of checking:
-`test_the_rule_can_fail` drives both arms over a model defined here.
+Flagged sites are argued in `_ARGUED`, held in both directions. The scope is `tests/` only: in
+`src/` deriving one model from another is a code question, not fixture ownership. The
+admissibility arm has no allowlist, since an object the model would refuse cannot be argued for;
+`test_the_rule_can_fail` drives both arms.
 """
 
 from __future__ import annotations
@@ -75,15 +37,9 @@ _VALIDATED_IN_SRC = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\s*\.\s*model_validate(?:
 #: `self.<field>` inside a validator body: the fields that validator inspects.
 _SELF_FIELD = re.compile(r"self\.([a-z_][a-z0-9_]*)")
 
-#: Every flagged site, keyed `<file>::<test>::<Model>.<field>` so the entry survives an edit above
-#: it, with the reason the fixture may build its subject that way. Held in both directions.
-#:
-#: The evidence common to all of them, and the reason none of these is a defect: every call site
-#: this suite executes was instrumented and its copy re-validated through `model_validate`. Each
-#: entry below came back **identical to the validated form**, so the object under test is one the
-#: system could have produced — the bypass is real and its effect here is nil. What each reason
-#: adds is the part no instrumentation can see: that the *assertion* is not about the check that
-#: was skipped.
+#: Every flagged site, keyed `<file>::<test>::<Model>.<field>`, with the reason the fixture may
+#: build its subject that way; held in both directions. Each reason states that the assertion is not
+#: about the check the copy skipped.
 _ARGUED: dict[str, str] = {
     # --- OrdReaction: `_roles_are_consistent` and `_steps_are_ordered` --------------------------
     "tests/test_eln.py::test_unparseable_smiles_is_a_problem::OrdReaction.outcomes": (
@@ -284,9 +240,9 @@ class _Module:
     def subject(self, receiver: ast.expr, node: ast.AST, depth: int = 0) -> str | None:
         """The class name of `receiver`, followed through the shapes this suite writes.
 
-        Deliberately partial: a receiver this cannot name is reported by
-        `test_the_walk_names_most_of_the_subjects_it_finds` rather than silently dropped, because a
-        resolver that goes blind turns this whole file green.
+        Deliberately partial: an unnamed receiver is reported by
+        `test_the_walk_names_most_of_the_subjects_it_finds` rather than dropped, since a blind
+        resolver turns this file green.
         """
         if depth > 6:
             return None
@@ -500,11 +456,10 @@ def _inadmissible(sites: list[Site]) -> list[str]:
 
 
 def test_no_model_copy_fixture_builds_an_object_its_own_model_would_refuse() -> None:
-    """A copy that assigns a value the field rejects is an object production cannot deliver.
+    """No `model_copy` fixture builds an object its own model would refuse.
 
-    There is nothing to argue here and so no allowlist: a guard whose subject could not have
-    reached the code under test is measuring the fixture. Empty today — instrumented, no site in
-    this suite builds one — and `test_the_rule_can_fail` is what proves the arm still looks.
+    Production cannot deliver such an object, so there is no allowlist; `test_the_rule_can_fail`
+    proves the arm still looks.
     """
     sites, _ = _sites()
     refused = _inadmissible(sites)
@@ -516,11 +471,11 @@ def test_no_model_copy_fixture_builds_an_object_its_own_model_would_refuse() -> 
 
 
 def test_every_model_copy_fixture_that_skips_a_check_its_model_applies_is_argued() -> None:
-    """A copy that walks past a check the constructor runs has to say why that is safe here.
+    """Every copy that skips a check its model applies is argued in `_ARGUED`.
 
-    Flagged from the live tree, never from a list in this file: the model's own
-    `model_validator` bodies say which fields they inspect, and `src/` says which models it obtains
-    by validating. A flag is not a defect — it is the set a reader has to be able to check.
+    Flagged from the live tree: validator bodies say which fields they inspect, and `src/` says
+    which models it obtains by validating. A flag is not a defect, only a site a reader must be able
+    to check.
     """
     sites, total = _sites()
     flagged = _flagged(sites)
@@ -535,11 +490,10 @@ def test_every_model_copy_fixture_that_skips_a_check_its_model_applies_is_argued
 
 
 def test_no_argument_outlives_the_fixture_it_argues() -> None:
-    """An exemption that can no longer be tripped is a claim that a control exists.
+    """No entry in `_ARGUED` outlives the fixture it argues.
 
-    The other direction of the same list, and the one that makes the guard above self-proving: if
-    the walk stops naming subjects, or a fixture is rebuilt through its constructor, the entry here
-    stops matching and this fails rather than the tree going quietly green.
+    If the walk stops naming subjects or a fixture is rebuilt through its constructor, the stale
+    entry fails here.
     """
     sites, _ = _sites()
     flagged = _flagged(sites)
@@ -551,12 +505,10 @@ def test_no_argument_outlives_the_fixture_it_argues() -> None:
 
 
 def test_the_rule_can_fail() -> None:
-    """Both arms, driven over a model defined here, because neither fires on the tree today.
+    """Both arms fire on a model defined here, since neither fires on the tree today.
 
-    The admissibility arm is empty and the flagged arm is fully argued, which is exactly the state
-    in which a broken derivation is indistinguishable from a clean tree. So the derivations are
-    driven directly: a field a validator inspects is flagged, a field nothing checks is not, and a
-    value the field refuses is refused.
+    A field a validator inspects is flagged, an unchecked field is not, and a value the field
+    refuses is refused.
     """
 
     class _Subject(pydantic.BaseModel):

@@ -507,7 +507,7 @@ class ConnectorManifest(BaseModel):
     jobs: list[JobSpec] = Field(default_factory=list)
     # Names of the `SKILL.md` folders under this bundle's `skills/` and the profile files under its
     # `profiles/`. Declared so a stray folder fails CI rather than shipping
-    # (`scripts.validate_connectors`).
+    # (`chemclaw.cli.validate_connectors`).
     skills: list[str] = Field(default_factory=list)
     profiles: list[str] = Field(default_factory=list)
     # The knowledge-graph vocabulary this bundle's `publish_to_graph` jobs mint, unioned into

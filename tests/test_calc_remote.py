@@ -175,12 +175,11 @@ async def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_rec
 async def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused call and an unreachable server are different failures, because a durable job acts
-    on it.
+    """A refused call and an unreachable server are different failures.
 
-    An unreachable server is fixed by a retry; a refused request is not. Asserted on the hierarchies
-    `durable/publish.py` matches: `CalcToolError` is a non-retryable `ChemclawError`, and
-    `CalcServerError` is a retryable `SubsystemUnavailableError`.
+    A durable job acts on the difference: an unreachable server is fixed by a retry, a refused
+    request is not. Asserted on the hierarchies `durable/publish.py` matches: `CalcToolError` is a
+    non-retryable `ChemclawError`, and `CalcServerError` is a retryable `SubsystemUnavailableError`.
     """
 
     class _Failing(_FakeSession):

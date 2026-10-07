@@ -557,7 +557,7 @@ def test_contradictory_constraints_are_diagnosed_as_constraints_not_as_bad_measu
 
 
 def test_botorch_still_raises_a_typed_error_for_an_empty_polytope() -> None:
-    """botorch still raises a typed error for an empty polytope.
+    """The empty-polytope error is still a typed botorch exception.
 
     The branch above keys on `InfeasibilityError`, not on wording; if a bump removes or re-parents
     it, this fails first.

@@ -524,8 +524,8 @@ def context_compaction_middleware() -> list[Any]:
                 GuardedEdit(
                     ClearOlderToolResultsEdit(
                         # Its own trigger, well below the window's budget: clearing is lossless, so
-                        # running it early
-                        # spares conversation groups the window would otherwise delete.
+                        # running it early spares conversation groups the window would otherwise
+                        # delete.
                         trigger=settings.agent_tool_result_clear_trigger,
                         keep=settings.agent_keep_last_tool_groups,
                         placeholder=TOOL_RESULT_PLACEHOLDER,

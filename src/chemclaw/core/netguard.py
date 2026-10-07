@@ -9,10 +9,10 @@ because `EgressForbidden` subclasses `OSError` and libraries routinely swallow t
 Layers:
 - This module patches Python's `socket` entry points. It cannot see child processes, `ctypes` calls,
   compiled extensions (gRPC's C-core, Temporal's Rust core) or `_socket.socket`.
-- `core/netguard_preload.c`, an `LD_PRELOAD` interposer on libc's `connect`, `getaddrinfo`, `sendto`
-  and `sendmsg`, armed by `deploy/entrypoint.sh` from the allowlist this module derives, covers
-  compiled code and inherited child processes (so a remote git host must be allowlisted). It reports
-  `chemclaw_egress_preload_armed` separately.
+- `core/netguard_preload.c`, an `LD_PRELOAD` interposer on libc's network calls (that file is the
+  declaration of which ones), armed by `deploy/entrypoint.sh` from the allowlist this module
+  derives, covers compiled code and inherited child processes (so a remote git host must be
+  allowlisted). It reports `chemclaw_egress_preload_armed` separately.
 - Statically linked binaries and raw syscalls are left to the NetworkPolicy.
 
 A proxy moves the destination out of the address, and a loopback sidecar proxy is invisible to the

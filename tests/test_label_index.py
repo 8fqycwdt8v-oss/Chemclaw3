@@ -1,10 +1,8 @@
 """The reaction-label index: the two-phase write, staleness as a query, and coverage.
 
-Every test here runs against **both** backends, driven by the same body, because the in-memory one
-is the reference the SQL one has to match and the interesting rules — what a re-ingest may clobber,
-what `IS DISTINCT FROM NULL` finds — are exactly the ones that are easy to get right in Python and
-wrong in SQL. The Postgres half skips when no database is reachable (see `tests/pg.py`; a green
-local run without `make up` has executed only half of this file).
+Every test runs against both backends with the same body: the in-memory one is the reference, and
+rules such as what a re-ingest may clobber or what `IS DISTINCT FROM NULL` finds are easy to get
+right in Python and wrong in SQL. The Postgres half skips without a database (`tests/pg.py`).
 """
 
 import asyncio
@@ -88,9 +86,7 @@ async def _postgres_or_skip() -> PostgresLabelIndex:
 def _both_backends(body: Callable[[LabelIndex, str], Awaitable[None]]) -> None:
     """Run `body` against the in-memory backend and then against Postgres, on distinct keys.
 
-    Distinct keys because the durable index is shared with every other test in the same schema, and
-    a fixture id colliding with another file's is the failure mode `tests/pg.py`'s isolation note
-    describes one level up.
+    The durable index is shared with every other test in the schema.
     """
 
     async def _run() -> None:
@@ -164,18 +160,10 @@ def test_labelling_stamps_the_row_out_of_the_stale_set_and_a_version_bump_puts_i
 
 
 def test_a_derived_phase_is_paired_to_its_species_by_ordinal_in_both_backends() -> None:
-    """The two backends have to agree about *which species* an answer is about.
+    """A derived phase is paired to its species by ordinal in both backends.
 
-    `PostgresLabelIndex` matches `ordinal` in its `UPDATE`; the in-memory index zipped the two
-    lists by position. Measured on this same reaction with the derived species handed back
-    reversed — the shape a labeller that groups by role produces — bromobenzene came back
-
-        in-memory  ordinal 0 Brc1ccccc1  PRODUCT
-        postgres   ordinal 0 Brc1ccccc1  STARTING_MATERIAL
-
-    from one `store_labels` call, and a short answer was truncated in one backend and applied in
-    the other. `_carry_species` one method up already pairs the record phase by ordinal for the
-    same reason.
+    `PostgresLabelIndex` matches `ordinal`; pairing by list position would disagree when a labeller
+    returns species in another order, and treat a short answer differently.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -309,27 +297,13 @@ def test_the_stale_scan_is_bounded_and_deterministic() -> None:
 
 
 async def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
-    """`current_version()` must reach `reaction_labels_current_version_idx` (086).
+    """`current_version()` reaches `reaction_labels_current_version_idx`.
 
-    Two halves, because they fail for different reasons. The **shape** half runs with no database:
-    the index is `(labelled_at DESC, source, reaction_id) WHERE labelled_at IS NOT NULL`, so this
-    statement's partial-index predicate and its `ORDER BY` have to be that index's exactly, or the
-    plan is a silent return to the parallel sequential scan the migration measures at 118 ms over a
-    million rows — paid once per rxnfp tool call, on the turn path. The **plan** half asks Postgres.
-
-    **The two ends are pinned and the middle deliberately is not.** This was one `endswith` over
-    the whole tail, which made an added *filter* indistinguishable from a rewritten `ORDER BY`:
-    `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished` added
-    `AND labeller_version NOT LIKE '%…'`, which changes nothing about which index serves the
-    statement (it discards rows the scan already walked, in the same order) and failed this
-    assertion anyway. What the index actually requires
-    is the two ends; that a filter between them is still served by it is exactly the claim the plan
-    half is here to make, so pinning it in prose twice would be the re-derivation
-    `tests/test_context_floor.py`'s docstring warns about.
-
-    `enable_seqscan = off` rather than a million seeded rows: with the sequential scan disabled, a
-    statement the index can serve plans as an index scan at any row count. What is being asserted
-    is that the index is reachable, not a timing that would depend on how much this test inserted.
+    Shape half, no database: the statement's partial-index predicate and `ORDER BY` must match the
+    index `(labelled_at DESC, source, reaction_id) WHERE labelled_at IS NOT NULL`, or every rxnfp
+    tool call pays a sequential scan. Only the two ends are pinned; that a filter between them is
+    still served is what the plan half checks, with `enable_seqscan = off` so reachability shows at
+    any row count.
     """
     assert PostgresLabelIndex._CURRENT_VERSION.startswith(
         "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL"
@@ -353,19 +327,10 @@ async def test_current_version_reads_the_index_and_not_the_whole_corpus() -> Non
 
 
 def test_a_labellers_confidence_survives_the_round_trip_in_both_backends() -> None:
-    """The column was `REAL`, so the double a labeller reported came back a different number.
+    """A labeller's confidence survives the round trip in both backends.
 
-    `ReactionLabel.confidence` is a Python `float` — IEEE double — and `reaction_labels.confidence`
-    was the only single-precision column in the schema: a `REAL` grep over `infra/sql` and `schema`
-    matched that one line and nothing else, so it was a slip rather than a convention. Measured
-    before migration 091, a model's `1/3` came back `0.3333333432674408`, and `0.95` came back
-    `0.949999988079071` — which is the shape that bites: the day something writes
-    `WHERE confidence >= 0.95`, the row stored *as* 0.95 is not in the answer, and nothing in the
-    stored value says why.
-
-    Driven through both backends because the in-memory index is what every other test in this file
-    proves behaviour against, and it holds the double. The two must agree, or those tests are
-    evidence about a store the deployment does not have.
+    `ReactionLabel.confidence` is a double; a `REAL` column would return 0.95 as 0.949999988..., and
+    a later `WHERE confidence >= 0.95` would miss it.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -387,14 +352,11 @@ def test_a_labellers_confidence_survives_the_round_trip_in_both_backends() -> No
 
 
 def test_an_underived_stamp_is_not_currency_in_either_backend() -> None:
-    """`store_labels(derived=False)` advances the drain without claiming the row is labelled.
+    """An underived stamp is not currency in either backend.
 
-    The three readers that decide currency have to agree with the one that decides staleness, and
-    they had not: `stale()` moved on (correct — the drain must advance past a row the labelling
-    server cannot answer for) while `coverage` counted the row as labelled at the new version, over
-    content the *previous* labeller derived. Driven through both backends because the marker is
-    handled in a Python set on one side and in a SQL `IS DISTINCT FROM` on the other, and this
-    file's whole premise is that a rule easy to get right in Python is the one to check in SQL.
+    `store_labels(derived=False)` advances `stale()` without letting `coverage` count the row as
+    labelled. Both backends, since the marker is a Python set on one side and SQL `IS DISTINCT FROM`
+    on the other.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -418,13 +380,10 @@ def test_an_underived_stamp_is_not_currency_in_either_backend() -> None:
 
 
 def test_an_underived_stamp_does_not_become_the_current_version_in_either_backend() -> None:
-    """The stamp is not advanced past the newest *derived* row, and neither is `labelled_at`.
+    """An underived stamp does not become the current version in either backend.
 
-    `current_version()` feeds every rxnfp tool, which passes it straight to `coverage`/`select`.
-    Answering with a marked stamp would count only the rows nothing was derived for — the defect
-    inverted — so the marked form is skipped, and `labelled_at` is left where it was so that an
-    ordinary degraded row is outranked by any genuinely derived one rather than relying on that
-    filter alone.
+    The marked form is skipped, and `labelled_at` is left alone so a degraded row is outranked by
+    any genuinely derived one.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -452,13 +411,10 @@ async def _labelled_at(index: LabelIndex, reaction_id: str) -> object:
 
 
 def test_a_version_that_already_carries_the_marker_is_refused_in_both_backends() -> None:
-    """The one way the tagged value could stop being decidable, refused where it is composed.
+    """A version that already carries the marker is refused in both backends.
 
-    `labeller_version` is `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"` and `remote`
-    is a separately versioned server's own answer, so this repository does not get to constrain the
-    string at its source. A remote version ending in the marker would make a genuinely derived row
-    indistinguishable from an un-derived one — silently, and permanently, since nothing would
-    revisit it. Loud here instead: the write does not happen.
+    `remote` comes from a separately versioned server, so a version ending in the marker would make
+    a derived row indistinguishable from an underived one; the write is refused instead.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:

@@ -47,8 +47,8 @@ class AgentSettings(BaseSettings):
     # older conversation groups are cut on a group boundary; the newest group is never dropped.
     # `agent_keep_last_conversation_groups` is an optional extra cap on groups kept (0 = off, so the
     # token budget governs). `chemclaw_context_compactions_total` shows it working. Derived default:
-    # smallest target window (128k) - `llm_max_tokens` must fit the budget, and the thread allowance
-    # is what remains after `tests/test_context_floor.PREFIX_BOUND`; `tests/test_compaction.py`
+    # `tests/test_context_floor.PREFIX_BOUND` + `BUDGET_THREAD_ALLOWANCE`, which must fit within
+    # the smallest target window (128k) - `llm_max_tokens`; `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`) asserts it.
     agent_context_token_budget: int = Field(default=119_300, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
@@ -307,9 +307,9 @@ class AgentSettings(BaseSettings):
     # its interval from this.
     template_step_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
     # Whole-run wall clock for one template execution. A literal, not derived, so raising
-    # `connector_job_timeout_seconds` is refused at startup until this is raised too
-    # (`core/config/__init__.py` requires it to contain one step). Default: a `job` step's bound
-    # (`wrapper_execution_timeout()`, 38,130 s) + eight ordinary steps (7,200 s).
+    # `connector_job_timeout_seconds` is refused at startup until this is raised too:
+    # `_the_template_run_ceiling_covers_one_step` requires it to exceed the longest step's ceiling
+    # (`template_step_ceilings`), usually a `job` step's `wrapper_execution_timeout()`.
     template_run_timeout_seconds: float = Field(default=45330.0, gt=0)
 
     @property

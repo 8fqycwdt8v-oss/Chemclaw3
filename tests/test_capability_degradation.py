@@ -45,8 +45,7 @@ def _dark_connector(name: str) -> Any:
     `HeldConnectorSession` absorbs it, the name comes back in `unreachable`) is what is tested.
     """
     # The tool never answers — this address is deliberately dark — but a manifest may not
-    # declare an empty `tools` list, because that used to turn the allow-list off and leave
-    # everything a server advertised unclassified.
+    # declare an empty `tools` list.
     endpoint = HttpEndpoint(
         url=f"http://127.0.0.1:{_free_port()}/mcp", tools=["unreached"], read_only=["unreached"]
     )

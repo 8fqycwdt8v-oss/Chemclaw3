@@ -1,27 +1,11 @@
 """Reaching a calculation's by-products: `list_artifacts` and `fetch_artifact` (D-165).
 
-The artifact store has been complete on the write side since D-124 — content-addressed, deduped,
-eviction-managed — and unreachable from the agent. A note may cite an `artifact_ref` in exactly the
-form `ArtifactRef.as_str()` writes, and nothing could open it. `find_calculations` (D-163) made the
-gap sharper by handing the model calculation keys it then had no way to look behind.
-
-What is pinned here is the pair of refusals, because both replace a plausible wrong answer: a
-binary artifact is refused rather than returned as mojibake, and a truncated read says so rather
-than reading as the whole file.
-
-**And, since `D-2026-08-27-a-tool-that-can-only-refuse-is-not-a-capability`, what the pair may
-*say*.** Measured on the real write path, `list_artifacts` returns one `application/x-npy` entry
-and `fetch_artifact` on it raises "is binary" — every time, because `ArrayOffloadingStore` is the
-only artifact writer left and it writes nothing but packed arrays. The text by-products these
-docstrings were written for went with the engines. So the last three tests below hold the surface
-to what the code can do: the refusal is *derived* from the writer rather than transcribed, no
-agent-facing surface names an artifact nothing produces, and the spectrum the docstrings now
-redirect to is one the code actually returns.
-
-The text fixtures here are deliberately hypothetical, and `test_no_agent_facing_surface_names_an_
-artifact_without_a_producer` is what stops that from becoming a claim: they exercise a real code
-path (`fetch_artifact`'s decode, clamp and truncate) that would serve any text artifact a future
-writer produced, and they are not evidence that one exists.
+The pair's refusals replace plausible wrong answers: a binary artifact is refused rather than
+returned as mojibake, and a truncated read says so. `ArrayOffloadingStore` is the only artifact
+writer and writes packed arrays only, so the last tests hold the agent-facing surface to that
+(`D-2026-08-27-a-tool-that-can-only-refuse-is-not-a-capability`): the refusal is derived from the
+writer, no surface names an artifact nothing produces, and the redirected spectrum is one the code
+returns. The text fixtures exercise a real decode path, not evidence that a text artifact exists.
 """
 
 import ast
@@ -164,19 +148,13 @@ async def test_a_reference_without_a_name_is_rejected(monkeypatch: pytest.Monkey
 
 # --- what the surface is allowed to say -------------------------------------------------------
 #
-# `ArrayOffloadingStore` is the only artifact writer left in this repository, and `HESSIAN_ARRAYS`
-# is the map it offloads through — so the set of names anything here can ever store is exactly its
-# values. Deriving both the refusal and the dead-name set from that constant, rather than listing
-# them, is what makes these tests fail the day a *text* writer is added: the name drops out of the
-# dead set on its own and the refusal below stops holding, which is the moment the docstrings need
-# revisiting. An invariant, not a transcription.
+# `HESSIAN_ARRAYS` is the map the only artifact writer offloads through, so its values are every
+# name that can be stored. Deriving from it makes these tests fail the day a text writer is added,
+# which is when the docstrings need revisiting.
 
 _PRODUCED: frozenset[str] = frozenset(HESSIAN_ARRAYS.values())
-# Every name the media-type table knows that nothing writes. `vibspectrum`, `xtbopt.xyz` and the
-# two CREST ensembles are here because their producers left with the engines
-# (`D-2026-08-16-the-physics-leaves-the-cache-stays`); `density.restart` and `orbitals.molden`
-# because the tier they were reserved for was retracted outright
-# (`D-2026-08-26-semiempirical-is-the-whole-tier`).
+# Every name the media-type table knows that nothing writes: their producers moved to the
+# calculation server or were retracted with the tier they served.
 _WITHOUT_A_PRODUCER: frozenset[str] = frozenset(_MEDIA_TYPES) - _PRODUCED
 
 
@@ -205,12 +183,10 @@ def _agent_facing_surfaces() -> dict[str, str]:
 
 
 def test_every_artifact_this_release_can_write_is_refused_by_fetch_artifact() -> None:
-    """The measurement behind the decision, derived from the writer rather than transcribed.
+    """Every artifact this release can write is refused by `fetch_artifact`.
 
-    `ArrayOffloadingStore` offloads exactly `HESSIAN_ARRAYS`, and every one of those is a packed
-    `.npy` whose magic byte is not valid UTF-8 — so `fetch_artifact` refuses the complete set of
-    what this repository stores. That is what makes "it can only refuse" a fact about the code and
-    not a remark about today's data.
+    Each offloaded array is a packed `.npy` whose magic byte is not UTF-8, so "it can only refuse"
+    is a fact about the code.
     """
 
     async def _run(store: InMemoryArtifactStore) -> None:
@@ -234,10 +210,7 @@ def test_every_artifact_this_release_can_write_is_refused_by_fetch_artifact() ->
 def test_no_agent_facing_surface_names_an_artifact_without_a_producer() -> None:
     """A docstring is the prompt, so a filename in one is an offer the model will take up.
 
-    `vibspectrum` and `xtbopt.xyz` were named in both places this checks, and neither has had a
-    writer since the engines moved. Naming a file nobody can obtain does not merely waste prompt:
-    it sends the model to `fetch_artifact` for a spectrum, which answers with an error, and the
-    turn that follows reports a gap where there is a band list.
+    Naming an artifact nobody can obtain sends the model to `fetch_artifact` for an error.
     """
     for where, text in _agent_facing_surfaces().items():
         for name in sorted(_WITHOUT_A_PRODUCER):
@@ -252,13 +225,10 @@ def test_no_agent_facing_surface_names_an_artifact_without_a_producer() -> None:
 
 
 def test_the_spectrum_the_docstrings_redirect_to_is_one_the_code_returns() -> None:
-    """The other half of the fix: a removed promise must leave a reachable answer behind.
+    """The spectrum the docstrings redirect to is one the code returns.
 
-    Deleting "a `vibspectrum`" from the two docstrings would be a regression on its own if the
-    spectrum then had nowhere to come from — a chemist asking for band positions would get a
-    refusal and no route. It has one, and this drives it rather than reading it: a
-    `ThermochemistryResult` carries every mode as a wavenumber with an IR intensity, and
-    `strongest_bands` is the truncation `compute_thermochemistry`'s `top_bands` applies.
+    A `ThermochemistryResult` carries every mode as a wavenumber with an IR intensity, and
+    `strongest_bands` is the truncation `top_bands` applies; driven rather than read.
     """
     for where in ("list_artifacts docstring", "fetch_artifact docstring"):
         text = _agent_facing_surfaces()[where]

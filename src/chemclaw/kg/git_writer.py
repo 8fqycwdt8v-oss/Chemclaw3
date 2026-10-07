@@ -14,7 +14,8 @@ Invariants:
   file is replaced atomically, and any failure restores the tree and un-stages the index.
 
 Writes serialize in-process through a loop-local lock, across processes through an exclusive
-`flock` under `.git/`, and across pods through a Postgres advisory lock.
+`flock` under `.git/`, and across pods through a Postgres advisory lock when
+`session_store="postgres"` (`_cluster_lock`).
 """
 
 import asyncio

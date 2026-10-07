@@ -842,12 +842,10 @@ async def _checkpoint_pool() -> Any:
                 conninfo=_session_dsn(),
                 kwargs={"autocommit": True, "connect_timeout": settings.pg_connect_timeout_seconds},
                 # Unlike `core/db`'s pool: a process that never takes a turn (a Temporal worker)
-                # holds no idle
-                # connections; the pool fills on demand.
+                # holds no idle connections; the pool fills on demand.
                 min_size=0,
                 # Sized for the memory store sharing this pool, not the saver: the saver uses one
-                # connection at a
-                # time, but `AsyncPostgresStore` is genuinely concurrent.
+                # connection at a time, but `AsyncPostgresStore` is genuinely concurrent.
                 max_size=settings.pg_pool_max_size,
                 # Timeout, idle limit and connection check match `core/db._pool_for`, so a saturated
                 # waiter is refused on the configured timeout and a backend killed from outside is

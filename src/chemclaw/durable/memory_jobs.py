@@ -112,15 +112,14 @@ async def read_corpus() -> CorpusRead:
                         reaction = adapter.map_to_ord(raw)
                     except ChemclawError as exc:
                         # A malformed entry is the sync's to report: skip and log it. Only
-                        # `ChemclawError` (the bad-data
-                        # contract) is caught, so unexpected errors surface.
+                        # `ChemclawError` (the bad-data contract) is caught, so unexpected errors
+                        # surface.
                         logger.info("memory job skipped an unmappable ELN entry: %s", exc)
                         skipped += 1
                         continue
                     if reaction.tier is RecordTier.CITATION_ONLY:
                         # A citation-only record has no reaction SMILES for the structural miners,
-                        # so it is left out and
-                        # counted without making the read incomplete.
+                        # so it is left out and counted without making the read incomplete.
                         citation_only += 1
                         continue
                     reactions.append(reaction)

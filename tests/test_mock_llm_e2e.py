@@ -1,12 +1,9 @@
 """The mock's selection rule and the browser suite's scripted workflows (`cli/e2e_behaviours.py`).
 
-Two halves. The first holds `MockLlm.select` and `already_has_tool_results` to the *turn*: the
-newest marked user message decides, and only this turn's tool results end a pass — the rule the
-kind suite measured broken (an `[[f-slow]]` asked after an `[[a-cheap]]` answered in 0.4 s as
-`a-cheap`, because the opening marker stayed in every resent thread). The second drives each `e2e:*`
-behaviour through `decide_turn` with the request shapes a real client sends, and — where it is
-cheap — through the agent graph itself, with a real `ChatOpenAI` posting to the mock's own app, so
-what is asserted is what the system did with the scripted model rather than what the script meant.
+First, `MockLlm.select` and `already_has_tool_results` follow the turn: the newest marked user
+message decides, and only this turn's tool results end a pass. Second, each `e2e:*` behaviour is
+driven through `decide_turn` with real client request shapes and, where cheap, through the agent
+graph with a real `ChatOpenAI` posting to the mock's app.
 """
 
 from __future__ import annotations
@@ -360,10 +357,9 @@ def test_cite_searches_the_store_before_it_cites_anything(served: MockLlm) -> No
     assert first.text == ""
 
 
-#: `uspto-amide-coupling-1` as the mock seeds it (the sibling Chemclaw3_mock's ELN fixtures, the
-#: `amide-coupling` archetype through `uspto_style_records`): the JSON-export shape, structure only.
-#: Copied rather than imported because the mock is a separate repository; what matters to the
-#: fingerprint is the species and their roles, and those are what is pinned.
+#: `uspto-amide-coupling-1` as the sibling `Chemclaw3_mock` seeds it (JSON-export shape, structure
+#: only). Copied because the mock is a separate repository; the species and roles are what the
+#: fingerprint depends on.
 _SEEDED_AMIDE_COUPLING = {
     "id": "uspto-amide-coupling-1",
     "reactants": [
@@ -380,10 +376,9 @@ _SEEDED_AMIDE_COUPLING = {
 def _similarity_to_seeded_amide(reaction_smiles: str) -> float:
     """Tanimoto of `reaction_smiles` against the seeded record, as the fingerprint index holds it.
 
-    Through the same steps ingestion takes — `JsonExportAdapter` to an `OrdReaction`, its
-    `transformation_smiles()` (reagents kept, solvent and catalyst dropped), `drfp_bitstring` — and
-    the same `tanimoto` the in-memory store ranks with, so this is the score the search compares
-    with `fingerprint_similarity_threshold`, computed without a database.
+    Through ingestion's own steps (`JsonExportAdapter`, `transformation_smiles()`, `drfp_bitstring`)
+    and the in-memory store's `tanimoto`, so this is the score compared with
+    `fingerprint_similarity_threshold`, without a database.
     """
     from datetime import UTC, datetime
 
@@ -402,12 +397,10 @@ def _similarity_to_seeded_amide(reaction_smiles: str) -> float:
 
 
 def test_cite_anchor_clears_the_similarity_threshold_against_the_seeded_corpus() -> None:
-    """The default anchor finds a seeded record, or the lane has nothing to cite.
+    """The default cite anchor clears the similarity threshold against the seeded corpus.
 
-    `find_similar_reactions` drops hits below `fingerprint_similarity_threshold`. The previous
-    anchor (benzoic acid + benzylamine) scored 0.168 against the nearest seeded reaction on the
-    kind cluster, so the fingerprint leg returned 0 chunks and the cited answer named a note alone.
-    Both halves are asserted, so the test is shown to discriminate rather than merely pass.
+    Below the threshold the fingerprint leg returns nothing and the lane has nothing to cite. Both
+    halves are asserted, so the test is shown to discriminate.
     """
     from chemclaw.core.config import settings
 
@@ -418,11 +411,10 @@ def test_cite_anchor_clears_the_similarity_threshold_against_the_seeded_corpus()
 
 
 def test_cite_anchor_finds_a_record_in_the_mock_s_own_seed() -> None:
-    """The same property against what `Chemclaw3_mock` actually seeds, read from the sibling.
+    """The cite anchor finds a record in what `Chemclaw3_mock` actually seeds.
 
-    The test above pins one record's shape so it runs anywhere; this one reads every free-text
-    record the mock serves (`uspto_style_records`), so a seed that drops or reshapes the amide
-    coupling fails here rather than on the kind lane, the place the old anchor was found wanting.
+    Reads every free-text record the sibling mock serves, so a seed change fails here rather than on
+    the kind lane.
     """
     import importlib.util
     from datetime import UTC, datetime
@@ -529,11 +521,10 @@ def test_the_long_job_quotes_the_id_the_launcher_returned(served: MockLlm) -> No
 
 
 def test_the_slow_turn_streams_its_text_over_time_rather_than_all_at_once() -> None:
-    """Frames are spread over `stream_seconds`, the first one at once. A lower bound only.
+    """The slow turn spreads its frames over `stream_seconds`, the first at once (lower bound only).
 
-    Timed on `_paced`, the generator both encoders draw their text frames from, rather than over
-    `httpx.ASGITransport`: that transport hands the client the response body only once the app has
-    finished, so every frame would appear to arrive at the same instant.
+    Timed on `_paced`, the shared frame generator, because `httpx.ASGITransport` delivers the body
+    only after the app finishes.
     """
     slow = next(b for b in e2e.E2E_BEHAVIOURS if b.name == e2e.SLOW)
     assert slow.calls == [] and slow.stream_seconds == e2e.SLOW_STREAM_SECONDS

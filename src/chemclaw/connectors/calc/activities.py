@@ -100,10 +100,11 @@ def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
 
     A worker has no request context, so both arrive as activity arguments (off the run's memo,
     outside `spec` so identity cannot change the cache key) and are bound here for
-    `connectors.identity.turn_identity_hook`, which `connectors/calc/remote.py::calc_session` hands
-    to `core.mcp_session.open_session`. The calc server's logs then name the person a durable run is
-    for. Off the durable path both are empty and nothing is stamped. `durable/interceptor.py` reads
-    the same two arguments; this bracket covers direct calls with no interceptor.
+    `core/call_identity.py::turn_identity_hook`, which `connectors/calc/remote.py::calc_session`
+    hands to `core.mcp_session.open_session`. The calc server's logs then name the person a durable
+    run is for. Off the durable path both are empty and nothing is stamped.
+    `durable/interceptor.py` reads the same two arguments; this bracket covers direct calls with no
+    interceptor.
     """
     if not actor and not correlation_id:
         yield

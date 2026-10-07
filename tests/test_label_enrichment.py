@@ -1,15 +1,9 @@
 """The enrichment drain: what it derives, what it keeps, and what it must never stall on.
 
-The property under test is the one the whole background service rests on — *`provides` is never a
-skip*. A source that ships NameRxn names for two thirds of its corpus is exactly as much work for
-this drain as one that ships none, because the policy describes the source's intent and the row
-describes the row. Everything else here is about not wedging: a reaction the server chokes on must
-cost that reaction and not the corpus behind it.
-
-The labelling server itself is faked. That is not a shortcut around an integration test — the real
-one lives in a separate repository and image — it is the same seam `tests/calc_server_fake.py`
-uses for the calculation server, and it is what lets the merge rule be asserted against answers
-chosen to exercise it.
+`provides` is never a skip: a source shipping names for part of its corpus is as much work as one
+shipping none, because the policy describes the source and the row describes the row. A reaction
+the server chokes on costs that reaction, not the corpus behind it. The labelling server is faked,
+as `tests/calc_server_fake.py` fakes the calculation server.
 """
 
 import asyncio
@@ -39,12 +33,9 @@ from chemclaw.science.labels.store import InMemoryLabelIndex
 from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION, LabelGroup, SpeciesRole
 
 _VERSION = "rxnlabel@1:std5:roles1"
-#: The stamp a *current* labeller mints, in the shape `labeller_version` composes —
-#: `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"`. Derived rather than written out,
-#: because the literal it replaced named `std7` and the labeller had moved to `std8`: the staleness
-#: assertion still passed (any version unequal to `_VERSION` is stale) while the string claimed to
-#: be a stamp nothing mints. This is the third place `STANDARDIZATION_VERSION` reaches, and
-#: `tests/test_compound_identity.py` pins the other two.
+#: The stamp a current labeller mints, in `labeller_version`'s shape
+#: (`f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"`). Derived rather than written out
+#: so it names a stamp something actually mints.
 _NEXT_VERSION = f"rxnlabel@2:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
 
 # A Buchwald-Hartwig, because it is the reaction three of the six precedent questions name and the
@@ -135,9 +126,8 @@ class _FakeLabeller:
     def _refused(self, wire_id: str) -> bool:
         """Whether this call is for a reaction the test told the server to refuse.
 
-        The drain sends a *correlation token*, not the reaction id — it has to, because the index
-        keys on `(source, reaction_id)` and one batch can hold two sources using one id. The token
-        still names the reaction it stands for, which is what lets a test go on saying "refuse r2".
+        The drain sends a correlation token, not the reaction id, because the index keys on
+        `(source, reaction_id)` and one batch can hold two sources using one id.
         """
         return wire_id.split(":", 1)[-1] in self.refuse
 
@@ -154,12 +144,10 @@ class _FakeLabeller:
 
 
 def test_a_group_the_source_provides_is_still_derived_where_the_row_is_empty() -> None:
-    """The whole of "the database will not have all these labels in the beginning".
+    """A group the source provides is still derived where the row is empty.
 
-    Pistachio declares that it provides named reactions. It ships them for part of its corpus — the
-    published figure is roughly two thirds — and the rest arrive with the column empty. Those rows
-    must be labelled, or the answer to "which ligands for Buchwald couplings" is drawn from
-    whichever fraction NameRxn happened to classify, silently.
+    A source like Pistachio ships named reactions for only part of its corpus; the rest must be
+    labelled, or answers come from whatever fraction was classified.
     """
     policy = LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))
     merged = merge(_row(), policy, _representation(), _naming())
@@ -253,12 +241,11 @@ async def test_a_drain_pass_labels_and_stamps_and_reports_more() -> None:
 
 
 async def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None:
-    """`stale()` is deterministic, so a refusal that failed the batch would repeat forever.
+    """One unlabellable reaction does not stall the corpus behind it.
 
-    This is the failure `reembed_stale` was changed to prevent one index over, where a single
-    un-embeddable chunk stopped document indexing for every share, permanently. The reaction is
-    still *stamped* — it leaves the stale set carrying nothing derived, which the coverage report
-    counts honestly — because the alternative is a row the drain re-reads on every pass forever.
+    `stale()` is deterministic, so a refusal that failed the batch would repeat forever. The
+    reaction is still stamped, leaving the stale set with nothing derived, which coverage counts
+    honestly.
     """
     index = InMemoryLabelIndex()
     for n in range(3):
@@ -288,22 +275,12 @@ async def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls(
 def test_a_short_species_list_costs_the_roles_and_not_the_atom_map(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A species list that does not match what was sent is bad data, and nothing used to say so.
+    """A short species list costs the roles and not the atom map.
 
-    `ReactionRepresentation.species` is documented as "one entry per species sent" and the roles
-    are matched back **positionally** — `merge._species` reads `answered[index]`. That guard only
-    stops the read running off the end; it cannot see that an answer for 3 of 4 species has shifted
-    every role by one, so a reactant is stored as the solvent and the solvent as the catalyst. The
-    server is versioned separately from this repository (`_role`'s leniency is written for exactly
-    that).
-
-    **Only the positional half is unusable, and dropping the answer threw away the other half.**
-    A representation also carries `mapped_smiles`, which has nothing to do with the species
-    contract — and `enrich.label_stale` stamps *every* stale row with the current
-    `labeller_version` whether or not the server answered, so the reaction leaves `stale()` and no
-    later pass revisits it: the atom map was lost permanently, not "this pass". Blanking `species`
-    keeps the answer, and `merge._species` then takes the floor it already documents ("a short or
-    absent answer falls back to `species_role_from`", the coarse map of what the source recorded).
+    Roles are matched back positionally (`merge._species` reads `answered[index]`), so a list that
+    does not match what was sent would shift every role. Blanking `species` keeps `mapped_smiles`
+    and lets `merge._species` fall back to `species_role_from`. Dropping the whole answer would lose
+    the map permanently, since `label_stale` stamps every stale row.
     """
 
     async def _run() -> None:
@@ -378,14 +355,10 @@ async def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
 
 
 async def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
-    """The requirement, as a test: every reaction corpus gets labelled, not only declaring ones.
+    """A source that declares no `labels:` block is still drained.
 
-    The drain used to narrow `stale()` to the sources that declared a `labels:` block. Exactly one
-    source in this tree declares one and it ships disabled, so an ELN corpus — which declares none
-    — was never labelled under any configuration, and the pass reported `has_more=False` while it
-    happened, which reads as "nothing left to do".
-
-    A block says what a source *carries*. It is read per row, as a policy, and never as permission.
+    Every reaction corpus gets labelled. A block says what a source carries and is read per row as a
+    policy, never as permission.
     """
     index = InMemoryLabelIndex()
     await index.record(_row("e1", source="eln-json"))
@@ -404,15 +377,11 @@ async def test_a_source_that_declares_no_labels_block_is_still_drained() -> None
 
 
 async def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
-    """One batch, one id, two rows — and neither may be given the other's chemistry.
+    """Two sources sharing a reaction id each keep their own labels.
 
-    `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs may use one entry
-    id, and `stale()` spans sources, so a batch can hold both. Keying the labeller's answers on the
-    bare id let the second overwrite the first: an esterification was stored with an amination's
-    atom map and named reaction, `merge._species` applied the wrong species list positionally, and
-    the pass reported both rows cleanly labelled.
-
-    The fake answers each id it is handed, so a mismatch here can only come from the drain.
+    `reaction_labels` keys on `(source, reaction_id)` and `stale()` spans sources, so answers keyed
+    on the bare id would overwrite one row with the other's chemistry. The fake answers each id it
+    is handed, so a mismatch can only come from the drain.
     """
     ester = "CCO.CC(=O)O>>CCOC(C)=O"
 
@@ -441,23 +410,11 @@ async def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() ->
 
 
 async def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> None:
-    """The re-label case the `std6`→`std7` bump made real, and what it used to answer.
+    """A pass that derived nothing does not report the corpus complete.
 
-    `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which is folded
-    into `labeller_version`, so **every** labelled row went stale at once. Drain that corpus while
-    the labelling server is degraded and `merge` keeps what the previous labeller derived, so the
-    row is written back unchanged — and it used to be stamped with the plain new version, which is
-    what `coverage` counts as labelled. Measured before the fix, on one row derived under std6:
-
-        coverage: 'COMPLETE: all 1 matching reaction(s) are labelled at the current version, so
-                   counts over this facet are totals rather than lower bounds.'
-        stored:   ('Buchwald-Hartwig amination', …, 'rxnlabel@1:std6:roles1' → new version)
-
-    On a Pistachio-scale re-label that makes any window where the server is degraded permanently
-    invisible: the rows claim currency under a standardization their content predates, and
-    `stale()` never returns them again. Two docstrings in `enrich.py` said the coverage report
-    counted them as unlabelled; `store.coverage` counted `labeller_version = version`, which is
-    counting them as labelled.
+    A `STANDARDIZATION_VERSION` bump makes every row stale. Drained while the labelling server is
+    degraded, `merge` keeps the previous content, so stamping it with the plain new version would
+    make `coverage` report COMPLETE over superseded content and `stale()` never return those rows.
     """
     old_version = "rxnlabel@1:std6:roles1"
 
@@ -481,37 +438,14 @@ async def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete()
 
 
 async def test_a_degraded_answer_is_stamped_so_it_re_labels_against_a_healthy_pod() -> None:
-    """A component that ran and failed must not leave its row claiming a healthy labeller.
+    """A degraded answer is stamped so it re-labels against a healthy pod.
 
-    `Chemclaw3-mcp`'s `servers/rxnlabel` answers each reaction with `labeller_version(degraded)`
-    when a component was installed, ran on that reaction and threw — `mapper@failed` in the slot
-    where a pod that never installed a mapper says `mapper@absent`. It was built that way on
-    purpose, in the commit that added it, *"so it is stale against a healthy pod and re-labels"*.
-
-    This side threw both halves away. `ReactionRepresentation`/`ReactionNaming` declare
-    `extra="ignore"`, so `version` and `degraded` were **dropped in transit**, and
-    `label_stale` stamped every row with the pass-level string `plan_label_sync` read once — which
-    reports the components the server *probed*, not what happened on this call. Driven through this
-    drain before the fix: a row whose mapper failed was stamped
-    `…:mapper@absent:namer@absent`, identical to a healthy pass's, so `stale()` never returned it
-    and no later pass revisited it until the deployment's component versions moved.
-
-    **The assertion is that the row is still stale, not that the stamp differs.** A stamp that
-    differed for any *other* reason — a locally-derived string, a nonce, the remote version without
-    `stamped`'s two local halves — would also "differ", and one of those would make the row stale
-    forever instead of once. So both directions are checked: stale while the component is broken,
-    and *not* stale once the same pass version is answered by a healthy pod.
-
-    Both halves of an answer are exercised, because the two carry different components and a fix
-    that read only `representation.degraded` would leave a broken classifier stamping healthy.
-
-    **And the pod below answers through `model_validate` rather than `model_copy(update=…)`,
-    because the first version of this test did the latter and was green with both fields deleted
-    from the model.** `model_copy` assigns past validation, so the fixture was supplying the very
-    fields whose survival is the subject — a control whose fixture builds its own subject, which is
-    the shape `tasks/lessons.md` records. The answer arrives from another repository's pod as JSON
-    and `extra="ignore"` is what decides whether a field survives that crossing, so the fixture
-    crosses it too.
+    The server answers with `labeller_version(degraded)` (e.g. `mapper@failed`) when a component ran
+    and failed; `version` and `degraded` must survive into the row's stamp rather than the
+    pass-level string. Asserted as staleness in both directions: stale while the component is
+    broken, not stale once a healthy pod answers the same pass version. Both halves of an answer are
+    exercised, since they carry different components. The pod answers through `model_validate`,
+    because `model_copy(update=…)` bypasses validation and would supply the very fields under test.
     """
     # The two shapes the server distinguishes, spelled the way it spells them.
     healthy_remote = "rxnlabel@2:rdkit@2026.3.5:mapper@present:namer@present"
@@ -535,13 +469,9 @@ async def test_a_degraded_answer_is_stamped_so_it_re_labels_against_a_healthy_po
             self, reactions: list[tuple[str, str, list[str]]]
         ) -> dict[str, ReactionRepresentation]:
             broken = not self._mapper
-            # **Built through `model_validate` over the wire shape, never `model_copy(update=…)`.**
-            # `model_copy` sets attributes without going through validation, so it attaches
-            # `version` and `degraded` to the instance whether or not the model declares them —
-            # which made the first version of this test pass with both fields deleted from
-            # `ReactionRepresentation`, i.e. green over the exact defect it names. The answer
-            # reaches this drain as JSON from another repository's pod, and `extra="ignore"` is what
-            # decides whether a field survives that, so the fixture has to cross the same boundary.
+            # Built through `model_validate` over the wire shape: `model_copy` would attach
+            # `version` and `degraded` whether or not the model declares them, and `extra="ignore"`
+            # is what decides whether a field survives the crossing.
             return {
                 rid: ReactionRepresentation.model_validate(
                     {
@@ -593,13 +523,10 @@ async def test_a_degraded_answer_is_stamped_so_it_re_labels_against_a_healthy_po
 
 
 async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
-    """Both halves of the stamp, because a fix to one of them breaks the other.
+    """An underived row leaves the stale set and returns at the next version.
 
-    Stamping is what lets the drain advance past a reaction the server cannot answer for — remove
-    it and `stale()`'s deterministic first batch is re-read forever, which is the wedge
-    `reembed_stale` was changed to prevent one index over. Marking the stamp must therefore not
-    put the row back into the stale set at the *same* version, and must not keep it out at the
-    next one.
+    Stamping lets the drain advance past a reaction the server cannot answer; the marked stamp must
+    not put it back at the same version and must not keep it out at the next.
     """
     index = InMemoryLabelIndex()
     await index.record(_row("r0"))
@@ -610,12 +537,10 @@ async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_ver
 
 
 async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:
-    """`current_version()` must never hand back a stamp no row's *content* was derived under.
+    """A degraded pass does not advance the version every tool reads.
 
-    Every rxnfp tool calls it first and passes the answer to `coverage`/`select`, so a marked
-    stamp there would make the facet queries count only the rows nothing was derived for — the
-    original defect inverted. A corpus whose whole re-label found the server down therefore has
-    *no* current version, which is the honest answer: the tools report the corpus as unlabelled.
+    `current_version()` feeds `coverage`/`select` in every rxnfp tool, so a corpus whose whole
+    re-label found the server down has no current version and reads as unlabelled.
     """
     index = InMemoryLabelIndex()
     await index.record(_row("r0"))
@@ -627,11 +552,9 @@ async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -
 
 
 async def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
-    """The case a Pistachio re-label really produces: some rows derived, some not.
+    """A partly degraded pass reports the share it actually derived.
 
-    The whole point of the fix is that this reads as PARTIAL rather than COMPLETE — a chemist told
-    "counts over this facet are totals" over a corpus two thirds of which carries superseded
-    content is the failure, and it is invisible in the answer itself.
+    It must read PARTIAL, not COMPLETE, when some rows carry superseded content.
     """
     index = InMemoryLabelIndex()
     for n in range(3):
@@ -650,9 +573,8 @@ async def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() ->
 class _UvicornServer:
     """A uvicorn server on a background thread, started and stopped around one test.
 
-    Copied in shape from `tests/test_connector_transport.py::_Server` rather than imported: that
-    module is a heavyweight import (it discovers and builds every local bundle at module scope)
-    and this file needs nine lines of it.
+    Copied in shape from `tests/test_connector_transport.py::_Server` rather than imported, since
+    that module builds every local bundle at import.
     """
 
     def __init__(self, app: Any, port: int) -> None:
@@ -688,20 +610,11 @@ def _free_port() -> int:
 def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one MCP leg in this system that went out anonymous, driven against a real listener.
+    """The labelling leg carries the turn that asked for it, driven against a real listener.
 
-    `connectors/calc/remote.py` has always passed `turn_identity_hook`, so its calls carry the
-    actor, the session, the correlation id and a `traceparent`. This one passed no hook and could
-    not: the hook lived in `connectors/identity.py`, and `ingest -> connectors` is not an edge
-    `tests/test_layering.py` permits. So a labelling drain — which runs for *hours* inside a durable
-    activity — reached the server with `Authorization` and nothing else, and the trail stopped at
-    this process boundary
-    (`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`).
-
-    Driven over HTTP against a real `FastMCP` on loopback rather than asserted about the source,
-    because the property is what arrives on the wire — and the module docstring of what is now
-    `core/call_identity.py` records a header mechanism that *is* invoked, with the right values,
-    and delivers nothing. Only a listener can tell those apart.
+    The drain's calls must carry actor, session, correlation id and `traceparent`, as
+    `connectors/calc/remote.py` does. Driven over HTTP against a real `FastMCP` on loopback, since
+    the property is what arrives on the wire.
     """
     import asyncio
 

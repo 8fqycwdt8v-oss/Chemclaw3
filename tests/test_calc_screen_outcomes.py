@@ -247,8 +247,8 @@ def test_a_payload_the_client_cannot_validate_fails_the_screen_rather_than_one_m
 ) -> None:
     """A contract skew only some inputs reach is the server's bug, not a medium the server refused.
 
-    pydantic's `ValidationError` is a `ValueError`, so the per-item boundary used to record it as
-    one medium "refused" — the job completed, and the server's defect sat in a chemistry column.
+    pydantic's `ValidationError` is a `ValueError`, so it must not be recorded per item as one
+    medium "refused"; it fails the screen.
     """
     from pydantic import ValidationError
 

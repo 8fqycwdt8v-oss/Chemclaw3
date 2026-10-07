@@ -1724,8 +1724,7 @@ class HypothesisTournamentWorkflow:
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
                     # One attempt: in-process failures are already refusals, and a retry would
-                    # re-invoke the governed
-                    # tool and write another audit row.
+                    # re-invoke the governed tool and write another audit row.
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
                 for check in computable
@@ -1737,8 +1736,7 @@ class HypothesisTournamentWorkflow:
             if isinstance(outcome, BaseException):
                 workflow.logger.warning("computable check failed for %s", check.hypothesis_id)
                 # An outcome, not a gap: `inconclusive` because the call was dispatched; not in
-                # `ran` because a
-                # failure has no value to read.
+                # `ran` because a failure has no value to read.
                 tool = check.call.tool if check.call else ""
                 out[check.hypothesis_id] = CheckOutcome(
                     hypothesis_id=check.hypothesis_id,
@@ -1978,8 +1976,7 @@ class HypothesisTournamentWorkflow:
                     id=f"{workflow.info().workflow_id}-template-{check.hypothesis_id}",
                     task_queue=plan.task_queue,
                     # The ceiling `start_template_run` passes and `unrunnable_reason` gated on; also
-                    # the only bound on
-                    # an enumeration's fan-out.
+                    # the only bound on an enumeration's fan-out.
                     execution_timeout=timedelta(seconds=plan.run_timeout_seconds),
                     # No retry policy, matching `start_template_run`: a retry would re-run the whole
                     # procedure, including an uncached metered model turn.
@@ -2175,8 +2172,7 @@ class HypothesisTournamentWorkflow:
     def _envelope(self, outcome: TournamentOutcome) -> ConnectorJobResult:
         return ConnectorJobResult(
             # The summary is this module's own rendering (`report.summarise` placed every model
-            # span), so it
-            # needs no cell treatment; `data` carries the structured outcome.
+            # span), so it needs no cell treatment; `data` carries the structured outcome.
             summary=summarise(outcome),
             data=outcome.model_dump(mode="json"),
             payload_kind="TournamentOutcome",

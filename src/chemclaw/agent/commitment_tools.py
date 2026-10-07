@@ -119,8 +119,7 @@ async def review_commitments(
         limit_applied=page.limit_applied,
         commitments=[
             # Defang the whole row: most fields are unvalidated strings from a site-supplied
-            # adapter, and a
-            # field added later is covered without remembering this line.
+            # adapter, and a field added later is covered without remembering this line.
             defanged_payload(row.model_dump(mode="json"))
             for row in page.commitments
         ],

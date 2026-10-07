@@ -1,13 +1,11 @@
 """The outbox delivers at least once, converges on redelivery, and never fails a calculation.
 
-Three properties, and each was a design decision rather than an implementation detail:
-
-- **Enqueue is idempotent**, because three call sites write to it with no coordination and a
-  retried Temporal activity must not double-queue.
-- **A failed delivery leaves its row pending**, because at-least-once against a content-addressed
-  target is safe and losing a result is not.
-- **Nothing here can fail the calculation that produced the record**, because by the time any of it
-  runs the science is finished and persisted.
+- **Enqueue is idempotent**: three uncoordinated call sites write to it and a retried activity must
+  not double-queue.
+- **A failed delivery leaves its row pending**: at-least-once against a content-addressed target is
+  safe, losing a result is not.
+- **Nothing here can fail the calculation that produced the record**: the science is already
+  persisted.
 """
 
 import asyncio
@@ -47,16 +45,11 @@ async def _reset(conn: psycopg.AsyncConnection[Any]) -> None:
 
 
 def _with_a_short_lease(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shorten the claim lease so an abandoned claim's expiry is real rather than hand-written.
+    """Shorten the claim lease so an abandoned claim really expires.
 
-    A claim is a lease, so a pass that *dies* — a pod eviction, an activity timeout, the per-sink
-    ceiling — leaves the row held until that lease expires, and "the next pass picks it up" is only
-    true afterwards. Every test below that simulates a dead pass by claiming and never marking has
-    to let the lease run out, and letting the real predicate do it (rather than writing `claimed_at`
-    back in SQL) is what keeps the simulation the same shape as the failure it stands for.
-
-    The lease is derived from `result_publish_timeout_seconds`, so shortening that is how it is
-    shortened; there is no lease knob of its own, deliberately (see the config property).
+    A pass that dies holds its rows until the lease expires; tests simulating a dead pass let the
+    real predicate expire it rather than rewriting `claimed_at`. The lease derives from
+    `result_publish_timeout_seconds`, which is how it is shortened.
     """
     monkeypatch.setattr(settings, "result_publish_timeout_seconds", 0.01)
 
@@ -152,11 +145,8 @@ async def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_att
     reclaimed = await outbox.claim("alpha", 10)
     assert len(reclaimed) == 1
 
-    # **The second mark carries the second claim's lease, not the first's.** A mark is fenced on the
-    # attempt the claim handing it out spent, so re-using `claimed[0].lease` here would be a
-    # superseded pass releasing a live one's row — which is the defect
-    # `test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds` drives, and which this
-    # test reproduced before the fence existed.
+    # The second mark carries the second claim's lease: marks are fenced on the claim's attempt, so
+    # the first lease would be a superseded pass releasing a live one's row.
     await outbox.mark_failed([reclaimed[0].lease], "destination unreachable")
     assert await outbox.claim("alpha", 10) == [], "out of attempts, no longer claimed"
 
@@ -194,11 +184,10 @@ async def test_a_delivered_row_is_not_claimed_again(monkeypatch: pytest.MonkeyPa
 def test_a_broken_outbox_does_not_raise_into_the_calculation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole polarity of this subsystem, in one assertion.
+    """A broken outbox does not raise into the calculation.
 
-    By the time enqueue runs the calculation has succeeded and is already persisted. A results
-    store — or the local queue — being unavailable is strictly less important than returning the
-    science, so the failure is counted and logged and the caller never sees it.
+    The calculation already succeeded and is persisted, so an unavailable store or queue is counted
+    and logged and the caller never sees it.
     """
     _with_sink(monkeypatch, "alpha")
 
@@ -227,19 +216,11 @@ def test_an_unprojectable_payload_does_not_raise_into_the_calculation(
 
 
 async def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The attempt is spent by the claim, not by the failure report.
+    """Claiming a row spends its attempt, and one delivery costs one attempt.
 
-    The increment has to happen in the claim rather than in `mark_failed`, because a pass that dies
-    between the two records no failure at all and must still have cost something — otherwise a row
-    whose delivery kills the worker every time is retried forever.
-
-    **This test used to assert the double-claim as the design.** It claimed twice with no mark
-    between them "as two overlapping runs would do" and asserted `attempts == 2`, on the argument
-    that spending the attempt in the claim is what keeps the budget correct when two runs overlap.
-    Spending it there is necessary and was never sufficient: measured with a 1.0 s sink and a
-    second drain started 0.3 s in, both drains *delivered* the row and it came to rest at
-    `attempts=2` for one delivery. So the second claim is the thing to refuse, and the assertion
-    below is now the one this file should always have made — one delivery, one attempt.
+    The claim, not `mark_failed`, spends the attempt, so a worker that dies every time still
+    exhausts the budget. A second claim of an in-flight row is refused, so overlapping drains cannot
+    both spend and deliver.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -300,13 +281,10 @@ async def test_marking_failed_does_not_double_count_the_attempt(
 async def test_one_unreadable_document_does_not_retire_its_whole_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A poison row is one row's problem, and which rows it took must not depend on claim order.
+    """One unreadable document does not retire its whole batch.
 
-    The drain validated the batch inside a single `try` and, on the first document it could not
-    parse, marked **every** claimed id failed. One row written by a future writer whose record shape
-    this release cannot read therefore retired up to `batch_size - 1` perfectly deliverable rows
-    once they had spent their attempts — silently, since a retired row is kept rather than deleted
-    and nothing counts it as lost.
+    A row from a future writer this release cannot parse is that row's problem; marking every
+    claimed id failed would silently retire deliverable neighbours.
     """
     from chemclaw.durable import publish_results
 
@@ -351,16 +329,10 @@ async def test_one_unreadable_document_does_not_retire_its_whole_batch(
 
 
 async def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Built per run means closed per run, or a scheduled job leaks a connection per pass.
+    """The drain closes every sink it builds, on success and on failure.
 
-    `drain_result_publications` builds a sink each run deliberately, so a rotated credential takes
-    effect on the next pass rather than the next restart. `SqlResultSink` opens its connection
-    lazily and holds it for the sink's life. Neither decision is wrong; together, and with nothing
-    closing the sink, they leaked one Postgres connection every `result_publish_schedule_minutes`
-    — reaching a stock `max_connections` of 100 inside a day and then failing the whole worker.
-
-    Asserted on a failing batch too, because a sink that could not deliver is holding exactly the
-    same connection as one that could.
+    A sink is built per run so rotated credentials apply next pass, and `SqlResultSink` holds its
+    connection for its life, so an unclosed sink leaks a connection per scheduled pass.
     """
     from chemclaw.durable import publish_results
     from chemclaw.publish.manifest import ResultSinkManifest
@@ -401,18 +373,11 @@ async def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyP
 async def test_one_refused_record_does_not_retire_its_neighbours(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The delivery side of the poison-row rule the parse side above already holds.
+    """One refused record does not retire its neighbours.
 
-    `_drain_one` protected against an unreadable *document* per row and against a refused *record*
-    per batch, so one record the sink would not take marked every id in the claim failed — up to
-    `batch_size - 1` neighbours retired once they had spent their attempts, and because `_CLAIM` is
-    `ORDER BY enqueued_at` the poison sat at the head of the queue and re-collected the same
-    neighbours on every pass. Worse, `SqlResultSink` writes record-by-record on an autocommit
-    connection: the records *before* the poison are already durable at the far end while being
-    booked `failed`, and the ones after it are never attempted at all.
-
-    Measured on the shipped code with a sink refusing the third of five: `delivered=0 failed=5` on
-    every pass, two rows written to the far end three times over and marked failed anyway.
+    `_CLAIM` orders by `enqueued_at`, so a poison record at the head would re-collect the same
+    neighbours every pass, and `SqlResultSink` autocommits per record, so earlier records are
+    durable at the far end even when the batch is booked failed.
     """
     from chemclaw.durable import publish_results
     from chemclaw.publish.driver import SinkRejectedError
@@ -464,12 +429,10 @@ async def test_one_refused_record_does_not_retire_its_neighbours(
 async def test_an_unreachable_destination_still_fails_the_whole_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of the same rule, and why it is not one handler.
+    """An unreachable destination still fails the whole batch.
 
-    A rejection is a statement about one record; an outage is a statement about the destination.
-    Re-attempting a batch record-by-record against a sink that cannot be reached would multiply one
-    outage into `batch_size` connection attempts per pass and learn nothing, so the unavailable
-    case stays batch-wide — one `deliver` call, every row left pending.
+    An outage is about the destination, not one record; replaying per record would multiply one
+    outage into `batch_size` connection attempts per pass.
     """
     from chemclaw.durable import publish_results
     from chemclaw.publish.driver import SinkUnavailableError
@@ -500,13 +463,10 @@ async def test_an_unreachable_destination_still_fails_the_whole_batch(
 def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A projector that raises is a code gap, and must not read as a destination's bad day.
+    """A projection that cannot succeed is not counted as a publish failure.
 
-    Both were `chemclaw_result_publish_failures_total`, whose declared population is "could not be
-    queued or delivered" — so a projector raising on *every* payload of a shape looked exactly like
-    a transient publish failure, and the most expensive calculation in the tier reached the result
-    store never while the only visible signal was a counter that also rises when a warehouse is
-    slow. A projection failure never fixes itself: it is a permanent gap until code changes.
+    `chemclaw_result_publish_failures_total` means "could not be queued or delivered"; a projector
+    raising is a permanent code gap and gets its own series.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -538,22 +498,11 @@ def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
 async def test_two_workers_claiming_at_once_split_the_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`FOR UPDATE SKIP LOCKED` is the whole of "two publisher replicas drain one queue".
+    """Two workers claiming at once split the queue (`FOR UPDATE SKIP LOCKED`).
 
-    Dropping it from `_CLAIM` passed all 35 tests in the outbox suite, `test_concurrency_claims.py`
-    included — that file races the *session-turn* claim with 32 claimants and gives this one only
-    sequential calls, and sequential calls cannot tell the two implementations apart: the claim
-    commits before delivery, so a second call afterwards legitimately sees the same rows again
-    (`test_claiming_a_row_spends_its_attempt` asserts exactly that).
-
-    What tells them apart is a second claimant arriving **while the first still holds its locks**,
-    which is the window `claim` occupies between its `UPDATE` and its commit. So the first worker
-    here runs the real statement on its own connection and does not commit until the second has
-    answered. With `SKIP LOCKED` the second steps over those rows and takes the rest; without it,
-    it blocks on them and this fails as a timeout rather than passing quietly — which is the
-    difference between two replicas splitting a queue and two replicas serializing on it, a drain
-    that takes twice as long and, under `result_publish_max_attempts` plus a statement timeout,
-    retires rows that were only ever blocked.
+    Sequential claims cannot distinguish the implementations, so the first worker holds its locks
+    uncommitted while the second claims on its own connection. With `SKIP LOCKED` the second takes
+    the rest; without it, it blocks and this fails as a timeout.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -568,18 +517,9 @@ async def test_two_workers_claiming_at_once_split_the_queue(
             outbox._CLAIM, ("alpha", 5, settings.result_publish_lease_seconds, 2)
         )
         mine = {str(row[1]) for row in await cursor.fetchall()}
-        # Worker B, on its own connection, against that live lock. The bound separates
-        # *blocked* from *not blocked*, which is the only thing time can observe here — and it
-        # is deliberately close to `pg_statement_timeout_seconds` (30 s) rather than tight.
-        #
-        # **It was 10 s, and that made this test fail under load rather than under the
-        # defect.** Measured on an idle box, an unblocked claim is 0.9 ms; a blocked one holds
-        # until the statement timeout. So any bound between those two distinguishes the
-        # implementations, and the only thing a *tight* one adds is a second failure mode:
-        # connection acquisition that is merely slow. It fired once that way, in a full serial
-        # run on a machine also carrying a second suite, four subagents and two MCP servers —
-        # and `CLAUDE.md` names exactly that cost, about a different pair of tests: "a gate
-        # that reds for a scheduling artefact teaches everybody to re-run".
+        # Worker B, on its own connection, against that live lock. An unblocked claim takes about a
+        # millisecond and a blocked one waits for the statement timeout, so the bound sits near
+        # `pg_statement_timeout_seconds` to avoid failing on merely slow connection acquisition.
         theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 25)}
         await first.commit()
 
@@ -593,23 +533,11 @@ async def test_two_workers_claiming_at_once_split_the_queue(
 async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The attempt bound in the claim predicate, with `mark_failed` kept out of the way.
+    """A row out of attempts is not claimed again, even while pending.
 
-    Dropping `attempts < %s` from `_CLAIM` also passed the whole suite, and the reason is that the
-    test which looks like it covers this reports each failure through `mark_failed` — which retires
-    the row to `failed`, so the `state = 'pending'` predicate excludes it whether or not the bound
-    is there. The bound's own job is the other case: a worker that claimed and then *died*, leaving
-    the row pending with its attempts spent. Without the predicate that row is claimed forever, and
-    a destination that is genuinely rejecting it is retried without limit.
-
-    **The second assertion used to read `("pending", 2)`, and that was this file asserting the
-    defect.** "Still pending" was a *proxy* for "the bound did the work, not the state" — but a row
-    left pending with its budget spent is unclaimable, uncounted as a dead letter, ageing forever
-    in the gauge the stuck-outbox alert reads, and unreachable by `--requeue`. `_REAP_EXHAUSTED`
-    now names that transition, so the row comes to rest in `'failed'`, which is where every one of
-    those readers can see it. The proxy is gone and the invariant it stood for is asserted directly
-    instead: the reap and the claim *partition* the pending set on the same bound, so a row one
-    attempt short is still handed out and a row at the bound is retired.
+    `mark_failed` retires rows, so the claim predicate's `attempts < %s` bound matters for a worker
+    that claimed and died. The reap and the claim partition the pending set on the same bound: one
+    attempt short is still handed out, at the bound it is retired to `'failed'`.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -650,18 +578,11 @@ async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pendi
 async def test_a_document_this_system_already_queued_stays_readable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A queued row is data, not a claim: the release that reads it may not refuse it.
+    """A document this system already queued stays readable.
 
-    `_drain_one` re-validates every stored `document` with `ResultRecord.model_validate` before
-    delivering it, so any check added to the *write* model becomes a filter on the *read* path —
-    over bytes that were written before it existed and cannot be rewritten. The scope check is the
-    one that showed it: `relative_energy` is registered per conformer, every species distribution
-    published it as a calculation scalar, and a validator on `PropertyFact` therefore made those
-    already-enqueued rows unparseable. Each then spends an attempt per pass until it dead-letters,
-    and the backfill CLI cannot help — the stored bytes are still the same bytes.
-
-    The document below is exactly what this system wrote at contract version 2. A projection bug is
-    caught where the projection happens (`project`), which is the only place it can be caused.
+    `_drain_one` re-validates stored documents, so a check added to the write model would filter
+    bytes written before it and dead-letter them. This document is exactly what was written at
+    contract version 2; projection bugs are caught in `project`.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -695,25 +616,12 @@ async def test_a_document_this_system_already_queued_stays_readable(
 async def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pass that dies between the claim and the mark must not strand the row forever.
+    """A row that spends its budget without an outcome is retired, not stranded.
 
-    `_CLAIM` spends the attempt and commits before the delivery, deliberately — so a pod eviction,
-    an activity timeout or the per-sink delivery ceiling leaves the row `pending` with an attempt
-    spent and no `last_error`. That is fine until the *last* attempt, at which point the row was in
-    a fourth state the three-state contract does not name: excluded from `_CLAIM` by
-    `attempts < max` so never delivered again, not `'failed'` so never counted as a dead letter,
-    still `'pending'` so counted and ageing forever in the two gauges `ChemclawResultOutboxStuck`
-    reads, and unmatched by `requeue_failed` so the documented remedy reset nothing.
-
-    Measured on the unfixed outbox: eight interrupted passes left `('alpha','stranded','pending',8,
-    '')`, `claim()` returned `[]`, and `requeue_failed()` reset **0** rows.
-
-    The interruption is simulated by claiming and never marking, which is exactly what every one of
-    those failures leaves behind — the accounting is identical whether the pass died in Temporal,
-    in the pod, or at the ceiling. Since a claim is now a *lease*, that also means each simulated
-    pass has to let the dead one's lease expire before it can claim, which is the real recovery
-    path rather than a fixture convenience: nothing else runs, and the row comes back inside the
-    next ordinary claim.
+    A pass that dies after the claim leaves the row pending with an attempt spent. On the last
+    attempt it would be unclaimable, uncounted as a dead letter, ageing in the stuck-outbox gauges
+    and missed by `requeue_failed`; the reap moves it to `'failed'`. Simulated by claiming and never
+    marking, and each pass lets the dead lease expire, the real recovery path.
     """
     from chemclaw.publish import backfill
 
@@ -764,11 +672,8 @@ async def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_st
 async def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A row that *did* record why it failed keeps that reason when it is retired.
-
-    The reaper writes `last_error` only when it is empty. An operator opening a dead letter needs
-    the destination's own account of the failure — "connection refused", "no such column" — not
-    this system's account of its own bookkeeping.
+    """The real failure reason outranks the reaper's generic one: the reaper writes `last_error`
+    only when empty.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -798,18 +703,10 @@ async def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
 async def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The healthiest state the drain has must not be its worst gauge reading.
+    """An emptied queue reads as zero seconds behind.
 
-    `_replace` keeps a sink that has fallen to zero in the gauge family rather than dropping it,
-    which is right — a disappearing series silently stops an alert evaluating. But the family it
-    zeroes holds an *epoch*, and `_oldest_pending_seconds` subtracted it from the clock. Measured
-    on a sink whose queue had just drained:
-    `chemclaw_outbox_oldest_pending_seconds{sink="alpha"} = 1788721651` — about 56 years —
-    so `ChemclawResultOutboxStuck` fires at its maximum reading on every deployment the first time
-    a sink clears its backlog.
-
-    `refresh_backlog`'s own docstring already claimed the fixed behaviour ("which reads as '0
-    seconds behind', the honest answer for an empty queue"); the arithmetic said the opposite.
+    A sink that drains to zero stays in the gauge family with a zero epoch, so the age computation
+    must not subtract that epoch from the clock.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -830,20 +727,11 @@ async def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_ye
 
 
 def test_all_three_backlog_gauge_families_are_actually_bound() -> None:
-    """The declaration is not the binding, and only the binding puts a series on `/metrics`.
+    """All three backlog gauge families are actually bound.
 
-    `record_metric` swallows a `None` callable by design — a metrics failure may not take a request
-    down — so a `bind_gauge_family` call that stops happening is a silent no-op: the family is
-    declared, never registered, never exported, and `ChemclawResultOutboxStuck` can never fire
-    because the series it alerts on does not exist. Replacing the whole
-    `chemclaw_outbox_oldest_pending_seconds` binding with `None` left the repository green under
-    every test whose tracing named this function, which is the same shape as the counter
-    `D-2026-08-08` found declared and never incremented.
-
-    Off the database on purpose. The Postgres-backed reading in
-    `tests/test_datapath_observability.py` does exercise all three, and it skips wherever Postgres
-    does — so the claim "the alert's series exists" would rest on a lane that can go quiet. This
-    asserts the registration itself, which needs no queue.
+    `record_metric` swallows a `None` callable by design, so an unbound family is never exported and
+    `ChemclawResultOutboxStuck` could never fire. Asserted without a database because the Postgres-
+    backed reading can skip.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -870,14 +758,10 @@ def test_all_three_backlog_gauge_families_are_actually_bound() -> None:
 
 
 def test_a_row_enqueued_by_a_pod_whose_clock_runs_ahead_reads_as_zero_not_as_one() -> None:
-    """The other end of the same clamp, and the end no fixture reached.
+    """A row enqueued by a pod whose clock runs ahead reads as zero, not one.
 
-    The test above pins the drained-queue case, where the stored epoch is the zero placeholder.
-    This is the skew case the clamp's own docstring names: a row enqueued by a pod whose clock runs
-    ahead of this one subtracts to a negative age. Zero is the honest reading — the row is not
-    behind — and a floor of anything else is a fabricated backlog that grows no matter how healthy
-    the drain is. `max(0.0, ...)` could become `max(1.0, ...)` with 63 tests green, because every
-    one of them had a row genuinely in the past.
+    Clock skew gives a negative age; the floor must be exactly zero, or a healthy drain shows a
+    fabricated backlog.
     """
     probe = "clock-skew-probe"
     outbox._OLDEST_ENQUEUED[probe] = time.time() + 300.0
@@ -892,17 +776,10 @@ def test_a_row_enqueued_by_a_pod_whose_clock_runs_ahead_reads_as_zero_not_as_one
 async def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Turning a destination off must not leave an alert nobody can silence.
+    """Rows for a disabled sink stop paging and are reported instead.
 
-    `enqueue` writes one row per *currently enabled* sink and the drain iterates *currently
-    enabled* manifests, while the backlog read took every row regardless. Measured: with `beta`
-    removed from the enable list its row was drained by nobody, pruned by nobody (retention sweeps
-    `delivered` only), requeued by nobody, and read `chemclaw_outbox_pending{sink="beta"} 1.0`
-    forever — so `ChemclawResultOutboxStuck` fired permanently for a destination the operator had
-    deliberately turned off.
-
-    The rows are not forgotten: they are reported once per pass on the degradation series, which is
-    a different fact wanting a different, non-paging rule.
+    Nothing drains, prunes or requeues them, so counting them in the backlog gauge would fire
+    `ChemclawResultOutboxStuck` forever. They are reported per pass on the degradation series.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha", "beta")
@@ -925,19 +802,11 @@ async def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
 def test_two_overlapping_drains_do_not_both_deliver_one_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case `_CLAIM`'s comment was written for, driven rather than reasoned about.
+    """Two overlapping drains do not both deliver one row.
 
-    A scheduled drain and an operator's manual one overlap over the **delivery**, which takes
-    seconds to a minute — not over the claim, which takes milliseconds. `FOR UPDATE SKIP LOCKED`
-    excludes only overlapping *transactions*, and the claim commits immediately by design so no row
-    lock is held across a delivery, so the second run's claim happens after that commit and sees a
-    row that is still `pending`. Measured on the unfixed outbox with a 1.0 s sink and a second
-    drain started 0.3 s in: **both** drains delivered the row and it came to rest at `attempts=2`
-    for one delivery — an attempt budget of 8 that empties after 4 real attempts against one
-    destination's outage.
-
-    What closes it is the lease: the claim moves the row out of `pending`, so the second run skips
-    it by predicate rather than by lock duration.
+    Drains overlap during delivery, which lasts seconds, after the claim has committed, so `SKIP
+    LOCKED` alone cannot exclude them. The lease moves the row out of `pending`, so the second run
+    skips it by predicate.
     """
     from chemclaw.durable import publish_results
 
@@ -987,17 +856,11 @@ def test_two_overlapping_drains_do_not_both_deliver_one_row(
 async def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The crashed claimer, which is what a lease costs and has to pay for itself.
+    """A lease its claimer died holding returns to the queue on the next claim.
 
-    A claim that moves a row out of `pending` is a claim that can be abandoned: a pod eviction, an
-    activity `start_to_close` expiry or the per-sink ceiling leaves the row `in_flight` with nobody
-    coming back for it. Without a way out that row is worse than the doubled attempt it replaced —
-    it is invisible to the claim *and* to `--requeue`.
-
-    The way out is the lease's own predicate, evaluated at the head of the next ordinary claim for
-    that sink — not a second timer nobody runs. So this test never marks the row: it claims it,
-    proves no other drain can take it while the lease holds, lets the lease expire, and claims
-    again with nothing else having happened in between.
+    The lease's own predicate, evaluated at the next ordinary claim, recovers it, not a separate
+    timer. The test claims, shows no other drain can take it while the lease holds, lets it expire
+    and claims again.
     """
     await migrated_db_or_skip()
     _with_sink(monkeypatch, "alpha")
@@ -1040,20 +903,11 @@ async def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next
 def test_one_unqueueable_record_costs_one_document_and_not_the_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A poison record must not take its siblings with it, and they are genuinely its siblings.
+    """One unqueueable record costs one document and not the batch.
 
-    `records_for` decomposes one payload into several — a solvent screen queues the aggregate *and*
-    its parts — so a batch here is one calculation's own facts, not an unrelated grouping. The
-    whole loop ran inside one transaction with one `except Exception` around it, so a single
-    refused row rolled back every good row beside it and returned 0, logging only "could not queue
-    3 record(s)": the counter could not say how many good documents went with the bad one.
-
-    **A savepoint per record rather than a bare `try` per record**, and the two poisons below are
-    why: they fail on opposite sides of the wire. psycopg refuses the NUL in its own text dumper,
-    which leaves the transaction healthy and would survive a bare `try`; the out-of-range
-    `schema_version` is refused by Postgres, which aborts the transaction, so every later `INSERT`
-    fails with `InFailedSqlTransaction` and the final `COMMIT` takes the good rows with it. Only a
-    savepoint contains both, and a test carrying only the first would have passed the weaker fix.
+    `records_for` decomposes one calculation into several records. A savepoint per record is
+    required: psycopg refuses a NUL client-side (transaction healthy), while Postgres refuses an
+    out-of-range `schema_version` and aborts the transaction, and only a savepoint contains both.
     """
 
     async def _run() -> list[str]:
@@ -1085,18 +939,10 @@ def test_one_unqueueable_record_costs_one_document_and_not_the_batch(
 def test_a_calculation_that_produced_a_non_finite_number_is_refused_at_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`NaN` is not JSON, so a document carrying one can never be queued — say so at projection.
+    """A calculation that produced a non-finite number is refused at projection.
 
-    A failed optimization or a division by zero inside a calculator produces `NaN` and `Infinity`
-    like any other float, and every model in `publish.record` took them. The document then reached
-    the `jsonb` column, which refused it as an `InvalidTextRepresentation` naming a *token* — a
-    write failure, counted as one, for a payload that will fail identically on every retry and
-    every re-publish.
-
-    Refusing it at projection puts it in the one series whose declared meaning is "this release
-    cannot project this shape until code changes", and leaves
-    `chemclaw_result_publish_failures_total` to mean what it says: a destination or a database
-    having a bad day.
+    `NaN` is not JSON and fails identically on every retry, so it belongs in the projection-failure
+    series, leaving `chemclaw_result_publish_failures_total` for destination or database trouble.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -1130,18 +976,11 @@ def test_a_calculation_that_produced_a_non_finite_number_is_refused_at_projectio
 def test_project_payload_separates_a_projector_that_raised_from_a_payload_with_nothing_to_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The three-state `enqueue_payload`'s `int` cannot carry, and why one caller needs it.
+    """`project_payload` separates a projector that raised from a payload with nothing to queue.
 
-    `enqueue_payload` returns 0 for "queued nothing", for "the projector raised" and for "no sink" —
-    which is correct for the three hooks behind a finished calculation, all of which are
-    best-effort and none of which reports a number to anyone. `backfill.py` is the caller that
-    *is* a report: it added that 0 to its `queued` counter and touched nothing else, so a row an
-    older calculator wrote landed in no bucket at all and the operator-facing line said "4 row(s)
-    seen, 2 queued, 1 skipped" over four rows.
-
-    `None` is that missing state. Asserted against the same payload through both entry points, so
-    the two cannot drift into disagreeing about what a failed projection is: `enqueue_payload`
-    still answers 0, and `project_payload` says why.
+    `enqueue_payload` returns 0 for all three cases, fine for best-effort hooks; `backfill.py`
+    reports counts and needs `None` for the failure. Asserted through both entry points so they
+    agree.
     """
     _with_sink(monkeypatch, "alpha")
     monkeypatch.setattr(outbox, "enqueue", _counting_enqueue)

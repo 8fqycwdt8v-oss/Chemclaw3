@@ -1347,8 +1347,7 @@ def test_a_calibrated_process_does_not_bill_past_its_budget(
         "cannot appear in it"
     )
 
-    # The criterion `D-2026-09-04` set, and the one the old arithmetic failed by 16,596: does the
-    # request fit the model it is going to.
+    # The criterion: does the request fit the model it is going to.
     assert billed <= SMALLEST_TARGET_WINDOW - settings.llm_max_tokens, (
         f"a converged process sent a request the provider bills at {billed}, against "
         f"{SMALLEST_TARGET_WINDOW - settings.llm_max_tokens} of input on the smallest window this "

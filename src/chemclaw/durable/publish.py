@@ -27,8 +27,8 @@ with workflow.unsafe.imports_passed_through():
 # listed here or declared retryable below.
 _DECLARED_RETRYABLE = frozenset(
     {
-        # Not here: `kg.git_submitter.GitRemoteError` (dead remote, timeout, contended lock) is the
-        # retryable half of git write failures.
+        # Not in the bad-data list: `kg/git_writer.py`'s `GitRemoteError` (dead remote, timeout,
+        # contended lock) is the retryable half of git write failures.
         "GitRemoteError",
     }
 )

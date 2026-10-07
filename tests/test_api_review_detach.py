@@ -1,5 +1,4 @@
-"""The detachable turn: pump failures are retrieved and logged, and `stop` propagates its own
-cancel.
+"""The detachable turn: pump failures are retrieved and logged, and `stop` re-raises its own cancel.
 
 `api/detach.py` runs on a path nobody watches once a client detaches, so a control there can stop
 working unnoticed; these tests drive `_note_pump_failure` and `stop` directly.

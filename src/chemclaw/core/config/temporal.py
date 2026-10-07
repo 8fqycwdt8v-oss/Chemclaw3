@@ -63,9 +63,10 @@ class TemporalSettings(BaseSettings):
     # knowing what each attempt may duplicate.
     agent_step_max_attempts: int = Field(default=1, ge=1)
 
-    # Concurrent activities per worker process. Equal to the Postgres pool width, so no activity
-    # waits for a connection (temporalio's default of 100 turns starvation into retry churn).
-    # Bundles whose activities wait rather than query (`calc`) override it in the chart.
+    # Concurrent activities per worker process. At most the worker's Postgres pool width
+    # (`pg_pool_max_size`), so no activity waits for a connection (temporalio's default of 100 turns
+    # starvation into retry churn). Bundles whose activities wait rather than query (`calc`)
+    # override it in the chart.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
     # Workflows a worker keeps resident between tasks (SDK default 1,000). Task slots only bound

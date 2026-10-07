@@ -626,8 +626,8 @@ class _TurnLedger:
         """Count one streamed event into the turn record — the one place the counts are taken.
 
         Off the events because every path (model run, resume, subagent) produces them. A refusal is
-        a `ToolFailedEvent` whose `reason` `agent/plan_gate.plan_gate_failure_reason` already
-        classified, so it is reused rather than re-decided.
+        a `ToolFailedEvent` whose `reason` `agent/audit.refusal_reason` already classified, so it is
+        reused rather than re-decided.
         """
         if isinstance(event, TokenEvent):
             # `not event.agent`: the same filter `_stream_into` applies to `answer_parts`.

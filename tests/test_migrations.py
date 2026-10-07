@@ -1,19 +1,8 @@
-"""The migration reader finds the SQL files, offline and with no database (D-148).
+"""The migration runner (`chemclaw.core.migrate`): files, checksums, locks and the ledger.
 
-`_read_sql_files` located `infra/sql/` as `Path(__file__).parent.parent` — correct only while the
-module sat at the repository root, where that expression happened to resolve there. D-148 moved it
-two levels deeper, into the calc package, and the path silently became a directory *inside* the
-package. `glob` on a non-existent directory raises nothing and yields nothing, so `make db-migrate`
-did not fail on a bad path — it applied zero migrations, and CI only caught it because the
-integration tests that follow found no schema.
-
-The module has since moved again, to `chemclaw.core.migrate`, where the schema's runner belongs
-(D-2026-08-05-append-only-by-grant-not-by-contract). That move needed no change to
-`sql_migrations_dir`, which is the property these tests exist to keep.
-
-That is the failure mode worth a test: not "the migrations are wrong" but "there are no migrations
-and nobody said so". These run offline and touch no database, so they fail on the commit that
-breaks the path rather than on the first job that needs the schema.
+The path tests run offline: a wrong `sql_migrations_dir` globs nothing and raises nothing, so
+`make db-migrate` would apply zero migrations silently. These fail on the commit that breaks the
+path rather than on the first job that needs the schema.
 """
 
 import asyncio
@@ -44,18 +33,10 @@ from tests.pg import migrated_db_or_skip
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-# The two collisions that were already applied when this guard was written, and the reason it is a
-# ratchet rather than a flat rule. Both are applied everywhere this schema runs, and
-# `schema_migrations` keys on the **filename**: renaming one would re-apply it on every existing
-# database and fail on the objects it already created. So they are frozen here, and every future
-# prefix has to be unique.
-#
-# **The exemption is the four filenames, not the two prefixes**, and it shipped as the prefixes —
-# which exempted exactly the case the test below exists for. `037` and `043` are the only already-
-# used low prefixes in the tree, so "a third file numbered into an already-used low prefix" could
-# only ever be a third `037` or a third `043`, and a prefix-keyed exemption waves both through. The
-# symmetric staleness check had the same hole: `< 2` fires when a grandfathered pair loses a member
-# and never when it gains one.
+# The two prefix collisions already applied when this guard was written. `schema_migrations` keys on
+# the filename, so renaming one would re-apply it on every existing database; they are frozen and
+# every future prefix must be unique. The exemption is the four filenames, not the two prefixes, so
+# a third `037` or `043` still fails.
 _APPLIED_DUPLICATES: dict[str, frozenset[str]] = {
     "037": frozenset({"037_bo_suggestion_provenance.sql", "037_document_index.sql"}),
     "043": frozenset({"043_session_listing.sql", "043_session_message_shape.sql"}),
@@ -63,19 +44,11 @@ _APPLIED_DUPLICATES: dict[str, frozenset[str]] = {
 
 
 def test_no_two_migrations_share_a_number() -> None:
-    """A duplicate prefix means one file set applied in two different orders, both reported as fine.
+    """No two migrations share a number.
 
-    `migrate()` sorts by the whole filename, so today's two pairs each have a deterministic order
-    and are independent of each other (columns on `bo_suggestions` against new document tables;
-    indexes against a new column) — the run is one transaction, so nothing can half-apply, and
-    measured on a fresh database all 79 files apply cleanly in that order. Harmless, and nothing
-    kept it so.
-
-    What it is latent *for* is the next file numbered into an already-used low prefix: on a fresh
-    install it sorts before everything from `038` on, and on an existing database it applies after
-    everything, because the ledger has already recorded the rest. Two installs of the same commit,
-    two orders, success reported both times — and a migration that depends on a later one is a
-    failure only the fresh install sees.
+    `migrate()` sorts by whole filename, so the frozen pairs have a deterministic order. A new file
+    numbered into an already-used low prefix would sort early on a fresh install but apply last on
+    an existing database, so two installs of one commit would apply in two orders.
     """
     prefixes: dict[str, list[str]] = {}
     for path in sorted((_REPO_ROOT / "infra" / "sql").glob("*.sql")):
@@ -120,11 +93,10 @@ def test_reading_the_migrations_finds_files(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_an_empty_directory_is_not_mistaken_for_no_work(tmp_path: Path) -> None:
-    """Pointing at the wrong directory must be visible, not read as "nothing to migrate".
+    """An empty directory is an error, not "nothing to migrate".
 
-    This is the guard the original bug walked straight through. `_read_sql_files` returning `{}` is
-    indistinguishable from a fully-migrated database at the call site, so the emptiness has to be
-    caught here rather than shrugged off downstream.
+    `_read_sql_files` returning `{}` is indistinguishable from a fully migrated database at the call
+    site.
     """
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(settings, "sql_migrations_dir", str(tmp_path))
@@ -137,17 +109,11 @@ def test_an_empty_directory_is_not_mistaken_for_no_work(tmp_path: Path) -> None:
 def test_a_directory_with_no_ledger_file_fails_by_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A mis-set `sql_migrations_dir` must name itself, the way the grant applier already does.
+    """A directory with no ledger file fails with an error naming the directory and setting.
 
-    `migrate` bootstraps the ledger with `sources[_LEDGER_FILE]` and nothing guards the subscript,
-    so an empty or wrong directory failed a `pre-install` hook Job with a bare
-    `KeyError: '000_schema_migrations.sql'` — naming neither the directory that was searched nor
-    the setting that points at it, and leaving an operator nothing to act on. `apply_grants`
-    handles the identical misconfiguration explicitly ("An empty directory is an error, not a
-    successful no-op") and names the path; this is the same rule at the same layer.
-
-    Checked before the connect, so a mis-set path fails as the configuration error it is rather
-    than as a `KeyError` inside an open transaction — and so this test needs no server.
+    Otherwise the bootstrap subscript raises a bare `KeyError` that tells an operator nothing; this
+    matches `apply_grants`. Checked before connecting, so it is a configuration error and needs no
+    server.
     """
     monkeypatch.setattr(settings, "sql_migrations_dir", str(tmp_path))
     with pytest.raises(MigrationError, match=re.escape(str(tmp_path))):
@@ -167,51 +133,41 @@ CREATE TABLE IF NOT EXISTS widgets (
 
 
 def test_editing_a_comment_does_not_count_as_drift() -> None:
-    """The whole-file hash made a corrected comment an outage on every existing database.
+    """Editing a comment does not count as drift.
 
-    Twice, from two different sessions, and both edits were right: `006_audit_events.sql` renamed a
-    module the D-148 package move had moved, `031_bo_campaigns.sql` recorded that two columns hold
-    the lead objective only. Each made `make db-migrate` refuse on any database that had already
-    applied the file, while CI stayed green because CI starts from an empty one. A comment cannot
-    change what a migration did, so it cannot be drift.
+    A comment cannot change what a migration did, and a whole-file hash would make a corrected
+    comment refuse on every database that already applied the file while CI (starting empty) stays
+    green.
     """
     recommented = _APPLIED.replace("-- what this migration is for", "-- what this migration does")
     assert _checksum(recommented) == _checksum(_APPLIED)
 
 
 def test_changing_a_statement_changes_the_checksum() -> None:
-    """The hash has to keep the power the fix above could have cost it.
+    """Changing a statement changes `_checksum`.
 
-    This is a property of `_checksum` and nothing more — it was named
-    `test_changing_a_statement_still_counts_as_drift`, which promised the *guard*, and measured on
-    2026-09-06 `elif row[0] != checksum:` could be replaced with `elif False:` with this file and
-    every other migration test green. What counts as drift is decided in `migrate`, against a row
-    that exists, and that is asserted in "the ledger row `migrate` finds" below.
+    A property of the hash only; that `migrate` refuses the drift is asserted against a real ledger
+    row in "the ledger row `migrate` finds" below.
     """
     altered = _APPLIED.replace("id BIGSERIAL PRIMARY KEY", "id TEXT PRIMARY KEY")
     assert _checksum(altered) != _checksum(_APPLIED)
 
 
 def test_a_trailing_comment_is_left_alone_rather_than_stripped_unsafely() -> None:
-    """Under-strip, never over-strip: a `--` inside a string literal must survive.
+    """Under-strip, never over-strip: a `--` inside a string literal survives.
 
-    Only lines whose first non-space characters are `--` are dropped. The cost is that editing a
-    *trailing* comment still reads as drift, which is the behaviour we already had and is the safe
-    direction to be wrong in.
+    Only lines starting with `--` are dropped, so editing a trailing comment still reads as drift,
+    the safe direction to be wrong.
     """
     assert "-- the key" in _statements(_APPLIED)
     assert "INSERT INTO t VALUES ('a -- b')" in _statements("INSERT INTO t VALUES ('a -- b')\n")
 
 
 def test_the_legacy_hash_and_the_statement_hash_are_different_values() -> None:
-    """The two hashes disagree, which is why the upgrade path has to exist at all.
+    """The legacy whole-file hash and the statement hash differ, so an upgrade path must exist.
 
-    Every `schema_migrations` row written before the guard became statement-only holds a
-    whole-file hash, so without an upgrade path the change that fixed an outage would declare
-    every deployed database drifted. That the runner *takes* that path is asserted below, against
-    a ledger row rather than here: this test used to end
-    `assert _legacy_checksum(_APPLIED) == _legacy_checksum(_APPLIED)`, a `sha256` call compared to
-    itself, which is a line that cannot fail.
+    Ledger rows written before statement-only hashing hold the legacy hash; that the runner takes
+    the upgrade path is asserted below against a ledger row.
     """
     assert _legacy_checksum(_APPLIED) != _checksum(_APPLIED)
 
@@ -222,11 +178,8 @@ def test_the_legacy_hash_and_the_statement_hash_are_different_values() -> None:
 class _RecordingCursor:
     """Enough of a psycopg cursor for `migrate`'s one query: "has this file been applied?".
 
-    `row` is what the ledger holds for the file just asked about: `None` where nothing is applied
-    yet — which is what the lock tests below want, every file new — and a one-column tuple where
-    the behaviour under test is what `migrate` does with a row that *already exists*. That second
-    case was unreachable for as long as this double could only answer `None`, and both arms of
-    `migrate`'s `if row is not None:` went untested with it.
+    `row` is what the ledger holds for the file asked about: `None` (every file new, for the lock
+    tests) or a one-column tuple, which exercises both arms of `migrate`'s `if row is not None:`.
     """
 
     def __init__(self, row: tuple[str] | None = None, rows: tuple[tuple[str], ...] = ()) -> None:
@@ -250,11 +203,8 @@ class _RecordingCursor:
 class _RecordingConnection:
     """Records the statements `migrate` issues, in order, without a database.
 
-    A recording double rather than a real connection because the property under test is the
-    *sequence* — which budget is in force when the advisory lock is taken, and which when the DDL
-    runs. Getting that backwards is silently wrong against a live database and invisible against an
-    idle one, which is exactly the kind of thing an integration test that only ever runs on an empty
-    CI database would never catch.
+    The property is the sequence: which timeout is in force when the advisory lock is taken and when
+    the DDL runs. Getting it backwards is invisible against an idle CI database.
     """
 
     def __init__(self, ledger: dict[str, str] | None = None) -> None:
@@ -311,13 +261,10 @@ def _run_against_recorder(
 
 
 def test_migrators_are_serialized_by_an_advisory_lock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two migrators running at once had nothing stopping them from interleaving DDL.
+    """Concurrent migrators are serialized by a transaction-scoped advisory lock.
 
-    `agent/audit_store.py` took exactly this lock to keep two appends from forking its hash chain
-    (both are gone as of D-2026-08-14; DDL still races, so this one stays)
-    (`infra/sql/011`), which is what made the absence conspicuous: the audit writer serialized its
-    *inserts* and the migrator did not serialize its *DDL*. Transaction-scoped, so the single commit
-    at the end of the run releases it and there is no path that leaks it.
+    Otherwise two runs could interleave DDL. The single commit at the end releases it, so no path
+    leaks it.
     """
     from chemclaw.core.migrate import _MIGRATION_LOCK_KEY
 
@@ -342,13 +289,11 @@ def test_the_lock_is_taken_before_any_ddl(monkeypatch: pytest.MonkeyPatch) -> No
 def test_waiting_for_a_peer_and_waiting_for_a_table_get_different_budgets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole reason there are two settings, and the order they have to be applied in.
+    """A peer migrator and a table lock get different wait budgets, applied in that order.
 
-    Taking the advisory lock under the 5 s DDL budget would fail an ordinary concurrent deploy —
-    waiting for a peer migrator is a legitimate event. Running the DDL under the 300 s peer budget
-    would let one `ALTER TABLE` sit in the lock queue for five minutes, and because Postgres's lock
-    queue is FIFO, *every* later query on that table queues behind it: the migration takes the table
-    down while waiting rather than merely being slow.
+    A peer migrator is a legitimate wait and gets the long budget. DDL gets the short one, because
+    Postgres's lock queue is FIFO: an `ALTER TABLE` waiting minutes would queue every later query on
+    that table behind it.
     """
     from chemclaw.core.config import settings as live
 
@@ -362,12 +307,9 @@ def test_waiting_for_a_peer_and_waiting_for_a_table_get_different_budgets(
 
 
 def test_the_run_still_takes_no_statement_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`lock_timeout` bounds the *wait*; the work stays unbounded, and that is the point.
+    """The run takes no `statement_timeout`: `lock_timeout` bounds the wait, not the work.
 
-    A `CREATE INDEX` may legitimately build for minutes once it has its lock. Capping that with a
-    `statement_timeout` would break migrations that are behaving correctly, which is why this module
-    connects without one and why the new setting is a different knob rather than a smaller value of
-    the old one.
+    A `CREATE INDEX` may build for minutes once it holds its lock.
     """
     import inspect
 
@@ -382,14 +324,9 @@ def test_the_run_still_takes_no_statement_timeout(monkeypatch: pytest.MonkeyPatc
 
 # --- the ledger row `migrate` finds ------------------------------------------------------------
 #
-# Both arms of `migrate`'s `if row is not None:` — refuse an edited file, upgrade a legacy row —
-# were unreached by this suite until 2026-09-06: the only harness for `migrate` was the recorder
-# above, whose `fetchone` answered `None` to everything, and the two tests that carried these
-# names asserted hash arithmetic instead. Measured, `elif row[0] != checksum:` → `elif False:` and
-# `if row[0] == _legacy_checksum(text):` → `if False and ...` each left the migration corpus at
-# 227 passed. So these drive `migrate` itself, once against a doubled connection (which runs
-# everywhere) and once against the real ledger in Postgres (which proves the row is actually
-# rewritten).
+# Both arms of `migrate`'s `if row is not None:` (refuse an edited file, upgrade a legacy row) are
+# driven through `migrate` itself: once against a doubled connection and once against the real
+# ledger in Postgres, which proves the row is actually rewritten.
 
 
 def _first_tracked_migration() -> tuple[str, str]:
@@ -409,9 +346,8 @@ def test_migrate_refuses_a_file_that_was_edited_after_it_was_applied(
 ) -> None:
     """A ledger row whose checksum disagrees stops the run, naming the file.
 
-    This is the whole point of the ledger: an applied migration's effect never changes, so an
-    in-place edit has to become a new file. The failure this catches is a schema diverging from
-    the ledger that claims to describe it, silently, on every database that already ran the file.
+    An applied migration's effect never changes, so an in-place edit must become a new file;
+    otherwise the schema diverges from the ledger silently.
     """
     name, _text = _first_tracked_migration()
     with pytest.raises(MigrationError, match=re.escape(name)):
@@ -421,12 +357,10 @@ def test_migrate_refuses_a_file_that_was_edited_after_it_was_applied(
 def test_migrate_upgrades_a_legacy_ledger_row_rather_than_rejecting_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A row holding the pre-fix whole-file hash is accepted once and rewritten, not refused.
+    """A legacy ledger row is accepted once and rewritten, not refused.
 
-    Three things have to be true, and only the first is visible from an exception that did not
-    happen: the run does not raise, the row is rewritten to the *statement* hash (so the next run
-    needs no legacy branch), and the file itself is **not** re-applied — the `continue` is what
-    keeps an already-applied `CREATE TABLE` from running a second time.
+    The run does not raise, the row is rewritten to the statement hash, and the file is not
+    re-applied (the `continue` keeps an applied `CREATE TABLE` from running twice).
     """
     name, text = _first_tracked_migration()
     conn = _run_against_recorder(monkeypatch, ledger={name: _legacy_checksum(text)})
@@ -440,12 +374,10 @@ def test_migrate_upgrades_a_legacy_ledger_row_rather_than_rejecting_it(
 
 
 def test_the_live_ledger_refuses_a_drifted_row_and_upgrades_a_legacy_one() -> None:
-    """The same two behaviours against a real `schema_migrations`, not a double.
+    """Against a real `schema_migrations`: a drifted row is refused and a legacy one upgraded.
 
-    The recorder proves what `migrate` *decides*; this proves what the database ends up holding —
-    the `UPDATE` actually lands, and the run that follows it reports the file as already applied.
-    Restored in a `finally` because a drifted row left behind would fail every later test that
-    calls `migrated_db_or_skip`.
+    Proves the `UPDATE` lands and the following run reports the file applied. Restored in a
+    `finally` so a drifted row cannot fail later tests using `migrated_db_or_skip`.
     """
 
     async def _run() -> None:
@@ -500,12 +432,10 @@ def test_the_live_ledger_refuses_a_drifted_row_and_upgrades_a_legacy_one() -> No
 def test_the_newest_shipped_migration_is_what_a_full_run_applies_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`newest_shipped_migration` and `migrate`'s apply order must agree on "newest".
+    """`newest_shipped_migration` and `migrate`'s apply order agree on "newest".
 
-    Both are a plain sort of the whole filename, and the readiness probe in
-    `api/routes/ops.py` compares one against a `schema_migrations` row the other wrote — so if
-    these two ever disagree (a Postgres collation in the comparison, a numeric sort here) the
-    probe asks about a file no full run ends on and every pod goes unready.
+    The readiness probe in `api/routes/ops.py` compares one against a ledger row the other wrote; if
+    they disagree, every pod goes unready.
     """
     monkeypatch.chdir(_REPO_ROOT)
     tracked = sorted(name for name in _read_sql_files() if name != _LEDGER_FILE)
@@ -513,11 +443,10 @@ def test_the_newest_shipped_migration_is_what_a_full_run_applies_last(
 
 
 def test_the_bootstrap_file_is_never_the_newest_shipped_migration(tmp_path: Path) -> None:
-    """An image shipping only the ledger's own DDL ships no *tracked* migration.
+    """The bootstrap file is never the newest shipped migration.
 
-    `000_schema_migrations.sql` is the one file that is never recorded in the ledger it creates,
-    so returning it would hand the readiness probe a filename no database can ever have applied —
-    a check that can only ever fail, on every pod, forever.
+    `000_schema_migrations.sql` is never recorded in its own ledger, so returning it would give the
+    readiness probe a check that always fails.
     """
     (tmp_path / _LEDGER_FILE).write_text("CREATE TABLE schema_migrations ();")
     original = settings.sql_migrations_dir
@@ -531,17 +460,11 @@ def test_the_bootstrap_file_is_never_the_newest_shipped_migration(tmp_path: Path
 async def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A database ahead of the image is a WARNING — and still a run that starts.
+    """A ledger row this image ships no file for is reported as a WARNING, and the run still starts.
 
-    The apply loop iterates the *image's* files, so a ledger row with no corresponding file was
-    never looked at: measured, an image shipping through `080` against a database at `091` applied
-    nothing, returned `[]`, and printed "(none — already up to date)" over eleven migrations it had
-    never heard of. That is exactly the state an operator is in after a rollback, and exactly when
-    they run the documented recovery command to find out whether the schema matches the image.
-
-    Both halves are asserted here on purpose. The warning is the fix; the *absence* of a refusal is
-    the constraint on it — a rollback has to be able to start, and this schema only ever goes
-    forward, so there is nothing here for the migrator to undo.
+    The apply loop iterates the image's files, so a database ahead of the image (after a rollback)
+    would otherwise report "already up to date". The schema only goes forward, so a rollback must
+    still be able to start.
     """
     await migrated_db_or_skip()
     dsn = migration_dsn()
@@ -572,15 +495,10 @@ async def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
 
 
 async def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_traceback() -> None:
-    """The *normal* concurrency case must not read as a crash.
+    """A peer holding the lock is named in a message, not raised as a traceback.
 
-    Two overlapping deploys, or `make db-migrate` run during one, is the event this lock exists
-    for. Before this, waiting out the budget surfaced as
-    `psycopg.errors.LockNotAvailable: canceling statement due to lock timeout` pointing at the
-    `pg_advisory_xact_lock` line — the hook Job's `backoffLimit: 3` self-heals it, so the traceback
-    only ever bought an operator reading a crash where the system was working as designed.
-
-    The budget is named in the message because it is the one thing an operator can change.
+    Overlapping deploys are the event the lock exists for, so waiting out the budget is not a crash.
+    The budget is named because it is what an operator can change.
     """
     await migrated_db_or_skip()
     dsn = migration_dsn()
@@ -602,12 +520,10 @@ async def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_tracebac
 async def test_a_migration_s_raise_warning_reaches_the_log_and_a_notice_does_not(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A notice nobody handles is dropped by psycopg, so a migration's WARNING used to reach no one.
+    """A migration's `RAISE WARNING` reaches the log, and a NOTICE does not.
 
-    `108` leaves its finiteness check `NOT VALID` on a database already holding a non-finite value
-    and says so with `RAISE WARNING`; the handler `migrate` registers is what turns that into a
-    log line. Driven against the server, so the `Diagnostic` is the real object rather than a
-    stand-in, and a NOTICE — what every `IF NOT EXISTS` replay emits — stays out of the log.
+    psycopg drops unhandled notices, so `migrate` registers a handler. Driven against the server so
+    the `Diagnostic` is real; the NOTICE every `IF NOT EXISTS` replay emits stays out.
     """
     await migrated_db_or_skip()
     conn = await psycopg.AsyncConnection.connect(migration_dsn())

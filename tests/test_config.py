@@ -1142,8 +1142,8 @@ _ENFORCED_POSTURE: dict[str, Any] = {
 @pytest.mark.parametrize(
     ("why", "dsn"),
     [
-        # The spelling that used to start and stopped: the hand-rolled parser could not see `host=`
-        # inside a URL query, so this took the loopback exemption by not being seen at all.
+        # `host=` inside a URL query names a socket directory; a hand-rolled parser would miss it
+        # and grant the loopback exemption by not seeing it.
         ("URL with host= in the query", "postgresql://u:p@/chemclaw?host=/var/run/postgresql"),
         ("the keyword form of the same", "host=/var/run/postgresql dbname=chemclaw user=u"),
         # Linux's abstract namespace, libpq's `@` spelling — the same transport, no filesystem path.

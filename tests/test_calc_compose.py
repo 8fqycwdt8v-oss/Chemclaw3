@@ -1,16 +1,9 @@
 """The composites: what a calculation is when its parts live in another repository.
 
-`D-2026-08-16-the-physics-leaves-the-cache-stays` split `calc` by **composability**. A primitive
-moved and is cached under the server's key; a composite — anything whose key would name an output —
-was not shipped at all and is assembled in `connectors/calc/compose.py` from parts that *are* keyed.
-That decision is only correct if the composites ask for the right parts and stop asking on a repeat,
-so almost everything here is a **call count**: "was this recomputed?" is a question about call
-counts and nothing else (D-011).
-
-Driven against `tests/calc_server_fake.py` rather than a running server, and the fake reproduces
-three key properties measured against the real one — a Fukui key that does not name the mode, an
-`xtb.opt` key that does not name who asked, and a `predict_logd` with no key at all. A fake that got
-those wrong would let these tests pass on a design that fails in production.
+A primitive is cached under the server's key; a composite (whose key would name an output) is
+assembled in `connectors/calc/compose.py` from keyed parts
+(`D-2026-08-16-the-physics-leaves-the-cache-stays`). So nearly every test is a call count (D-011).
+Driven against `tests/calc_server_fake.py`, which reproduces the real server's key properties.
 """
 
 import asyncio
@@ -35,13 +28,10 @@ def _run(coroutine: Any) -> Any:
 def test_thermochemistry_is_two_cached_parts_and_a_local_arithmetic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The measurement the whole split turns on: a repeat pays no calculation at all.
+    """Thermochemistry is two cached parts and local arithmetic: a repeat computes nothing.
 
-    `compute_thermochemistry` never had a cache row of its own — its key would have to name the
-    geometry the refinement loop settles on, which is an output — so its economy is entirely the
-    nested optimization and Hessian entries. Shipping it whole would have swallowed both. Here the
-    second run computes **nothing**: two `calculation_key` round trips, two store hits, and the RRHO
-    arithmetic again, which is milliseconds and is the part that depends on the temperature.
+    Its own key would name the geometry the refinement settles on, so it has no cache row; a second
+    run is two `calculation_key` round trips, two store hits and the RRHO arithmetic.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -66,12 +56,9 @@ def test_thermochemistry_is_two_cached_parts_and_a_local_arithmetic(
 def test_a_second_temperature_reuses_the_hessian_instead_of_recomputing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reason the state variables are not in any key any more.
+    """A second temperature reuses the Hessian instead of recomputing it.
 
-    A Hessian does not depend on the temperature, so the server keys it on what can move the matrix
-    and nothing else. Asking the same minimum at 310 K after 298 K is therefore a cache hit plus a
-    page of partition functions — where a shipped composite would have taken the second derivatives
-    again.
+    A Hessian does not depend on temperature, so the server keys it without one.
     """
     from chemclaw.science.calc.thermo import ThermoSettings
 
@@ -97,11 +84,9 @@ def test_a_second_temperature_reuses_the_hessian_instead_of_recomputing_it(
 def test_the_refinement_loop_escapes_a_saddle_point(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stationary point is not always a minimum, and the escape is this repository's.
 
-    A force field hands over an eclipsed methyl and a Cartesian optimizer preserves that symmetry
-    all the way down onto the rotational saddle — measured on ethyl acetate, an ordinary ester, at
-    -42 cm^-1, where the free energy computed there is not a free energy. Displace along the
-    imaginary mode and re-optimize; here the fake reports a saddle once and a minimum after, so the
-    loop has to take a second pass and land on a *different* geometry.
+    A Cartesian optimizer can preserve an eclipsed symmetry onto a rotational saddle, where a free
+    energy is meaningless. The loop displaces along the imaginary mode and re-optimizes; the fake
+    reports a saddle once, so the loop must land on a different geometry.
     """
     server = install(monkeypatch, FakeCalcServer(saddle_first=True))
     store = InMemoryStore()
@@ -155,12 +140,7 @@ def _always_a_saddle(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_a_scan_is_a_series_of_separately_keyed_points(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One `scan_point` per value, each cached on its own — so re-running with two more is cheap.
-
-    The whole profile used to be one cache entry, on the reasoning that its constrained points were
-    of no use to anyone else. They are of use to the *same* scan asked again, which is the common
-    case, and the server keys each point anyway.
-    """
+    """One `scan_point` per value, each cached on its own — so re-running with two more is cheap."""
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
 
@@ -185,9 +165,8 @@ def test_a_scan_longer_than_the_cap_is_rejected_before_any_call(
 ) -> None:
     """Every point is a full constrained optimization, so the length of `values` *is* the cost.
 
-    The values come from the model, which makes an uncapped scan an unbounded compute request the
-    agent can issue by naming more of them. Checked before the embed, so a refused request costs no
-    round trip at all.
+    The values come from the model, so the cap is checked before the embed and a refusal costs no
+    round trip.
     """
     from chemclaw.core.config import settings
 
@@ -255,9 +234,8 @@ def test_the_pair_is_canonically_ordered_so_either_direction_is_one_calculation(
 ) -> None:
     """A-with-B and B-with-A are one physical quantity but not one starting geometry.
 
-    `combine_structures` holds the first monomer at the origin and offsets the second along +x, so
-    swapping the arguments negates the intermolecular vector and would key to a different entry —
-    paying twice, at minutes per search, for the same answer.
+    `combine_structures` offsets the second monomer along +x, so the pair is canonically ordered to
+    key one entry.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -279,9 +257,8 @@ def test_an_interaction_energy_differences_relaxed_species(
 ) -> None:
     """The complex at its optimized binding mode, minus each monomer optimized on its own.
 
-    Which deliberately includes the deformation cost of binding — the part a "rigid monomer"
-    definition leaves out. Three relaxations plus one search, and every one of them shared with any
-    other question about those molecules.
+    This includes the deformation cost of binding. Every part is shared with other questions about
+    those molecules.
     """
     server = install(monkeypatch, FakeCalcServer())
 
@@ -315,9 +292,7 @@ def test_an_unbalanced_equation_is_rejected_before_anything_is_computed(
 ) -> None:
     """An unbalanced equation is rejected before anything crosses the wire.
 
-    The difference would include whatever atoms the two sides do not share — meaningless, and it
-    looks entirely ordinary. The message names the element and the count, because the usual cause is
-    a forgotten water and that is immediately fixable once stated.
+    The message names the element and count, since the usual cause is a forgotten water.
     """
     server = install(monkeypatch, FakeCalcServer())
     with pytest.raises(ValueError, match="not atom-balanced"):
@@ -341,11 +316,10 @@ _NEUTRALISATION = (["OC(=O)C(F)(F)F", "O=C([O-])[O-]"], ["[O-]C(=O)C(F)(F)F", "O
 def test_a_gas_phase_reaction_over_ions_is_refused_before_anything_is_computed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pc-03: a gas-phase energy over free ions is refused, not reported.
+    """A gas-phase energy over free ions is refused, not reported.
 
-    The value it produced was presented to a chemist as "exothermic enough to matter at scale". In
-    vacuum each ion is bare, so the difference is unscreened charge rather than a reaction energy,
-    and the message has to name the ions and the remedy (a solvent) the caller can act on.
+    In vacuum the difference is unscreened charge, not a reaction energy; the message names the ions
+    and the remedy (a solvent).
     """
     server = install(monkeypatch, FakeCalcServer())
     with pytest.raises(ValueError, match="not physically meaningful") as refused:
@@ -417,9 +391,7 @@ def test_a_shared_species_is_computed_once_across_two_reactions(
 ) -> None:
     """There is deliberately no reaction-level cache entry, and this is why it needs none.
 
-    The expensive parts are one optimization and one Hessian per species, each keyed individually,
-    so a second reaction sharing a species reuses it and a reaction is a subtraction over values
-    already held. A reaction-level row could never be hit by anything the per-species rows miss.
+    Each species is keyed individually, so a second reaction sharing a species reuses it.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -515,12 +487,10 @@ def test_quick_level_takes_no_hessian_at_all(monkeypatch: pytest.MonkeyPatch) ->
 def test_an_open_shell_species_is_multiplicity_two_and_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A homolysis is the reaction whose whole point is that one side is open-shell.
+    """An open-shell species is multiplicity two and says so.
 
-    Its multiplicity comes from the SMILES' own radical electrons, derived here because the server
-    reads `multiplicity=None` as closed-shell singlet and would refuse the species outright —
-    measured. The warning is attached at every level, because the caveat is about the energies and
-    every level differences those.
+    Multiplicity comes from the SMILES' radical electrons, since the server reads `None` as a closed
+    shell singlet and would refuse. The warning is attached at every level.
     """
     install(monkeypatch, FakeCalcServer())
     result = _run(
@@ -535,15 +505,10 @@ def test_a_solution_reaction_that_changes_the_molecule_count_is_corrected_to_one
 ) -> None:
     """Δn != 0 in solution: the reported ΔG must be the 1 mol/L one, not the 1 atm one.
 
-    The electronic energy comes back from an ALPB implicit-solvent SCF while the entropy is the
-    ideal-gas one, so a solution ΔG quoted at 1 atm is wrong by RT ln(RT c0/P0) = 1.894 kcal/mol
-    per mole the reaction creates or destroys — a factor of 24.47 in K per unit of Δn. The fake
-    returns the same energies in every medium (which is what the solvent screen's own test rests
-    on), so the entire gas-to-solution difference here *is* the standard-state term and nothing
-    else.
-
-    An association (Δn = -1) must become **more** favourable in the 1 M state, because 1 M is the
-    more concentrated reference: the sign is asserted rather than only the magnitude.
+    The entropy is ideal-gas, so a solution ΔG at 1 atm is off by RT ln(RT c0/P0) = 1.894 kcal/mol
+    per mole created or destroyed. The fake's energies are medium-independent, so the
+    gas-to-solution difference here is exactly that term. An association (Δn = -1) becomes more
+    favourable at 1 M; the sign is asserted.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -572,9 +537,7 @@ def test_the_standard_state_term_follows_the_sign_of_delta_n(
 ) -> None:
     """The same reaction read backwards moves the other way, by the same 1.894 kcal/mol.
 
-    A dissociation makes a mole of species and is therefore **less** favourable at 1 M; checking
-    both directions is what distinguishes a correct correction from a constant offset applied
-    wherever a solvent is named.
+    Both directions distinguish a correct correction from a constant offset.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -622,10 +585,8 @@ def test_a_solvent_screen_says_which_standard_state_each_number_is_in(
 ) -> None:
     """The screen's gas reference is quoted at 1 atm and its solutions at 1 M, so it must say so.
 
-    Solvent-against-solvent — the comparison the tool exists for — is unaffected: every solution
-    entry is in the same state. The gas-to-solution gap is not, and for Δn != 0 it carries the
-    1.894·Δn term on top of the solvation. A reader differencing the two columns without being
-    told is the failure this warning prevents.
+    Solvent-to-solvent comparisons are unaffected; the gas-to-solution gap carries 1.894·Δn on top
+    of solvation.
     """
     install(monkeypatch, FakeCalcServer())
     result = _run(
@@ -646,10 +607,8 @@ def test_a_solvent_screen_ranks_the_media_and_includes_the_gas_phase(
 ) -> None:
     """A screen ranks its media and includes the gas phase as a reference.
 
-    "The solvent barely matters here" is a real answer and is invisible without one.
-
-    The screen also shares every species across media that key the same way, which is the reason it
-    is a fan-out over one cache rather than N independent runs.
+    "The solvent barely matters" is invisible without one. Species keyed alike are shared across
+    media.
     """
     install(monkeypatch, FakeCalcServer())
     result = _run(
@@ -684,11 +643,10 @@ def test_a_screen_that_cannot_distinguish_its_solvents_says_so(
 def test_a_reaction_energy_over_the_ceiling_refuses_before_it_computes_anything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`reaction_energy` fans out over every reactant and product with no ceiling of its own.
+    """A reaction energy over the ceiling refuses before it computes anything.
 
-    Unlike every sibling composite in this module (species_ranking, refined_ensemble, ...), it had
-    no `require_within_budget` call at all — an unprivileged, non-`expensive` job could name an
-    arbitrarily long reactants/products list. The refusal must land before any species is computed.
+    The reactant/product lists are model-supplied, so `require_within_budget` must run before any
+    species is computed.
     """
     server = install(monkeypatch, FakeCalcServer())
     monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
@@ -702,12 +660,10 @@ def test_a_reaction_energy_over_the_ceiling_refuses_before_it_computes_anything(
 def test_a_solvent_screen_counts_species_times_media_against_the_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`solvent_comparison` bounded only *parallelism*; every solvent still ran eventually.
+    """A solvent screen counts species times media against the budget.
 
-    `calc_screen_max_parallel` throttles concurrency, not the total count — the same gap
-    `rank_species_across_solvents` closes by multiplying species by media before checking the
-    budget. A modest reaction (`_ESTERIFICATION`, 4 species) run across enough solvents must still
-    refuse, and refuse before any solvent's reaction energy is computed.
+    `calc_screen_max_parallel` bounds concurrency, not total work, so the product is checked before
+    any solvent runs.
     """
     server = install(monkeypatch, FakeCalcServer())
     monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
@@ -730,16 +686,9 @@ def test_an_oversized_hessian_is_refused_here_with_the_routes_this_system_actual
 ) -> None:
     """The molecule too big for a Hessian is refused before the wire, naming a real way forward.
 
-    The calculation server has its own atom ceiling and refuses above it — and its refusal used to
-    tell the model to "submit it through Chemclaw3's durable QM job path instead", a route
-    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted. There is no such path: every durable
-    job here composes the *same* `compute_hessian` primitive under the same ceiling, so escalating
-    changes nothing.
-
-    So the fence is a preflight on this side, in the `require_within_budget` family, and it names
-    the two things that do work: `level="quick"`, which skips every Hessian, and a smaller model
-    system. The count assertion is the whole test — a refusal that arrives after the call is not a
-    preflight, however true its message.
+    Every durable job composes the same `compute_hessian` under the same atom ceiling, so there is
+    no route to escalate to. The preflight names what works: `level="quick"` (no Hessian) or a
+    smaller model system. The call count is the test: a refusal after the call is not a preflight.
     """
     server = install(monkeypatch, FakeCalcServer())
     monkeypatch.setattr(calc_settings, "calc_hessian_max_atoms", 4)
@@ -758,10 +707,8 @@ def test_a_hessian_carries_the_gradient_that_says_it_was_a_stationary_point(
 ) -> None:
     """`max_gradient_hartree_per_angstrom` survives the wire into the payload this repository reads.
 
-    The server returns it beside every Hessian precisely because `compute_hessian` differentiates
-    whatever geometry it is handed. Dropping it here — which a model that does not declare the
-    field does silently — is what leaves a zero-point energy computed at a non-stationary geometry
-    indistinguishable from one computed at a minimum.
+    `compute_hessian` differentiates whatever geometry it is given; without the gradient, a
+    zero-point energy at a non-stationary geometry looks like one at a minimum.
     """
     install(monkeypatch, FakeCalcServer())
 

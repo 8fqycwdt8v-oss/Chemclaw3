@@ -242,8 +242,7 @@ def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
     resource = Resource.create(
         {
             # The standard variable wins when set; resolved explicitly so the service name is
-            # decided in one
-            # expression.
+            # decided in one expression.
             SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME") or _DEFAULT_SERVICE_NAME,
             # The build's Git SHA, the same value stamped on every audit record.
             SERVICE_VERSION: settings.deployment_revision,

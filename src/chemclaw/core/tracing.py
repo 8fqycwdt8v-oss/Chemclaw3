@@ -152,9 +152,9 @@ def start_span(name: str, **attributes: str | int | float | bool) -> Iterator[Sp
 def trace_header_names() -> frozenset[str]:
     """Every header name `trace_headers()` can produce, whether or not a span is active now.
 
-    For `connectors.identity.turn_identity_hook`, which strips everything this system stamped when a
-    request leaves the connector's origin, possibly after the span ended. Read from the configured
-    propagator's `fields`, so a B3 propagator yields B3 names. Empty when tracing is off.
+    For `core/call_identity.py::turn_identity_hook`, which strips everything this system stamped
+    when a request leaves the connector's origin, possibly after the span ended. Read from the
+    configured propagator's `fields`, so a B3 propagator yields B3 names. Empty when tracing is off.
     """
     if _tracer() is None:
         return frozenset()

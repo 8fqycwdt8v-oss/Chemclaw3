@@ -1,48 +1,16 @@
-"""The schema is forward-only and additive — a policy rather than a habit, because this fails.
+"""The schema is forward-only and additive, enforced by checks that fail.
 
-`infra/sql/` has 35 migrations, no down-path, and — until this file — nothing saying whether that
-was a decision or an omission. Measured before deciding: **not one destructive statement exists in
-any of them.** No `DROP`, no `ALTER … DROP COLUMN`, no `RENAME`, no `TRUNCATE`, no `DELETE`. The
-only `ALTER TABLE` in the tree is `artifact_blobs ALTER COLUMN data SET STORAGE EXTERNAL`, a
-TOAST hint that moves no data.
+There is no down-path. For an additive schema the rollback is "deploy the previous image": old
+code ignores new columns and tables, and the data stays. A scripted down migration is a data-loss
+hazard one command away (e.g. on the append-only audit trail), and a never-run down-path drifts.
+A wrong column is deprecated, not removed; a genuine removal is a deliberate, reviewed operation.
 
-So the policy was already being followed and was written nowhere, which is the state in which
-migration 036 drops a column and nobody notices until the restore. This file writes it down in the
-only form that holds — a check that fails.
+Two separate questions:
 
-**Why additive-forward rather than a tested down-path** (D-2026-08-04-the-schema-only-goes-forward):
-
-* A down migration is a data-loss hazard wearing a safety net's clothes. The audit trail is
-  append-only precisely so that history cannot be rewritten; a scripted `DROP COLUMN` on
-  `audit_events` is the thing that property exists to prevent, and having it in the repository
-  makes it one command away.
-* For an additive schema the rollback already exists and needs no script: **deploy the previous
-  image**. The old code ignores the new column, the new table sits unread, and the data stays.
-  That property is exactly what "additive" buys, and it is worth more than a down-path because it
-  is the one that works under pressure.
-* A down-path that is never run is not a rollback, it is a second schema definition that drifts.
-  The migrations here are `IF NOT EXISTS` and re-runnable; their inverse would be neither.
-
-The cost is stated plainly rather than hidden: a column that turns out to be wrong is *deprecated*,
-not removed, and the tree grows. A genuine removal is a deliberate, reviewed operation — which is
-what an explicit refusal here forces it to be, instead of a line in a file that ran at deploy time.
-
-**Two buckets, because the first version of this check had one and it was wrong in both
-directions** (D-2026-08-08-a-rollback-that-is-not-a-schema-step). It matched `DROP CONSTRAINT`,
-which destroys no data at all, and it was blind to `SET NOT NULL`, which destroys no data either
-*and stops the previous image from writing the table*. It therefore refused a primary-key rebuild
-for a reason that was not true while passing the statement beside it that actually broke the
-rollback. Measured on a scratch database with 000→041 applied, running the previous image's own
-statements verbatim: `SET NOT NULL` on `document_files.chunking_key` failed every file write, and
-the replaced primary key failed every chunk write with "no unique or exclusion constraint matching
-the ON CONFLICT specification". The `DROP CONSTRAINT` the check named cost nothing by itself.
-
-So the two things are asked separately, because they have different answers. **Destroying data is
-refused outright** — no exemption exists, rollback cannot bring rows back. **Breaking the previous
-image is refusable but reviewable**: the data survives, the previous image simply cannot write, and
-whether that is acceptable is a judgement about one migration rather than a rule. A migration in
-`_REVIEWED_ROLLBACK_BREAKS` has had that judgement made, in an ADR that states what an operator
-does instead of "deploy the previous image".
+* destroying data is refused outright, with no exemption, since rollback cannot bring rows back;
+* breaking the previous image's writes (e.g. `SET NOT NULL`, a replaced key that `ON CONFLICT`
+  names) keeps the data but ends the rollback, and may be accepted in
+  `_REVIEWED_ROLLBACK_BREAKS` with an ADR stating what an operator does instead.
 """
 
 from __future__ import annotations
@@ -59,22 +27,15 @@ _MIGRATIONS = Path(__file__).resolve().parents[1] / "infra" / "sql"
 _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
 _RUNBOOK = Path(__file__).resolve().parents[1] / "docs" / "guides" / "runbook.md"
 
-# How an identifier may be spelled. Both patterns below used to say `\w+`, which is the bare
-# lower-case spelling every merged migration happens to use and only that one — so a
-# schema-qualified, `ONLY`, `IF EXISTS` or quoted table name walked through both checks. `ALTER
-# TABLE ONLY …` is the form **`pg_dump` emits**, i.e. the likeliest thing an author pastes out of a
-# dump while writing a migration, which made the miss the opposite of academic. Written once and
-# substituted into every position that names a table or a column, so the two buckets cannot drift
-# into policing different spellings of the same statement.
+# How an identifier may be spelled: bare, schema-qualified, quoted, and after `ONLY`/`IF EXISTS`.
+# `ALTER TABLE ONLY ...` is the form `pg_dump` emits. Written once and substituted into every
+# position naming a table or column, so the two buckets police the same spellings.
 _NAME = r"[\w.\"]+"  # `t`, `public.t`, `"t"`, `public."t"`
 _TABLE = rf"(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{_NAME}"  # ALTER TABLE [IF EXISTS] [ONLY] name
 
-# Statements that destroy data, or the object holding it. Matched on statement *starts* (after
-# optional whitespace) rather than anywhere in the file, so the word "drop" in a comment — or
-# `DROP` inside a `CREATE INDEX … WHERE` predicate — is not a false positive.
-#
-# `DROP CONSTRAINT` and `DROP INDEX` are deliberately **not** here: neither removes a row. They
-# belong to the second bucket, where they can be reviewed for what they actually cost.
+# Statements that destroy data, or the object holding it, matched at statement starts so `drop` in a
+# comment or a `WHERE` predicate is not a false positive. `DROP CONSTRAINT` and `DROP INDEX` remove
+# no row and belong to the second bucket.
 _DESTROYS_DATA = re.compile(
     r"^\s*(?:"
     r"DROP\s+(?:TABLE|SCHEMA|TYPE|VIEW|DATABASE)"
@@ -85,38 +46,18 @@ _DESTROYS_DATA = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Statements that destroy no data and still end the "deploy the previous image" rollback, because
-# after them a write the previous image makes no longer succeeds.
+# Statements that destroy no data but end the "deploy the previous image" rollback, because a write
+# the previous image makes no longer succeeds.
 #
-# **Unconditional breaks only**, and the line is deliberate rather than convenient. `SET NOT NULL`
-# on an existing column rejects *every* insert that omits it; dropping or replacing a key makes
-# *every* `ON CONFLICT` naming the old one fail to plan. Both fail regardless of what is in the
-# table. A `CHECK` constraint or a `CREATE UNIQUE INDEX` narrows what may be written but rejects
-# only *some* rows — data-dependent, and four merged migrations (014, 016, 017,
-# 037_bo_suggestion_provenance) add unique indexes to tables that already existed. Flagging those
-# would be over-reach dressed as rigour; they are named in `docs/planning/BACKLOG.md` instead, so
-# what this check does not cover is written down rather than implied.
+# Unconditional breaks only: `SET NOT NULL` rejects every insert omitting the column, and a dropped
+# or replaced key makes every `ON CONFLICT` naming it fail to plan. A `CHECK` or `CREATE UNIQUE
+# INDEX` rejects only some rows and is tracked in `docs/planning/BACKLOG.md` instead.
+# `ADD COLUMN ... NOT NULL` without a default is refused by Postgres on a non-empty table.
 #
-# `ADD COLUMN … NOT NULL` without a `DEFAULT` is absent for a different reason: Postgres refuses it
-# on a non-empty table, so it can only appear on a table the previous image does not write anyway.
-#
-# `DROP INDEX` is the one member that can over-flag: `ON CONFLICT` infers its arbiter from a unique
-# index, so dropping one breaks writes exactly as dropping the constraint does — and dropping a
-# plain index costs only a plan. A pattern cannot tell them apart, and the previous version of this
-# check called every `DROP INDEX` destructive, which is further from the truth than this is. The
-# answer to an over-flag is a reviewed exemption naming the statement, not a looser pattern.
-#
-# `ALTER COLUMN … TYPE` is here rather than in `_DESTROYS_DATA`, and the choice is the judgement
-# this bucket exists to hold. A **narrowing** conversion destroys data outright and irreversibly:
-# measured on Postgres 16, `DOUBLE PRECISION` -> `REAL` turns `0.3333333333333333` into
-# `0.33333334`, and converting back yields `0.3333333432674408` rather than the original — the
-# rows are still there and what they said is gone. A **widening** destroys nothing at all, and the
-# tree has exactly one (`091`, `confidence REAL` -> `DOUBLE PRECISION`). No pattern can tell the
-# two apart without tracking each column's current type across ninety files, which is a type
-# checker for SQL. So the statement goes in the bucket that *has* an exemption path, and the
-# refusal is carried by the failure message: a narrowing may not be exempted, because the bucket
-# below it refuses data loss with no exemption at all. Both comment blocks used to enumerate what
-# they cover and omit a type change from both lists, which is an omission rather than a decision.
+# `DROP INDEX` can over-flag (only a unique index is an `ON CONFLICT` arbiter); the answer is a
+# reviewed exemption, not a looser pattern. `ALTER COLUMN ... TYPE` is here rather than in
+# `_DESTROYS_DATA` because a pattern cannot tell a narrowing (which loses data irreversibly and may
+# not be exempted) from a widening (which loses nothing).
 _BREAKS_PREVIOUS_IMAGE = re.compile(
     r"^\s*(?:"
     rf"ALTER\s+TABLE\s+{_TABLE}\s+ALTER\s+(?:COLUMN\s+)?{_NAME}\s+SET\s+NOT\s+NULL"
@@ -128,27 +69,12 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# A constraint is added by name, and a name is unique per table — so an `ADD CONSTRAINT` is the one
-# additive-looking statement that is **not** re-runnable on its own. `CREATE … IF NOT EXISTS` covers
-# every other object in this directory; `ALTER TABLE … ADD CONSTRAINT` has no `IF NOT EXISTS`
-# spelling in Postgres at all, so a re-runnable one is written in one of two ways: dropped `IF
-# EXISTS` first, or added inside a `DO` block behind an `IF NOT EXISTS (SELECT … FROM pg_constraint
-# …)` probe naming the same table and constraint. This comment used to call the first "the only
-# re-runnable way", and it is the worse of the two wherever the constraint is `NOT VALID`: a replay
-# of a drop-then-add silently re-creates it unvalidated, discarding a `VALIDATE CONSTRAINT` an
-# operator ran on purpose, and its `DROP CONSTRAINT` is a statement `_BREAKS_PREVIOUS_IMAGE` has to
-# flag. `108` is the first file written the second way.
-#
-# Measured, because the scan above enumerates `CREATE` and therefore covers exactly what it
-# enumerated: on a database carrying the whole schema with its `schema_migrations` ledger emptied —
-# the logical restore the re-runnability check exists for — the runner aborts at 046 with
-# `DuplicateObject: constraint "session_messages_shape_known" for relation "session_messages"
-# already exists`, and 058 aborts with `UndefinedObject` on the other arm the same docstring names
-# (a database built by hand, without that constraint), because its drop omits `IF EXISTS`.
-#
-# The table name is compared bare for the reason `_NAME` exists: `ALTER TABLE ONLY public."t"` is
-# the same table as `ALTER TABLE t`, and a rule that reads only the bare spelling would let a
-# `pg_dump`-shaped paste through.
+# `ADD CONSTRAINT` has no `IF NOT EXISTS` in Postgres, so it is the one additive-looking statement
+# that is not re-runnable on its own. It is re-runnable when dropped `IF EXISTS` first, or added
+# inside a `DO` block behind an `IF NOT EXISTS (SELECT ... FROM pg_constraint ...)` probe on the
+# same table and name. The guarded form is better for a `NOT VALID` constraint: drop-then-add would
+# discard an operator's `VALIDATE CONSTRAINT` and is itself a flagged `DROP CONSTRAINT`. Table names
+# are compared bare, so a `pg_dump`-shaped spelling is the same table.
 _ADD_CONSTRAINT = re.compile(
     rf"^\s*ALTER\s+TABLE\s+({_TABLE})\s+ADD\s+CONSTRAINT\s+({_NAME})",
     re.IGNORECASE | re.MULTILINE,
@@ -157,11 +83,9 @@ _DROP_CONSTRAINT_IF_EXISTS = re.compile(
     rf"^\s*ALTER\s+TABLE\s+({_TABLE})\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+({_NAME})",
     re.IGNORECASE | re.MULTILINE,
 )
-# The guarded form: `IF NOT EXISTS (<probe>) THEN … END IF`, where the probe reads `pg_constraint`
-# for one table and one name. Both are required, because a constraint name is unique per *table*
-# rather than per schema — a probe on the name alone answers "yes" for another table's constraint
-# and skips this one's add. The body is captured so an add is covered only if it sits *inside* the
-# guard, not merely after it.
+# The guarded form: `IF NOT EXISTS (<probe>) THEN ... END IF`, the probe reading `pg_constraint` for
+# one table and one name (names are unique per table, not per schema). The body is captured so only
+# an add inside the guard is covered.
 _GUARDED_BY_PG_CONSTRAINT = re.compile(
     r"IF\s+NOT\s+EXISTS\s*\((?P<probe>[^;]*?\bpg_constraint\b[^;]*?)\)\s*THEN\b"
     r"(?P<body>.*?)\bEND\s+IF\b",
@@ -196,10 +120,9 @@ def _guarded_spans(sql: str) -> dict[tuple[str, str], list[tuple[int, int]]]:
 def _constraints_re_added_without_a_drop(sql: str) -> tuple[str, ...]:
     """`table.constraint` for every `ADD CONSTRAINT` neither dropped `IF EXISTS` first nor guarded.
 
-    Position-aware rather than set-based: a drop that comes *after* the add makes the file worse,
-    not better, so "the file mentions both" is not the property — and a guard covers only the add
-    inside its own `THEN … END IF`. Compared on the bare table and constraint names, so the four
-    spellings Postgres accepts resolve to one object.
+    Position-aware: a drop after the add does not help, and a guard covers only the add inside its
+    own `THEN ... END IF`. Compared on bare names, so every accepted spelling resolves to one
+    object.
     """
     dropped: dict[tuple[str, str], int] = {}
     for match in _DROP_CONSTRAINT_IF_EXISTS.finditer(sql):
@@ -215,13 +138,9 @@ def _constraints_re_added_without_a_drop(sql: str) -> tuple[str, ...]:
     )
 
 
-# Merged migrations that are not re-runnable, each with the **recipe** an operator applies before
-# a replay. Not a rollback procedure — the file is merged and its statements are immutable, so the
-# only fix that exists is one statement run against the database first. Reported here and in the
-# runbook, because an operator recovering a restore does not read a test file.
-#
-# `(ADR, the flagged objects, the recipe)`, exact rather than per-file, for the reason
-# `_REVIEWED_ROLLBACK_BREAKS` gives: an exemption covers statements somebody read.
+# Merged migrations that are not re-runnable, each with the recipe an operator runs before a replay
+# (the file is immutable, so a preparatory statement is the only fix). Also reported in the
+# runbook. `(ADR, the flagged objects, the recipe)`, exact rather than per-file.
 _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "046_review_hardening_indexes.sql": (
         "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
@@ -233,24 +152,19 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "058_note_proposal_superseded.sql": (
         "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
         ("note_proposals.note_proposals_state_known",),
-        # The other arm: 058 *does* drop first, without `IF EXISTS`, so it replays against a
-        # restore and fails against a database built without that constraint. The recipe puts the
-        # constraint back so the bare drop finds one — unconditionally, because an operator under
-        # pressure should not have to first work out which arm they are in, and a bare `ADD` fails
-        # on the arm where the constraint is present. It re-adds the *post*-058 form, identical to
-        # what the file itself re-adds, so it cannot fail on data 058 already permits, where the
-        # pre-058 form would reject any row holding `superseded`.
+        # 058 drops without `IF EXISTS`, so it fails on a database built without that constraint.
+        # The recipe re-adds the post-058 form unconditionally (identical to what the file re-adds),
+        # so the operator need not work out which case they are in, and existing rows already
+        # satisfy it.
         "ALTER TABLE note_proposals DROP CONSTRAINT IF EXISTS note_proposals_state_known; "
         "ALTER TABLE note_proposals ADD CONSTRAINT note_proposals_state_known "
         "CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));",
     ),
 }
 
-# Migrations reviewed and accepted as ending the previous-image rollback, each mapped to the exact
-# statement prefixes `_BREAKS_PREVIOUS_IMAGE` matches in it and to the ADR that says what an
-# operator does instead. Exact rather than per-file, so a later edit that adds a *fifth* break to
-# an exempted migration still fails — an exemption is granted to statements somebody read, not to a
-# filename.
+# Migrations accepted as ending the previous-image rollback, each mapped to the exact statement
+# prefixes `_BREAKS_PREVIOUS_IMAGE` matches and to the ADR saying what an operator does instead.
+# Exact, so an added break in an exempted file still fails.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
     "117_exhibit_html_kind.sql": (
         # 116's shape again: a widening of the same kind CHECK. The previous image loses reading
@@ -266,23 +180,17 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
         ("ALTER TABLE session_exhibits DROP CONSTRAINT",),
     ),
     "106_drop_the_index_nobodys_query_uses.sql": (
-        # The over-flag the `DROP INDEX` comment above predicts, and the first one in this tree.
-        # `_BREAKS_PREVIOUS_IMAGE` cannot tell a unique index (whose drop breaks `ON CONFLICT`'s
-        # arbiter inference, exactly as dropping the constraint does) from a plain one (whose drop
-        # costs a plan). This is a plain GIN index on `turn_costs.skills_loaded`, no `ON CONFLICT`
-        # names it, and nothing reads through it — the containment query it was created for in
-        # `105` was never written, and the column's one reader scans the whole corpus in a single
-        # pass. So the previous image writes exactly as before, and the rollback is still "deploy
-        # the previous image"; re-running `105` restores the index if anybody ever wants it back.
+        # An over-flag: a plain GIN index on `turn_costs.skills_loaded` that no `ON CONFLICT` names
+        # and nothing reads through. The previous image writes as before, so the rollback is still
+        # "deploy the previous image"; re-running `105` restores the index.
         "D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code",
         ("DROP INDEX",),
     ),
     "094_fingerprint_definition_identity.sql": (
         # The definition joins the key on all three fingerprint tables, so a superseded generation
-        # is shelved instead of deleted. Unlike 056/063/093 this one genuinely stops the previous
-        # image writing at all: its `ON CONFLICT (id)` / `(source, id)` no longer plans against the
-        # widened key, so every fingerprint and corpus-reaction write fails with
-        # `InvalidColumnReference`. Roll forward, or re-add the old key by hand.
+        # is shelved rather than deleted. This genuinely stops the previous image writing: its `ON
+        # CONFLICT` no longer plans against the widened key. Roll forward, or re-add the old key by
+        # hand.
         "D-2026-09-09-a-definition-change-shelves-a-row-it-does-not-delete",
         (
             "ALTER TABLE molecule_fingerprints DROP CONSTRAINT",
@@ -294,12 +202,9 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "093_measurement_source.sql": (
-        # The fourth table to be keyed by its source, after 056, 063 and 051 — and the same
-        # rollback shape as 056 and 063 above. The widening adds `source` to the key rather than
-        # removing information, so nothing is destroyed by restoring the previous image; what
-        # breaks is that a row written under the new key with a `source` other than
-        # `chemist-reported` is unreachable to the old reader's two-column lookup. The operator
-        # runs the migration forward again.
+        # Keys the table by its source, like 056 and 063. Nothing is destroyed by restoring the
+        # previous image, but rows written with a `source` other than `chemist-reported` are
+        # unreachable to its two-column lookup. Run the migration forward again.
         "D-2026-09-09-a-measurement-is-keyed-by-who-measured-it",
         (
             "ALTER TABLE measurements DROP CONSTRAINT",
@@ -314,10 +219,9 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "058_note_proposal_superseded.sql": (
-        # Reviewed, and it does not in fact end the rollback: the drop-and-re-add *widens* the
-        # state CHECK, and the previous image only ever writes the old, still-allowed states —
-        # the ADR records that reading, and this row exists because the guard matches the DROP
-        # CONSTRAINT text, not the semantics.
+        # Does not end the rollback in practice: the drop-and-re-add widens the state CHECK, and the
+        # previous image writes only states still allowed. Listed because the guard matches the
+        # text.
         "D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed",
         ("ALTER TABLE note_proposals DROP CONSTRAINT",),
     ),
@@ -336,11 +240,10 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "091_reaction_label_confidence_precision.sql": (
-        # Reviewed, and — like 058 — it does not in fact end the rollback: the conversion *widens*
-        # `confidence` from `REAL` to `DOUBLE PRECISION`, every stored value survives it exactly,
-        # and the previous image writes a Python float into the column as before. The row exists
-        # because no pattern can read a conversion's direction, and the direction is the whole
-        # question: a narrowing loses data irreversibly and may not be exempted here at all.
+        # Does not end the rollback in practice: it widens `confidence` from `REAL` to `DOUBLE
+        # PRECISION`, every value survives, and the previous image writes a float as before. Listed
+        # because no pattern can read a conversion's direction; a narrowing could not be exempted
+        # here.
         "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
         ("ALTER TABLE reaction_labels ALTER COLUMN confidence TYPE",),
     ),
@@ -355,27 +258,14 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 
-# Migrations that end the previous-image rollback **for a reason no statement shape carries**, and
-# so are found by review rather than by either pattern above. A separate register on purpose: a row
-# here is a judgement somebody made, where a row in `_REVIEWED_ROLLBACK_BREAKS` is a judgement about
-# a statement a regex found and can re-find.
+# Migrations that end the previous-image rollback for a reason no statement shape carries, found by
+# review rather than by a pattern. Kept separate from `_REVIEWED_ROLLBACK_BREAKS`, whose rows are
+# judgements about statements a regex re-finds.
 #
-# The case that opened it is 089. It adds one nullable column with no default — additive by every
-# reading above, and its own ADR says approvingly that "the previous image keeps writing the
-# table". It does. **Without the lease.** `claimed_at` is a mutual exclusion, so a pod that does not
-# know about it re-claims a row a new-pod drain is mid-delivering: driven against the migrated
-# schema with the pre-089 `_CLAIM` verbatim, one row came to rest at `id=1 state=pending attempts=2
-# leased=t` — one delivery, two attempts spent, which is the double-delivery symptom 089 exists to
-# close. The sink converges (every key there is content-addressed), so what is lost is the attempt
-# budget: eight attempts empty after four real ones, and the row then dead-ends `pending` where no
-# remedy matches it.
-#
-# **This register does not catch the next one and must not be read as if it did.** "Does this new
-# column mean something the previous image must honour?" is a question about the code on both
-# sides, not about the SQL, and a pattern that claimed to answer it would be the shape this
-# repository calls a control that is really a claim. What the register buys is that the judgement,
-# once made, is written down where an operator planning a rollback reads it — the same place the
-# regex-found ones are.
+# 089 adds one nullable column, but `claimed_at` is a mutual exclusion: a previous-image pod ignores
+# the lease and re-claims rows a new pod is delivering, spending the attempt budget twice. This
+# register does not catch the next such case; it records the judgement where an operator planning a
+# rollback reads it.
 _REVIEWED_SEMANTIC_BREAKS: dict[str, tuple[str, str]] = {
     "092_session_owners_updated_at.sql": (
         "D-2026-09-09-a-sort-key-a-page-cannot-prune-is-a-scan",
@@ -392,44 +282,21 @@ _REVIEWED_SEMANTIC_BREAKS: dict[str, tuple[str, str]] = {
     ),
 }
 
-# The two migrations whose statements were edited *before* the guard below could run, kept as named
-# exemptions rather than repaired — because the repair is what would break things now.
+# The two migrations whose statements were edited before the immutability check could run, kept as
+# named exemptions. `004_fingerprint_definition.sql` documents the edit: a column was added to both
+# `CREATE TABLE`s and an `ALTER` written for existing databases.
 #
-# **They were found the day `fetch-depth: 0` reached CI.** The check below had never actually
-# executed: on `actions/checkout`'s depth-1 default every migration compared
-# equal to itself, so it reported no edit across all 45. Turning the checkout on is what asked the
-# question for the first time, and this is its first answer — which is the check working, not a
-# regression.
-#
-# **The edit was deliberate and is documented in the tree.** `004_fingerprint_definition.sql` says
-# so in its own opening line: "Fresh databases get the column straight from 002/003; this migration
-# brings an existing dev database up to date." Someone added `definition` to both `CREATE TABLE`s
-# *and* wrote the `ALTER` for databases that had already run them. By today's rule
-# (`D-2026-08-04-the-schema-only-goes-forward`) only the second half is allowed. It predates the
-# rule.
-#
-# **Reverting them would break every database that exists to fix one that cannot.** The ledger keys
-# on the checksum recorded when a file was applied, so:
-#
-#   * a database that applied 002 *before* the edit already fails `make db-migrate` today — and it
-#     is unreachable anyway, because that version named the column `smiles`, nothing ever renamed it
-#     to `label`, and no current query would find it. There is no supported database in that state.
-#   * every database created *since* recorded the current checksum. Restoring the old statements
-#     would make `make db-migrate` refuse on all of them — CI, every dev sandbox, every deployment.
-#
-# So the honest move is the one the collision check makes for `037`/`043`: name them, say why, and
-# keep the teeth for everything that comes after. Each entry is checked to still *be* an edit
-# (`test_no_grandfathered_edit_outlives_its_reason`), so an exemption that stops applying fails
-# rather than quietly widening.
+# Reverting is worse: every database created since recorded the current checksum, so restoring the
+# old statements would make `make db-migrate` refuse everywhere, while no supported database holds
+# the pre-edit version. `test_no_grandfathered_edit_outlives_its_reason` checks each entry is still
+# an edit.
 _GRANDFATHERED_EDITS: frozenset[str] = frozenset(
     {"002_molecule_fingerprints.sql", "003_reaction_fingerprints.sql"}
 )
 
-# Comment stripping is the *runner's* `_statements`, imported rather than reimplemented. Every
-# migration here is heavily commented and several comments discuss what they are careful *not* to
-# drop, so scanning the prose would fail the check on the files that explain the policy best — and
-# the runner needs the identical reduction, because its drift checksum is taken over it. Two
-# spellings of "the SQL, without the prose" is how a test and the thing it guards start disagreeing.
+# Comment stripping is the runner's own `_statements`, imported rather than reimplemented: comments
+# discussing what not to drop must not fail the scan, and the runner's drift checksum uses the same
+# reduction.
 
 
 def _sql(path: Path) -> str:
@@ -443,13 +310,7 @@ def _migration_files() -> list[Path]:
 
 
 def test_there_are_migrations_to_check() -> None:
-    """The scan below is worthless against an empty glob — so the glob is asserted first.
-
-    A check that silently examines nothing is the vacuous-pass shape this repository has hit
-    repeatedly: an audit chain verifying over zero rows, a probe suite grading zero probes. A
-    renamed directory would turn every assertion in this file into a tautology, and this is the
-    one line that would notice.
-    """
+    """There are migrations to check; every other assertion is vacuous against an empty glob."""
     files = _migration_files()
     assert len(files) >= 30, f"only {len(files)} migrations found under {_MIGRATIONS}"
 
@@ -473,17 +334,11 @@ def test_a_migration_destroys_nothing(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _migration_files(), ids=lambda p: p.name)
 def test_a_migration_leaves_the_previous_image_able_to_write(path: Path) -> None:
-    """No migration may make a write the previous image performs stop working — unless reviewed.
+    """A migration leaves the previous image able to write, unless reviewed.
 
-    The other half of "deploy the previous image", and the half nothing checked: a migration can
-    leave every row in place and still end the rollback, because the previous image's `INSERT` no
-    longer satisfies the table. That is what 041 does, and what the single-bucket check missed
-    while refusing the `DROP CONSTRAINT` beside it.
-
-    An exemption is exact: the statements this file flags must be *exactly* the reviewed set, so a
-    stale entry fails as loudly as a new break. And the ADR that granted it must exist and name the
-    migration — the exemption's whole content is the rollback procedure that replaces "deploy the
-    previous image", so an exemption without one is an exemption nobody wrote down.
+    A migration can keep every row and still end the rollback because the previous image's `INSERT`
+    no longer satisfies the table. An exemption must match the flagged statements exactly, so a
+    stale entry fails as loudly as a new break, and its ADR must exist and name the migration.
     """
     found = tuple(match.strip() for match in _BREAKS_PREVIOUS_IMAGE.findall(_sql(path)))
     reviewed = _REVIEWED_ROLLBACK_BREAKS.get(path.name)
@@ -554,24 +409,21 @@ def test_a_migration_leaves_the_previous_image_able_to_write(path: Path) -> None
     ],
 )
 def test_the_two_patterns_say_what_they_mean(statement: str, destroys: int, breaks: int) -> None:
-    """Each bucket matches its own statements and not the other's — the correction, as a test.
+    """Each bucket matches its own statements and not the other's.
 
-    Asked of synthetic SQL rather than of the tree, because the tree is exactly one example of each
-    and a pattern that happens to fit one file is how the previous version passed review. These are
-    the cases that decide whether the check is honest: a `DROP CONSTRAINT` that destroys nothing, a
-    `SET NOT NULL` that destroys nothing and still ends the rollback, and the additive
-    `ADD COLUMN … NOT NULL DEFAULT` that eight merged migrations use and neither bucket may claim.
+    Asked of synthetic SQL, since the tree holds one example of each: a `DROP CONSTRAINT` that
+    destroys nothing, a `SET NOT NULL` that destroys nothing but ends the rollback, and an additive
+    `ADD COLUMN ... NOT NULL DEFAULT` that neither bucket may claim.
     """
     assert len(_DESTROYS_DATA.findall(statement)) == destroys
     assert len(_BREAKS_PREVIOUS_IMAGE.findall(statement)) == breaks
 
 
 def test_no_exemption_outlives_its_migration() -> None:
-    """An exemption names a file that exists — otherwise it is a permission nobody can see spent.
+    """Every exemption names a migration that exists.
 
-    The check above is parametrized over the migrations on disk, so an entry for a file that was
-    never added (a typo) or has gone (a rename) is simply never consulted. That is the shape a
-    granted exemption drifts into an unnoticed blanket one, so it is asserted here instead.
+    The check is parametrised over files on disk, so an entry for a missing file is never consulted
+    and could drift into a blanket permission.
     """
     on_disk = {p.name for p in _migration_files()}
     registered = (
@@ -584,21 +436,11 @@ def test_no_exemption_outlives_its_migration() -> None:
 
 
 def test_every_reviewed_break_tells_the_operator_what_it_costs() -> None:
-    """A break somebody reviewed is one the runbook names, or the review reached nobody.
+    """Every reviewed break is named in the runbook's rollback-consequences table.
 
-    Both registers below record that a break was *examined* — the ADR, and the statements the
-    exemption covers. Neither records what the operator actually loses when the previous image
-    comes back, and neither is a thing an operator reads at 3 a.m.; the runbook's "What is still
-    broken after a successful rollback" table is. Those two were maintained side by side by hand
-    and drifted exactly as that arrangement always does: measured at this commit's parent, the
-    table covered five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of
-    `_REVIEWED_SEMANTIC_BREAKS`'s two, with the three newest breaks reviewed, exempted, and
-    invisible to the person rolling back.
-
-    So the register is the authority and the runbook is checked against it. One direction only:
-    the table also carries rows for breaks the patterns catch without review (083, 090), and
-    those are not defects — the register says a break was judged, this table says what it costs,
-    and only the second is something a register could never hold.
+    The registers record that a break was examined; the runbook says what the operator loses, and is
+    what they read. The register is the authority and the runbook is checked against it, one
+    direction only: the table may also list breaks the patterns catch without review.
     """
     section = _runbook_rollback_section()
     registered = set(_REVIEWED_ROLLBACK_BREAKS) | set(_REVIEWED_SEMANTIC_BREAKS)
@@ -614,9 +456,7 @@ def test_every_reviewed_break_tells_the_operator_what_it_costs() -> None:
 def _runbook_rollback_section() -> str:
     """The runbook prose between the rollback-consequences heading and the next one.
 
-    Scoped rather than searched whole on purpose: migration numbers appear all over this runbook
-    (`046` and `058` in the replay recipe, for two), so a substring search against the whole file
-    would pass on a mention that has nothing to do with rolling back.
+    Scoped because migration numbers appear elsewhere in the runbook (e.g. the replay recipe).
     """
     text = _RUNBOOK.read_text(encoding="utf-8")
     start = text.index("**What is still broken after a successful rollback**")
@@ -625,17 +465,11 @@ def _runbook_rollback_section() -> str:
 
 
 def test_a_judged_break_is_one_no_pattern_could_have_found() -> None:
-    """`_REVIEWED_SEMANTIC_BREAKS` holds only what review can find and a regex cannot.
+    """`_REVIEWED_SEMANTIC_BREAKS` holds only breaks no pattern could have found.
 
-    The register's whole justification is that its members are invisible to
-    `_BREAKS_PREVIOUS_IMAGE`. A migration that *is* flagged there and also listed here would be
-    reviewed twice, under two procedures, with nothing saying which one an operator follows — and
-    the flagged half would keep passing on the other register's exemption. So the two are asserted
-    disjoint, and a member of this one is asserted to be genuinely unflagged: if a later widening of
-    the pattern reaches it, the row belongs in `_REVIEWED_ROLLBACK_BREAKS` instead.
-
-    Each row still owes what every exemption here owes: an ADR that exists and names the migration,
-    because the row's content is the rollback procedure and an operator has to be able to find it.
+    The two registers are disjoint, and each member here is genuinely unflagged; if a widened
+    pattern reaches one, it moves to `_REVIEWED_ROLLBACK_BREAKS`. Each row needs an ADR that exists
+    and names the migration.
     """
     both = sorted(set(_REVIEWED_SEMANTIC_BREAKS) & set(_REVIEWED_ROLLBACK_BREAKS))
     assert not both, f"migration(s) in two rollback-break registers at once: {both}"
@@ -734,24 +568,20 @@ def test_a_judged_break_is_one_no_pattern_could_have_found() -> None:
 def test_the_replay_rule_reads_the_object_not_the_spelling(
     sql: str, flagged: tuple[str, ...]
 ) -> None:
-    """Asked of synthetic SQL, because the tree holds exactly two examples and both are exempt.
+    """The replay rule reads the object, not the spelling.
 
-    A rule validated only against the files it was written for is a rule that fits those files. The
-    cases that decide whether this one is honest are the ones the tree does not contain: a sound
-    drop-then-add, the same across a line break and a schema qualifier, and a drop that comes after
-    the add — which co-occurrence would pass and which replays no better than no drop at all.
+    Synthetic SQL, since the tree's two examples are both exempt: a sound drop-then-add, the same
+    across a line break and a schema qualifier, and a drop placed after the add, which does not
+    help.
     """
     assert _constraints_re_added_without_a_drop(sql) == flagged
 
 
 def test_every_migration_is_re_runnable() -> None:
-    """Each file creates only with `IF NOT EXISTS` — the property the ledger's drift check assumes.
+    """Each file creates only with `IF NOT EXISTS`.
 
-    The runner records each file's hash and refuses a changed one, so a migration is applied
-    exactly once in the normal path. `IF NOT EXISTS` is what covers the abnormal ones: a restored
-    database whose `schema_migrations` ledger is older than its tables, or an operator re-pointing
-    the runner at a database that was built by hand. Without it the recovery is "work out which
-    statements already ran", by hand, under pressure.
+    Normally a file applies once, but a restored database whose ledger is older than its tables, or
+    a hand-built one, needs every statement to be replayable.
     """
     offenders: list[str] = []
     for path in _migration_files():
@@ -773,26 +603,12 @@ def test_every_migration_is_re_runnable() -> None:
 
 @pytest.mark.parametrize("path", _migration_files(), ids=lambda p: p.name)
 def test_a_re_added_constraint_is_dropped_first(path: Path) -> None:
-    """The other half of re-runnability, and the half the `CREATE` scan above cannot see.
+    """A re-added constraint is dropped `IF EXISTS` first or guarded.
 
-    A constraint has no `IF NOT EXISTS`, so `ALTER TABLE … ADD CONSTRAINT` re-runs only behind a
-    `DROP CONSTRAINT IF EXISTS` of the same name. That is not a hypothetical: the recovery the
-    check above is written for — a restored database whose ledger is older than its tables — aborts
-    the whole run at the first such statement, and the run is one transaction, so nothing after it
-    applies either.
-
-    Both arms of that docstring's own sentence were measured on a scratch database carrying all 91
-    migrations. Ledger emptied (a logical restore): `DuplicateObject … session_messages_shape_known
-    … already exists` at 046, file 46 of 91. Built by hand without one constraint: `UndefinedObject
-    … note_proposals_state_known … does not exist` at 058, whose drop omits `IF EXISTS`. Every
-    other file replayed clean, so the two exemptions below are the whole set rather than the two
-    that were noticed.
-
-    Exempted exactly, like `_REVIEWED_ROLLBACK_BREAKS`: the constraints flagged must be *the*
-    reviewed ones, so a later edit adding a second un-dropped constraint to an exempted file still
-    fails. What an exemption carries here is a recipe rather than a rollback procedure — the one
-    statement an operator runs before the replay — because the migration is merged and immutable
-    and the recipe is therefore the only fix that exists.
+    A constraint has no `IF NOT EXISTS`, and the run is one transaction, so on a restored database
+    the first unguarded `ADD CONSTRAINT` aborts everything. Exempted exactly, with a recipe (the
+    statement an operator runs before replay) rather than a rollback procedure, since merged files
+    are immutable.
     """
     found = _constraints_re_added_without_a_drop(_sql(path))
     reviewed = _REVIEWED_REPLAY_BREAKS.get(path.name)
@@ -825,18 +641,12 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _shallow_grafts(repo: Path) -> frozenset[str]:
-    """The commits git reports as parentless *only* because the clone was truncated there.
+    """The commits git reports as parentless only because the clone was truncated there.
 
-    A graft is indistinguishable from a real commit in `git log`: it has a hash, a tree and a date,
-    and `--diff-filter=A` will happily name it as the commit that "added" every file whose true
-    introduction lies beyond the boundary. That is not a defect in git — the earlier history is
-    simply absent — but it makes the comparison below vacuous in a way `compared` cannot see, so the
-    walk has to know which commits are boundaries rather than beginnings.
-
-    Read from `.git/shallow` via `rev-parse --git-path`, so it resolves under a worktree or a
-    relocated `$GIT_DIR` rather than assuming `repo/.git`. Empty on a full clone, which is what
-    makes this a no-op on CI (`fetch-depth: 0`) and keeps the *true* root commit a legitimate
-    introducing commit — a migration added in the repository's first commit must still be checked.
+    `git log --diff-filter=A` names a graft as the commit that added every file introduced beyond
+    the boundary, which would make the immutability comparison vacuous. Read via `rev-parse
+    --git-path shallow`, so worktrees and relocated `$GIT_DIR` work. Empty on a full clone, where
+    the true root commit remains a legitimate introducing commit.
     """
     if _git(repo, "rev-parse", "--is-shallow-repository") != "true":
         return frozenset()
@@ -851,28 +661,9 @@ def _shallow_grafts(repo: Path) -> frozenset[str]:
 def _statements_changed_since_merge(migrations: Path | None = None) -> tuple[list[str], int]:
     """Which merged migrations differ from the commit that added them, and how many were compared.
 
-    Extracted so the immutability check and its exemption's staleness check ask git the *same*
-    question. A shared module-level cache would make them order-dependent, and a second copy of the
-    walk would let the exemption be validated against a rule the check no longer applies — which is
-    precisely how an exemption outlives its reason.
-
-    `compared` counts only comparisons that **span a commit**, and there are two ways for one not
-    to. A file introduced by `HEAD` itself has nothing earlier to differ from. And a file whose
-    introducing commit is a **shallow graft** has nothing earlier *available*: git names the
-    boundary as the adding commit, `git show <graft>:file` returns the content as of the boundary,
-    and a file untouched since then compares equal to itself while any edit made before the boundary
-    is invisible.
-
-    **The second case is the one that was missing, and it was measured rather than reasoned about.**
-    The docstring below used to say this repository's shallow checkout "still spans every
-    migration, so the skip is narrow". That stopped being true: on a 171-commit shallow clone whose
-    graft is `4ee6056`, `002_molecule_fingerprints.sql` reported that graft as its adding commit and
-    compared equal, so all 47 migrations "compared" — clearing the `>= 30` floor — while both
-    genuinely-edited exemptions looked stale and
-    `test_no_grandfathered_edit_outlives_its_reason` failed. A truncation deep enough to clear the
-    floor is exactly the case the floor was meant to catch, so the boundary has to be excluded at
-    the source rather than absorbed by a larger threshold: a bigger number would only move the depth
-    at which the same silence returns.
+    Shared by the immutability check and its exemption's staleness check so both ask git the same
+    question. `compared` counts only comparisons that span a commit: files introduced by `HEAD` or
+    by a shallow graft have no earlier version available and are excluded at the source.
     """
     migrations = migrations if migrations is not None else _MIGRATIONS
     repo = migrations.parents[1]
@@ -905,55 +696,16 @@ def _statements_changed_since_merge(migrations: Path | None = None) -> tuple[lis
 
 
 def test_no_merged_migration_had_its_statements_changed() -> None:
-    """A merged migration's *statements* are immutable. Its comments are not, and that is the fix.
+    """A merged migration's statements are immutable; its comments are not.
 
-    `core/migrate.py` records a checksum per file and refuses to run when it changes. The
-    checksum used to cover the whole file, which made every comment edit an outage: migrations
-    refuse on **every database that already applied the file**, while CI stays green because CI
-    always starts from an empty one. It happened twice, from two different sessions, and both edits
-    were *correct* — `006_audit_events.sql` renaming a module the D-148 package move had moved,
-    `031_bo_campaigns.sql` recording that two columns hold the lead objective only.
+    `core/migrate.py` checksums statements (`_statements`), and this asks the same question of git
+    history: what the file contained in the commit that introduced it. Uncommitted files are
+    skipped.
 
-    So the guard now hashes the statements (`_statements`), and this test asks the same question of
-    history that the runner asks of the ledger. One definition of "changed", used by both — the
-    alternative is a test and a runtime guard that can disagree about whether a file drifted.
-
-    Asked of git because the question *is* history: what a file contained in the commit that
-    introduced it. A file added in the working tree and not yet committed is skipped — it has not
-    landed, so it is still free to change.
-
-    **Two ways this answers without having looked, and only one of them is the empty glob.**
-
-    *No history at all* — a tarball, or `git` absent — makes every `git log` empty, so every file
-    takes the not-yet-merged branch and the check passes having compared nothing. Measured: on a
-    copy of the tree with `.git` removed, this passed green.
-
-    *Truncated history* is the one a count cannot see, because the count stays healthy while the
-    comparison stops spanning anything. On a `git clone --depth=1` every file looks introduced by
-    the graft commit, and the graft commit **is** `HEAD`, so `git show <introduced>:file` returns
-    the working tree's own content and each file is compared against itself. Measured on a
-    depth-1 clone whose `HEAD` already carried a `smuggled` `ALTER TABLE` appended to a merged
-    `006_audit_events.sql`: reported as no edit, 42 files "compared". `actions/checkout` defaults
-    to `fetch-depth: 1`, so that is exactly the CI checkout.
-
-    So what is counted is not "files looked at" but **comparisons that span a commit** — the
-    introducing commit is neither `HEAD` nor a shallow graft. That one number distinguishes all
-    three cases without a second mechanism: 42 here, 0 on a depth-1 clone, 0 with no `.git`. A
-    migration genuinely added in `HEAD` is excluded from it and from the check, which is right: it
-    has nothing earlier to differ from.
-
-    **A partial clone is not only a depth-1 clone**, and excluding the graft is what makes the
-    count honest about the difference. A truncation *above* the migrations leaves plenty of visible
-    history — enough to clear any floor — while every comparison still lands on the boundary rather
-    than on a real earlier version. `_shallow_grafts` says how that is detected and what it
-    measured; the consequence here is that the count now falls to the comparisons that are real, so
-    the skip below fires on a truncated clone of *any* depth instead of only the shallowest one.
-
-    The floor is an assertion, except where git says the history is truncated — then it is a skip
-    naming the fix, because a truncated checkout is a CI setting rather than a defect in the tree
-    and a red build would say the wrong thing about it. CI sets `fetch-depth: 0`
-    (`.github/workflows/ci.yml`), so on CI there are no grafts, nothing is excluded, and the check
-    asks its question of every merged migration.
+    Missing or truncated history would make the check pass having compared nothing (a depth-1 clone
+    compares every file with itself), so the count is of comparisons spanning a commit, and a floor
+    on it is asserted. Where git reports truncated history the floor becomes a skip naming the fix,
+    because that is a CI setting, not a defect; CI sets `fetch-depth: 0`.
     """
     repo = _MIGRATIONS.parents[1]
     edited, compared = _statements_changed_since_merge()
@@ -977,21 +729,11 @@ def test_no_merged_migration_had_its_statements_changed() -> None:
 
 
 def test_no_two_migrations_claim_one_number() -> None:
-    """Two files with the same prefix are two migrations one number cannot name.
+    """No two migrations claim one number, beyond the grandfathered pairs.
 
-    **This does not ask for the existing collisions to be fixed, and that is the decision it
-    encodes.** `037_bo_suggestion_provenance` / `037_document_index` and `043_session_listing` /
-    `043_session_message_shape` are already merged and applied. The runner orders and records by
-    *filename*, so nothing about them is broken — and renaming a merged migration is exactly the
-    destructive edit `test_no_merged_migration_had_its_statements_changed` refuses, which would also
-    leave every database that already recorded the old name applying the new one a second time.
-
-    So the four are grandfathered by name, and the check exists for the *next* one — caught at
-    review, when a rename is still free. The exemption list is what makes that honest: adding a
-    fifth name to it is a visible act in a diff, where a check that simply excluded duplicates
-    would let the number space keep colliding in silence.
-
-    Grandfathered pairwise rather than by number, so a *third* file claiming `037` still fails.
+    `037_*` and `043_*` pairs are merged and applied; the runner orders and records by filename, so
+    they work, and renaming them would re-apply them everywhere. They are grandfathered by name, so
+    a third file claiming either number still fails and new collisions are caught at review.
     """
     grandfathered = {
         frozenset({"037_bo_suggestion_provenance.sql", "037_document_index.sql"}),
@@ -1016,24 +758,11 @@ def test_no_two_migrations_claim_one_number() -> None:
 
 
 def test_no_grandfathered_edit_outlives_its_reason() -> None:
-    """Each grandfathered file must still exist and still *be* an edit.
+    """Each grandfathered file still exists and is still an edit.
 
-    The sibling of `test_no_exemption_outlives_its_migration`, and it checks the stronger of the two
-    properties an exemption can lose. A name that no longer matches a file is one failure; a name
-    whose file no longer differs from its introducing commit is the quieter one — the exemption
-    stops doing anything and stays granted, so the next edit to *that* file passes unexamined. Both
-    are "a permission nobody can see spent".
-
-    Asked through `_statements_changed_since_merge`, the same walk the check itself uses, so the
-    exemption cannot be validated against a rule the check no longer applies.
-
-    Skipped rather than failed on *any* truncated clone, and deliberately not behind the sibling's
-    `compared < 30` conjunct — which is the calibration this test was actually failing on. A
-    truncated clone still compares plenty of files, so that count stays well above 30; what it
-    cannot see is an edit made *before* the graft boundary, because the "original" it diffs against
-    is the grafted version. Both grandfathered edits are early migrations, so they compared equal to
-    themselves and the check reported two live exemptions as stale — a red build about the clone
-    depth rather than about the tree, which is exactly what the skip exists to prevent.
+    An exemption whose file no longer differs would keep granting permission for the next edit.
+    Asked through `_statements_changed_since_merge`, the check's own walk. Skipped on any truncated
+    clone, since edits before the graft boundary are invisible there and would read as stale.
     """
     repo = _MIGRATIONS.parents[1]
     edited, compared = _statements_changed_since_merge()
@@ -1056,23 +785,11 @@ def test_no_grandfathered_edit_outlives_its_reason() -> None:
 
 
 def test_truncating_history_never_raises_the_number_of_sound_comparisons(tmp_path: Path) -> None:
-    """`compared` must fall when history is cut away, because that is the only reason to trust it.
+    """Truncating history never raises the number of sound comparisons.
 
-    Both checks above abstain on `compared < 30` when git reports a shallow repository, and that
-    threshold is only meaningful if the number actually tracks how much history is present. It did
-    not. Measured on this repository before the graft exclusion was added: a 171-commit clone
-    reported **47** comparisons against the **44** of a complete one, because truncation gives
-    *more* files an earliest-commit that is not `HEAD` — the graft stands in for the real
-    introduction. The skip therefore never fired above depth 1, and it had been unreachable since
-    the tree crossed thirty migrations.
-
-    What that cost was not hypothetical. On such a clone the immutability check compared every
-    migration against its graft-boundary content and passed having verified nothing about any edit
-    made earlier, while its sibling failed and told the reader to delete two exemptions that are
-    live on full history — an instruction that would have removed the control it exists to keep.
-
-    Asserted as an inequality rather than a fixed number so it keeps holding as migrations are
-    added: cutting history away can only remove comparisons, never invent them.
+    The checks above abstain on a low count only when history is shallow, which is meaningful only
+    if the count falls as history is cut. Asserted as an inequality, so it holds as migrations are
+    added.
     """
     repo = _MIGRATIONS.parents[1]
     if _git(repo, "rev-parse", "--is-shallow-repository") != "false":

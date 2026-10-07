@@ -254,8 +254,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
                 )
             if _DRAINING and isinstance(exc, asyncio.CancelledError):
                 # Temporal redelivers the work, so it is paid for twice; counted here because only
-                # this frame sees
-                # the cancellation.
+                # this frame sees the cancellation.
                 record_metric(
                     lambda m: m.increment("chemclaw_worker_activities_cancelled_on_drain_total")
                 )

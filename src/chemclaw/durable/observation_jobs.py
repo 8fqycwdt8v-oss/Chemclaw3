@@ -204,8 +204,7 @@ class ObservationSynthesisWorkflow:
         )
         if report.corpus_reactions == 0 or not report.complete:
             # A pass that saw no or a partial corpus refreshed nothing, so retiring on it would
-            # erase the tier
-            # because a source broke.
+            # erase the tier because a source broke.
             workflow.logger.warning(
                 "skipping observation retirement: the mining pass saw %d reaction(s), "
                 "complete=%s — nothing was re-observed, so nothing may age out on it",

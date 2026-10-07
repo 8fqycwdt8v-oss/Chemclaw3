@@ -1,13 +1,8 @@
 """Putting a document's chunks back together without losing any of it.
 
-A protocol is atomic: half an SOP is not a shorter SOP, it is a misleading one. The share stores
-documents cut into `chunk_chars` pieces because that is what makes retrieval work, and until now
-nothing could put one back — `sync._read_and_parse` discards the parsed text after hashing it into
-`doc_id`, so the chunks are the only copy.
-
-These tests exist because the first two implementations of the de-overlapping rule **deleted real
-text** and did it silently. Both are pinned below as regressions rather than described, because a
-protocol missing a step reads exactly like a protocol that never had one.
+A protocol is atomic: half an SOP is a misleading one. The chunks are the only stored copy
+(`sync._read_and_parse` discards the parsed text after hashing it), and a de-overlapping rule
+that deletes text does so silently, so the regressions are pinned rather than described.
 """
 
 import random
@@ -40,12 +35,10 @@ def test_a_real_overlap_is_removed_exactly_once() -> None:
 
 
 def test_repetitive_content_keeps_its_text_rather_than_guessing_a_boundary() -> None:
-    """`_hard_split` pieces share nothing, but repetitive content makes them look as if they do.
+    """Repetitive content keeps its text rather than guessing a boundary.
 
-    Measured against the naive longest-match rule: a 5,000-character line of `x` reassembled as
-    **2,600** characters, and a comma-separated line of period 10 as **3,200 of 6,000**. Both are
-    real text deleted at every boundary. A share whose allowlist includes `.csv`/`.tsv` makes this
-    ordinary rather than exotic.
+    `_hard_split` pieces share nothing, but repetitive content makes a longest-match rule see an
+    overlap and delete real text at every boundary — ordinary for `.csv`/`.tsv` on a share.
     """
     for text in ("x" * 5000, "1,2,3,4,5," * 600, "ab,cd,x" * 800):
         chunks = chunk_document(text, chunk_chars=400, overlap_chars=200)

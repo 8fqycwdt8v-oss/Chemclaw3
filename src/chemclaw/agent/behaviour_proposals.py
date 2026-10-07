@@ -266,8 +266,7 @@ class PostgresProposalStore:
                     )
                     revived = cur.rowcount == 1
                 # Only a version that arrived (inserted or revived) supersedes its siblings;
-                # otherwise a repeat
-                # would close the open sibling and leave nothing to decide.
+                # otherwise a repeat would close the open sibling and leave nothing to decide.
                 superseded = 0
                 if inserted or revived:
                     await cur.execute(

@@ -1,13 +1,9 @@
-"""The mcp-molfp server advertises the fingerprint capability as MCP tools (3.1).
+"""The mcp-molfp server advertises the fingerprint capability as MCP tools.
 
-Wiring (tool registration + schemas, and the startup report the bundle hands its lifespan), plus
-the two behaviours a chemist's answer actually rests on — that a similarity search ranks and that a
-substructure search filters — exercised over a substituted in-memory store, never the production
-one. Those two came from `test_search_tools.py` when D-2026-08-05 deleted the in-process wrapper
-they used to cover: the assertions were sound and the subject was not, since the wrapper was not
-the surface any turn calls and had drifted from the one that is. The capability logic itself is
-proven in `test_molfp.py`; that the empty-index signal survives the MCP round trip is proven, for
-the tool that produced the live-run defect, in `test_rxnfp_server.py`.
+Covers wiring (tool registration, schemas, the startup report) and the two behaviours an answer
+rests on, similarity ranking and substructure filtering, over a substituted in-memory store. The
+capability logic is proven in `test_molfp.py`; the empty-index signal over MCP in
+`test_rxnfp_server.py`.
 """
 
 import asyncio
@@ -45,9 +41,8 @@ def _seeded_store() -> InMemoryFingerprintStore:
 def _call(name: str, args: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Invoke one molfp tool over the seeded store and return the payload MCP sends back.
 
-    The record store is substituted too: every result now asks it how many citation-only records
-    sit outside the index, and the module default is the Postgres one, so leaving it would turn
-    these into database tests silently.
+    The record store is substituted too, since every result asks it for citation-only counts and the
+    default is Postgres.
     """
     monkeypatch.setattr(tools, "_store", _seeded_store())
     monkeypatch.setattr(tools, "_records", InMemoryReactionRecordStore())
@@ -84,13 +79,10 @@ def test_substructure_matches_returns_only_molecules_bearing_the_fragment(
 def test_the_bundle_reports_its_index_size_for_the_startup_hook(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The bundle's lifespan wires this in, so an unbuilt index is loud before a chemist asks.
+    """The bundle reports its index size for the startup hook, so an unbuilt index is loud early.
 
-    See `src/chemclaw/connectors/molfp/server/app.py` for the wiring.
-
-    Called directly rather than through the app's lifespan on purpose: `FastMCP.session_manager`
-    is single-use per process, and the bundle exports one module-level `app` that
-    `test_connector_transport.py` already serves — entering its lifespan here would break that.
+    Called directly rather than through the lifespan: `FastMCP.session_manager` is single-use per
+    process, and `test_connector_transport.py` already serves the module-level `app`.
     """
     monkeypatch.setattr(tools, "_store", InMemoryFingerprintStore())
     with caplog.at_level("WARNING"):

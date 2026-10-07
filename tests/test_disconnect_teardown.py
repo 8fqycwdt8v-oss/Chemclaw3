@@ -1,19 +1,11 @@
 """A client that walks away mid-turn frees its session immediately (D-130).
 
-Driven through the **real ASGI contract** — a genuine `http.disconnect` message handed to the real
-app — because that is precisely where this defect lived and why it survived a suite that already
-had three tests about abandoned turns. sse-starlette answers `http.disconnect` by cancelling its
-task group; it never calls `aclose()` on the body iterator. So the teardown runs inside a
-*cancelled* task, where the first `await` raises before it does anything, and every existing test
-closed the stream by hand instead — the one thing production never does.
+Driven through the real ASGI contract — a genuine `http.disconnect` to the real app — because
+sse-starlette answers it by cancelling its task group, never `aclose()`, so teardown runs inside a
+cancelled task where the first `await` raises. Pinned:
 
-Measured before the fix, on a live front door with Postgres: the durable release was entered on
-every abandoned turn and completed on none, so the session answered 409 to its own owner for the
-full 60-second lease. A chemist who closed a tab could not reopen the conversation for a minute.
-
-What is pinned here:
-  1. The durable turn claim is released — not merely *entered* — when the client disconnects.
-  2. The session accepts its next turn straight away rather than 409ing until the lease expires.
+1. The durable turn claim is released — not merely *entered* — on disconnect.
+2. The session accepts its next turn immediately rather than 409ing until the lease expires.
 """
 
 import asyncio
@@ -36,9 +28,8 @@ from chemclaw.core.config import settings
 class _RecordingClaims:
     """An in-memory `SessionTurns` that distinguishes an *entered* release from a finished one.
 
-    `release` suspends on a real timer on purpose. The defect is invisible to a fake that never
-    yields: a cancelled task runs synchronous code to the end and only raises at a suspension
-    point, so a release with no `await` in it would "pass" against the broken code.
+    `release` suspends on a real timer: a cancelled task only raises at a suspension point, so a
+    fake that never yields would pass against broken code.
     """
 
     def __init__(self) -> None:
@@ -141,10 +132,8 @@ async def _post_turn_and_vanish(app: Any, session_id: str) -> int:
 class _BrokenClaims(_RecordingClaims):
     """A store whose `release` fails the way a stopped Postgres does.
 
-    `psycopg.errors.AdminShutdown` — the concrete error the chaos run produced — is a
-    `psycopg.Error`, so it is deliberately *not* one of the connection errors the release used to
-    catch. Standing in for it with a plain `RuntimeError` would test the old narrow tuple instead
-    of the contract.
+    `psycopg.errors.AdminShutdown` is a `psycopg.Error`, not a connection error, so a plain
+    `RuntimeError` stand-in would test a narrower contract.
     """
 
     class Failure(Exception):
@@ -158,11 +147,10 @@ class _BrokenClaims(_RecordingClaims):
 
 
 async def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() -> None:
-    """Shielding makes the release *run*; it must not make a store failure a stray traceback.
+    """A release that cannot reach the store never escapes its task.
 
-    A shielded task whose awaiter has been cancelled is nobody's to await, so anything it raises
-    surfaces only as an unattributed `Task exception was never retrieved`. Measured in chaos
-    scenario C4 (Postgres stopped at the instant of the disconnect) before this was widened.
+    A shielded task whose awaiter was cancelled is nobody's to await, so anything it raised would
+    surface only as an unattributed `Task exception was never retrieved`.
     """
     claims = _BrokenClaims()
     app = create_app(
@@ -191,9 +179,8 @@ async def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() ->
 async def test_a_client_disconnect_releases_the_durable_turn_claim() -> None:
     """The claim is *released*, not merely entered, when the stream is torn down mid-turn.
 
-    Counterfactual: without the `shield` in `_release_turn_claim`, `entered` is 1 and `completed`
-    is 0 — the release starts, hits its first suspension point inside a cancelled task, and never
-    reaches the store.
+    Without the `shield` in `_release_turn_claim` the release would start, hit its first suspension
+    point in a cancelled task, and never reach the store.
     """
     claims = _RecordingClaims()
     app = create_app(
@@ -251,14 +238,10 @@ async def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -
 async def _post_turn_and_vanish_before_first_byte(app: Any, session_id: str) -> None:
     """POST a turn whose client is gone before the response's first byte is ever accepted.
 
-    The one teardown window neither `finally` covers: the route returns the streaming response
-    (`handed_off=True`, so `post_message`'s own finally stands down), but the socket never accepts
-    `http.response.start` — the send below blocks forever, exactly like a peer that vanished
-    without closing cleanly — and the disconnect arrives first. sse-starlette's disconnect
-    listener then cancels its task group while `_stream_response` is still suspended in that
-    send, **before the first `__anext__`**, so the turn's async generator is never started and
-    an unstarted generator runs no `finally` at all. Deterministic rather than raced: the send
-    genuinely cannot complete, so cancellation can only land pre-iteration.
+    The route has handed off (so `post_message`'s finally stands down), but the send of
+    `http.response.start` blocks forever and the disconnect arrives first, so sse-starlette cancels
+    before the generator's first `__anext__` and no `finally` runs. Deterministic: the send cannot
+    complete, so cancellation can only land pre-iteration.
     """
     body = json.dumps({"message": "hello"}).encode()
     delivered = False
@@ -280,16 +263,11 @@ async def _post_turn_and_vanish_before_first_byte(app: Any, session_id: str) -> 
 async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
     monkeypatch: Any,
 ) -> None:
-    """The in-process turn guard is a lease: the one release-less window cannot 409 forever (A3).
+    """A client gone before the stream starts does not wedge the session.
 
-    Both release sites are `finally` blocks — the generator's own, and `post_message`'s
-    pre-handoff one — and a client gone after handoff but before the generator's first advance
-    runs neither. With a bare set that entry was permanent: the session answered 409 for the
-    pod's whole lifetime. With the deadline map the entry leaks identically (asserted below,
-    proving the window is real) and then *expires*, so the session's next turn is admitted.
-
-    Counterfactual: revert `active_turns` to a latch (claim without a deadline, or a membership
-    test that ignores the deadline) and the waiting message never leaves the line.
+    In that window neither release `finally` runs, so the in-process turn guard is a lease: the
+    entry leaks (asserted, proving the window is real) and then *expires*, admitting the next turn.
+    A latch without a deadline would 409 for the pod's lifetime.
     """
     from chemclaw.core.config import settings
 
@@ -337,13 +315,8 @@ async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session
 async def _open_event_stream_and_vanish_before_first_byte(app: Any, session_id: str) -> None:
     """Open `GET /sessions/{id}/events` for a client that is gone before the first byte lands.
 
-    The event-stream twin of `_post_turn_and_vanish_before_first_byte`, and the same window:
-    `session_events` hands off the streaming response, so its own pre-handoff `finally` stands
-    down, while the send below never accepts `http.response.start`. sse-starlette's disconnect
-    listener cancels the task group with `_stream_response` still suspended in that send —
-    before the body iterator's first `__anext__` — so the generator that holds the slot's
-    release in its `finally` is never started, and an unstarted async generator runs no
-    `finally` at all.
+    The event-stream twin of `_post_turn_and_vanish_before_first_byte`: cancellation lands before
+    the body iterator's first `__anext__`, so the generator holding the slot's release never starts.
     """
     delivered = False
 
@@ -364,22 +337,12 @@ async def _open_event_stream_and_vanish_before_first_byte(app: Any, session_id: 
 def test_a_client_gone_before_the_event_stream_starts_frees_its_per_user_slot(
     monkeypatch: Any,
 ) -> None:
-    """A stream slot is held for as long as the *response* is served, not the generator (A3).
+    """A stream slot is held for as long as the *response* is served, not the generator.
 
-    Measured before the fix: five clients that vanish in this window leave
-    `event_streams == {"oid-...": 5}` with nothing open, and the sixth honest connect is
-    answered `429 too many concurrent event streams; close one and retry` — permanently, for
-    that user on that pod, with nothing to close. It survived `gc.collect()`: a never-started
-    generator has no `finally` to run and closing it is a no-op.
-
-    Unlike the turn slot next door, this one cannot be a lease: a push-back stream is
-    *deliberately* unbounded in lifetime (`stream_new_events` polls until the client leaves), so
-    there is no deadline that expires a leak without also evicting a healthy long-lived stream's
-    accounting. The release therefore moves to the one scope that ends exactly when the stream
-    does — the response's own `__call__`.
-
-    Counterfactual: release the slot only in the generator's `finally` (the shipped behaviour
-    before this test) and the assertion below sees one leaked slot per vanished client.
+    Otherwise each vanished client leaks a per-user slot until the user is refused with 429 forever
+    on that pod. It cannot be a lease, because a push-back stream is deliberately unbounded in
+    lifetime, so the release lives in the response's own `__call__`, the scope that ends with the
+    stream.
     """
     from chemclaw.api import app as front_door
 
@@ -430,26 +393,11 @@ def test_a_client_gone_before_the_event_stream_starts_frees_its_per_user_slot(
 def test_a_disconnected_turn_still_resets_every_ambient_context_var() -> None:
     """`run_turn`'s `finally` must stay synchronous, or a disconnect skips the turn's spend ledger.
 
-    D-167 added approval-consumption to the end of a turn, and the obvious home for it — the
-    `finally` — is wrong here. Production reaches teardown by *cancellation* rather than `aclose()`
-    (D-130), and an `await` in that block re-raises the cancellation on the spot, skipping every
-    step after it.
-
-    **What that block holds has changed, and this docstring is corrected rather than left to rot.**
-    It used to carry the five `reset_current_*` calls, so the failure it named was the next turn on
-    the worker running under the disconnected user's identity. Those resets now live in
-    `api/runner._turn_ambient`, a *synchronous* `@contextmanager` — an `await` cannot be spelled in
-    its `finally` at all, and its `__exit__` runs while the cancellation propagates, so the identity
-    guarantee is structural rather than dependent on this assertion. What is left here is
-    `_book_turn_spend`, and the defect an `await` would reintroduce is a cancelled turn that books
-    no tokens and no duration: abandon-and-retry becomes free, which is the cheapest attack on the
-    runaway-cost guard.
-
-    Asserted on the *source* rather than by driving a disconnect, because the failure is a property
-    of the block: any future `await` added there reintroduces it, whatever that await happens to do.
-    The property it used to stand in for is now asserted directly, by driving a real cancellation
-    and reading the ambients back — `tests/test_turn_cancellation.py`'s
-    `test_a_cancelled_turn_unstamps_every_ambient_it_stamped`.
+    Teardown arrives by cancellation (D-130), and an `await` in that block re-raises on the spot,
+    skipping `_book_turn_spend`, which would make abandon-and-retry free. Asserted on the source,
+    because any future `await` there reintroduces it. The ambient resets live in the synchronous
+    `api/runner._turn_ambient`, driven by
+    `tests/test_turn_cancellation.py::test_a_cancelled_turn_unstamps_every_ambient_it_stamped`.
     """
     import ast
     from pathlib import Path
@@ -478,10 +426,7 @@ def test_a_disconnected_turn_still_resets_every_ambient_context_var() -> None:
 class _ParkingClaims(_RecordingClaims):
     """A claim store whose `release` parks until the test lets it go.
 
-    The park is the whole apparatus. What is under test is a *second* cancellation delivered while
-    the shielded durable release is still in flight — the instant `_release_turn_claim`'s own
-    docstring calls out ("Cancellation still propagates out of here") — and a fake that never
-    suspends cannot express it.
+    Needed to deliver a *second* cancellation while the shielded durable release is in flight.
     """
 
     def __init__(self) -> None:
@@ -502,9 +447,8 @@ class _ParkingClaims(_RecordingClaims):
 class _ParkingOwners(SessionOwnerStore):
     """The durable registry, with the one call `delete_session` awaits parked forever.
 
-    A subclass of the real store rather than a stand-in because the route reaches this method only
-    behind `isinstance(owners, SessionOwnerStore)` — a duck-typed fake takes the other branch and
-    the route then never suspends where the test needs it to. Nothing here opens a connection.
+    A subclass of the real store because the route reaches this method only behind
+    `isinstance(owners, SessionOwnerStore)`. Nothing here opens a connection.
     """
 
     def __init__(self, started: asyncio.Event) -> None:
@@ -524,12 +468,9 @@ def _slot_after_a_recancelled_route(
 ) -> dict[str, Any]:
     """Cancel one of the two slot-holding routes twice, and hand back the leftover slot map.
 
-    The first cancellation is the ordinary one — a client that gave up, a pod forcing shutdown —
-    and is survived: the route's `finally` runs and reaches the shielded durable release. The
-    second lands while that release is parked, so every statement the `finally` had not reached
-    yet is skipped. Whichever release the block leaves for last is the one a re-cancel loses, and
-    the in-process slot is the one that is never swept: it is claimed with `deadline=math.inf`, so
-    `_claim_turn_slot` refuses the session's own owner for the life of the pod.
+    The first cancellation runs the route's `finally` into the shielded durable release; the second
+    lands while that release is parked, skipping whatever the block had not reached. The in-process
+    slot is claimed with `deadline=math.inf`, so if it is the one skipped nothing ever sweeps it.
     """
     claims = _ParkingClaims()
     started = asyncio.Event()
@@ -574,14 +515,9 @@ def test_a_recancelled_route_still_hands_back_the_sessions_turn_slot(
 ) -> None:
     """The in-process slot must come back even when the awaited release does not.
 
-    Both routes claim the slot with `deadline=math.inf`, because neither ever starts the lease
-    clock that bounds a turn's — so the `finally` is the *only* thing that gives it back and
-    nothing sweeps what it drops. Ordering the block "durable release, then slot" put an `await`
-    in front of the one release that cannot fail, and a second cancellation delivered inside that
-    await skips it: the session then answers 409 to its own owner for the life of the pod.
-
-    The durable half is the one that survives being lost — it expires on its own lease, which is
-    exactly why `_release_turn_claim` can afford to say cancellation propagates out of it.
+    Both routes claim it with `deadline=math.inf`, so the `finally` is the only release; it must
+    come before the `await`, since a re-cancel inside the await would skip it and 409 the owner for
+    the life of the pod. The durable half expires on its own lease, so losing it is survivable.
     """
     slots = _slot_after_a_recancelled_route(monkeypatch, route_name=route_name)
 

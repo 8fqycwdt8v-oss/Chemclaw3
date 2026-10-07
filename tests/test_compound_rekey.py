@@ -232,7 +232,7 @@ def test_no_link_in_the_corpus_is_left_pointing_at_nothing_current(
 
 
 def test_a_pre_bump_note_re_recorded_still_carries_its_compound(corpus: dict[str, str]) -> None:
-    """`compound_dependencies` used to return `[]` here, so the note landed without its compound."""
+    """`compound_dependencies` resolves the old id, so the note lands with its compound."""
     job = next(n for n in load_notes(settings.knowledge_path) if n.id == "job-perchlorate")
     (dependency,) = compound_dependencies(job)
     assert dependency.id == corpus["ionic"]

@@ -402,7 +402,7 @@ class _StepMeter(AsyncCallbackHandler):
         Args:
             response: The call's result. `generations` is a list per prompt, each a list of
                 candidates; both are walked.
-            kwargs: The rest of the callback contract, unused.
+            **kwargs: The rest of the callback contract, unused.
         """
         self.usage.add(llm_result_usage(response))
 
