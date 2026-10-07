@@ -275,9 +275,7 @@ def test_a_parameter_class_some_tool_produced_is_left_alone() -> None:
 
 
 def test_ordinary_chemistry_prose_does_not_trip_the_scan() -> None:
-    r"""Ordinary chemistry prose does not trip the scan: "to form a complex" is not a polymorph
-    form.
-    """
+    r"""Ordinary prose does not trip the scan: "to form a complex" is not a polymorph form."""
     prose = "The base deprotonates the amide to form a stabilised anion; warming drives it to bar."
     assert ungrounded_parameter_shapes(prose, []) == []
 
@@ -304,8 +302,9 @@ def test_one_tool_result_reaches_the_judge_once_however_many_ids_it_grounds() ->
 
 
 def test_the_judge_prompt_is_budgeted_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The judge prompt's evidence is budgeted newest first; past the cap the oldest are named, not
-    shown.
+    """The judge prompt's evidence is budgeted newest first.
+
+    Past the cap the oldest are named, not shown.
 
     The newest outputs are what the answer was written from; named omissions make a claim resting on
     them read as unverifiable rather than unsupported. The newest always survives.

@@ -414,8 +414,7 @@ class _Visitor(ast.NodeVisitor):
             self.visit(stmt)
 
     def _record(self, target: str, lineno: int) -> None:
-        """Keep an import if it carries a layer edge, or if it reaches into any dependency's
-        internals.
+        """Keep an import that carries a layer edge or reaches into a dependency's internals.
 
         The stack policy concerns only `_STACKS` roots; the private-import ratchet concerns every
         dependency. An unstacked private import is kept with `stack=""`, which `_edges` skips.

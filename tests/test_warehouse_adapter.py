@@ -350,8 +350,7 @@ def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
 
 
 def test_a_declared_withdrawal_column_is_in_the_cursor_and_an_undeclared_one_is_not() -> None:
-    """A declared withdrawal column is in the cursor, and an undeclared one leaves the SQL
-    unchanged.
+    """A declared withdrawal column is in the cursor; an undeclared one leaves the SQL unchanged.
 
     The fake mirrors the watermark's semantics without parsing the clause, so only the SQL pins them
     together. `COALESCE(retracted, W)` inside `GREATEST` matters because some warehouses propagate

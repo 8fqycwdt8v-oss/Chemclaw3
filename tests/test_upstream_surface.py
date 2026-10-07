@@ -242,8 +242,9 @@ def test_the_mcp_adapter_still_calls_a_tool_with_no_read_timeout() -> None:
 
 
 def test_the_v3_stream_transformer_extension_point_is_present() -> None:
-    """The v3 stream-transformer extension point is present: the restart condition for a deferred
-    migration, not a live dependency.
+    """The v3 stream-transformer extension point is present.
+
+    It is the restart condition for a deferred migration, not a live dependency.
 
     Nothing in `src/` imports it. v3 reports token usage only at `message-finish`, so an abandoned
     turn would book nothing. If this seam disappears, the deferred backlog row should be closed.
@@ -462,8 +463,9 @@ def test_a_filesystem_permission_still_has_the_two_modes_the_rules_use() -> None
 
 
 def test_the_interrupt_on_predicate_is_still_synchronous() -> None:
-    """The `interrupt_on` predicate is still synchronous: the restart condition for
-    `HumanInTheLoopMiddleware`.
+    """The `interrupt_on` predicate is still synchronous.
+
+    It is the restart condition for adopting `HumanInTheLoopMiddleware`.
 
     Nothing in `src/` imports it; plan approval is a first-party `wrap_tool_call`. The gate's
     predicates `await` the approval store, so an async `when` would lift one of the reasons for
@@ -641,8 +643,7 @@ def test_the_deepagents_symbols_this_repo_names_are_importable(
 
 
 def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys() -> None:
-    """The gateway client still publishes cache tokens under the two flat keys, with no per-TTL
-    keys.
+    """The gateway client still publishes cache tokens under two flat keys, with no per-TTL keys.
 
     `agent/turn_usage.graph_usage_tokens` subtracts `cache_read` and `cache_creation` from
     `input_tokens` and books `cache_creation` as the write; a rename would price every cached token
@@ -1118,8 +1119,7 @@ def test_astream_with_a_mode_list_and_subgraphs_still_yields_three_tuples() -> N
 
 
 def test_a_streamed_message_still_names_the_node_it_ran_in_and_tools_run_in_tools() -> None:
-    """A streamed message still names its node, and `create_agent` still calls the tool node
-    `tools`.
+    """A streamed message names its node, and `create_agent` still names the tool node `tools`.
 
     `api/graph_stream._TOOL_NODE` withholds `messages` chunks from `langgraph_node == "tools"`, so a
     model call inside a tool body does not leak into the answer. Behaviour is asserted in

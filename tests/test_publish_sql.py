@@ -1,18 +1,9 @@
 """The acceptance check: the six chemistry questions, as SQL, against a real database.
 
-**A schema that cannot answer these is not "highly structured", whatever its shape.** So this file
-is written as the questions rather than as unit tests of the writer: it loads projected records
-into a Postgres running the *shipped* DDL (`schema/result-store/`) and asks what a chemist would.
-
-Two of the six carry a specific trap and each has a negative case here, because without one the
-test would pass on a partial answer:
-
-- The THF question must return a run submitted as `tetrahydrofuran`. The calculation layer accepts
-  both spellings and passes the name through verbatim, so a schema storing the given name answers
-  with a confident subset and raises nothing. The alias table is what makes it pass.
-- The cross-solvent question must return solvents that were never compared in one call — which is
-  the more common case, and the reason a solvent screen publishes its parts as well as its
-  aggregate.
+Projected records are loaded into Postgres running the shipped `schema/result-store/` DDL and
+queried as a chemist would. Two questions carry traps with negative cases: the THF question must
+return a run submitted as `tetrahydrofuran` (via the alias table), and the cross-solvent question
+must return solvents never compared in one call (why a screen publishes its parts).
 """
 
 from datetime import UTC, datetime
@@ -39,11 +30,7 @@ from chemclaw.science.calc.models import (
 )
 from tests.pg import migrated_db_or_skip
 
-# The **directory**, not `001_core.sql`. This file's docstring has always said it runs the shipped
-# DDL, and it ran the first file of it — so every migration after the first was outside the one
-# lane that drives real queries against a real store, which is the same "a basis that is
-# re-derived rather than observed" shape this repository keeps finding
-# (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds` found it here).
+# The whole DDL directory, not `001_core.sql`, so every migration is exercised by real queries.
 _DDL = Path(__file__).resolve().parents[1] / "schema" / "result-store"
 _NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
@@ -170,9 +157,8 @@ def _pka(*, value: float, ref: str, smiles: str) -> ResultRecord:
 async def _load(conn: psycopg.AsyncConnection[Any], records: list[ResultRecord]) -> None:
     """Write records through the same row builder and upserts the SQL driver uses.
 
-    Deliberately not a hand-written INSERT: a test that loaded rows its own way would be asserting
-    that a schema *could* answer these questions, not that this system's writer produces rows that
-    do. The registry seed goes in first because every fact row references it.
+    Hand-written INSERTs would prove a schema could answer, not that this writer's rows do. The
+    registry seed goes first because every fact row references it.
     """
     from chemclaw.publish.properties import REGISTRY
     from chemclaw.publish.solvents import display_name, known_solvents
@@ -215,9 +201,8 @@ async def _load(conn: psycopg.AsyncConnection[Any], records: list[ResultRecord])
 async def _open_loaded() -> psycopg.AsyncConnection[Any]:
     """A database running the shipped DDL, holding a small corpus of published results.
 
-    The corpus is chosen so every question below has both a match and a near-miss: a reaction that
-    is downhill but in the wrong solvent, an ensemble with too few populated conformers, a pKa just
-    outside the window. A question that cannot tell those apart is not answering.
+    Every question has a match and a near-miss (wrong solvent, too few populated conformers, a pKa
+    just outside the window).
     """
     await migrated_db_or_skip()
     conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
@@ -283,11 +268,10 @@ async def _rows(conn: psycopg.AsyncConnection[Any], sql: str, params: Any = ()) 
 
 
 async def test_q1_reactions_below_a_free_energy_in_one_solvent() -> None:
-    """Answer: every reaction with delta-G below -10 kcal/mol run in THF at GFN2.
+    """Every reaction with delta-G below -10 kcal/mol run in THF at GFN2.
 
-    One index, one table — and the alias table is what makes it complete. `rxn-thf-spelled-long`
-    was submitted as `tetrahydrofuran`; a schema that stored the name as given would return three
-    rows here, look entirely correct, and be missing a run.
+    `rxn-thf-spelled-long` was submitted as `tetrahydrofuran`; only the alias table makes the answer
+    complete.
     """
     loaded = await _open_loaded()
     try:
@@ -344,12 +328,10 @@ async def test_q2_ensembles_with_several_populated_conformers() -> None:
 
 
 async def test_q3_predicted_pka_in_a_window_with_its_uncertainty() -> None:
-    """Answer: every compound whose predicted pKa is between 4 and 6, with its uncertainty.
+    """Every compound whose predicted pKa is between 4 and 6, with its uncertainty.
 
-    The uncertainty is a column on the value's own row, deliberately. Were it a second property
-    row, this query would be a self-join that silently returns the value without its error bar
-    whenever the second row is missing — and a semiempirical pKa quoted bare is precisely what the
-    result model's own docstring warns against.
+    The uncertainty is a column on the value's own row, so the query cannot silently drop the error
+    bar the way a self-join over a second property row could.
     """
     loaded = await _open_loaded()
     try:
@@ -432,15 +414,11 @@ async def test_q5_every_geometry_for_a_compound_with_its_energy() -> None:
 
 
 async def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
-    """Answer: compare delta-G for this reaction across every solvent we ran it in.
+    """Delta-G for one reaction across every solvent it was run in.
 
-    The payoff of a subject identity that excludes solvent, temperature and method: this is a
-    `GROUP BY` on one column rather than a fuzzy join over two text arrays.
-
-    **And it must span solvents that were never compared in one call.** `dmso` and `toluene` come
-    from a solvent screen; `thf` and `acetonitrile` from standalone runs. A screen that published
-    only its aggregate would leave the first two unanswerable here — which is why publishing an
-    aggregate's parts is a rule and not an optimization.
+    The subject identity excludes solvent, temperature and method, so this is a `GROUP BY` on one
+    column. `dmso` and `toluene` come from a screen and `thf` and `acetonitrile` from standalone
+    runs, which only works because a screen publishes its parts.
     """
     loaded = await _open_loaded()
     try:
@@ -482,11 +460,10 @@ async def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
 
 
 async def test_a_quick_level_reaction_publishes_no_free_energy() -> None:
-    """An absent number stays absent — there is no fallback anywhere in the projector.
+    """A `quick`-level reaction publishes no free energy.
 
-    `delta_g_kcal` is None at `quick` level and whenever a species' symmetry number was unstated.
-    A projector that substituted `delta_e_kcal` would publish an electronic energy under the name
-    of a free energy, and every query above would then be quietly wrong rather than incomplete.
+    `delta_g_kcal` is None there; substituting `delta_e_kcal` would make every query above quietly
+    wrong.
     """
     loaded = await _open_loaded()
     try:
@@ -527,11 +504,10 @@ async def test_republishing_the_same_record_is_a_no_op() -> None:
 
 
 async def test_a_reaction_carries_its_per_species_breakdown() -> None:
-    """The breakdown `job_records.result` holds today and nothing can query.
+    """A reaction carries its per-species breakdown.
 
-    A reaction's delta-G is a fact about the run (`member_ordinal IS NULL`); each species' absolute
-    Gibbs energy is a fact about one member. One table answers both, which is what
-    `member_ordinal` being nullable buys.
+    The run's delta-G has `member_ordinal IS NULL`; each species' Gibbs energy is a member fact in
+    the same table.
     """
     loaded = await _open_loaded()
     try:

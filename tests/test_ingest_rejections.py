@@ -300,8 +300,7 @@ async def test_an_unreadable_ledger_is_reported_rather_than_rendered_as_nothing_
 async def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A systematically broken source cannot grow the table without bound, and the newest refusals
-    survive.
+    """A broken source cannot grow the table without bound, and the newest refusals survive.
 
     Two batches, because `now()` is transaction time: within one call every row shares `last_seen`
     and only the `entry_id` tie-break decides. The test checks the two timestamps really differ.

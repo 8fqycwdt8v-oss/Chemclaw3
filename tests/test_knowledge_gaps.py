@@ -379,8 +379,9 @@ def test_the_floor_is_the_identity_wherever_no_leg_was_at_zero() -> None:
 def _a_floor_that_reads_the_retriever_field(
     fused: list[EvidenceChunk], legs: list[list[EvidenceChunk]], limit: int
 ) -> list[EvidenceChunk]:
-    """The floor this repository did not build: identical to `with_no_leg_cut_out` but reading
-    `chunk.retriever`, coded so a test can separate the two.
+    """The floor this repository did not build, coded so a test can separate the two.
+
+    Identical to `with_no_leg_cut_out` except that it reads `chunk.retriever`.
     """
     reserved = set()
     for leg in legs:

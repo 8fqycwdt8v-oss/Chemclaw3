@@ -490,8 +490,7 @@ def test_the_chart_publishes_the_graph_where_settings_reads_it(
 
 
 def test_a_config_change_restarts_the_pods_that_read_it() -> None:
-    """Every pod template carries a ConfigMap checksum, so a config change restarts the pods that
-    read it.
+    """Every pod template carries a ConfigMap checksum, so a config change restarts its readers.
 
     Environment is read once at start; without the annotation `helm upgrade` updates the ConfigMap
     and no running pod, and later scale-ups split the fleet across two configurations. Counted per

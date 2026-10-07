@@ -1,15 +1,9 @@
-"""What the HTTP result sink calls a delivery — and what it refuses to.
+"""What the HTTP result sink calls a delivery, and what it refuses to.
 
-This file exists because the sink's failure mode is the most expensive one this system has: a
-`deliver()` that returns is read by `durable/publish_results._drain_one` as "every record in this
-batch is durable at the far end", and the outbox then writes `state='delivered'`. A response class
-the classifier does not name is therefore not an unhandled case; it is a **positive false claim**
-that science was published, on a row `requeue_failed` can never bring back and retention will
-delete.
-
-Driven through the real `HttpResultSink` and a real `httpx.AsyncClient` — only the transport is
-scripted — so the client's own redirect policy is part of what is under test rather than something
-this file assumes.
+A returning `deliver()` is read by `_drain_one` as every record durable at the far end, so an
+unclassified response would be a false claim of publication that cannot be requeued. Driven
+through the real `HttpResultSink` and `httpx.AsyncClient` with only the transport scripted, so the
+client's redirect policy is under test.
 """
 
 import asyncio
@@ -48,9 +42,8 @@ def _sink_answering(
 ) -> HttpResultSink:
     """A real sink whose transport answers `responses` in order, recording every URL dialled.
 
-    The client is the real one: `trust_env`, the timeout and — the point of this helper — the
-    redirect policy are whatever the driver asked for, so a test can tell "refused the redirect"
-    from "followed it and was answered by somewhere else".
+    The client's redirect policy is the driver's own, so a test can tell "refused the redirect" from
+    "followed it elsewhere".
     """
     remaining = list(responses)
 
@@ -72,16 +65,11 @@ def _sink_answering(
 def test_a_redirect_is_refused_rather_than_reported_as_delivered(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    """A 3xx must raise, because the batch did not land where the manifest addressed it.
+    """A redirect is refused rather than reported as delivered.
 
-    Measured on the unfixed driver against a real listener answering `302 + Location:`: the POST
-    was received, the endpoint wrote nothing, `deliver()` **returned**, and
-    `result_publications` read `state='delivered'` with `delivered_at` set — while the driver's own
-    log line for that same call said `sink.failed ... -> 3xx`. A redirect is not exotic: it is what
-    an ingress does for an http->https upgrade and what a proxy does for a renamed path.
-
-    Refused rather than retried, because no retry to the same URL changes the answer — the fix is
-    the manifest's `url`, and dead-lettering is how an operator is told that.
+    A 3xx means the batch did not land where the manifest addressed it (ingress http->https upgrades
+    and renamed proxy paths do this). Refused, not retried: the fix is the manifest's `url`, and
+    dead-lettering tells the operator.
     """
     seen: list[str] = []
     sink = _sink_answering(
@@ -103,12 +91,7 @@ def test_a_redirect_is_refused_rather_than_reported_as_delivered(
 def test_an_informational_or_unknown_non_2xx_is_not_a_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Success is `2xx` and nothing else — stated as a closed rule, not an open one.
-
-    The classifier used to be written as two rejections with an implicit `return` for everything
-    else, which made every response class nobody thought of a silent success. This asserts the
-    inversion: an unnamed class raises.
-    """
+    """Success is `2xx` and nothing else: an unnamed response class raises."""
     sink = _sink_answering(monkeypatch, [httpx.Response(199)], [])
     with pytest.raises(SinkRejectedError):
         asyncio.run(sink.deliver([_record()]))

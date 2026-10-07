@@ -141,9 +141,7 @@ def test_a_result_of_exactly_the_limit_is_not_cut() -> None:
 
 
 def test_a_limit_of_exactly_the_notice_keeps_the_explanatory_form_and_no_text() -> None:
-    """At `limit == widest` the explanatory notice fits and takes the whole share: `kept` is 0, not
-    1.
-    """
+    """At `limit == widest` the explanatory notice takes the whole share: `kept` is 0, not 1."""
     total = 5_000
     widest = len(_notice("read_document", total, total))
 

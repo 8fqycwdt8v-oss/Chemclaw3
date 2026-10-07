@@ -844,8 +844,7 @@ def _basic_auth_git_remote(root: Path, token: str) -> tuple[str, ThreadingHTTPSe
 def test_the_note_writer_can_push_to_a_remote_that_needs_the_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The note writer can push to a remote that needs the token, through the image's askpass
-    helper.
+    """The note writer pushes to a remote that needs the token, through the image's askpass helper.
 
     `knowledge-sync.sh checkout` leaves a remote URL without the token, and the push runs in another
     container. Driven against a Basic-auth remote: the push succeeds once `GIT_ASKPASS` names

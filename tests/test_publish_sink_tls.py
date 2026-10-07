@@ -1,12 +1,9 @@
 """The result sinks refuse a non-loopback cleartext transport under the enforced posture.
 
-A published record is confidential chemistry, and an HTTP sink additionally carries a bearer
-credential in every request. The system's own database and the Temporal broker already refuse
-plaintext-or-unverified transport under `entra_required` (`require_pg_tls`, the Temporal-mTLS
-guard); a sink that writes the same-sensitivity data to *another* store is the same exposure and is
-refused on the same terms. These tests pin both directions — the refusal fires where it should, and
-loopback dev and `https://`/`sslmode`-bearing configurations are left alone — and that the guard is
-inert when the deployment does not claim the enforced posture, so a dev sink is never blocked.
+Published records are confidential and an HTTP sink sends a bearer credential, so sinks follow the
+same `entra_required` rule as the database and Temporal. Pinned both ways: the refusal fires where
+it should, loopback and `https://`/`sslmode` configurations pass, and the guard is inert outside
+the enforced posture.
 """
 
 import pytest

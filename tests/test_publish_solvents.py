@@ -1,14 +1,8 @@
 """Every solvent name the calculation layer accepts resolves to a canonical id.
 
-**The gap this closes is measured, not hypothetical.** `ALPB_SOLVENTS` holds 42 names for 25
-solvents — `thf` and `tetrahydrofuran`, `hexane`/`n-hexane`/`nhexane`/`n-hexan`/`nhexan`,
-`ch2cl2`/`dichloromethane`/`dichlormethane`/`methylenechloride` — and that name reaches the
-calculation key verbatim. A published schema storing it as given would answer "every reaction we
-ran in THF" with a confident subset of the truth and raise nothing.
-
-The first test is the one that matters over time: a name added upstream that this module has no
-group for would quietly become its own solvent, so it is caught here rather than in a query that
-under-returns six months later.
+`ALPB_SOLVENTS` has several names per solvent (`thf`/`tetrahydrofuran`, the hexane spellings) and
+the name reaches the calculation key verbatim, so a store keeping it as given would answer "every
+reaction in THF" with a subset. The first test catches an upstream name with no group here.
 """
 
 import pytest
@@ -18,11 +12,10 @@ from chemclaw.science.calc.solvents import ALPB_SOLVENTS, SUGGESTED_SOLVENTS
 
 
 def test_every_upstream_solvent_name_resolves_to_a_known_group() -> None:
-    """A name the calculator accepts must reach a canonical id this module knows.
+    """Every upstream solvent name resolves to a known group.
 
-    Without this, a solvent added to `ALPB_SOLVENTS` upstream would pass through
-    `canonical_solvent` as itself — a new one-member group nobody declared — and calculations run
-    in it would be invisible to every query grouping by its real siblings.
+    Otherwise a new `ALPB_SOLVENTS` name would pass through `canonical_solvent` as an undeclared
+    one-member group, invisible to queries over its real siblings.
     """
     groups = known_solvents()
     unmapped = sorted(name for name in ALPB_SOLVENTS if canonical_solvent(name) not in groups)
@@ -48,11 +41,9 @@ def test_every_declared_alias_is_a_name_the_calculator_accepts() -> None:
 
 
 def test_the_canonical_spelling_is_the_one_the_system_already_suggests() -> None:
-    """Where the calculation layer already has a preferred spelling, this module uses it.
-
-    `SUGGESTED_SOLVENTS` is what a refusal message quotes, so a chemist who is told to write `thf`
-    and then sees `tetrahydrofuran` in a results table has been given two names for one thing by
-    one system.
+    """The canonical spelling is the one `SUGGESTED_SOLVENTS` already uses, so a chemist sees one
+    name
+    for one solvent across refusals and results.
     """
     groups = known_solvents()
     for suggested in SUGGESTED_SOLVENTS:
@@ -73,11 +64,10 @@ def test_the_canonical_spelling_is_the_one_the_system_already_suggests() -> None
     ],
 )
 def test_spellings_of_one_solvent_collapse(spellings: tuple[str, ...], expected: str) -> None:
-    """The specific collisions that made this module necessary.
+    """Spellings of one solvent collapse to one id.
 
-    Normalized the way the calculation layer normalizes — stripped and lowercased — because it
-    matches that way, and a publish path that canonicalized differently would fork on capitalization
-    alone.
+    Normalized as the calculation layer normalizes (stripped, lowercased), so capitalization cannot
+    fork it.
     """
     assert {canonical_solvent(name) for name in spellings} == {expected}
 
@@ -103,11 +93,9 @@ def test_gas_phase_is_absence_rather_than_a_solvent() -> None:
 
 
 def test_an_unknown_solvent_is_published_rather_than_refused() -> None:
-    """A solvent this registry has not heard of still reaches the record.
+    """An unknown solvent is published normalized under its own id rather than refused.
 
-    Refusing to publish a finished calculation because its solvent is unfamiliar would lose science
-    to protect a lookup table. It lands normalized, as its own id, which reads correctly as "a
-    solvent we have no alias group for".
+    Refusing would lose a finished calculation to protect a lookup table.
     """
     assert canonical_solvent("  SuperCriticalCO2 ") == "supercriticalco2"
 
