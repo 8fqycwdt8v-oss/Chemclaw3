@@ -56,8 +56,7 @@ def default_turn_cost_sink() -> TurnCostSink:
     """The durable sink where a database exists, else the null one.
 
     Keys on `session_store == "postgres"`, as the audit sink and job record do. The store is
-    imported
-    lazily so a memory-store process never loads psycopg.
+    imported lazily so a memory-store process never loads psycopg.
     """
     if settings.session_store != "postgres":
         return NullTurnCostSink()
@@ -71,8 +70,7 @@ def record_turn_cost(cost: TurnCost) -> None:
 
     Synchronous by contract: both callers (`api/runner._book_turn_spend` and
     `durable/template_activities._book_step_spend`) run in teardown, where an `await` would re-raise
-    a
-    pending cancellation and skip what follows. The write runs as its own task held in `_PENDING`,
+    a pending cancellation and skip what follows. The write runs as its own task held in `_PENDING`,
     and a failure is logged at warning level and lost rather than failing a turn that already
     answered.
     """

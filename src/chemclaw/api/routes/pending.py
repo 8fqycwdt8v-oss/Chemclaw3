@@ -24,12 +24,12 @@ from chemclaw.kg.premise import count_refusals, premise_breaks
 logger = logging.getLogger(__name__)
 
 
-# Request kinds where the requester may never be the answerer, whatever the routing says.
-#
-# Separation of duties: an `approval` gates an irreversible external change, and its whole point is
-# that a second person looked — even when routed to a group the requester belongs to. Approvals must
-# also be routed at launch. Other kinds (`measurement`, `question`) may be answered within the
-# requester's own team.
+#: Request kinds where the requester may never be the answerer, whatever the routing says.
+#:
+#: Separation of duties: an `approval` gates an irreversible external change, and its whole point is
+#: that a second person looked — even when routed to a group the requester belongs to. Approvals
+#: must also be routed at launch. Other kinds (`measurement`, `question`) may be answered within the
+#: requester's own team.
 SECOND_PERSON_KINDS = frozenset({"approval"})
 
 
@@ -107,8 +107,7 @@ async def answer_pending(
       so a row never says `answered` while the waiter still waits.
 
     The premise check lives here, not in the workflow: a workflow cannot do I/O without a new
-    activity
-    and a replay guard, and this route already has the caller, the row and a way to refuse.
+    activity and a replay guard, and this route already has the caller, the row and a way to refuse.
     """
     stored = await pending_store.get_request(request_id)
     if stored is None:
@@ -118,10 +117,8 @@ async def answer_pending(
     if stored.state != "waiting":
         raise HTTPException(status_code=409, detail=f"this request is already {stored.state}")
     # Only breaks that `blocks_an_answer`: an `absent` note may just be a checkout behind, and this
-    # route
-    # has no override. A `review` is exempt: its premise is what is under review, and superseding
-    # that
-    # note is the natural outcome of reading it.
+    # route has no override. A `review` is exempt: its premise is what is under review, and
+    # superseding that note is the natural outcome of reading it.
     breaks = await premise_breaks(stored.premise_note_ids) if stored.kind != "review" else []
     broken = [item for item in breaks if item.blocks_an_answer()]
     if broken:

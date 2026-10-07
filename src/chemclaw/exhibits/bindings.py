@@ -1,31 +1,22 @@
 """Resolve an artefact's bound values against the stored tool results of its own session.
 
-`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`. A spec may put
-`{"$bind": {"result": "r:<hex>", "pointer": "/a/0/b"}}` where it takes a cell, a property, a SMILES
-or a series, and a table may take `rows_from` instead of `rows`. This module turns such a spec into
-the three things the rest of the package needs:
+A spec may put `{"$bind": {"result": "r:<hex>", "pointer": "/a/0/b"}}` where it takes a cell,
+property, SMILES or series, and a table may take `rows_from` instead of `rows`. This module
+produces:
 
-- the **stored** spec — the bindings kept, each handle replaced by the full 64-hex ref it names, so
-  a revision keeps pointing at the same bytes whatever later results share its prefix;
-- the **resolved** spec — every binding replaced by its value, which is what a renderer, an export
-  and the caps see, so the existing renderers work unchanged;
-- the **bindings** list the view serves beside it, one entry per bound value.
+- the **stored** spec — bindings kept, each handle expanded to the full 64-hex ref, so a revision
+  keeps pointing at the same bytes;
+- the **resolved** spec — every binding replaced by its value, for renderers, exports and caps;
+- the **bindings** list served beside it, one entry per bound value.
 
-**A write and a read differ in one thing: what a failure is.** On a write every binding must
-resolve — the result exists in this session's `tool_result_links`, its prefix names exactly one,
-the pointer reaches a value and the value fits the position — or the write is refused naming the
-first few problems. On a read the stored ref is already exact and the only thing that can have
-changed is that retention swept the result; that binding reads `null` with `ok: false` and a
-reason, and the rest of the artefact still reads.
+On a write every binding must resolve (the result is linked to this session, its prefix names
+exactly one, the pointer reaches a value that fits the position) or the write is refused naming the
+problems. On a read only retention can have changed anything: a swept binding reads `null` with `ok:
+false` and the rest still reads.
 
-**The session is the scope, and the link is the authorization** — the join `api/tool_results.py`
-makes for its fetch route, made again here because `exhibits` sits below `api`: a ref another
-session produced resolves to nothing, so neither the model nor a person can bind bytes they were
-never shown. A person's revision may keep any ref already linked to the session (copied from
-`raw_spec`), replace one with a literal, and no more.
-
-**JSON Pointers are RFC 6901, written here rather than imported**: the grammar is two escapes and
-an array index, and a dependency for it would be one more thing every image installs.
+The session's `tool_result_links` are the authorization, so a ref another session produced resolves
+to nothing. JSON Pointers are RFC 6901, implemented here (two escapes and an array index) rather
+than adding a dependency.
 """
 
 from __future__ import annotations
@@ -57,11 +48,9 @@ from chemclaw.exhibits.sources import resolved_geometry
 #: What each bound position accepts, by the name a refusal uses for it.
 Expect = Literal["cell", "prop", "smiles", "x", "y", "rows"]
 
-# **Only evidence is bindable** (`exhibits.evidence`): a `read_exhibit` readout, a helper's report
-# or a scratchpad file is the agent's own transcription handed back, and a value bound to it would
-# carry the provenance marker of a tool result while being exactly the transcription a binding
-# exists to replace. Every query here carries the same predicate, so a ref into one resolves to
-# nothing — the "not a tool result of this conversation" refusal on a write, `ok: false` on a read.
+# Only evidence is bindable (`exhibits.evidence`): a value bound to the agent's own transcription
+# handed back would carry a tool result's provenance while being exactly what binding replaces.
+# Every query carries this predicate.
 _EVIDENCE = evidence_predicate("tool")
 
 _SESSION_LINKS = (
@@ -83,14 +72,11 @@ WHERE l.session_id = %s AND l.content_hash = ANY(%s) AND {evidence_predicate("l.
 """
 
 
-#: Parsed result documents, by content hash, most recently used last, each with its stored size.
-#:
-#: **Safe to share across sessions and requests because a blob is immutable**: its key is the hash
-#: of its bytes, so a cached document can never disagree with the store. What it does not carry is
-#: authorization — a hit is used only for a ref the session's own links have just been asked for
-#: (`_run`), so the cache saves the blob read and the parse, never the link join. Per process and
-#: bounded by `exhibit_binding_cache_bytes` of *stored* bytes; a parsed document is several times
-#: that in memory, which is what the default is sized against.
+# Parsed result documents by content hash, most recently used last, each with its stored size.
+#
+# Safe to share across sessions because a blob is immutable, but a hit is used only for a ref the
+# session's own links just named, so the cache never authorizes. Per process, bounded by
+# `exhibit_binding_cache_bytes` of stored bytes (the parsed form is several times larger).
 _DOCUMENTS: OrderedDict[str, tuple[Any, int]] = OrderedDict()
 
 
@@ -98,10 +84,8 @@ _DOCUMENTS: OrderedDict[str, tuple[Any, int]] = OrderedDict()
 class _Site:
     """One bound position in a spec's JSON: where it is, what it reads, what it must be.
 
-    `at` is the position as keys and indices from the spec's root (`("rows", 3, "yield")`), which
-    is what the value is written back through; `path` is the same position as the diff spells it,
-    for a reader. Two forms because a column key or a property name may itself contain `.` or `[`,
-    and a dotted string cannot be walked back reliably.
+    `at` is the position as keys and indices from the root, used to write the value back; `path` is
+    the same position spelled as the diff spells it. Both, because a key may contain `.` or `[`.
     """
 
     path: str
@@ -175,8 +159,7 @@ def _bound(value: object) -> tuple[str, str] | None:
 async def _links(session_id: str, refs: Collection[str] | None = None) -> dict[str, str]:
     """The session's stored results, ref to tool — all of them, or only those among `refs`.
 
-    A write needs all of them, because a handle is a prefix and only the session's set can say
-    which ref it names; a read already holds exact refs and asks for just those.
+    A write needs all, since a handle is a prefix; a read holds exact refs.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -328,8 +311,7 @@ def _fitted(value: Any, site: _Site) -> Any:
 def _rows(value: Any, columns: Mapping[str, str]) -> list[dict[str, Any]]:
     """A table's rows from an array of records: one row per element, one cell per column pointer.
 
-    A column pointer an element does not reach gives an empty cell — a list of records with an
-    optional field is the ordinary case, and refusing it would refuse most real results.
+    A column pointer an element does not reach gives an empty cell (optional fields are ordinary).
 
     Raises:
         _Unresolved: the value is not an array, or a cell is not text, a number or null.
@@ -378,8 +360,7 @@ def _container(raw: dict[str, Any], site: _Site) -> Any:
 def _placed(raw: dict[str, Any], site: _Site, value: Any) -> None:
     """Put `value` where `site` sits in the spec JSON `raw`, in place.
 
-    A table's `rows_from` becomes its `rows` — `[]` when it did not resolve, since a table's rows
-    are a list whatever happened to the result they came from.
+    A table's `rows_from` becomes its `rows` — `[]` when it did not resolve.
     """
     if site.expect == "rows":
         raw.pop("rows_from", None)
@@ -398,9 +379,9 @@ def _restamped(raw: dict[str, Any], site: _Site, ref: str) -> None:
 class _Plan:
     """What each site resolves against, decided before anything is parsed.
 
-    `refs` is the ref each site reads (by its index in the site list), `refusals` the sites that are
-    refused before any read, and `tolerated` the sites a missing result does not refuse — every
-    site on a read, and on a write a binding carried unchanged from the revision being revised.
+    `refs` is the ref each site reads (by index), `refusals` the sites refused before any read, and
+    `tolerated` the sites a missing result does not refuse — every site on a read, and on a write a
+    binding carried unchanged from the parent revision.
     """
 
     refs: Mapping[int, str]
@@ -419,9 +400,8 @@ def _resolve(
 ) -> tuple[dict[str, Any], dict[str, Any], list[ExhibitBinding], list[str]]:
     """The stored JSON, the resolved JSON, the bindings and the problems — pure, off the loop.
 
-    A problem on a site that is not tolerated refuses a write (collected, so a writer sees several
-    at once); everything else reads as a `null` value with `ok: false`, which is what a read of a
-    swept result always is and what a write keeps for a binding it carried unchanged.
+    A problem on a non-tolerated site refuses a write (all collected); otherwise it reads as `null`
+    with `ok: false`.
     """
     stored = json.loads(json.dumps(raw))
     resolved = json.loads(json.dumps(raw))
@@ -478,21 +458,18 @@ def _resolve(
 def _write_plan(sites: list[_Site], links: Mapping[str, str], parent: Spec | None) -> _Plan:
     """Which ref each site of a write names, and which are refused or carried.
 
-    A binding copied unchanged from the parent revision — the same full ref and pointer — is
-    carried even when retention has since swept its result: it was checked when it was written,
-    and refusing it would block every whole-spec revision of the artefact until a person detached
-    a value they never touched. A ref the parent bound and the session no longer holds, at any
-    other pointer, is refused naming that cause; anything else outside the links is refused as
-    not a result of this conversation.
+    A binding copied unchanged from the parent (same ref and pointer) is carried even if retention
+    swept its result; refusing it would block every revision until someone detached a value they
+    never touched. A swept parent ref at another pointer is refused naming that cause; anything else
+    not linked to the session is refused as not a result of this conversation.
     """
     carried = _bound_pairs(parent)
     once_held = {ref for ref, _ in carried}
     refs: dict[int, str] = {}
     refusals: dict[int, str] = {}
     tolerated: set[int] = set()
-    # One prefix scan per distinct target, not per site: a table binds a whole column to one result
-    # cell by cell, and `_ref_for` walks every link the session holds — 2,000 cells over 2,000
-    # links is 4 million prefix tests on the event loop for an answer that has one value.
+    # One prefix scan per distinct target, not per site: a table binding a column cell by cell would
+    # otherwise scan every link once per cell.
     named: dict[str, str | _Unresolved] = {}
     for index, site in enumerate(sites):
         if site.target not in named:
@@ -536,8 +513,8 @@ async def _run(
 ) -> Any:
     """Read what `sites` need from the store, then resolve — the parse off the loop when large.
 
-    The session's links are asked first, and only a ref they name is read, from the cache or the
-    blob table: a cached document is never the authorization.
+    The session's links are asked first, and only a ref they name is read (from cache or blob
+    table): a cached document is never the authorization.
     """
     if writing:
         links = await _links(session_id)
@@ -582,26 +559,20 @@ async def _run(
 async def bind_for_write(session_id: str, spec: Spec, *, parent: Spec | None = None) -> Bound:
     """The spec to store and the spec to show, or a refusal naming every binding that fails.
 
-    `parent` is the stored spec of the revision being revised, `None` for a create: a binding
-    copied from it unchanged stays even when its result has been swept, reading `null` with
-    `ok: false` as a read does (`_write_plan`). A spec with no binding is returned as both, with no
-    read of the store.
-
-    Every writer comes through here, so this is also where the spec byte cap is first applied —
-    before any binding is resolved.
+    `parent` is the stored spec of the revision being revised, `None` for a create; unchanged
+    bindings from it are carried even when swept (`_write_plan`). A spec with no binding is returned
+    as both, without reading the store. Every writer comes through here, so the spec byte cap is
+    applied first.
 
     Raises:
         InvalidExhibit: the spec is over `exhibit_max_spec_bytes`; a binding names a result this
-            session does not hold (or names it
-            ambiguously, or held it once and retention swept it), its pointer does not resolve,
-            its value does not fit the position, the spec binds into more results than
-            `exhibit_max_bound_results`, or this deployment keeps no tool results to bind to.
+            session does not hold (or names it ambiguously, or it was swept), its pointer does not
+            resolve, its value does not fit the position, the spec binds more than
+            `exhibit_max_bound_results` results, or this deployment keeps no tool results.
     """
     raw = spec_json(spec)
-    # The byte cap before anything is resolved: a binding is a read and a parse of a stored result,
-    # and a spec the store will refuse anyway must not buy them — 20,000 bound cells over the cap
-    # resolved first and were refused after. The handles grow by the full ref when stored, so the
-    # stored form is checked again by `require_writable`; this is the floor of that, and free.
+    # The byte cap before anything is resolved, so an oversized spec does not buy reads and parses.
+    # The stored form (with full refs) is checked again by `require_writable`.
     if (size := spec_bytes(spec)) > settings.exhibit_max_spec_bytes:
         raise InvalidExhibit(
             f"the spec is {size} bytes, over the {settings.exhibit_max_spec_bytes}-byte cap; "
@@ -631,9 +602,9 @@ async def bind_for_write(session_id: str, spec: Spec, *, parent: Spec | None = N
 async def resolved_view(view: ExhibitView) -> ExhibitView:
     """`view` as a reader is served it: `spec` resolved, `raw_spec` as stored, `bindings` listed.
 
-    A binding whose stored result is gone reads `null` with `ok: false`; nothing here raises for
-    it, because an artefact must stay readable when retention takes what one cell pointed at. A
-    geometry citing a `structure_id` is resolved the same way (`sources.resolved_geometry`).
+    A binding whose result is gone reads `null` with `ok: false`; an artefact must stay readable
+    after retention. A geometry citing a `structure_id` is resolved too
+    (`sources.resolved_geometry`).
     """
     if isinstance(view.raw_spec, GeometrySpec):
         return await resolved_geometry(view)

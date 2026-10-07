@@ -1,21 +1,21 @@
 """The organisation's own skills: judgment an administrator approved, acting on everyone's turns.
 
-An administrator writes this tier through `POST /skills/org`, every turn reads it, and no agent
-path touches it. Promotion is by document (an admin pastes a body), not by reaching into a
-chemist's proposal queue, so no route ever writes into a person's namespace
+An administrator writes this tier through `POST /skills/org`, every turn reads it, and no agent path
+touches it. Promotion is by document (an admin pastes a body), not by reaching into a chemist's
+proposal queue, so no route ever writes into a person's namespace
 (D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius).
 
 Two namespaces replace `git revert`:
 
 - `("org-skills",)` holds the **active** body per name; only this is mounted.
 - `("org-skills-versions", name)` holds every body ever activated, keyed by content hash, so a
-  revert names bytes the system already holds. The version namespace is capped, so old bodies
-  are eventually evicted.
+  revert names bytes the system already holds. The version namespace is capped, so old bodies are
+  eventually evicted.
 
-The tier is not per-actor, so `agent/leaver.py` does not sweep it. It is narrowed by the stored
-half of `skill_access.SkillNarrowing` (tool scope, not `EnabledSkills`, which names shipped
-skills). Every org skill's name and description is in every model call's prefix, including each
-helper's, which is why `agent_org_skills_max` is small.
+The tier is not per-actor, so `agent/leaver.py` does not sweep it. It is narrowed by the stored half
+of `skill_access.SkillNarrowing` (tool scope, not `EnabledSkills`, which names shipped skills).
+Every org skill's name and description is in every model call's prefix, including each helper's,
+which is why `agent_org_skills_max` is small.
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
-# The root the organisation's skills are mounted at, and the label the model sees in their paths;
-# it names no tenant because it appears in every prompt.
+# The root the organisation's skills are mounted at, and the label the model sees in their paths; it
+# names no tenant because it appears in every prompt.
 ORG_SKILLS_ROOT = "/org/"
 
 #: The same label without its slashes, for the skills middleware's source list.
@@ -97,8 +97,9 @@ class OrgSkillVersion:
 
 
 def _version_key(digest: str) -> str:
-    """The key one activated body is held under: its content hash, so re-activating writes the same
-    row.
+    """The key one activated body is held under.
+
+    Its content hash, so re-activating the same bytes writes the same row.
     """
     return f"/{digest}"
 
@@ -264,8 +265,7 @@ async def save_org_skill(store: Any, name: str, body: str, *, activated_by: str)
     async with _one_writer_per_org(name):
         held = await list_org_skills(store)
         # Refused rather than evicted, counted inside the lock. Replacing a held skill is allowed at
-        # the cap
-        # so one can always be corrected.
+        # the cap so one can always be corrected.
         if name not in held and len(held) >= settings.agent_org_skills_max:
             raise SkillRefused(
                 f"this deployment already keeps {len(held)} organisation skills, which is its "

@@ -324,9 +324,8 @@ async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str
     """The `calc_version` this tool would stamp on a result, without computing one.
 
     The only way to learn a calculator's current version, which `calculator_trust` needs because the
-    calibration ledger is keyed exactly on version (D-139). `arguments` are required by
-    `calculation_key` but do not affect the version; callers pass
-    `settings.calc_version_probe_smiles`.
+    calibration ledger is keyed exactly on version. `arguments` are required by `calculation_key`
+    but do not affect the version; callers pass `settings.calc_version_probe_smiles`.
     """
     async with calc_session() as session:
         identity = await _identity(session, tool, arguments)
@@ -377,10 +376,9 @@ async def cached_remote(
 ) -> tuple[ResultPayload, bool]:
     """One calculation: look it up by the server's own key, compute remotely only on a miss.
 
-    A persisted result is never recomputed (D-011). Both calls share one session, which is safe
-    because they belong to one caller; a hit costs one `calculation_key` round trip. A tool the
-    server
-    will not key is a caller error, not a silent uncached compute.
+    A persisted result is never recomputed. Both calls share one session, which is safe because they
+    belong to one caller; a hit costs one `calculation_key` round trip. A tool the server will not
+    key is a caller error, not a silent uncached compute.
     """
     async with calc_session(timeout_seconds) as session:
         keyed = await remote_key(session, tool, arguments)

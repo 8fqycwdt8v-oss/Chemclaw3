@@ -34,8 +34,8 @@ from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
 
-# How much of the budget goes to the head; the rest is the tail. More than half because a result's
-# identifying material (query, columns, first rows) is at the front.
+#: How much of the budget goes to the head; the rest is the tail. More than half because a result's
+#: identifying material (query, columns, first rows) is at the front.
 _HEAD_SHARE = 3 / 5
 
 #: What a model can do about a cut *it caused by asking*, which is every tool result and a `task`
@@ -44,8 +44,8 @@ TOOL_REMEDY = ModelProse(
     "narrow the question (a filter, a smaller limit, one identifier) to see the part you need"
 )
 
-# The remedy for a cut in a template `agent` step's prompt: the text came from a step reference the
-# model did not write, so there is no question to narrow — it can only say so in its answer.
+#: The remedy for a cut in a template `agent` step's prompt: the text came from a step reference the
+#: model did not write, so there is no question to narrow — it can only say so in its answer.
 STEP_REMEDY = ModelProse(
     "this step's template interpolated it, so there is no question to narrow — answer from what "
     "is here and say in your answer that part of the input was not shown"
@@ -63,11 +63,9 @@ def _notice(
 
     States the arithmetic so the model can say how much it did not see, and names the remedy. Ends
     in `SYSTEM_SPEECH_MARK` so the claim of system provenance cannot be forged by a connector.
-    Inside
-    a framed connector result the outer framing defangs the mark, which is consistent: there the
-    whole span is data. `remedy` varies because narrowing the question is wrong advice for a
-    template
-    step, whose prompt the model did not write.
+    Inside a framed connector result the outer framing defangs the mark, which is consistent: there
+    the whole span is data. `remedy` varies because narrowing the question is wrong advice for a
+    template step, whose prompt the model did not write.
     """
     return (
         f"\n\n[{removed:,} of {total:,} characters removed from the middle of this "
@@ -81,10 +79,9 @@ def _brief_notice(removed: int, mark: str = SYSTEM_SPEECH_MARK) -> str:
     """The shortest honest form of the notice, for a share too small to hold the full one.
 
     Without it each result floors at the full notice's length and a wide batch's total grows with
-    its
-    width. Keeps only what the mark cannot carry: that something was removed, and how much. It is
-    never itself cut, so `tests/test_tool_result_size.py` derives the width above which a batch can
-    exceed the ceiling from this function.
+    its width. Keeps only what the mark cannot carry: that something was removed, and how much. It
+    is never itself cut, so `tests/test_tool_result_size.py` derives the width above which a batch
+    can exceed the ceiling from this function.
 
     Args:
         removed: How many characters were removed.
@@ -143,7 +140,7 @@ def _kept(spans: list[str], limit: int, notice: str, carrier: int = 0) -> list[s
         limit: Total characters the result may keep, notice excluded.
         notice: The sentence explaining the cut.
         carrier: The earliest index whose text survives `_rebuilt`; the notice never lands before
-        it.
+            it.
 
     Returns:
         One replacement per input span, same length and same order.
@@ -170,10 +167,8 @@ def _kept(spans: list[str], limit: int, notice: str, carrier: int = 0) -> list[s
         tails[index] = available[-tail_budget:] if tail_budget < len(available) else available
         tail_budget -= len(tails[index])
     # A head budget of 0 leaves `last_head` at -1, so clamp it or the notice is dropped and the cut
-    # is
-    # silent. Then move to the first block that survives `_rebuilt`, which on an image-first result
-    # is
-    # not where the budget ran out.
+    # is silent. Then move to the first block that survives `_rebuilt`, which on an image-first
+    # result is not where the budget ran out.
     at = max(last_head, carrier)
     return [
         heads[index] + (notice if index == at else "") + tails[index] for index in range(len(spans))
@@ -213,16 +208,15 @@ def bounded_content(
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
     The notice is charged against `limit`, so the result never exceeds it; its length is taken at
-    its
-    widest form. A result shorter than the notice is left alone: a cut is never silent and a bound
-    never grows what it bounds.
+    its widest form. A result shorter than the notice is left alone: a cut is never silent and a
+    bound never grows what it bounds.
 
     This runs twice on a connector result (`frame_connector_results` re-bounds after escaping), so
     the notice's numbers must describe the tool, not the intermediate. `charged_total` is the tool's
     real output size; `expanded_from` is the size before the caller expanded the text, used to
-    convert
-    the kept span back into the tool's units in proportion. The conversion is an unbiased estimate,
-    bounded by the tool's total, not an exact count. `None` for either means a single pass.
+    convert the kept span back into the tool's units in proportion. The conversion is an unbiased
+    estimate, bounded by the tool's total, not an exact count. `None` for either means a single
+    pass.
 
     Returns:
         The bounded content and the number of characters removed from `content` (0 when nothing
@@ -242,11 +236,9 @@ def bounded_content(
     carrier = _carrier(content, spans)
     if limit < widest:
         # The share is smaller than the full notice, so use the brief form. It is not itself cut —
-        # the one
-        # case this returns more than `limit` — because cutting it would make the cut silent; the
-        # overshoot
-        # only matters at batch widths far beyond any real turn. Nothing of the tool's output
-        # survives here.
+        # the one case this returns more than `limit` — because cutting it would make the cut
+        # silent; the overshoot only matters at batch widths far beyond any real turn. Nothing of
+        # the tool's output survives here.
         brief = _brief_notice(charged, mark)
         if total <= len(brief):
             return content, 0
@@ -261,10 +253,10 @@ def bounded_content(
     return _rebuilt(content, _kept(spans, kept, notice, carrier)), removed
 
 
-# Where the inner bound records the tool's real output size, for the outer bound to charge.
-#
-# On `response_metadata` because it travels with the message through `model_copy` and the model
-# does not read it; a contextvar would be wrong when a batch is bounded concurrently.
+#: Where the inner bound records the tool's real output size, for the outer bound to charge.
+#:
+#: On `response_metadata` because it travels with the message through `model_copy` and the model
+#: does not read it; a contextvar would be wrong when a batch is bounded concurrently.
 ORIGINAL_CHARS_KEY = "chemclaw_original_chars"
 
 
@@ -286,14 +278,14 @@ def original_chars(message: Any) -> int | None:
     return stamped if isinstance(stamped, int) else None
 
 
-# Where a cut result names the full text it was cut from: present iff the model was shown a cut,
-# valued with the `FullResultSink` ref or `""` when nothing was stored. Presence and value are
-# separate facts on purpose. On `response_metadata`, like `ORIGINAL_CHARS_KEY`, so the thread
-# carries a pointer, never the text.
+#: Where a cut result names the full text it was cut from: present iff the model was shown a cut,
+#: valued with the `FullResultSink` ref or `""` when nothing was stored. Presence and value are
+#: separate facts on purpose. On `response_metadata`, like `ORIGINAL_CHARS_KEY`, so the thread
+#: carries a pointer, never the text.
 FULL_RESULT_REF_KEY = "chemclaw_full_result_ref"
 
-# `(tool, full_text) -> ref`, answering `""` when it stored nothing and never raising. Mirrors
-# `api/tool_results.ResultSink` without importing it (`agent` may not import `api`).
+#: `(tool, full_text) -> ref`, answering `""` when it stored nothing and never raising. Mirrors
+#: `api/tool_results.ResultSink` without importing it (`agent` may not import `api`).
 FullResultSink = Callable[[str, str], Awaitable[str]]
 
 # Ambient, because the middleware is built once per profile and cached, so a sink captured at build
@@ -333,10 +325,10 @@ def full_text(content: Any) -> str:
     return "".join(_spans(content))
 
 
-# Where a result names the stored full text its handle line points at: present on every result the
-# turn's `FullResultSink` stored, cut or not. `stamp_result_handles` appends `⟨r:<12 hex>⟩` from it,
-# and the stream names it as the result's `result_ref`. Distinct from `FULL_RESULT_REF_KEY`, which
-# says the model saw a cut; for a cut result kept whole the two hold the same ref.
+#: Where a result names the stored full text its handle line points at: present on every result the
+#: turn's `FullResultSink` stored, cut or not. `stamp_result_handles` appends `⟨r:<12 hex>⟩` from
+#: it, and the stream names it as the result's `result_ref`. Distinct from `FULL_RESULT_REF_KEY`,
+#: which says the model saw a cut; for a cut result kept whole the two hold the same ref.
 RESULT_REF_KEY = "chemclaw_result_ref"
 
 
@@ -415,8 +407,7 @@ def bounded_for_batch(
     ceiling is enforced in one place. Returns `content` itself when nothing was removed.
 
     On the second pass over one result, `charged_total` and `expanded_from` keep the notice about
-    the
-    tool (see `bounded_content`), and `count=False` keeps the metric and log row to one per cut.
+    the tool (see `bounded_content`), and `count=False` keeps the metric and log row to one per cut.
     """
     tool = str(request.tool_call["name"])
     ceiling = settings.agent_max_tool_result_chars
@@ -434,10 +425,8 @@ def bounded_for_batch(
     if not removed or not count:
         return bounded if removed else content
     # The metric label is the served tool name, never the model's string: an invented name would
-    # mint
-    # an unbounded series on the unauthenticated `/metrics`. The notice keeps the raw name so the
-    # result
-    # says which call it belongs to.
+    # mint an unbounded series on the unauthenticated `/metrics`. The notice keeps the raw name so
+    # the result says which call it belongs to.
     label = metric_tool_name(request, tool)
     record_metric(
         lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
@@ -459,10 +448,8 @@ def _batch_calls(request: Any) -> list[Any]:
     """The tool calls the assistant message that asked for this one made, this one included.
 
     Read off the originating `AIMessage`, because `ToolNode` gives each call a pre-batch snapshot
-    and
-    the sibling results do not exist yet. Empty when the message cannot be found (a middleware
-    driven
-    directly), which callers treat as a batch of one.
+    and the sibling results do not exist yet. Empty when the message cannot be found (a middleware
+    driven directly), which callers treat as a batch of one.
 
     Args:
         request: The tool-call request the middleware chain is running.
@@ -499,8 +486,7 @@ def batch_siblings(request: Any) -> int:
     The divisor for the caller's `files` channel, which only `task` writes: concurrent `task` calls
     each read the same pre-batch snapshot, so each must take a share. It counts siblings, not actual
     writers (their results do not exist yet), so a lone writer among silent siblings is cut more
-    than
-    needed — this fails closed.
+    than needed — this fails closed.
 
     Args:
         request: The tool-call request the middleware chain is running.
@@ -509,8 +495,7 @@ def batch_siblings(request: Any) -> int:
         The number of calls in this batch naming this call's tool, never below 1.
     """
     # Subscript, like `bounded_for_batch`: a missing name would match no sibling, floor to 1 and
-    # hand
-    # out the whole budget (fail open).
+    # hand out the whole budget (fail open).
     name = request.tool_call["name"]
     return max(sum(1 for call in _batch_calls(request) if call.get("name") == name), 1)
 
@@ -521,8 +506,7 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
 
     The share, not the whole ceiling, because the context edits cannot reclaim the newest batch; for
     a lone call the share is the ceiling. Applies to every tool, in-process or connector, to
-    failures
-    too, and to a `task` report (a `Command`, handled via `agent/tool_result_shape.py`).
+    failures too, and to a `task` report (a `Command`, handled via `agent/tool_result_shape.py`).
     """
     result = await handler(request)
     # Full text of every result in this pass, cut or not, for `kept_in_full` to store after the
@@ -606,12 +590,9 @@ def _bounded_file(content: str, share: int) -> str:
     """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
 
     The share is computed by `agent/tool_result_shape.rewritten_command_files`; this does the cut,
-    log
-    and counter. Reuses `bounded_content`, so a cut file keeps both ends and the system-marked
-    notice —
-    the caller can read it back. A share of 0 means no cap (the setting's off switch); live shares
-    are
-    floored at 1 by the caller.
+    log and counter. Reuses `bounded_content`, so a cut file keeps both ends and the system-marked
+    notice — the caller can read it back. A share of 0 means no cap (the setting's off switch); live
+    shares are floored at 1 by the caller.
 
     Args:
         content: The file's text as the helper left it.

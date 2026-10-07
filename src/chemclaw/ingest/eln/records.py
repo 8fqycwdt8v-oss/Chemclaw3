@@ -1,32 +1,13 @@
-"""The ELN transcription tier: reaction records as queryable data (D-2026-08-25).
+"""The ELN transcription tier: reaction records as queryable data.
 
-An ELN entry used to become a `created_by: agent` markdown note that a human merged through the
-PR-gate. D-005's gate existed to put a human in front of *machine-generated knowledge*, and a
-transcription is not that — `record_from_ord_reaction` is a pure deterministic mapping with no
-model in it, so the reviewer was approving a rendering of data a chemist had already signed off on
-upstream. Measured, that cost 202 ms of serialized git per entry and a corpus scan that outgrows
-`eln_sync_timeout_seconds` at ~700k notes, and it bought nothing anyone could decide.
+A transcription is a deterministic mapping with no model in it, so it lands in Postgres as data
+rather than as a knowledge note (D-2026-08-25-an-eln-transcription-is-data-not-a-claim). Claims
+about these runs are playbooks or campaigns in `knowledge/`, citing records as `reaction-<id>`.
 
-So a record lands here instead, in Postgres, exactly as migration `025` argues for observations:
-with no review, Git buys a commit per entry and returns nothing. What a human *asserts* about
-these runs is still a playbook or a campaign in `knowledge/` — written straight into the graph and
-corrected rather than pre-approved since
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, where this line used to read "gated as it
-always was" — citing these records by the same `reaction-<id>` name it always used.
-
-**Upsert-by-id is the idempotency**, which is why nothing here asks "have I seen this?" as a
-separate question of the corpus. The sync loop used to answer it by parsing every merged note on
-disk — 425 µs and 2.9 kB of resident memory per note, linear — for something `ON CONFLICT` settles
-in the write.
-
-Shaped as `science.fingerprints.store` is, and for the same reason: a Protocol with an in-memory
-and a Postgres implementation, so the ingest path is injectable and its tests need no database,
-while the store that actually serves queries is exercised against a real one.
-
-Four readers resolve through here, which is why the eligibility filter lives in the store rather
-than in any of them: `retrieval.retrievers.FingerprintReactionRetriever` narrows a page of
-structural hits, `agent.graph_tools.expand_note` serves the recipe behind one hit,
-`ingest.eln.sync` skips an unchanged replay, and `kg.validate` checks that a cited record exists.
+Upsert-by-id is the idempotency: `ON CONFLICT` settles "have I seen this?" in the write. A Protocol
+with in-memory and Postgres implementations, like `science.fingerprints.store`. The eligibility
+filter lives in the store because four readers resolve through it: `FingerprintReactionRetriever`,
+`expand_note`, `ingest.eln.sync` and `kg.validate`.
 """
 
 import logging
@@ -58,9 +39,8 @@ RECORD_TYPE = "reaction"
 class UnreadableConditions(ChemclawError):
     """A `reaction_records.conditions` payload is not a JSON object, so no build can read it.
 
-    Distinct from the version skew `_stored_conditions` tolerates: an *added* field is an ordinary
-    rolling upgrade and is ignored, while a payload that is not an object at all cannot have come
-    from any build of this ingest.
+    Distinct from the version skew `_stored_conditions` tolerates: no build of this ingest writes a
+    non-object.
     """
 
 
@@ -71,23 +51,11 @@ class AmbiguousReactionRecord(ChemclawError):
 def _reject_unstorable(value: str, field: str) -> str:
     r"""Refuse a string the corpus cannot hold — a NUL byte, or a lone surrogate.
 
-    Both are ordinary ELN free text rather than adversarial input. A NUL reaches a record through
-    any prose field an export carries (a procedure, a hypothesis, an impurity name, an unmapped
-    attribute) and Postgres refuses one in a `text` or `jsonb` value outright; a lone surrogate
-    reaches it from a JSON export with a truncated `\u` escape — `json.loads('"\ud800"')` returns
-    one happily — and psycopg refuses that a step earlier, when it encodes the parameter.
-
-    **Why the record refuses rather than repairs.** A transcription is what the source said, and
-    `record._without_wikilinks` states the rule this follows: "deleting a chemist's characters to
-    make them safe is the same mistake as trusting them". Refusing here also puts the failure where
-    the sync can act on it — `ValidationError` is one of the two types `sync_entries` treats as
-    per-entry bad data, so the entry becomes one rejection with a reason in the ledger and the rest
-    of the batch ingests. Left to the write, it was a `psycopg.DataError` at the *last* of
-    `ingest_reaction`'s five writes: fingerprint and label rows committed, no record, no ledger row,
-    and an activity that failed the same way on every retry until the source stopped advancing.
-
-    The mirror of this decision is `ingest/rejections.py::_storable`, which sanitises the same two
-    values instead of refusing them, because a ledger row has nowhere left to refuse to.
+    Both occur in ordinary ELN text (a NUL in prose, a lone surrogate from a truncated `\u` escape)
+    and Postgres or psycopg refuses them. Refused rather than repaired, because a transcription is
+    what the source said. Raising here makes it a per-entry `ValidationError` the sync files as one
+    rejection; failing at the write would leave partial rows and an activity failing on every retry.
+    `ingest/rejections.py::_storable` sanitises instead, because a ledger row cannot refuse.
     """
     if "\x00" in value:
         raise ValueError(
@@ -107,17 +75,9 @@ def _reject_unstorable(value: str, field: str) -> str:
 def _walk_storable(model: BaseModel, prefix: str) -> None:
     """Reject any unstorable string on `model`, recursing into the models and lists under it.
 
-    Field names are joined dotted (`conditions.major_impurity`) and indexed (`tags[1]`) so the
-    refusal reason — which is what the ingest ledger stores and a chemist eventually reads — names
-    the field a fix has to touch rather than the record it sits in. `kg.note._walk_encodable` is
-    the same shape over the same problem for notes; it is not shared, because that one asks a
-    different question of each value and the two answers must be able to diverge (see
-    `_reject_unstorable`).
-
-    The `list` arm is the one that made both of those claims true. It was missing while the
-    docstring said "the same shape" and the validator above said the next field added to the
-    record cannot forget the check: no field of `ReactionRecord` is a list, so the omission was
-    invisible until the first one — and a `list[str]` of ELN tags is an ordinary thing to add.
+    Field names are joined dotted and indexed (`conditions.major_impurity`, `tags[1]`) so the
+    refusal names the field to fix. Kept apart from `kg.note._walk_encodable`, which asks a
+    different question of each value.
     """
     for name in type(model).model_fields:
         value = getattr(model, name)
@@ -137,15 +97,9 @@ def _walk_storable(model: BaseModel, prefix: str) -> None:
 def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> "ReactionRecord":
     """The one record a `reaction-<id>` citation names, or a refusal saying why there is no one.
 
-    A citation carries no source (`kg.note.note_id_for_reaction` spells the bare id), so with two
-    sites' transcriptions behind one id there is genuinely no right answer — and returning either
-    is a coin flip that reads as a fact. That is what the bare-id primary key used to do silently,
-    except worse: the later sync had already destroyed the other site's row.
-
-    **A row with no `ingest_source` predates the key change and is superseded by one that has it.**
-    Migration `056` defaults the column to `''` on rows already stored, and the first sync after the
-    upgrade re-writes each of them under its real source — so during that window one id can hold a
-    legacy row and its own replacement, which is not an ambiguity and must not read as one.
+    A bare citation carries no source, so with two sources' transcriptions behind one id there is no
+    right answer and picking one would read as fact. A row with an empty `ingest_source` predates
+    migration `056` and is superseded by one that has a source, which is not an ambiguity.
     """
     stated = [pair for pair in found if pair[0]]
     candidates = stated or list(found)
@@ -203,19 +157,16 @@ _SELECT_ONE_FOR_SOURCE = (
 
 _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = ANY(%s)"
 
-# Which of a page of candidate ids the source has withdrawn. Asked in this direction — "which of
-# these are retracted?" — because that is what `066`'s partial index answers
-# (`reaction_records_retracted_idx`), and because the complement is the far larger set an
-# unfiltered sweep would otherwise have to enumerate on every query.
+# Which of a page of candidate ids the source has withdrawn; asked in this direction because `066`'s
+# partial index answers it and the complement is far larger.
 _SELECT_RETRACTED = (
     "SELECT ingest_source, reaction_id FROM reaction_records "
     "WHERE reaction_id = ANY(%s) AND retracted_at IS NOT NULL"
 )
 
-# Which of a page of candidate ids no structure search may serve: withdrawn by the source, or
-# citation-only (`110`). The second can only carry a fingerprint row if an entry was ingested
-# structured and later amended to name a species without its structure — the app role cannot
-# DELETE from `reaction_fingerprints`, so the stale row stays and this is what keeps it unserved.
+# Which of a page of candidate ids no structure search may serve: withdrawn, or citation-only
+# (`110`). A citation-only row has a fingerprint only if amended from structured, and the app role
+# cannot delete that stale fingerprint row.
 _SELECT_WITHHELD = (
     "SELECT ingest_source, reaction_id FROM reaction_records "
     "WHERE reaction_id = ANY(%s) AND (retracted_at IS NOT NULL OR tier <> 'structured')"
@@ -226,12 +177,10 @@ _SELECT_BODIES = (
     "WHERE ingest_source = %s AND reaction_id = ANY(%s)"
 )
 
-# The records no structure index holds, counted, and which of them list one of `patterns` as a
-# drawn species (`ReactionRecordStore.citation_only`). `114`'s partial index is exactly this
-# `WHERE`, so the read touches only the tier's own rows, never the rest of the corpus.
-# `strpos` rather than `LIKE`: a SMILES ring bond `%10` is a LIKE wildcard, and escaping one
-# grammar inside another is how a match silently widens. An empty `patterns` array makes `hit`
-# false without reading a body.
+# The records no structure index holds, counted, and which list one of `patterns` as a drawn species
+# (`ReactionRecordStore.citation_only`); `114`'s partial index matches this `WHERE`. `strpos` rather
+# than `LIKE`, since `%` occurs in SMILES ring bonds. An empty `patterns` makes `hit` false without
+# reading a body.
 _SELECT_CITATION_ONLY = """
 SELECT count(*),
        count(*) FILTER (WHERE hit),
@@ -249,14 +198,10 @@ FROM (
 def drawn_species_patterns(query: str | None) -> list[str]:
     """The body text a citation-only record carries for a drawn species spelled like `query`.
 
-    `ingest/eln/record.py::_species_line` renders each drawn species of a citation-only record as
-    ``- `<smiles>` (<role>)``, the SMILES as the source gave it. So the check is textual and its
-    reach is the spellings tried: the query as given, RDKit-canonical and standardized, which
-    covers a source that wrote the canonical form and a chemist who did not. A reaction query is
-    split into its molecules (agents included), because the tier lists species one at a time and
-    what a reaction query asks of it is "does any of these runs involve one of these". A SMARTS or
-    a string RDKit cannot read is tried as given only — the lenient helpers return it unchanged.
-    `None` or blank asks for no check at all.
+    `record._species_line` renders each drawn species as ``- `<smiles>` (<role>)``, so the check is
+    textual over the spellings tried: as given, RDKit-canonical and standardized. A reaction query
+    is split into its molecules. An unparseable string is tried as given only. `None` or blank asks
+    for no check.
     """
     if not query or not query.strip():
         return []
@@ -301,26 +246,21 @@ class ReactionRecord(BaseModel):
     compound_smiles: str | None = None
     project: str | None = None
     performed_at: date | None = None
-    # The numbers a chemist compares, kept as numbers beside the prose that renders them
-    # (`kg.note.ProcessConditions`). `None` means the entry recorded none of them, which is not the
-    # same claim as an empty block.
+    # The numbers a chemist compares, kept as numbers (`kg.note.ProcessConditions`). `None` means
+    # none were recorded, which differs from an empty block.
     conditions: ProcessConditions | None = None
     source: str = Field(min_length=1)
-    # When the *source* reported this entry withdrawn. `None` is "not retracted", and it is the
-    # only honest value for a row whose source says nothing: an ELN fetch is a delta, so "not seen
-    # this run" is the normal state of every entry ever ingested and can never mean withdrawal.
-    # Set from `RawEntry.retracted_at`, never inferred from absence
-    # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
+    # When the source reported this entry withdrawn; `None` is "not retracted". Set from
+    # `RawEntry.retracted_at`, never inferred from absence, since a fetch is a delta
+    # (D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports).
     retracted_at: datetime | None = None
-    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/111`):
-    # the row is citable and no structure search may serve it. Defaulted to `STRUCTURED` because
-    # that is what every record was before the tier existed, and what the migration says of them.
+    # `CITATION_ONLY` when the source named a species without its structure: citable, never served
+    # by structure search. Defaults to `STRUCTURED`, as the migration says of existing rows.
     tier: RecordTier = RecordTier.STRUCTURED
     # Each compared role's canonical structures (`ingest.eln.ord.RoleSpecies`), so the turn-time
-    # comparison can diff what the source gave structured without the component list it rendered
-    # into `body` (`D-2026-10-01-the-turn-time-comparison-reads-the-species-the-row-keeps`).
-    # `None` is "no projection stored" — a row written before `infra/sql/112`, or a citation-only
-    # one — and is skipped by every comparison; it is never the same claim as four empty roles.
+    # comparison can diff species without parsing `body`. `None` means no projection stored (an
+    # older row, or citation-only) and is skipped by every comparison, never read as four empty
+    # roles.
     species: RoleSpecies | None = None
 
     @field_validator("reaction_id")
@@ -328,9 +268,7 @@ class ReactionRecord(BaseModel):
     def _slug_only(cls, value: str) -> str:
         """An entry id must stay a safe slug even though it is no longer a filename.
 
-        It becomes the `reaction-<id>` citation that campaign and playbook notes carry into git, so
-        external JSON reaches a committed note body through here. One rule, `kg.note`'s, because
-        two spellings of "safe id" is how one of them drifts.
+        It becomes the `reaction-<id>` citation committed into note bodies; one rule, `kg.note`'s.
         """
         return require_note_slug(value)
 
@@ -338,12 +276,8 @@ class ReactionRecord(BaseModel):
     def _text_is_storable(self) -> "ReactionRecord":
         """Refuse a record carrying text no column of this tier can hold (`_reject_unstorable`).
 
-        Walked over the model rather than written at each field, the same argument
-        `record._without_wikilinks` makes about applying its substitution once to the assembled
-        body: the next field added to this record cannot forget it. The walk covers strings, nested
-        models and lists of either — `conditions` is the nested one today, and it matters, because
-        it is a `jsonb` column of its own that an impurity name reaches without passing through
-        `body` at all.
+        Walked over the whole model so a new field cannot forget it; covers nested models and lists,
+        including `conditions`, its own `jsonb` column.
         """
         _walk_storable(self, "")
         return self
@@ -351,20 +285,9 @@ class ReactionRecord(BaseModel):
     def is_current(self, as_of: date) -> bool:
         """Whether this is servable as *current* evidence on `as_of`.
 
-        One way to fail: **not yet valid**. That is the `Note.is_current` lower bound, and it is
-        reachable — `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped
-        slightly ahead of the wall clock rather than rejecting a real experiment over a clock skew.
-
-        The other way is **withdrawal**, which is a different fact from expiry and is why it took
-        its own column rather than a `valid_to`. A *result* does not expire on its own; it is
-        superseded, which is a claim a human makes in a note. A source retracting an entry is the
-        source saying the run did not happen as recorded, and `retracted_at` is the only thing that
-        may set it — never an entry's absence from an export, which is the normal state of every
-        entry ever ingested (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
-
-        `read()` still serves a retracted row and this still says False, and that asymmetry is the
-        design: a row is the only readable form of an ELN run, so a citation to a withdrawn one
-        must resolve *and say so* rather than become a dangling link.
+        False when not yet valid (`eln_sync_future_tolerance_seconds` admits slightly future-stamped
+        entries) or when the source withdrew it. A result does not expire; it is superseded by a
+        human claim. `read()` still serves a retracted row so a citation to it resolves and says so.
         """
         if self.retracted_at is not None:
             return False
@@ -373,15 +296,11 @@ class ReactionRecord(BaseModel):
     def passes(self, filters: dict[str, Any], as_of: date) -> bool:
         """Whether this record satisfies `filters` and is current — the eligibility rule itself.
 
-        The one definition both backends answer with, so the in-memory store the ingest tests use
-        cannot drift from the SQL the deployment runs. Two rules are inherited from
-        `retrieval.retrievers._eligible_notes` deliberately, both because a filter must never widen
-        what it was asked:
+        The single definition both backends answer with. A filter must never widen what was asked:
 
-        - **A record with no `performed_at` fails a windowed query** rather than passing it. It
-          cannot be *shown* to fall in the window, and a caller asking what happened in a period is
-          not asking for runs of unknown date.
-        - **A not-yet-current record is dropped**, matching `Note.is_current`.
+        - A record with no `performed_at` fails a windowed query, since it cannot be shown to fall
+          inside.
+        - A not-yet-current record is dropped, matching `Note.is_current`.
         """
         if (want_type := filters.get("type")) is not None and want_type != RECORD_TYPE:
             return False
@@ -406,52 +325,27 @@ class ReactionRecordStore(Protocol):
     async def record(self, records: Sequence[ReactionRecord], source: str) -> int:
         """Insert or replace `source`'s records by reaction id; return how many were written.
 
-        **`source` is the registry source name and it is half of the row's identity**, not a label
-        on it. Two ELNs may legitimately use one entry id — `ingest_reaction` said so and answered
-        it with a `source` *column* beside a bare-id key, which only ever recorded which one won:
-        the upsert refreshed every field, so the later sync replaced the earlier site's
-        transcription and every citation to it then resolved to a different run at a different
-        site, with `kg-validate` still passing. The label index put the pair in its key from the
-        start; this is the same rule here.
-
-        Not a field on `ReactionRecord`, because that model is what `record_from_ord_reaction`
-        renders out of one entry and the registry name is not in the entry. The store is where the
-        two meet.
+        `source` is the registry source name and half of the row's identity, since two ELNs may use
+        one entry id. Not a field on `ReactionRecord`, which is rendered from one entry that does
+        not know its registry name.
         """
         ...
 
     async def read(self, reaction_id: str, source: str = "") -> ReactionRecord | None:
         """One record by its bare ELN id, or `None` when the corpus does not hold it.
 
-        Never the `reaction-` note id: that prefix is a citation spelling
-        (`kg.note.note_id_for_reaction`), and accepting both is how a store ends up holding two
-        names for one row.
-
-        **`source` is what a qualified citation carries, and it is what removes the ambiguity
-        rather than merely reporting it.** With it, exactly one row can answer, because
-        `(ingest_source, reaction_id)` is the primary key. Without it — every citation committed
-        before the qualified spelling existed — the read is across sources and
-        `AmbiguousReactionRecord` is raised when two have transcribed the id; see `_one_of` for why
-        that is a refusal rather than a pick.
+        Never the `reaction-` note id, which is a citation spelling. With `source`, the primary key
+        answers exactly; without it, the read spans sources and raises `AmbiguousReactionRecord`
+        when two have the id (see `_one_of`).
         """
         ...
 
     async def bodies(self, reaction_ids: Sequence[str], source: str) -> dict[str, str]:
         """The stored body of each of `reaction_ids` the corpus holds — the unchanged check.
 
-        **Keyed on the ids the caller is about to write, never on the corpus.** The sync's overlap
-        window deliberately re-fetches entries it has seen, and answering "is this one unchanged?"
-        used to mean parsing the whole corpus, which is what made the sync outgrow its own activity
-        timeout. The question is about a bounded page of candidates, so the lookup is too.
-
-        The body, not merely the id: an ELN amends an entry *in place* — a yield corrected after
-        assay, an impurity added, a retraction — while keeping its `created_at`, so treating "seen
-        before" as "unchanged" drops every correction silently.
-
-        Scoped to `source` for the reason `record` is: comparing a page of one ELN's entries
-        against another ELN's rows of the same ids answers a question nobody asked, and it answers
-        it wrong in both directions — a false "unchanged" skips a real entry, and a false "changed"
-        re-ingests one forever.
+        Keyed on the bounded page the caller is about to write, never the corpus. The body rather
+        than the id, because ELNs amend entries in place. Scoped to `source`, since another source's
+        row of the same id says nothing about this entry.
         """
         ...
 
@@ -462,57 +356,37 @@ class ReactionRecordStore(Protocol):
     async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn.
 
-        **Separate from `eligible`, and the separation is the point.** `eligible` answers "which of
-        these pass a filter", and it drops a match with no stored record because a record nobody
-        can read cannot be shown to satisfy a narrowing. An *unfiltered* sweep asks a different
-        question — it must still surface every structural hit the index holds — so it cannot go
-        through that gate without silently losing every hit whose record is missing. This asks only
-        what a withdrawal is: a positive set, over the page of candidates, answered by `066`'s
-        partial index.
-
-        **Asked per source, because a hit names one.** `reaction_fingerprints` is keyed by
-        `(source, id)` since `063`, so two sites behind one entry id are two hits — and asking by
-        bare id would let one site's withdrawal drop the other site's run, which is the same
-        collapse `D-2026-09-13-a-citation-names-the-source-it-was-found-in` fixes in the citation.
-        An empty source means "any source withdrew it", which is what a bare citation can ask.
+        Separate from `eligible`, which drops hits with no stored record; an unfiltered sweep must
+        keep those, so it asks only for the positive set of withdrawals. Per source, since
+        `reaction_fingerprints` keys by source and one site's withdrawal must not drop another's
+        run. An empty source matches any.
         """
         ...
 
     async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` no structure search may serve: withdrawn, or citation-only.
 
-        The question every structural reader asks of a page of hits, and a superset of `retracted`
-        by one clause. A citation-only record never *gets* a fingerprint row
-        (`ingest.eln.ingest.ingest_reaction`), so the second clause answers for one case only: an
-        entry ingested structured and amended to name a species without its structure, whose old
-        fingerprint row the app role cannot delete. Without this, "a structure search never returns
-        a citation-only record" would hold for every record except the ones that changed tier.
-
-        `retracted` stays its own method, because `sync` asks it a different question — whether a
-        replayed entry's withdrawal state changed — where a citation-only row is not withdrawn.
-        Same source rule as `retracted`: an empty source matches any.
+        `retracted` plus one clause, covering an entry amended from structured to citation-only
+        whose old fingerprint row cannot be deleted. `retracted` stays separate because the sync
+        asks only about withdrawal. An empty source matches any.
         """
         ...
 
     async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
         """The records no structure index holds, and which of them list `query` as drawn.
 
-        Asked by every structural tool, so its verdict states its denominator: a citation-only
-        record contributes no fingerprint, molecule or label row
-        (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), and a search
-        that reports "complete" without saying so reads as a search of the ELN. Withdrawn records
-        are not counted — nobody may be sent to cite one. `query` is matched as text against each
-        record's drawn species (`drawn_species_patterns`), never through an index, so the tier
-        stays outside every structure search as decided; `None` asks for the count alone.
+        Lets every structural tool state its denominator
+        (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable). Withdrawn records
+        are not counted. `query` is matched as text (`drawn_species_patterns`), never through an
+        index; `None` asks for the count alone.
         """
         ...
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all — the citation-existence check.
 
-        Existence regardless of currency or filter, because a citation to a run performed tomorrow
-        is a real citation to a real record; `kg.validate` is asking whether the link resolves, not
-        whether the record is servable as current evidence.
+        Regardless of currency or filter: `kg.validate` asks whether a link resolves, not whether
+        the record is current.
         """
         ...
 
@@ -520,16 +394,9 @@ class ReactionRecordStore(Protocol):
 class InMemoryReactionRecordStore:
     """Process-local `ReactionRecordStore` — the reference the SQL one is written to match.
 
-    **A differential oracle, not a deployment backend.** No configuration returns it — every
-    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
-    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
-    `src/` because it is the executable statement of the contract its Postgres sibling is written
-    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
-    halves of that — the absence of a shipped caller, and the absence of this claim.
-
-    Keyed by `(source, reaction_id)`, so re-recording one source's id replaces it and two sources
-    sharing an id keep both rows — the same identity the durable store's primary key gives, which
-    is what lets an ingest test assert replay behaviour without a database.
+    A differential test oracle, not a deployment backend: no configuration returns it
+    (D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend). Keyed by `(source,
+    reaction_id)`, the durable store's primary key.
     """
 
     def __init__(self) -> None:
@@ -625,8 +492,7 @@ class PostgresReactionRecordStore:
     async def record(self, records: Sequence[ReactionRecord], source: str) -> int:
         """Upsert `source`'s transcribed reactions; return how many were written.
 
-        One round trip for the batch rather than one per record: the sync loop hands over a whole
-        chunk, and the per-entry cost is the thing this tier exists to remove.
+        One round trip for the whole batch.
         """
         if not records:
             return 0
@@ -661,13 +527,8 @@ class PostgresReactionRecordStore:
     async def read(self, reaction_id: str, source: str = "") -> ReactionRecord | None:
         """One record by its bare ELN id, or `None` when the corpus does not hold it.
 
-        Every row answering to the id comes back, not the first one the plan happened to return:
-        `_one_of` is what decides between them, and it refuses rather than picking when two ingest
-        sources have both transcribed the id and the citation did not say which.
-
-        A qualified citation does say, and then the primary key answers exactly — so the narrowed
-        statement is a different one rather than the same one filtered in Python, which would move
-        the whole ambiguous set across the wire to discard most of it.
+        Every row for the id comes back so `_one_of` can refuse an ambiguous bare citation; a
+        qualified one uses a narrowed statement on the primary key.
         """
         statement, params = (
             (_SELECT_ONE_FOR_SOURCE, (reaction_id, source))
@@ -698,10 +559,8 @@ class PostgresReactionRecordStore:
     async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
         """Which of `reaction_ids` pass `filters` and are current, narrowed in SQL.
 
-        `ReactionRecord.passes` expressed against the columns. The candidate set is a page of
-        structural hits, so the ids go down as a parameter and the narrowing comes back — the
-        alternative, fetching the page's bodies to filter them in Python, moves the corpus's
-        largest column across the wire to answer a question about its smallest ones.
+        `ReactionRecord.passes` against the columns; the page's ids go down as a parameter rather
+        than fetching bodies to filter in Python.
         """
         if not reaction_ids:
             return set()
@@ -735,11 +594,8 @@ class PostgresReactionRecordStore:
     async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` the source has reported withdrawn; an empty source matches any.
 
-        One statement over the ids, narrowed to the asked-for source in Python rather than in SQL.
-        The predicate that matters — `retracted_at IS NOT NULL` over a page of ids — is what `066`'s
-        partial index answers, and a withdrawal is rare, so what comes back is a handful of rows to
-        pair off. A per-ref `(source, id)` `IN` list would be a bind parameter per hit for a
-        narrowing that costs nothing here.
+        One statement over the ids (`066`'s partial index), paired with sources in Python, since
+        withdrawals are rare.
         """
         if not refs:
             return set()
@@ -752,9 +608,8 @@ class PostgresReactionRecordStore:
     async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` are withdrawn or citation-only; an empty source matches any.
 
-        One statement over the page of ids, paired off in Python for the reason `retracted` gives.
-        Both conditions are rare over a page of structural hits — a citation-only row reaches one
-        only through an amendment — so what comes back is a handful of rows.
+        One statement over the page, paired off in Python as in `retracted`; both conditions are
+        rare.
         """
         if not refs:
             return set()
@@ -792,27 +647,10 @@ class PostgresReactionRecordStore:
 def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | None:
     """One row's `conditions` payload as a model, ignoring fields this build does not know.
 
-    **The read tolerates what the write forbids, and the asymmetry is the decision** — the same one
-    `D-2026-09-06-a-decode-the-workflow-does-not-do-is-a-failure-nobody-hears` took on the Temporal
-    wire, for the same fact: a rolling upgrade is not atomic. `ProcessConditions` forbids extras
-    because a typo'd key silently dropped is a number a chemist wrote that no comparison will ever
-    render, and that argument is about *writing* — `ingest/eln/record.py` builds the model from ORD
-    data inside this image, where an unknown key is a bug that must fail loudly. This function reads
-    a row written by *some* build of core against one shared database, and during every rollout that
-    is routinely a newer one. Measured before this existed: a row carrying one added field raised
-    `ValidationError: pressure_bar_v2 — Extra inputs are not permitted` on the old pod, and because
-    a reaction is looked up by *structure*, the failure landed on a chemist's query for a molecule
-    rather than on the ingest that wrote it.
-
-    Unknown keys are dropped rather than kept, because `ProcessConditions` is frozen and typed and
-    there is nowhere to put them; the row itself still holds them for the build that understands
-    them. A *known* field with an unreadable value is not this case and still raises: that is
-    corruption or a type change, not a version skew, and `read` addresses one reaction by id, so
-    refusing is telling the caller about the row it asked for.
-
-    `is not None` rather than a truth test: `{}` is "conditions were recorded and every one of them
-    is unknown", which `comparison.MISSING` renders differently from "no conditions were recorded",
-    and a falsy check collapsed the two.
+    The read tolerates what the write forbids because a rolling upgrade is not atomic: a newer build
+    may have written a field this one does not know, and failing would surface on a chemist's
+    structure query. Unknown keys are dropped (the row keeps them); a known field with an unreadable
+    value still raises. `{}` (recorded, all unknown) is kept distinct from NULL.
 
     Args:
         reaction_id: The record the payload belongs to, for the log line.
@@ -824,9 +662,8 @@ def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | Non
     if stored is None:
         return None
     if not isinstance(stored, Mapping):
-        # `conditions` is a bare `jsonb` column, so an array or a scalar is storable and both
-        # reached `ProcessConditions(**row)` as `TypeError: argument after ** must be a mapping`,
-        # which names neither the table nor the row. Nothing this repository writes produces one.
+        # A bare `jsonb` column can hold an array or scalar; refuse it with a message naming the
+        # row.
         raise UnreadableConditions(
             f"reaction_records row {reaction_id!r} holds {type(stored).__name__} in `conditions` "
             "where a JSON object is required; the row was written by something other than this "
@@ -845,8 +682,7 @@ def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | Non
 def _pair_off(refs: Sequence[tuple[str, str]], found: set[tuple[str, str]]) -> set[tuple[str, str]]:
     """The `refs` that `found` holds, where a ref with an empty source matches any source.
 
-    One rule for every "which of these hits" question the stores answer, so the in-memory oracle
-    and the SQL store cannot disagree on what a bare citation matches.
+    One rule so the in-memory oracle and the SQL store agree on what a bare citation matches.
     """
     return {
         (source, reaction_id)
@@ -868,9 +704,8 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         source=row[6],
         retracted_at=row[7],
         tier=RecordTier(row[8]),
-        # Validated rather than trusted, and unknown keys dropped by `RoleSpecies`' default rather
-        # than refused — the rolling-upgrade argument `_stored_conditions` makes, for a role a
-        # newer build may add.
+        # Validated, with unknown keys dropped, for the rolling-upgrade reason `_stored_conditions`
+        # gives.
         species=RoleSpecies.model_validate(row[9]) if row[9] is not None else None,
     )
 

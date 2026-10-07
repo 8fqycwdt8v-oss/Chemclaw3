@@ -88,8 +88,8 @@ UPDATE predictions p
    AND c.value IS NOT NULL
 """
 
-# Scoped to one calculator version: pooling versions could average opposite biases into
-# apparent good calibration.
+# Scoped to one calculator version: pooling versions could average opposite biases into apparent
+# good calibration.
 _SELECT_RECONCILED = """
 SELECT subject, predicted_value, predicted_uncertainty, observed_value
   FROM predictions

@@ -32,13 +32,10 @@ def reset_tolerantly(reset: Callable[[Any], None], token: Any, *, closing: str) 
     """Undo one ambient, tolerating a token whose `Context` is not the one closing the turn.
 
     When a client stops reading, the turn's generator is finalised by `aclose()` in a new task with
-    a
-    new context, so every reset raises `ValueError`; without tolerance the first one aborts the
-    rest,
-    including `reset_current_identity`. The context is being discarded anyway, so nothing is lost by
-    skipping it. Only `ValueError` is tolerated. Lives here so `api/runner` and the cap ambients
-    share
-    it (`agent` may not import `api`).
+    a new context, so every reset raises `ValueError`; without tolerance the first one aborts the
+    rest, including `reset_current_identity`. The context is being discarded anyway, so nothing is
+    lost by skipping it. Only `ValueError` is tolerated. Lives here so `api/runner` and the cap
+    ambients share it (`agent` may not import `api`).
 
     Args:
         reset: The contextvar reset to attempt.
@@ -60,12 +57,9 @@ def turn_caps(usage: TurnUsage, *, closing: str = "a turn") -> Iterator[TurnUsag
     """Open every per-turn cap ambient, and close all of them however the turn ends.
 
     Yields the turn's `TurnUsage` ledger, so a driver books spend from the same object the caps
-    read.
-    `usage` is required so a nested call cannot shadow an outer turn's ledger. Without this manager
-    a
-    turn is still capped, by the per-branch channel; this makes a fan-out share one allowance and,
-    where
-    a meter fills the ledger, counts off-stream model calls.
+    read. `usage` is required so a nested call cannot shadow an outer turn's ledger. Without this
+    manager a turn is still capped, by the per-branch channel; this makes a fan-out share one
+    allowance and, where a meter fills the ledger, counts off-stream model calls.
     """
     calls_token = begin_call_watch()
     context_token = begin_context_watch()

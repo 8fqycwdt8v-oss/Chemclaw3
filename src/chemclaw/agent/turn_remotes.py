@@ -24,8 +24,8 @@ from psycopg.rows import TupleRow
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.jsonb import json_column
 
-# What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
-# the holder defers exactly as the local route does.
+#: What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
+#: the holder defers exactly as the local route does.
 Kind = Literal["watch", "stop", "unload_stop"]
 
 #: The holder's answer, written onto the request. `asked` until the holder has read it; then

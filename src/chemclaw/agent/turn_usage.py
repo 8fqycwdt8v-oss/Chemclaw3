@@ -59,12 +59,9 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
 
     Duck-typed so a provider reporting no usage meters 0; `total` falls back to input+output. Cache
     counts are subtracted from `input`, because `langchain_openai` reports `prompt_tokens`
-    (including
-    cached ones) as `input_tokens` and breaks the cached share out again. Cache keys are read by
-    suffix
-    because a response's service tier prefixes them (`priority_cache_read`). Cache-write is usually
-    0
-    on an OpenAI-compatible gateway.
+    (including cached ones) as `input_tokens` and breaks the cached share out again. Cache keys are
+    read by suffix because a response's service tier prefixes them (`priority_cache_read`).
+    Cache-write is usually 0 on an OpenAI-compatible gateway.
 
     `unreadable` distinguishes "usage reported but unreadable" (an upstream rename, which would
     otherwise silently disarm the budget guard) from "no usage", which is the normal case for most
@@ -110,9 +107,8 @@ def error_result_usage(response: Any) -> TurnUsage:
     With `method="json_schema"` a reply that fails validation raises inside the SDK before
     `on_llm_end` fires — the verifier's normal degrade path — so it would otherwise book nothing.
     `langchain_core` puts the raw HTTP body on `response_metadata["body"]`, whose `usage` block is
-    the
-    provider's own count, so this goes to the measured ledger. A refused request has no `usage`, so
-    it books zero without classifying the exception.
+    the provider's own count, so this goes to the measured ledger. A refused request has no `usage`,
+    so it books zero without classifying the exception.
 
     Args:
         response: The `LLMResult` `on_llm_error` was handed, or anything else, in which case this
@@ -183,9 +179,8 @@ def metered_turn_tokens() -> int:
     """What this turn has been metered so far, or 0 where nothing is metering.
 
     The runner hands one `TurnUsage` to `set_turn_usage` and the stream, so this includes model
-    calls
-    made by tool bodies, which no `wrap_model_call` sees; `agent/spend_cap.py` reads it for that. A
-    floor, not live-exact: a call in flight is not fully counted.
+    calls made by tool bodies, which no `wrap_model_call` sees; `agent/spend_cap.py` reads it for
+    that. A floor, not live-exact: a call in flight is not fully counted.
 
     Returns:
         The metered total, or 0 off the request path, where there is no ledger.
@@ -203,11 +198,9 @@ class _OffStreamMeter(AsyncCallbackHandler):
     """Books every model call made under it into the turn's ambient ledger.
 
     A callback, because `with_structured_output(...)` returns the parsed model and the usage is on
-    the
-    raw response; `include_raw=True` would change the caller's error contract. The ledger is
-    mutated,
-    not rebound, so a call from another task books into its caller's ledger. `on_llm_error` covers a
-    reply that fails validation after being served.
+    the raw response; `include_raw=True` would change the caller's error contract. The ledger is
+    mutated, not rebound, so a call from another task books into its caller's ledger. `on_llm_error`
+    covers a reply that fails validation after being served.
     """
 
     async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
@@ -239,10 +232,8 @@ class InFlightPrompts(AsyncCallbackHandler):
 
     A gateway reports usage only on the terminal frame, so a turn cancelled mid-message would meter
     zero and dropping the connection would defeat the budget guard. So each call's prompt is
-    estimated
-    when it starts, held while it runs, and dropped when the provider's numbers arrive; only what
-    was
-    never reported is left at teardown.
+    estimated when it starts, held while it runs, and dropped when the provider's numbers arrive;
+    only what was never reported is left at teardown.
 
     The estimate covers the whole request, tool schemas included (`prefix_tokens()` minus the system
     message, plus the message list), converted with `estimator_ratio()`. Streamed output is ignored.
@@ -267,8 +258,7 @@ class InFlightPrompts(AsyncCallbackHandler):
         """Forget a call that raised — the turn will report the failure.
 
         A rejected request bills nothing, and a mid-response death cannot be told apart from the
-        failure
-        already recorded.
+        failure already recorded.
         """
         self._pending.pop(kwargs.get("run_id"), None)
 

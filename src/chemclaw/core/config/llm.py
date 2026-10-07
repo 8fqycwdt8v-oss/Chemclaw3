@@ -18,11 +18,11 @@ class LlmSettings(BaseSettings):
     """
 
     # Every model call goes to one OpenAI-compatible gateway; which vendor sits behind it is the
-    # gateway's business (D-2026-09-04-a-gateway-is-the-only-provider). There is no provider field,
-    # so nothing can bypass this destination. One generic API credential (`llm_api_key`), not
-    # per-user Entra: inference is not a user-scoped resource. The defaults name the local mock
-    # gateway (`cli/mock_llm.MOCK_PORT`), so a misconfigured deployment fails loudly on loopback; an
-    # empty base URL is refused because the OpenAI SDK would fall back to its public host.
+    # gateway's business. There is no provider field, so nothing can bypass this destination. One
+    # generic API credential (`llm_api_key`), not per-user Entra: inference is not a user-scoped
+    # resource. The defaults name the local mock gateway (`cli/mock_llm.MOCK_PORT`), so a
+    # misconfigured deployment fails loudly on loopback; an empty base URL is refused because the
+    # OpenAI SDK would fall back to its public host.
     llm_base_url: str = "http://127.0.0.1:8820/v1"
     llm_model: str = "mock"
     # Opt-in to a gateway on this host (dev mock or same-pod sidecar). Every model-calling process

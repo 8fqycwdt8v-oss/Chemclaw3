@@ -1,31 +1,18 @@
 """Carry compound notes across a `STANDARDIZATION_VERSION` bump that moves their id.
 
-A compound note's id is a hash of its standardized structure (`core.chem.compound_id`), and the
-version is not in the hash — deliberately, since folding it in would invalidate every stored id at
-every bump and break every citation to one. So a bump that changes what a structure standardizes to
-moves that compound to a new id and leaves the old note behind, current, with nothing linking the
-two: two notes for one substance, and a citation to the old id resolving to a stale copy.
+A compound note's id hashes its standardized structure (`core.chem.compound_id`) without the
+version, so ids stay stable across bumps that do not change the structure, but a bump that does
+leaves the old note behind under the old id.
 
-**The link is the ordinary supersede link, in the ordinary write order**
-(`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`). The note under the new id
-records `supersedes` for every old id that standardizes onto it; each old note is retired —
-`valid_to` closed, `superseded-by` the new id — by `memory.supersede.retire_note`; and both land
-through `kg.record.record_note`, whose order (dependencies, subject, retirements) means the old note
-never names a successor that is not yet in the graph. Nothing is rewritten or deleted: the old note
-stays in Git, reachable by id, and `kg.graph.current_successor` is how a reader gets from it to the
-note that replaced it.
+The link is the ordinary supersede link in the ordinary write order: the note under the new id
+records `supersedes` for each old id that now standardizes onto it, each old note is retired
+(`memory.supersede.retire_note`), and both land through `kg.record.record_note`. Nothing is deleted;
+`kg.graph.current_successor` leads a reader from an old id to its replacement.
 
-**Derived from what the note already holds.** The old note's `compound_smiles` is the structure
-standardized under the *old* version, and re-standardizing it under the new one is the new id. That
-is exact for a bump that discards or neutralizes more than its predecessor did — which is every bump
-so far, `std12` included — and it cannot be exact for one that would need something the old
-standard form already threw away. Such a bump needs the source data again; this module says so by
-never inventing an answer: it re-keys what the stored structure determines and nothing else.
-
-Only structure-derived ids are candidates. A seed note filed under a slug (`compound-thf`) never had
-a hash to go stale, and a note a person wrote is never retired in place — `git_writer` refuses that
-amendment, so it is counted and left current, while the replacement still records that it
-supersedes it.
+The new id is derived by re-standardizing the old note's `compound_smiles`, which is exact for a
+bump that only discards more than its predecessor; nothing else is inferred. Only structure-derived
+ids are candidates, and a person's note is never retired in place: it is counted and left current
+while the replacement still names it.
 """
 
 import asyncio
@@ -128,14 +115,9 @@ def _end_of_chain(old_id: str, target: dict[str, str]) -> str | None:
 def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
     """What re-keying `notes` onto the current standardization writes; empty when nothing moved.
 
-    **Idempotent by construction, so a second run is a read.** An old note is a candidate only
-    while `valid_to` is open, which a first run closes; one a person wrote stays open and is then
-    excluded because its successor already names it. A new id with nothing left to add is not in
-    the plan at all.
-
-    Grouped by new id, because a bump is exactly the change that makes two old ids one: the
-    neutral and the ionic spelling of one salt were two notes under `std11` and are one compound
-    under `std12`, so one successor supersedes both.
+    Idempotent: an old note is a candidate only while `valid_to` is open, and a person's note is
+    excluded once its successor names it. Grouped by new id, since a bump can merge two old ids into
+    one compound.
 
     Args:
         notes: The corpus, typically `kg.graph.load_notes` over the knowledge directory.
@@ -164,11 +146,8 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
         # A structure whose id moved and whose note is already closed was re-keyed by an earlier
         # pass; it is neither unchanged nor a candidate, and counting it as either would be a lie.
 
-    # **A target can itself be moving.** Old note A may land on B's id while B's own structure
-    # moves it on to C; planning A onto B and B onto C separately wrote B twice in one pass — the
-    # successor carrying `supersedes A`, then the retirement of the unedited B — and the second
-    # write discarded the first. So each old id is followed to the end of its chain and every note
-    # on the chain is superseded by the last one. A cycle has no end and is left alone.
+    # A target may itself be moving (A onto B while B moves onto C), so each old id is followed to
+    # the end of its chain and every note on it is superseded by the last. A cycle is left alone.
     for old_id in sorted(target):
         final = _end_of_chain(old_id, target)
         if final is None:
@@ -181,9 +160,8 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
     for new_id in sorted(moved):
         old_notes = sorted(moved[new_id], key=lambda note: note.id)
         existing = by_id.get(new_id)
-        # Recording onto a note a person wrote would forge their note, and onto one that names
-        # the person it was written for would write it for somebody else — `record_note` refuses
-        # both, so the plan does not offer them. The old notes stay current and are counted.
+        # `record_note` refuses to write onto a person's note or one written for a named person, so
+        # the plan does not offer them; the old notes stay current and are counted.
         if existing is not None and (not existing.authorship.by_agent or existing.actor):
             blocked.append(new_id)
             continue
@@ -221,9 +199,8 @@ async def apply_compound_rekey(
 ) -> None:
     """Write `plan` through the one write path, one successor and its retirements per record.
 
-    One `record_note` per new id rather than one commit for the pass, so each unit is the ordinary
-    one — the successor, then the notes it retires — and an interrupted run leaves every compound
-    either wholly moved or untouched; the next run's plan is exactly what is left.
+    One `record_note` per new id, so an interrupted run leaves each compound wholly moved or
+    untouched, and the next plan is exactly what remains.
     """
     for rekey in plan.rekeys:
         await record_note(
@@ -252,15 +229,14 @@ async def rekey_standardization(
 ) -> StandardizationRekeyReport:
     """Carry the compound notes and both fingerprint indexes onto the current standardization.
 
-    The job an operator runs after deploying a `STANDARDIZATION_VERSION` bump. Idempotent and
-    interrupt-safe in both halves, and a preview unless `apply`: every count is computed before
-    anything is written, and the same way either way.
+    Run by an operator after deploying a `STANDARDIZATION_VERSION` bump. Idempotent, interrupt-safe,
+    and a preview unless `apply`; counts are computed the same way either way.
 
     Args:
         apply: Write; otherwise count only.
         notes_dir: The knowledge tree to read (`settings.knowledge_path`).
-        writer: Builds the note writer — called only when there is something to write, because
-            the git writer insists on a dedicated checkout and a preview should not need one.
+        writer: Builds the note writer; called only when there is something to write, since the git
+            writer requires a dedicated checkout.
         molecule_store: The molecule index.
         reaction_store: The reaction index.
         as_of: The date a retired note's `valid_to` records.

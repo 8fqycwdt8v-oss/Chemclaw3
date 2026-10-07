@@ -69,10 +69,8 @@ class VerificationResult(BaseModel):
     """The verdict for a whole answer: per-claim checks and an aggregate confidence in [0, 1]."""
 
     # Required, with no default: pydantic drops a defaulted field from the schema's `required`, so
-    # the
-    # provider would accept a verdict with no claims. An empty list is still legal and means the
-    # answer
-    # contains no factual claim to check.
+    # the provider would accept a verdict with no claims. An empty list is still legal and means the
+    # answer contains no factual claim to check.
     claims: list[ClaimCheck] = Field(
         ...,
         description=(
@@ -82,12 +80,9 @@ class VerificationResult(BaseModel):
     )
     confidence: float = Field(ge=0, le=1)
     # Which check produced this verdict. The judge scores faithfulness; the citation gate scores
-    # only
-    # whether citations resolve, and is more generous on a cited-but-wrong answer, so a caller must
-    # know
-    # which ran. Defaults to the value that does not clear the gate; only the judge's own path
-    # stamps
-    # "judge".
+    # only whether citations resolve, and is more generous on a cited-but-wrong answer, so a caller
+    # must know which ran. Defaults to the value that does not clear the gate; only the judge's own
+    # path stamps "judge".
     verified_by: Literal["judge", "citation-gate"] = "citation-gate"
 
     @property
@@ -102,10 +97,9 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     Reuses `verify_claims` with the whole answer as one claim whose citations are its wikilinks;
     confidence is 1.0 when supported, else 0.0. Detects a citation the turn's tools never returned,
     and treats an answer that cites nothing as unverified. It cannot parse claims, so it cannot
-    catch
-    an answer that cites correctly but misdescribes the evidence (the judge's job), and it flags a
-    purely conversational reply along with any uncited answer — over-flagging is the cheaper error.
-    An empty answer is not flagged.
+    catch an answer that cites correctly but misdescribes the evidence (the judge's job), and it
+    flags a purely conversational reply along with any uncited answer — over-flagging is the cheaper
+    error. An empty answer is not flagged.
     """
     body = answer.strip()
     if not body:
@@ -147,26 +141,21 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
 
     Every untrusted channel is neutralised: evidence content is wrapped in `framing.ENVELOPE_TAG`
     (nonce'd and defanged), note ids pass through `framing.safe_id`, and the answer is defanged so
-    it
-    cannot forge an envelope. One envelope per distinct content, naming every id it grounds, because
-    `turn_evidence` emits one chunk per (output, cited id) pair and rendering each would repeat the
-    same text once per citation.
+    it cannot forge an envelope. One envelope per distinct content, naming every id it grounds,
+    because `turn_evidence` emits one chunk per (output, cited id) pair and rendering each would
+    repeat the same text once per citation.
     """
     by_content: dict[str, list[str]] = {}
     for chunk in evidence:
         by_content.setdefault(chunk.content, []).append(chunk.source_note_id)
     # Ids are listed in a line we author, outside the envelope, because `frame_untrusted` sanitises
-    # an
-    # `id` attribute and would mangle a space-separated list; the envelope carries the first id.
+    # an `id` attribute and would mangle a space-separated list; the envelope carries the first id.
     # The content (a serialized tool result with envelopes inside its JSON strings) is framed once,
     # whole, with the delimiters inside escaped — cheaper than an envelope per gap and leaves
-    # nothing at
-    # top level.
-    # Budgeted newest-first: the end of `by_content` is what the answer was most recently written
-    # from,
-    # and the newest always survives. Omitted ids are named so the judge reads them as "evidence
-    # exists,
-    # not shown"; the citation gate still checks every output regardless.
+    # nothing at top level. Budgeted newest-first: the end of `by_content` is what the answer was
+    # most recently written from, and the newest always survives. Omitted ids are named so the judge
+    # reads them as "evidence exists, not shown"; the citation gate still checks every output
+    # regardless.
     budget = settings.verifier_evidence_max_chars
     entries = list(by_content.items())
     kept: list[tuple[str, list[str]]] = []
@@ -195,8 +184,7 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     return (
         _VERIFIER.format(envelope_tag=ENVELOPE_TAG) + f"EVIDENCE:\n{blocks or '(none)'}\n\n"
         # Defanged, not framed: the answer is under review, not evidence, but it must not be able to
-        # spell
-        # `ENVELOPE_TAG` and pass as evidence.
+        # spell `ENVELOPE_TAG` and pass as evidence.
         f"ANSWER:\n{defang(answer)}"
     )
 
@@ -217,8 +205,7 @@ async def require_verifier_capability(*, client: Any | None = None) -> None:
 
     Otherwise every judged answer would silently degrade to the citation gate for the life of the
     deployment. Makes one real structured-output call against the routed `"verifier"` model and
-    raises
-    on failure; called from `api/app.py::_lifespan`. A no-op unless `verifier_enabled`.
+    raises on failure; called from `api/app.py::_lifespan`. A no-op unless `verifier_enabled`.
     """
     if not settings.verifier_enabled:
         return
@@ -254,23 +241,18 @@ async def judge_once(
     """One roll of the LLM judge — the raw scoring call, no band, no degrade, no fallback.
 
     Shared by `verify_answer` (which adds the band and degrade policy) and `cli.verifier_margin`
-    (which
-    measures roll-to-roll spread and must not get the band). Raises on any failure; the policy is
-    the
-    caller's.
+    (which measures roll-to-roll spread and must not get the band). Raises on any failure; the
+    policy is the caller's.
     """
     # Its own timeout: this runs between the model's last token and the answer event, so a stalled
     # judge would otherwise hold a finished answer until the turn deadline. Expiry costs the score,
     # never the answer. Each reroll gets the full budget.
     async with asyncio.timeout(settings.verifier_timeout_seconds):
         # Structured output, with `method="json_schema"`: the default function-calling path marks
-        # defaulted
-        # fields optional, so the provider would not enforce the whole `VerificationResult`.
-        # `tests/test_verifier.py` asserts the schema.
-        # `off_stream_metering()` puts this call on the turn's bill: it runs after the stream ends,
-        # so no
-        # graph callback sees it. Only here — on an in-graph call it would replace the inherited
-        # callbacks.
+        # defaulted fields optional, so the provider would not enforce the whole
+        # `VerificationResult`. `tests/test_verifier.py` asserts the schema. `off_stream_metering()`
+        # puts this call on the turn's bill: it runs after the stream ends, so no graph callback
+        # sees it. Only here — on an in-graph call it would replace the inherited callbacks.
         response = await client.with_structured_output(
             VerificationResult, method="json_schema"
         ).ainvoke(_verifier_prompt(answer, evidence), config=off_stream_metering())
@@ -286,8 +268,8 @@ async def _banded_verdict(
 
     The judge is least stable near the threshold, so a confidence within `verifier_review_band` of
     `verifier_confidence_threshold` triggers up to `verifier_band_rerolls` more rolls; the median
-    roll
-    wins, with its own claims. Outside the band the first roll stands. A failed reroll is dropped.
+    roll wins, with its own claims. Outside the band the first roll stands. A failed reroll is
+    dropped.
     """
     threshold = settings.verifier_confidence_threshold
     band = settings.verifier_review_band
@@ -319,8 +301,7 @@ async def verify_answer(
         return _deterministic_result(answer, evidence)
     try:
         # Client construction is inside the guard, so a missing `"verifier"` route degrades to the
-        # citation
-        # gate instead of leaving the answer unscored.
+        # citation gate instead of leaving the answer unscored.
         if client is None:
             client = _default_client()
         # One roll, then the review band. A failed first roll lands in the degrade path below.
@@ -339,8 +320,8 @@ async def verify_answer(
     return response.model_copy(update={"verified_by": "judge"})
 
 
-# The honesty checks `score_answer` can run. A closed set because it crosses the SSE wire to
-# `Chemclaw3_ui` and `Chemclaw3_mock`, whose consumers switch on it exhaustively.
+#: The honesty checks `score_answer` can run. A closed set because it crosses the SSE wire to
+#: `Chemclaw3_ui` and `Chemclaw3_mock`, whose consumers switch on it exhaustively.
 AnswerCheck = Literal["verifier", "answer-shape"]
 
 
@@ -352,29 +333,23 @@ class TurnReview(BaseModel):
     """
 
     # Which checks ran, in order — what distinguishes "nothing looked" from "looked and found
-    # nothing",
-    # since every finding field defaults to clean. A check that crashed still ran and is listed.
-    # `verified_by` cannot cover this: the shape gate produces no score.
+    # nothing", since every finding field defaults to clean. A check that crashed still ran and is
+    # listed. `verified_by` cannot cover this: the shape gate produces no score.
     checks_run: list[AnswerCheck] = Field(default_factory=list)
     confidence: float | None = None
     verified_by: Literal["judge", "citation-gate"] | None = None
     # Only claims the answer makes that its evidence does not support — the model's own prose.
-    # Status
-    # messages about the check go in `review_notes`.
+    # Status messages about the check go in `review_notes`.
     unsupported: list[str] = Field(default_factory=list)
     # Why the verdict is what it is when the reason concerns the check, not the answer (e.g. "the
-    # judge
-    # did not run"). Kept apart from `unsupported` because `api/runner.py`'s revision loop quotes
-    # those
-    # back to the model as claims to drop. `runner_answer.build_answer_event` concatenates both onto
-    # `AnswerEvent.unsupported_claims`, so the wire is unchanged.
+    # judge did not run"). Kept apart from `unsupported` because `api/runner.py`'s revision loop
+    # quotes those back to the model as claims to drop. `runner_answer.build_answer_event`
+    # concatenates both onto `AnswerEvent.unsupported_claims`, so the wire is unchanged.
     review_notes: list[str] = Field(default_factory=list)
     review_required: bool = False
     # Always at their defaults: nothing writes them since the challenge panel was removed. Kept
-    # because
-    # they are `AnswerEvent` fields the frontend and mock read; they go with the coordinated
-    # three-repo
-    # change that retires the transcript route.
+    # because they are `AnswerEvent` fields the frontend and mock read; they go with the coordinated
+    # three-repo change that retires the transcript route.
     challenged: bool = False
     hold_id: str | None = None
 
@@ -394,8 +369,7 @@ async def score_answer(
     - Each check flags independently; they measure different things.
     - A check configured on that did not complete flags the answer.
     - A verdict the judge did not produce flags, with the reason in `review_notes`: the citation
-      gate
-      is more generous than the judge, so it must not clear the gate in the judge's place.
+      gate is more generous than the judge, so it must not clear the gate in the judge's place.
 
     Args:
         answer: The finished answer text.
@@ -464,10 +438,9 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
 
     A cited id is seen when it appears in a tool result's text as a whole token (`_mentions`), so
     wikilinks, bare slugs and JSON read alike, and a longer id (`reaction-12`) cannot ground a
-    shorter
-    one (`reaction-1`). Outputs no citation matched are kept under a synthetic `tool-output-N` id so
-    the judge still reads them; no citation can match that id, so they add evidence, never
-    grounding.
+    shorter one (`reaction-1`). Outputs no citation matched are kept under a synthetic
+    `tool-output-N` id so the judge still reads them; no citation can match that id, so they add
+    evidence, never grounding.
     """
     citations = cited_ids(answer)
     chunks: list[EvidenceChunk] = []
@@ -509,12 +482,10 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
 
     A scan, because instructions not to invent method parameters do not bind the model reliably. Per
     shape class, not per value: a class fires when the answer contains one of `_PARAMETER_SHAPES`
-    and no
-    tool result this turn contains that class at all, so rounding or reformatting a retrieved number
-    is fine. It is a heuristic, wrong both ways: it fires on parameters the chemist supplied, and
-    misses
-    shapes not in the table or classes some tool happened to return. It sits behind a config knob
-    (on by default); a fire triggers a revision round.
+    and no tool result this turn contains that class at all, so rounding or reformatting a retrieved
+    number is fine. It is a heuristic, wrong both ways: it fires on parameters the chemist supplied,
+    and misses shapes not in the table or classes some tool happened to return. It sits behind a
+    config knob (on by default); a fire triggers a revision round.
 
     Returns:
         One `"<shape class>: <the matched text>"` per class that fired, in table order. Empty when
@@ -535,9 +506,8 @@ def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[st
 
     Catches an answer that promises results ("I'll call X …") and ends without calling X, which
     instructions alone did not prevent. Exact, matching whole tokens against the capability tool
-    names;
-    the one false positive is an answer describing the toolset, which is why it shares the shape
-    gate's operator knob.
+    names; the one false positive is an answer describing the toolset, which is why it shares the
+    shape gate's operator knob.
 
     Args:
         answer: The finished answer text.
@@ -546,12 +516,10 @@ def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[st
     Returns:
         One `"promised but not called: <name>"` per offending tool, in first-mention order.
     """
-    # Imported here to avoid a cycle (`chemclaw_agent` imports this module).
-    # Capability names only, not `available_tool_names()`: that also holds scaffolding (`task`, the
-    # todo
-    # writer, `ls`, `grep`, `read_file`…), several of which are ordinary English words and would
-    # make
-    # correct answers fail the scan.
+    # Imported here to avoid a cycle (`chemclaw_agent` imports this module). Capability names only,
+    # not `available_tool_names()`: that also holds scaffolding (`task`, the todo writer, `ls`,
+    # `grep`, `read_file`…), several of which are ordinary English words and would make correct
+    # answers fail the scan.
     from chemclaw.agent.chemclaw_agent import capability_tool_names
 
     capability_tools = capability_tool_names()

@@ -282,8 +282,7 @@ def _rows(response: Any) -> list[dict[str, Any]]:
         ]
         if not names:
             # A recognised envelope whose column metadata moved: `data_array` cannot be read without
-            # names,
-            # and an empty result would be indistinguishable from an empty corpus.
+            # names, and an empty result would be indistinguishable from an empty corpus.
             logger.warning(
                 "databricks returned %d row(s) with no readable column names; the manifest shape "
                 "has moved and `_rows` in this module is what needs teaching",

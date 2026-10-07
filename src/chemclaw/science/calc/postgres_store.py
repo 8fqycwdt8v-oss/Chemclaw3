@@ -136,8 +136,7 @@ class PostgresStore:
             return None
         result, provenance, compute_seconds, structure_id, epoch = row
         # `checked_payload` refuses a non-object jsonb top level by name rather than failing later
-        # with
-        # an anonymous `TypeError`.
+        # with an anonymous `TypeError`.
         return StoredResult(
             key=key,
             result=checked_payload(key, result),

@@ -6,12 +6,12 @@ heals such a thread; deepagents' `PatchToolCallsMiddleware` does that upstream (
 
 - **A guard on deletion.** `droppable_rows`, used by `durable/retention.py`, keeps an age cutoff
   from taking one half of a pair. It contracts rather than expands.
-- **Assertions.** `unmatched_call_ids`, `unmatched_result_ids` and
-  `calls_without_adjacent_results` let tests prove that code which deletes or assembles messages
-  (including `agent/compaction.py`) strands nothing. They report and never repair.
+- **Assertions.** `unmatched_call_ids`, `unmatched_result_ids` and `calls_without_adjacent_results`
+  let tests prove that code which deletes or assembles messages (including `agent/compaction.py`)
+  strands nothing. They report and never repair.
 
-`droppable_rows` takes call ids, read from either stored shape by `stored_call_ids`, so the
-deletion path imports no framework types.
+`droppable_rows` takes call ids, read from either stored shape by `stored_call_ids`, so the deletion
+path imports no framework types.
 """
 
 import logging
@@ -36,16 +36,14 @@ _MAF_RESULT = "function_result"
 def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> frozenset[str] | None:
     """The tool-call ids one stored `session_messages.message` row mentions, in either direction.
 
-    The `message_shape` stamp decides the shape (MAF `{"role", "contents"}` or LangChain
-    `{"type", "data"}`), as in `session_store.message_from_row`; an unstamped historical row falls
-    back to the payload. Returns `None` for a payload matching neither shape (including a
-    non-mapping):
+    The `message_shape` stamp decides the shape (MAF `{"role", "contents"}` or LangChain `{"type",
+    "data"}`), as in `session_store.message_from_row`; an unstamped historical row falls back to the
+    payload. Returns `None` for a payload matching neither shape (including a non-mapping):
     unreadable is not the same as "no ids", and treating it so would make the row droppable.
     """
     if not isinstance(payload, Mapping):
         # `message` is bare `jsonb`, so a non-mapping is storable; return `None` rather than raise,
-        # so the
-        # retention sweep's per-session unreadable-row skip handles it.
+        # so the retention sweep's per-session unreadable-row skip handles it.
         return None
     if shape == LANGCHAIN_SHAPE:
         return _langchain_call_ids(payload)
@@ -135,8 +133,8 @@ def unmatched_call_ids(messages: Sequence[BaseMessage]) -> set[str]:
 def unmatched_result_ids(messages: Sequence[BaseMessage]) -> set[str]:
     """Return the ids of tool *results* that no tool call accounts for.
 
-    The mirror of `unmatched_call_ids`. Both are assertions, never repairs (D-145): stripping either
-    half would destroy evidence and mask the bug that produced it.
+    The mirror of `unmatched_call_ids`. Both are assertions, never repairs: stripping either half
+    would destroy evidence and mask the bug that produced it.
     """
     called = {
         str(call["id"])

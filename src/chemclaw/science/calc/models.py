@@ -46,10 +46,9 @@ ReactionLevel = Literal["quick", "standard", "thorough"]
 # 298.15 K, which cancels only when Δn = 0.
 StandardState = Literal["gas-1atm", "solution-1M"]
 
-# Decimal places coordinates are rounded to before a `Structure` is hashed (0.1 pm), so float
-# noise cannot fork the cache. A constant, not a setting: the server derives `input_hash` from
-# these bytes, so changing it makes every calculation miss and must land in both repositories at
-# once.
+# Decimal places coordinates are rounded to before a `Structure` is hashed (0.1 pm), so float noise
+# cannot fork the cache. A constant, not a setting: the server derives `input_hash` from these
+# bytes, so changing it makes every calculation miss and must land in both repositories at once.
 _GEOMETRY_DECIMALS = 4
 
 
@@ -102,8 +101,7 @@ class Structure(BaseModel):
         electrons = sum(self.elements) - self.charge
         if electrons < unpaired or (electrons - unpaired) % 2:
             # The closed-shell default gets the specific message: it is hit by accident (radical
-            # SMILES, wrong
-            # charge), and the fix is to declare the multiplicity.
+            # SMILES, wrong charge), and the fix is to declare the multiplicity.
             if self.multiplicity == 1:
                 raise ValueError(
                     f"open-shell species ({electrons} electrons at charge {self.charge}) "
@@ -169,8 +167,7 @@ class PkaResult(BaseModel):
     deprotonation_energy_kcal: float
     uncertainty: float
     # "acid" = an O-H/S-H proton came off; "base" = the pKa of the protonated form (pKaH). Each has
-    # its
-    # own calibration.
+    # its own calibration.
     site: Literal["acid", "base"] = "acid"
 
 
@@ -544,8 +541,7 @@ class HessianPayload(BaseModel):
     atom_count: int
     electronic_energy_hartree: float
     # Largest absolute gradient component (Hartree/Angstrom) at the differentiated geometry. `None`
-    # =
-    # not reported, distinct from zero.
+    # = not reported, distinct from zero.
     max_gradient_hartree_per_angstrom: float | None = None
     hessian_npy: str
     dipole_derivatives_npy: str | None = None
@@ -626,8 +622,7 @@ class ThermochemistryResult(BaseModel):
     modes: list[VibrationalMode]
     # Why this result carries wavenumbers but no intensities, or `None` when it carries both.
     # Pairing intensities to modes is unsafe near linearity, and that failure is confined here
-    # rather
-    # than discarding the free energy, which reads no intensity. When set, every
+    # rather than discarding the free energy, which reads no intensity. When set, every
     # `VibrationalMode.ir_intensity_km_per_mol` is `None`.
     spectrum_unavailable: str | None = None
     mode_count: int
@@ -716,8 +711,7 @@ class Interconversion(BaseModel):
     rate_per_second: float
     half_life_seconds: float
     # The half-lives at the barrier plus and minus the method's uncertainty: the shortest and
-    # longest
-    # lifetime consistent with this calculation.
+    # longest lifetime consistent with this calculation.
     half_life_seconds_fastest: float
     half_life_seconds_slowest: float
     uncertainty_kcal: float
@@ -783,16 +777,14 @@ class RotationBarrier(BaseModel):
     """
 
     # `from_rotamer == to_rotamer` is a real case: a torsion with one form per period rotates into
-    # its
-    # own symmetry image (an amide, a hindered biaryl). Forward and reverse energies are equal.
+    # its own symmetry image (an amide, a hindered biaryl). Forward and reverse energies are equal.
     from_rotamer: int
     to_rotamer: int
     at_degrees: float
     forward_kcal: float
     reverse_kcal: float
     # `E` for an electronic barrier, `G` when a Hessian at the pass had its one imaginary mode
-    # dropped.
-    # A pass with two imaginary modes falls back to `E` and says so in the warnings.
+    # dropped. A pass with two imaginary modes falls back to `E` and says so in the warnings.
     basis: Literal["E", "G"] = "E"
     # Rate and lifetime at the profile's temperature, with the band the method's uncertainty
     # implies. Absent only when the arithmetic could not be done.
@@ -845,8 +837,7 @@ class EnsembleMember(BaseModel):
 
     energy_hartree: float
     # `ge=1`: `boltzmann_populations` divides by the sum of weights, so all-zero degeneracies must
-    # be
-    # refused at the boundary.
+    # be refused at the boundary.
     degeneracy: int = Field(default=1, ge=1)
     structure: Structure
 
@@ -1047,8 +1038,7 @@ class RefinedConformer(BaseModel):
     relative_kcal: float
     population: float
     # `ge=1`: `boltzmann_populations` divides by the sum of weights, so all-zero degeneracies must
-    # be
-    # refused at the boundary.
+    # be refused at the boundary.
     degeneracy: int = Field(default=1, ge=1)
     gibbs_free_energy_hartree: float
     electronic_energy_hartree: float
@@ -1079,8 +1069,7 @@ class RefinedEnsemble(BaseModel):
     refined_count: int
     refined_population_covered: float
     # Named `refined_` because these are over the renormalised top N, unlike the ensemble-wide
-    # fields
-    # of `ConformerEnsemble`; the entropy over N states is systematically too small, and
+    # fields of `ConformerEnsemble`; the entropy over N states is systematically too small, and
     # `refined_population_covered` says how much of the ensemble N accounts for.
     refined_conformational_entropy_cal_per_mol_k: float
     refined_ensemble_correction_kcal: float
@@ -1361,8 +1350,7 @@ class ReactionEnergyResult(BaseModel):
     cache_hits: int
     uncertainty_kcal: float
     # Thermal-hazard screening flag, advisory only: a reason to look at thermal data, never a heat
-    # of
-    # reaction or a clearance. Reads ΔE, since a runaway is driven by the heat released.
+    # of reaction or a clearance. Reads ΔE, since a runaway is driven by the heat released.
     is_strongly_exothermic: bool
     exotherm_threshold_kcal: float
     # Which conformational treatment produced the deltas.

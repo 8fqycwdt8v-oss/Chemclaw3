@@ -1,9 +1,9 @@
 """Reading a session's proposed plan from outside a turn.
 
 `api/routes/plan.py` and the CLI's `/plan` and `/approve` need the plan while no turn runs.
-`TodoListMiddleware` owns `todos` and the checkpointer holds them between turns (keyed by session
-id as `thread_id`), so this is a checkpointer read, in one place so the plan an approval is hashed
-over is the same plan the gate checks. Absent state means "no plan yet", not an error.
+`TodoListMiddleware` owns `todos` and the checkpointer holds them between turns (keyed by session id
+as `thread_id`), so this is a checkpointer read, in one place so the plan an approval is hashed over
+is the same plan the gate checks. Absent state means "no plan yet", not an error.
 """
 
 import logging
@@ -20,8 +20,7 @@ async def session_plan(session_id: str, *, saver: Any | None = None) -> list[dic
     `consume_turn_approval` must not skip spending an approval because a read failed. Steps are
     returned whole because the identity hashes both content and `tools`; steps without readable
     `content` are dropped here so every caller sees the same list. The `todos` channel name is
-    pinned
-    by `tests/test_upstream_surface.py`. `saver=None` resolves the configured checkpointer.
+    pinned by `tests/test_upstream_surface.py`. `saver=None` resolves the configured checkpointer.
     """
     checkpoint = await _latest_checkpoint(session_id, saver)
     if checkpoint is None:

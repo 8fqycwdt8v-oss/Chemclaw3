@@ -832,8 +832,8 @@ def _plan_gate_findings(
         + (f"; held by another gate {held}" if held else ""),
     )
 
-    # DARK-1 itself. Only checkable when the script carries a turn after the approved one — the
-    # plan has to *change* for the binding to have anything to say.
+    # The re-gating check: only possible when the script carries a turn after the approved one,
+    # since the plan has to change for the binding to say anything.
     if len(run.turns) <= approved_turn + 1:
         finding(
             "a changed plan is re-gated (DARK-1)",

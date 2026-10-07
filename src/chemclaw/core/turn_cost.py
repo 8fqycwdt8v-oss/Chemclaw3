@@ -1,20 +1,9 @@
 """The shape of one turn's spend — the record, not the machinery that writes it.
 
-**In `core/` because two layers read it and only one writes it.** `agent/turn_cost.py` owns the
-sink, the fire-and-forget scheduling and the `finally`-block discipline that makes a disconnected
-turn still book its cost; those are behaviours and they belong beside the turn. This is the *record*
-those behaviours move, and `chemclaw.evals` scores it — `turn_cost_ratio` reads a list of these out
-of a case file.
-
-Splitting them is what keeps `tests/test_layering.py` honest rather than what works around it. The
-eval layer is deliberately not allowed to import `chemclaw.agent`: an eval scores output, the agent
-is the thing under test, and a dependency from the scorer to the scored is the one edge that would
-let a change to the agent silently change what "correct" means. `core` is the shared kernel both may
-read, and a data shape is exactly the kind of thing it exists to hold.
-
-The alternative — a second model in `evals/` describing the same five counters — was rejected for
-the reason the reuse is worth having: a case file's shape would then be free to drift from what the
-ledger actually produces, and nothing would say so.
+`agent/turn_cost.py` owns writing it (the sink, scheduling, booking a disconnected turn), and
+`chemclaw.evals` scores it (`turn_cost_ratio`). The eval layer may not import `chemclaw.agent` (the
+scorer must not depend on the scored), so the shared data shape lives in `core`, keeping case files
+from drifting from what the ledger produces.
 """
 
 import uuid
@@ -40,14 +29,8 @@ class TurnCost(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # **Minted here, per record, and never read off a request.** A `default_factory` rather than a
-    # required argument because the identity is not the caller's to supply: there is no argument a
-    # writer could pass that would be more correct than a fresh one, and both producers
-    # (`api/runner._book_turn_spend` and `durable/template_activities._book_step_spend`) build
-    # exactly one of these per turn. What the upsert protects is therefore unchanged in the case it
-    # was written for — a *retried write of this record* still replaces rather than doubles,
-    # because it carries this id — and gone in the case it was never meant to cover, two different
-    # turns sharing a label.
+    # Minted per record, never read off a request: no caller-supplied value would be more correct. A
+    # retried write of this record still replaces rather than doubles; two turns cannot share an id.
     turn_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=1)
     # The turn's correlation id: the join to `audit_events`, `session_messages` and every log line,
     # and possibly a string the caller chose. Indexed, not unique (migration 088).
@@ -61,123 +44,65 @@ class TurnCost(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_write_tokens: int = Field(default=0, ge=0)
-    # **Tokens the provider was billed for and never reported, beside the measured four rather than
-    # summed into them.** `stream_options.include_usage` reports on the terminal chunk only, so a
-    # turn abandoned mid-message carries a real cost the gateway never told anyone about;
-    # `agent/turn_usage.InFlightPrompts` estimates the requests nobody was billed *through*. The
-    # budget meters the sum, because a cost guard has to bind on the whole bill. This record keeps
-    # the two apart, so an inferred number can never pass for a provider's — and so a reader can
-    # ask what fraction of the ledger is inference. `0` on every completed turn.
+    # Tokens billed but never reported (usage arrives only on the terminal chunk, so an abandoned
+    # turn's prompt is estimated by `agent/turn_usage.InFlightPrompts`). Kept apart from the
+    # measured four so inference never passes for a provider's number; the budget meters the sum.
+    # `0` on completed turns.
     estimated_tokens: int = Field(default=0, ge=0)
     duration_seconds: float = Field(default=0.0, ge=0)
-    # False when the turn was torn down *before it answered* — `chemclaw.api.runner` books
-    # `completed=answered`, so a disconnect or wall-clock deadline that lands after the answer is a
-    # completed turn that keeps its history, and only one that lands before it is not. Recorded
-    # rather than filtered: those turns spent real tokens, and a ledger that kept only the tidy ones
-    # would be wrong in the direction that hides a runaway.
-    #
-    # **Derived from `outcome` since 2026-08-27, and kept because things already read it.** It is
-    # one boolean over a six-value enum: a capped turn, a silent turn, a raised turn, a timed-out
-    # turn and an abandoned turn were all simply `False`, and a partial answer after the runaway cap
-    # was `True` beside a clean one.
+    # False when the turn was torn down before it answered (`completed=answered`). Such turns are
+    # recorded, not filtered, because they spent real tokens. Derived from `outcome` and kept for
+    # existing readers; `outcome` is the precise field.
     completed: bool = True
-    # How the turn ended (`chemclaw.api.runner._OUTCOMES`). Two producers, because a step is not
-    # a chat turn: `api.runner._settle_outcome` for a chat turn, and
-    # `durable.template_activities._book_step_spend` for a harness step — which cannot import
-    # `api` (`tests/test_layering.py`), so it spells four of the six values as literals. A chat
-    # turn whose own process died books nothing; `api.runner.settle_interrupted_turns` books its
-    # `interrupted` row, once, from whichever process next touches the session.
-    # `unknown` is the column default a row written before this field existed carries, and it is
-    # *also* written live, by `_book_turn_spend`'s caught-exception fallback, which logs when it
-    # does.
+    # How the turn ended (`chemclaw.api.runner._OUTCOMES`). Written by `api.runner._settle_outcome`
+    # for chat turns and by `durable.template_activities._book_step_spend` for harness steps (which
+    # spells values as literals, since it cannot import `api`). A turn whose process died is booked
+    # `interrupted` by `api.runner.settle_interrupted_turns`. `unknown` is the column default and
+    # also `_book_turn_spend`'s logged fallback.
     outcome: str = "unknown"
-    # The user-facing classification of a failed turn (`chemclaw.api.runner._classify`), empty for
-    # every other outcome. It was computed, sent to the chemist and discarded server-side, so a
-    # chemist quoting a code named something the deployment had no record of.
+    # The user-facing classification of a failed turn (`chemclaw.api.runner._classify`), so a code a
+    # chemist quotes can be found server-side. Empty for every other outcome.
     error_code: str = ""
-    # The model id the turn's *agent* route resolved to. `core/metrics.py` and the runbook both
-    # said this table carried model attribution — it is the stated reason the spend counters
-    # deliberately omit a `model` label — while the table had no such column. One turn can span
-    # models (the verifier's judge runs on its own route); this names the one that answered.
+    # The model id the turn's agent route resolved to; the reason the spend counters carry no
+    # `model` label. A turn can span models (the verifier's judge has its own route); this names the
+    # one that answered.
     model: str = ""
-    # What the turn actually did, which `duration_seconds` alone cannot separate: a slow turn that
-    # made two tool calls and a slow turn that made forty are different problems. `None` where the
-    # writer did not count, which is every row written before these existed.
+    # What the turn did, which `duration_seconds` cannot separate. `None` where the writer did not
+    # count.
     tool_calls: int | None = Field(default=None, ge=0)
     tool_failures: int | None = Field(default=None, ge=0)
     # Calls a governance gate stopped (the plan gate today) — the control working, which must not
     # be read as a failure.
     tool_refusals: int | None = Field(default=None, ge=0)
-    # **The jobs this turn left *running*, which is not what the name says and not what
-    # `chemclaw_jobs_started_total` counts.** It is fed by `JobStartedEvent`, and
-    # `connectors/jobs.py` announces one only when the run is still going after the inline wait —
-    # deliberately, because an announcement for a finished run draws a surface row no
-    # `job_completed` will clear. So a job that answers inside its turn moves the counter and not
-    # this, and a rejoined run still going moves this and not the counter (measured 2026-09-06,
-    # both directions). Five of the seven declared jobs carry `inline_wait_seconds`, so on a
-    # calc-heavy deployment the first case is the common one. The column keeps its name because
-    # this schema does not rename (D-2026-08-04-the-schema-only-goes-forward); renaming it is a
-    # decision with a migration behind it, and until then the meaning is written here.
+    # The jobs this turn left *running*, not every launch: fed by `JobStartedEvent`, which
+    # `connectors/jobs.py` announces only when the run is still going after the inline wait.
+    # `chemclaw_jobs_started_total` counts launches. The name stays because the schema only goes
+    # forward.
     jobs_started: int | None = Field(default=None, ge=0)
-    # Seconds to the turn's first streamed token — the latency a chemist actually experiences, as
-    # opposed to `duration_seconds`, which includes every tool call after it. `None` when the turn
-    # produced no token at all, which is a different fact from zero.
+    # Seconds to the first streamed token, the latency a chemist experiences. `None` when no token
+    # was produced, which differs from zero.
     ttft_seconds: float | None = Field(default=None, ge=0)
-    # **What the context policy did to this turn**, and the join nothing could make before it.
-    # `chemclaw_context_compactions_total` says the policy fired somewhere in the fleet;
-    # `input_tokens` above says what a turn cost. Neither could answer "what is compaction costing
-    # us, and is it working", because the counter carries no identity and the ledger had never
-    # heard of the policy.
-    #
-    # `context_unreducible` is the one to alert on: a model call went out over the conversation
-    # budget with the policy unable to reduce it further, which is the state immediately before a
-    # context-length failure at the provider. Measured, the compaction counters cannot see it —
-    # both edits run and reclaim nothing — so a turn like that used to look exactly like a quiet
-    # one (`agent/compaction.py::_record_overrun`).
-    #
-    # Both may be true of one turn: an early model call reduced the thread, a later one had
-    # nothing left to reclaim.
+    # What the context policy did to this turn, joinable with its cost. `context_unreducible` is the
+    # one to alert on: a call went out over budget with nothing left to reclaim, the state just
+    # before a provider context-length failure (`agent/compaction.py`). Both may be true of one
+    # turn.
     compacted: bool = False
     context_unreducible: bool = False
-    # **The knowledge dimensions — what this turn looked at, what it cited, what it wrote back.**
-    #
-    # This row already carried what a turn spent and how it ended. It could not say whether the
-    # turn consulted the record at all, and that is the question two separate reviews of this
-    # system's knowledge loop had to answer with bespoke scripts because no series and no table
-    # held it. None of it is recoverable afterwards: the events are gone, and `session_messages`
-    # holds prose rather than which tool ran.
-    #
-    # `retrieval_calls == 0` on a turn that made a claim about this programme's chemistry is the
-    # signal the retrieval obligation in the system prompt exists to move, and the only way to
-    # know whether it worked. `capture_calls` is the same question in the write direction.
-    #
-    # **Consultations, not attempts.** Both used to count the `ToolCallEvent` and stop there, so a
-    # refused or raised call counted as a reading: measured, a turn with one successful
-    # `find_notes`, one repeat-refused `find_notes` and one `expand_note` that raised booked 3
-    # while the record was consulted once. `api/runner._TurnLedger.note_event` takes a failed or
-    # refused call back out, which leaves the 0-vs-nonzero reading unchanged and makes any *rate*
-    # built on these mean what its name says.
+    # What this turn looked at, cited and wrote back; not recoverable afterwards from
+    # `session_messages`. `retrieval_calls == 0` on a turn making claims about the programme's
+    # chemistry is what the retrieval obligation exists to move; `capture_calls` is the write
+    # direction. Consultations, not attempts: `api/runner._TurnLedger.note_event` removes refused or
+    # failed calls.
     retrieval_calls: int = 0
     capture_calls: int = 0
-    # `score_answer` computes these on **every** production turn and they were streamed to the
-    # client and discarded — `api/schemas.py` records that they are not persisted either, so the
-    # richest answer-quality signal this system produces was retained nowhere.
-    #
-    # `answer_confidence` stays `None` when the verifier did not run. That is not a low score and
-    # must never be stored as one: `review_required` can be True with `confidence is None`,
-    # because the answer-shape gate found something and that is not a score.
+    # `score_answer` runs on every turn; these persist its result. `answer_confidence` stays `None`
+    # when the verifier did not run, which is not a low score: `review_required` can be True with no
+    # confidence, when the answer-shape gate fired.
     answer_confidence: float | None = None
     review_required: bool = False
     notes_cited: int = 0
-    # **Which skills shaped this turn** — the dimension the self-confirmation guard reads, and the
-    # one a counter cannot supply: `chemclaw_skill_loads_total{skill}` says a skill was read, never
-    # in which turn, and a Prometheus counter is not a join key. Both tiers land here, since a
-    # personal skill shapes a turn exactly as a reviewed one does and a guard blind to the personal
-    # tier would be blind to the one the agent can propose into.
-    #
-    # Sorted on the way in, so two turns that loaded the same skills produce the same row. A
-    # `list` rather than a `tuple` because psycopg adapts a list to a Postgres array and a tuple to
-    # a composite — the column is `TEXT[]`, and the difference is a runtime error rather than a
-    # style choice.
+    # Which skills shaped this turn, from both tiers (the self-confirmation guard reads it; a
+    # counter cannot be joined to a turn). Sorted so equal sets give equal rows. A `list` because
+    # psycopg adapts lists to arrays and tuples to composites; the column is `TEXT[]`.
     skills_loaded: list[str] = Field(default_factory=list)
     recorded_at: datetime | None = None

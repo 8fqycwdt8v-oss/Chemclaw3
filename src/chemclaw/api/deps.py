@@ -32,11 +32,11 @@ logger = logging.getLogger(__name__)
 # The resources this module can refuse, as a closed label set of source literals, so
 # `chemclaw_authz_refusals_total` cannot grow a series from caller input.
 _SESSION = "session"
-# Design writes refuse in their own module with a 403 (a design's reads are open, so its existence
-# is no secret) and record through `record_refusal`.
+#: Design writes refuse in their own module with a 403 (a design's reads are open, so its existence
+#: is no secret) and record through `record_refusal`.
 DESIGN = "design"
-# Organisation-skill writes refuse in their own module with a 403, as for `DESIGN`: the tier's
-# reads are open. The target is a skill name, never a person's oid.
+#: Organisation-skill writes refuse in their own module with a 403, as for `DESIGN`: the tier's
+#: reads are open. The target is a skill name, never a person's oid.
 ORG_SKILL = "org-skill"
 
 
@@ -46,9 +46,8 @@ def _refuse(
     """Record one authorization refusal, then build the 404 that discloses none of it.
 
     404, not 403, so an id's existence is not confirmed; the server-side record is therefore the
-    only
-    place the distinction survives, which is what makes an enumeration scan visible. `reason` names
-    which arm fired. `target` is caller input and is clipped before logging.
+    only place the distinction survives, which is what makes an enumeration scan visible. `reason`
+    names which arm fired. `target` is caller input and is clipped before logging.
     """
     record_refusal(resource, reason, principal, target, status=404)
     return HTTPException(status_code=404, detail=detail)
@@ -115,9 +114,8 @@ def require_owner(live: LiveSession, principal: Principal, session_id: str, act:
     """403 unless `principal` is the session's owner — for the acts a member may not perform.
 
     A 403 because the caller already passed `resolve_session` and knows the session exists.
-    Owner-only
-    acts: deleting or forking the session, and admitting or removing members. Recorded like every
-    refusal.
+    Owner-only acts: deleting or forking the session, and admitting or removing members. Recorded
+    like every refusal.
     """
     if not owner_permits(live.owner, principal.oid):
         record_refusal(_SESSION, "a member, not the owner", principal, session_id, status=403)
@@ -139,10 +137,8 @@ async def _resolve_session(request: Request, session_id: str, principal: Princip
     """Return the caller's live session — from the cache, or rehydrated from durable ownership.
 
     A cache hit is authorized against its stored owner. On a miss under `session_store="postgres"`,
-    a
-    session the caller may reach is rebuilt over its persisted history, so a pod restart does not
-    orphan
-    it. Unknown and not-yours are the same 404.
+    a session the caller may reach is rebuilt over its persisted history, so a pod restart does not
+    orphan it. Unknown and not-yours are the same 404.
     """
     entry = state(request).live_sessions.get(session_id)
     if entry is not None:
@@ -170,10 +166,8 @@ async def _rehydrate_session(
     if entry is not None:
         return entry
     # The history provider reloads the thread on first use, so a new handle resumes the
-    # conversation.
-    # Rebuilt on the session's own profile: the default would silently widen the tool surface, since
-    # a
-    # profile only attenuates and the LRU can evict a session mid-conversation.
+    # conversation. Rebuilt on the session's own profile: the default would silently widen the tool
+    # surface, since a profile only attenuates and the LRU can evict a session mid-conversation.
     session = TurnSession(session_id=session_id)
     return front.live_sessions.add(session_id, session, owner, profile)
 
@@ -185,8 +179,7 @@ async def resolve_session(request: Request, session_id: str, principal: CurrentU
     """
     live = await _resolve_session(request, session_id, principal)
     # Bound here, not at request entry: the session is a routed path parameter, unknown until the
-    # router
-    # runs. Every session-scoped route passes here. The middleware resets it.
+    # router runs. Every session-scoped route passes here. The middleware resets it.
     bind_request_session(request, session_id)
     return live
 

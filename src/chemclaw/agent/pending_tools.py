@@ -1,9 +1,9 @@
 """Agent tools for the durable wait: raise a question, and read what is outstanding.
 
 `request_external_input` starts a durable workflow, so it is state-changing (authorized, needs an
-actor, plan-gated); `check_pending_requests` is a read. Neither can answer a question: answering
-is the `POST /pending/{id}/answer` route, because a model must never be able to authorize its own
-work (D-005).
+actor, plan-gated); `check_pending_requests` is a read. Neither can answer a question: answering is
+the `POST /pending/{id}/answer` route, because a model must never be able to authorize its own work
+(D-005).
 """
 
 from typing import Literal
@@ -64,8 +64,7 @@ async def request_external_input(
     """
     authorize_trigger("request_external_input")
     # The premise is derived by `AwaitRequest` itself, never passed as an argument, so no producer
-    # of a
-    # wait can skip it.
+    # of a wait can skip it.
     request = AwaitRequest(
         kind=kind,
         subject=subject,
@@ -79,10 +78,8 @@ async def request_external_input(
         deadline_days=deadline_days,
     )
     # Refused at the ask so every open wait begins with a whole premise; that is what lets a break
-    # found
-    # at answer time mean "since the question". Every break refuses here, including `absent`,
-    # because
-    # the model can fix its own citation. Nothing has been written yet.
+    # found at answer time mean "since the question". Every break refuses here, including `absent`,
+    # because the model can fix its own citation. Nothing has been written yet.
     broken = await premise_breaks(request.premise_note_ids)
     if broken:
         count_refusals("ask", broken)
@@ -95,8 +92,8 @@ async def request_external_input(
     # tool owns authorization, the premise refusal and the announcement.
     request_id, opened = await open_wait(request)
     if not opened:
-        # The same question is already open. Hand back its id rather than opening a second wait,
-        # and announce nothing: this run already existed, so a start signal would be false.
+        # The same question is already open. Hand back its id rather than opening a second wait, and
+        # announce nothing: this run already existed, so a start signal would be false.
         return request_id
     record_job_started(request_id, "awaiting")
     return request_id
@@ -170,9 +167,8 @@ async def check_pending_requests(asked_of: str = "", limit: int = 20) -> Pending
     return PendingOverview(
         requests=[
             # Every field of `PendingRequest` is unconstrained text raised by some turn, so the
-            # whole row is
-            # defanged rather than a field list. `answer` is excluded: these are open requests, so
-            # it is empty.
+            # whole row is defanged rather than a field list. `answer` is excluded: these are open
+            # requests, so it is empty.
             defanged_payload(request.model_dump(exclude={"answer"}))
             for request in page.requests
         ],

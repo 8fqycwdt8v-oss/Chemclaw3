@@ -99,13 +99,11 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
     if isinstance(parameter, CategoricalParameter):
         labels = _identity_labels(parameter.categories)
         # The set of choices is the space, not their order, so sort here — in the identity payload
-        # only:
-        # the surrogate keeps the caller's order, since a bare `CategoricalInput` is ordinally
+        # only: the surrogate keeps the caller's order, since a bare `CategoricalInput` is ordinally
         # encoded.
         dumped["categories"] = sorted(labels.values())
         # `structures` and `descriptors` are keyed by the labels, so re-key through the one map
-        # rather
-        # than reducing twice. The SMILES values are never touched.
+        # rather than reducing twice. The SMILES values are never touched.
         if parameter.structures is not None:
             dumped["structures"] = {
                 labels[label]: smiles for label, smiles in parameter.structures.items()
@@ -130,8 +128,8 @@ def _canonical(constraint: Constraint, labels: Mapping[str, Mapping[str, str]]) 
     dumped = constraint.model_dump(mode="json")
     if isinstance(constraint, ExcludeConstraint):
         # Options are category labels, so re-key them through the parameter's map rather than
-        # reducing
-        # again: an option list is a subset of the space and could reduce differently on its own.
+        # reducing again: an option list is a subset of the space and could reduce differently on
+        # its own.
         dumped["pairs"] = sorted(
             [
                 canonical_text(name),

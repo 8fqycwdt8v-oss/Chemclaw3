@@ -89,22 +89,19 @@ class _HttpxJwkClient(PyJWKClient):
     """PyJWT's JWKS client with its one network call moved onto `httpx`.
 
     Upstream fetches via `urlopen`, which follows the process's `HTTPS_PROXY`, so a proxy could
-    answer
-    with a key set of its choosing. The fetch here uses `trust_env=False`, a per-request decision
-    with
-    no process-global state. `verify=` is `_tenant_ssl_context`, built once. Overriding `fetch_data`
-    relies on an undocumented upstream method, pinned in `tests/test_upstream_surface.py`.
+    answer with a key set of its choosing. The fetch here uses `trust_env=False`, a per-request
+    decision with no process-global state. `verify=` is `_tenant_ssl_context`, built once.
+    Overriding `fetch_data` relies on an undocumented upstream method, pinned in
+    `tests/test_upstream_surface.py`.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Upstream's client, plus the lock and the memory that make one fetch serve a crowd.
 
         Fetches per client are serialised (upstream's expiry read and our forced refresh can both
-        call
-        `fetch_data`), and a caller that waited is answered by the fetch it waited behind. A failure
-        is
-        remembered for `entra_jwks_failure_backoff_seconds`, so an IdP fault is not one fetch per
-        request.
+        call `fetch_data`), and a caller that waited is answered by the fetch it waited behind. A
+        failure is remembered for `entra_jwks_failure_backoff_seconds`, so an IdP fault is not one
+        fetch per request.
         """
         super().__init__(*args, **kwargs)
         self._fetch_lock = threading.Lock()
@@ -156,10 +153,8 @@ class _HttpxJwkClient(PyJWKClient):
 
         A redirect is refused explicitly, before `raise_for_status`: following it would move the key
         set's origin past `core/netguard.py`'s allowlist. Our own exception type is raised because
-        PyJWT
-        catches nothing around `fetch_data`. The cache write reproduces upstream's, or PyJWT's
-        key-set cache
-        would be disabled; pinned in `tests/test_upstream_surface.py`.
+        PyJWT catches nothing around `fetch_data`. The cache write reproduces upstream's, or PyJWT's
+        key-set cache would be disabled; pinned in `tests/test_upstream_surface.py`.
         """
         try:
             response = httpx.get(
@@ -190,8 +185,7 @@ class _HttpxJwkClient(PyJWKClient):
                 self.jwk_set_cache.put(jwk_set)
             except (jwt.PyJWTError, ValueError) as exc:
                 # PyJWT parses inside `put` and raises before storing; treat it as a fetch failure
-                # so `fetch_data`
-                # remembers it.
+                # so `fetch_data` remembers it.
                 raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
         return jwk_set
 
@@ -201,10 +195,9 @@ def _tenant_ssl_context(ca_bundle: str) -> ssl.SSLContext:
     """The trust store the tenant's key set is fetched under: `ca_bundle`, else certifi.
 
     Unset, the process's shared certifi context. Set, the bundle replaces certifi rather than
-    joining
-    it, so the mounted file is the complete answer. `SSL_CERT_FILE`/`SSL_CERT_DIR` are ignored, and
-    there is no way to turn verification off: the key set is what every token is validated against.
-    Cached per path; a rotated bundle is picked up on restart.
+    joining it, so the mounted file is the complete answer. `SSL_CERT_FILE`/`SSL_CERT_DIR` are
+    ignored, and there is no way to turn verification off: the key set is what every token is
+    validated against. Cached per path; a rotated bundle is picked up on restart.
 
     Raises:
         OSError: the path does not name a readable file.
@@ -219,9 +212,8 @@ def refuse_unusable_entra_ca_bundle() -> None:
     """Refuse to boot when `entra_ca_bundle` names a file that is not a usable CA bundle.
 
     At boot rather than at the first fetch, where it would surface as a 500 on every request. Uses
-    the
-    same cached `_tenant_ssl_context` the fetch uses, and runs whether or not `entra_required` is
-    on.
+    the same cached `_tenant_ssl_context` the fetch uses, and runs whether or not `entra_required`
+    is on.
 
     Raises:
         RuntimeError: the path is missing, unreadable, a directory, or holds no PEM certificate.
@@ -262,8 +254,7 @@ def _client_for(endpoint: str) -> PyJWKClient:
         client = _jwks_clients.setdefault(
             endpoint,
             # `cooldown_duration=0`: the refresh cooldown is ours (`_forced_refresh_allowed`);
-            # PyJWT's own
-            # would compose with it and stretch `entra_jwks_refresh_cooldown_seconds`.
+            # PyJWT's own would compose with it and stretch `entra_jwks_refresh_cooldown_seconds`.
             _HttpxJwkClient(
                 endpoint, timeout=settings.entra_http_timeout_seconds, cooldown_duration=0
             ),
@@ -300,10 +291,8 @@ def _signing_key(token: str) -> Any:
 
     The fetch is blocking I/O, so callers on the event loop run validation in a worker thread; it is
     bounded by `entra_http_timeout_seconds`. A cached `kid` costs no network. An unknown one may
-    force
-    a re-fetch at most once per `entra_jwks_refresh_cooldown_seconds`, and is otherwise an
-    `AuthError`:
-    the caller must not choose how much work we do.
+    force a re-fetch at most once per `entra_jwks_refresh_cooldown_seconds`, and is otherwise an
+    `AuthError`: the caller must not choose how much work we do.
     """
     endpoint = settings.entra_jwks_endpoint
     client = _client_for(endpoint)
@@ -321,16 +310,14 @@ def _signing_key(token: str) -> Any:
         return client.get_signing_key(kid).key
     except PyJWKClientError as exc:
         # A `PyJWKClientError` here is an unknown key: the caller's problem. An unreachable tenant
-        # is
-        # `IdentityProviderUnavailable`, raised at the fetch, and passes through this frame
+        # is `IdentityProviderUnavailable`, raised at the fetch, and passes through this frame
         # untouched.
         raise AuthError(f"no signing key matches kid {kid!r}: {exc}") from exc
     except (ValueError, jwt.PyJWTError) as exc:
         # The IdP answered with something that is not a usable key set (`PyJWKSetError` and other
         # `PyJWTError`s, or a `ValueError`). That is our outage, not a bad credential, so 503 rather
-        # than 401.
-        # Last, so the arms above keep their meaning; an `AuthError` raised in the `try` passes
-        # through.
+        # than 401. Last, so the arms above keep their meaning; an `AuthError` raised in the `try`
+        # passes through.
         raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
 
 
@@ -361,8 +348,7 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     """Build a `Principal` from validated claims (`oid` is mandatory — no anonymous identity).
 
     Under `entra_group_claims_as_roles` the token's `groups` join the same entitlement set every
-    gate
-    reads, so no gate has to decide separately whether to consult groups.
+    gate reads, so no gate has to decide separately whether to consult groups.
     """
     oid = claims.get("oid")
     # Checked as `Principal` will check it (a string, non-empty once stripped), so a malformed
@@ -375,14 +361,11 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     entitlements = _string_list_claim(claims, "roles")
     if settings.entra_group_claims_as_roles:
         # Entra emits `_claim_names` instead of `groups` when a user is in too many groups. That is
-        # an
-        # overage, not an empty membership; resolving it needs a Graph call, which is not permitted,
-        # so it
-        # is logged rather than silently treated as no groups.
+        # an overage, not an empty membership; resolving it needs a Graph call, which is not
+        # permitted, so it is logged rather than silently treated as no groups.
         if "groups" not in claims and "_claim_names" in claims:
             # Counted as well as logged: the counter is what makes someone look, and the chemist
-            # sees only a
-            # gated share returning nothing.
+            # sees only a gated share returning nothing.
             record_metric(lambda m: m.increment("chemclaw_group_claim_overage_total"))
             logger.warning(
                 "token for %s carries a group-claim overage rather than 'groups'; "
@@ -390,8 +373,7 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
                 oid,
             )
         # Namespaced: group claims may be names rather than object ids (a tenant setting), so an
-        # unprefixed
-        # group could match a privileged app role and widen the write-tool gates.
+        # unprefixed group could match a privileged app role and widen the write-tool gates.
         entitlements += [
             f"{GROUP_ROLE_PREFIX}{group}" for group in _string_list_claim(claims, "groups")
         ]
@@ -417,8 +399,7 @@ async def require_principal(request: Request) -> Principal:
 
     With `entra_required` False (local dev) a fixed dev principal is returned; otherwise a
     missing/invalid `Authorization: Bearer` token is a 401. Validation runs in a worker thread
-    because
-    a JWKS cache miss is a blocking fetch, and every stream shares the event loop.
+    because a JWKS cache miss is a blocking fetch, and every stream shares the event loop.
     """
     _shed_if_the_database_is_known_down(request)
     if not settings.entra_required:
@@ -429,14 +410,12 @@ async def require_principal(request: Request) -> Principal:
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         # Counted and logged so a client sending no header is distinguishable from no failures.
-        # `info`
-        # because unauthenticated probes are ordinary internet traffic; the counter makes a rate
-        # alertable.
+        # `info` because unauthenticated probes are ordinary internet traffic; the counter makes a
+        # rate alertable.
         _count_auth_failure("missing")
         # Log the route template, never `request.url.path`: on this unauthenticated path the path is
         # caller-authored, unbounded text that would stall the redacting log filter and inject into
-        # logs.
-        # An unrouted request reads `<unmatched>`.
+        # logs. An unrouted request reads `<unmatched>`.
         logger.info("request to %s carried no bearer token", route_template(request.scope))
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
@@ -462,8 +441,7 @@ async def reauthorize(request: Request, principal: Principal) -> Principal:
     For work that starts long after its request was authenticated: a message that waited in a shared
     session's queue runs its turn up to `service_turn_queue_max` × `service_turn_timeout_seconds`
     later. Re-runs the same validation (signature, audience, issuer, `exp`); roles come only from
-    the
-    token, so expiry is how they change. A token now naming someone else is refused. Not
+    the token, so expiry is how they change. A token now naming someone else is refused. Not
     `require_principal`, which would also charge the rate budget and rebind ambients.
 
     Under `entra_required=False` there is no credential to re-check and the dev principal stands.
@@ -507,10 +485,9 @@ def _refuse_exposed_dev_principal(request: Request) -> None:
     """Refuse to mint the dev principal for a request that arrived from the network.
 
     The boot guard reads `settings.service_host`, which uvicorn's `--host` can contradict; this
-    reads
-    the socket the request actually arrived on. Dev branch only — with `entra_required` an off-box
-    request is an ordinary 401. `service_allow_insecure=true` opts out, as at boot. 503 because no
-    credential would help: the service is misconfigured.
+    reads the socket the request actually arrived on. Dev branch only — with `entra_required` an
+    off-box request is an ordinary 401. `service_allow_insecure=true` opts out, as at boot. 503
+    because no credential would help: the service is misconfigured.
 
     Raises:
         HTTPException: 503, when an unauthenticated deployment is serving the network.
@@ -535,8 +512,7 @@ def _bind(request: Request, principal: Principal) -> Principal:
     """Make the authenticated caller ambient for the rest of the request, then return it.
 
     Here because every authenticated route funnels through this function, so every log line names
-    its
-    actor. The reset is `api/middleware._RequestObservability`'s, which runs on every exit path.
+    its actor. The reset is `api/middleware._RequestObservability`'s, which runs on every exit path.
     """
     bind_request_actor(request, principal.oid, principal.roles)
     return principal
@@ -546,9 +522,8 @@ def _within_budget(principal: Principal) -> Principal:
     """Spend one request against this principal's rate budget, or 429.
 
     Here because every authenticated route funnels through `require_principal`, so a new route
-    cannot
-    skip it; the policy is `api/rate_limit.py`'s. After validation, so the limit is per person, not
-    per credential. Probe routes do not depend on this and are never limited.
+    cannot skip it; the policy is `api/rate_limit.py`'s. After validation, so the limit is per
+    person, not per credential. Probe routes do not depend on this and are never limited.
     """
     try:
         enforce_request_budget(principal.oid)

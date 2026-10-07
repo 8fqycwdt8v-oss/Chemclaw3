@@ -51,8 +51,7 @@ class DraftStream:
     """The `exhibit_draft` frames one turn's model chunks produce, call by call.
 
     One instance per turn, fed every root-agent chunk in order (`feed`) and closed whenever the
-    model
-    node completes (`close`), when its calls are whole.
+    model node completes (`close`), when its calls are whole.
     """
 
     def __init__(self) -> None:
@@ -85,8 +84,7 @@ class DraftStream:
             now = time.monotonic()
             interval = _interval_seconds(call.sent_bytes)
             # After the first frame, throttle on the last parse, so arguments that stopped growing
-            # the text are
-            # not re-parsed per chunk; before it, on the arguments' growth.
+            # the text are not re-parsed per chunk; before it, on the arguments' growth.
             if call.sent_chars:
                 if call.checked_at is not None and now - call.checked_at < interval:
                     continue
@@ -118,9 +116,8 @@ def _interval_seconds(sent_bytes: int) -> float:
     """How long a call waits after a frame of `sent_bytes` before its next one is considered.
 
     The floor `exhibit_draft_min_interval_ms`, stretched to `sent_bytes /
-    exhibit_draft_bytes_per_ms`
-    for long documents: each frame is the whole text, so a fixed interval would make draft bytes
-    quadratic in size. It also bounds the parse cost.
+    exhibit_draft_bytes_per_ms` for long documents: each frame is the whole text, so a fixed
+    interval would make draft bytes quadratic in size. It also bounds the parse cost.
     """
     floor = settings.exhibit_draft_min_interval_ms
     return max(floor, sent_bytes / settings.exhibit_draft_bytes_per_ms) / 1000

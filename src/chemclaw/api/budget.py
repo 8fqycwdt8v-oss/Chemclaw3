@@ -100,12 +100,10 @@ def _warn(scope: str, identity: str, turns: int, tokens: int, booked: int) -> No
     """Say so on the one turn that carries a scope's usage across the warning fraction of a cap.
 
     The log line carries `identity` because the alert metric is unlabelled (an oid or session id
-    would
-    be unbounded cardinality); the log is how an operator finds who. Called from `record` only,
-    since
-    `check` runs twice per turn. Edge-triggered — `booked` lets the previous total be derived
-    without
-    per-principal state — so one crossing produces one warning, as the alert rule assumes.
+    would be unbounded cardinality); the log is how an operator finds who. Called from `record`
+    only, since `check` runs twice per turn. Edge-triggered — `booked` lets the previous total be
+    derived without per-principal state — so one crossing produces one warning, as the alert rule
+    assumes.
     """
     caps = (
         ("turns", turns, turns - 1, _cap(scope, "turns")),
@@ -146,10 +144,9 @@ def _book(
     """Add one turn and its (non-negative) tokens to `key`, evicting the LRU past capacity.
 
     `rolls` starts a fresh window when the counter's has expired; passed for the user scope only,
-    which
-    the durable row windows. A session is not windowed: its cap bounds one conversation, not a rate.
-    The map is a `BoundedLru` so a long-lived pod does not keep a counter per session or user ever
-    seen; capacity is read live from config.
+    which the durable row windows. A session is not windowed: its cap bounds one conversation, not a
+    rate. The map is a `BoundedLru` so a long-lived pod does not keep a counter per session or user
+    ever seen; capacity is read live from config.
 
     Returns the updated counter so the caller can warn off it without a second lookup.
     """
@@ -167,18 +164,14 @@ class BudgetTracker:
 
     `check` refuses a turn before it runs; `record` books it after. A lock guards the in-process
     counters. Since the two are separate calls, turns admitted concurrently may overshoot a cap by
-    up to
-    `service_max_concurrent_turns` plus any detached turns still running — which holds only because
-    the
-    front door re-checks after taking the admission permit
-    (`chemclaw.api.routes.turns.post_message`).
-    Both maps are LRU-bounded (`service_max_live_sessions`, `budget_max_tracked_users`).
+    up to `service_max_concurrent_turns` plus any detached turns still running — which holds only
+    because the front door re-checks after taking the admission permit
+    (`chemclaw.api.routes.turns.post_message`). Both maps are LRU-bounded
+    (`service_max_live_sessions`, `budget_max_tracked_users`).
 
     `record` is synchronous because its caller, `api/runner._book_turn_spend`, runs in teardown
-    where
-    an `await` would re-raise a pending cancellation; it schedules the durable write as a task.
-    `check`
-    is async so it can read the durable row before admitting a turn.
+    where an `await` would re-raise a pending cancellation; it schedules the durable write as a
+    task. `check` is async so it can read the durable row before admitting a turn.
     """
 
     def __init__(self) -> None:
@@ -195,11 +188,9 @@ class BudgetTracker:
         """Raise `BudgetExceeded` if the next turn would exceed a session or user cap.
 
         No-op when `budget_enabled` is off. Checked against usage already booked, so a cap of 100
-        allows
-        100 turns and refuses the 101st. The user scope takes the larger of the in-process and
-        durable
-        counts; an unreachable database degrades to the in-process count rather than failing the
-        turn.
+        allows 100 turns and refuses the 101st. The user scope takes the larger of the in-process
+        and durable counts; an unreachable database degrades to the in-process count rather than
+        failing the turn.
         """
         if not settings.budget_enabled:
             return
@@ -251,20 +242,16 @@ class BudgetTracker:
         """Re-anchor this pod's counter for `user` to the durable window; return the counter.
 
         The local counter starts when this pod first books the user, which may be long after the
-        durable
-        window opened, so it is aligned with that window:
+        durable window opened, so it is aligned with that window:
 
         - the durable window has expired: drop local counts and restart now;
         - the durable window is newer than the one last reconciled, or opened after the counter
-          started:
-          adopt the durable counts, which already hold every turn in the new window;
+          started: adopt the durable counts, which already hold every turn in the new window;
         - otherwise keep the local counts (the unwritten turns `max()` exists for) and adopt the
-          window's
-          start so both roll together.
+          window's start so both roll together.
 
         No durable row (`start is None`) leaves the counter alone. Comparing the window's identity
-        rather
-        than its start on the local clock makes the decision once per window.
+        rather than its start on the local clock makes the decision once per window.
         """
         if stored.start is None:
             with self._lock:
@@ -304,9 +291,8 @@ class BudgetTracker:
         """Book one completed turn and its metered tokens against the session and the user.
 
         No-op when `budget_enabled` is off. A failed turn is still booked: it consumed tokens.
-        Synchronous
-        by contract (see the class); the in-process counters update now and the durable write is
-        scheduled as its own task.
+        Synchronous by contract (see the class); the in-process counters update now and the durable
+        write is scheduled as its own task.
         """
         if not settings.budget_enabled:
             return
@@ -327,8 +313,7 @@ class BudgetTracker:
         """Book the durable window off the hot path, warning off the totals it returns.
 
         A failed write is logged and lost rather than failing an answered turn; the in-process
-        counter
-        still holds the turn.
+        counter still holds the turn.
         """
         from chemclaw.api import budget_store
 
@@ -337,8 +322,7 @@ class BudgetTracker:
                 stored = await budget_store.book(user, tokens)
             except asyncio.CancelledError:
                 # Cancellation (shutdown, rollout) is the common loss mode for a fire-and-forget
-                # task and is not an
-                # `Exception`, so it is recorded separately.
+                # task and is not an `Exception`, so it is recorded separately.
                 degraded(
                     logger,
                     "budget_window",
@@ -389,8 +373,8 @@ async def check_thread_size(session_id: str) -> None:
     Every turn loads the whole thread, so a turn's memory cost grows with the conversation; enough
     concurrent turns on large threads can OOM the pod. Reads the stored thread, which every replica
     sees. Not behind `budget_enabled`: it is a memory bound. Called at request entry (clean 429
-    before a
-    claim) and again after the permit (the binding check). An unreachable database admits the turn.
+    before a claim) and again after the permit (the binding check). An unreachable database admits
+    the turn.
     """
     cap = settings.session_max_thread_bytes
     if not cap:
@@ -419,8 +403,7 @@ async def drain_pending(timeout: float = 5.0) -> None:
     """Wait for the in-flight durable bookings, so an orderly shutdown does not drop them.
 
     Called from the front door's lifespan after the turns drain; otherwise every rollout hands back
-    the
-    last booking of each in-flight principal. Bounded, since the pod is inside its termination
+    the last booking of each in-flight principal. Bounded, since the pod is inside its termination
     grace.
     """
     if not _PENDING:

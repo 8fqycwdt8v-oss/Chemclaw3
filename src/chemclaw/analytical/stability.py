@@ -24,8 +24,8 @@ from chemclaw.core.units import Measurement, UnitError
 #: The confidence level Q1E specifies for the one-sided bound.
 CONFIDENCE = 0.95
 
-# The fewest timepoints a regression may be fitted to. Not a statistical recommendation: with two
-# points there are zero residual degrees of freedom and no confidence band.
+#: The fewest timepoints a regression may be fitted to. Not a statistical recommendation: with two
+#: points there are zero residual degrees of freedom and no confidence band.
 MINIMUM_TIMEPOINTS = 3
 
 
@@ -40,7 +40,7 @@ class StabilityError(ValueError):
 class Timepoint:
     """One measurement of one attribute at one storage time."""
 
-    # Months on stability: the unit Q1E's periods and extrapolation limits are written in.
+    #: Months on stability: the unit Q1E's periods and extrapolation limits are written in.
     months: float
     value: Measurement
 
@@ -53,9 +53,8 @@ class TrendEstimate:
     slope_per_month: float
     #: The fitted value at time zero, in the attribute's own unit.
     intercept: float
-    # Coefficient of determination. Reported, not gated: a flat, in-control attribute legitimately
-    # has
-    # a low value.
+    #: Coefficient of determination. Reported, not gated: a flat, in-control attribute legitimately
+    #: has a low value.
     r_squared: float
     #: Months at which the one-sided 95% bound reaches the limit, or `None` when it does not within
     #: the extrapolation Q1E permits. `note` says which.
@@ -99,10 +98,8 @@ def estimate_trend(timepoints: list[Timepoint], criterion: AcceptanceCriterion) 
     """Fit the attribute against time and find where its 95% bound meets the criterion.
 
     The bound at time `t` is `fit(t) ± t_{0.95,n-2} · s · sqrt(1/n + (t - x̄)²/Sxx)` — the
-    confidence
-    interval for the mean response, as Q1E uses. The crossing is found by bisection over the
-    permitted
-    extrapolation window, since the bound is not linear in `t`.
+    confidence interval for the mean response, as Q1E uses. The crossing is found by bisection over
+    the permitted extrapolation window, since the bound is not linear in `t`.
 
     Args:
         timepoints: At least `MINIMUM_TIMEPOINTS` measurements of one attribute, in units of one
@@ -171,9 +168,8 @@ def _is_a_drift(months: list[float], slope: float, standard_error: float) -> boo
     """Whether the fitted slope is distinguishable from zero at the band's own confidence level.
 
     Compares the slope against `t_{0.95,n-2} · s / sqrt(Sxx)`, using `CONFIDENCE` so the module
-    applies
-    one standard. With a perfect fit (`s == 0`) any non-zero slope is a drift. `_fit` guarantees
-    `Sxx > 0`.
+    applies one standard. With a perfect fit (`s == 0`) any non-zero slope is a drift. `_fit`
+    guarantees `Sxx > 0`.
     """
     n = len(months)
     if standard_error == 0.0:
@@ -206,8 +202,7 @@ def _side_the_attribute_approaches(
     * it does not, and the slope is a real drift (`_is_a_drift`) — still that side, so `_bound_for`
       raises: there is nothing to reach;
     * it does not, and the slope is noise — the criterion decides: the side it states, or, with
-      both,
-      the bound the fitted value sits nearer to, which the widening band reaches first.
+      both, the bound the fitted value sits nearer to, which the widening band reaches first.
     """
     rising = slope > 0
     if slope != 0.0 and (drifting or _states_a_bound(criterion, rising=rising)):
@@ -257,8 +252,7 @@ def _crossing(
     """Where the one-sided bound reaches `limit`, inside the extrapolation Q1E permits.
 
     Returns `(None, why)` when it does not — the common answer for a stable product, deliberately
-    not
-    spelled as a very large number.
+    not spelled as a very large number.
     """
     n = len(months)
     mean_x = sum(months) / n

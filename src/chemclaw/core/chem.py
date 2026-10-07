@@ -449,8 +449,7 @@ def require_canonical_smiles(smiles: str) -> str:
     """RDKit canonical SMILES, raising `InvalidSmilesError` if it does not parse.
 
     For keys that must reject bad input and must not distinguish spellings: the calculation cache
-    and
-    durable dedup ids, so `"CCO"` and `"OCC"` share one entry (D-011). Parses through
+    and durable dedup ids, so `"CCO"` and `"OCC"` share one entry. Parses through
     `require_molecule`.
     """
     return str(Chem.MolToSmiles(require_molecule(smiles)))
@@ -503,7 +502,7 @@ def compound_id(smiles: str) -> str:
 
     Structure-derived, so differently spelled sources reach one note. Here because its callers span
     layers that share nothing else (ingest writes the note, fingerprint connectors cite it), and a
-    connector may not import the knowledge graph (D-115).
+    connector may not import the knowledge graph.
     """
     return compound_id_of_standard(require_standard_smiles(smiles))
 

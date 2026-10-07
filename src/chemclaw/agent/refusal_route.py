@@ -72,9 +72,7 @@ def sentence_of(text: str) -> str:
     """`text` without its routing footer — what a reader who is not the model should be shown.
 
     The footer is addressed to the model; the chemist's transcript (`tool_authz.failure_detail`)
-    gets
-    the sentence alone. Here because where the footer begins is this module's knowledge. Text with
-    no
-    footer comes back unchanged.
+    gets the sentence alone. Here because where the footer begins is this module's knowledge. Text
+    with no footer comes back unchanged.
     """
     return text.split(f"\n{FOOTER_OPENING}")[0]

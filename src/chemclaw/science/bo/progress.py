@@ -63,8 +63,8 @@ class CampaignProgress(BaseModel):
     window: int = Field(ge=1)
 
     n_observations: int = Field(ge=0)
-    # Distinct parameter combinations run (replicates count once), including any an exclusion
-    # later forbade.
+    # Distinct parameter combinations run (replicates count once), including any an exclusion later
+    # forbade.
     n_distinct: int = Field(ge=0)
     # How many of those occupy a cell of the *feasible* grid — what a coverage claim may divide by.
     # A run can fall outside it through an exclusion or a value outside the current domain (e.g. a
@@ -156,8 +156,7 @@ class CampaignProgress(BaseModel):
         if self.design_space is None:
             return ""
         # Both sides feasible: the numerator is runs occupying a feasible cell; `n_distinct` is
-        # still
-        # reported beside it.
+        # still reported beside it.
         stated = (
             f" ({self.n_distinct_in_space} distinct condition(s) out of the {self.design_space} "
             "the feasible grid holds"

@@ -30,13 +30,13 @@ logger = logging.getLogger(__name__)
 #: The name this surface reports as, in its health payload and its metric labels.
 FACE_NAME = "chemclaw-read"
 
-# Read-only tools that are not advertised here, each with the reason.
-#
-# Read-only is not sufficient. The face exports what the programme knows about its chemistry, never
-# what it knows about its people — who is doing what and what it cost — and nothing scoped to a turn
-# an external caller does not have. A deny-list because nothing classifies that property; it is kept
-# honest as a partition: `tests/test_mcp_face.py` asserts every read-only tool is either advertised
-# or named here.
+#: Read-only tools that are not advertised here, each with the reason.
+#:
+#: Read-only is not sufficient. The face exports what the programme knows about its chemistry, never
+#: what it knows about its people — who is doing what and what it cost — and nothing scoped to a
+#: turn an external caller does not have. A deny-list because nothing classifies that property; it
+#: is kept honest as a partition: `tests/test_mcp_face.py` asserts every read-only tool is either
+#: advertised or named here.
 WITHHELD: dict[str, str] = {
     # Scoped to a turn this caller does not have.
     "ask_clarifying_question": "puts a question to the chemist in the conversation; there is none",
@@ -136,8 +136,7 @@ def face_token_env() -> str:
     """The environment variable the face's bearer token is read from.
 
     Not in a manifest: the face is not a connector, and `CHEMCLAW_CONNECTOR_URLS` must never name
-    it,
-    or the deployment would dial itself.
+    it, or the deployment would dial itself.
     """
     return settings.mcp_face_token_env
 
@@ -171,8 +170,7 @@ def main() -> None:
     configure_logging()
     configure_telemetry()
     # This process makes model calls (`condense_protocols` builds its own chat model), so the
-    # gateway
-    # guard applies.
+    # gateway guard applies.
     refuse_unconfigured_llm_gateway()
     logger.info("mcp face starting on %s:%s", settings.service_host, settings.service_port)
     uvicorn.run(

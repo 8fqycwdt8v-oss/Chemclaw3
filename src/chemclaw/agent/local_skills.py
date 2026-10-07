@@ -1,8 +1,8 @@
 """A chemist's own skills: judgment that shapes their turns and nobody else's.
 
-The chemist writes this tier through `POST /skills/mine` (or by accepting a proposal); no agent
-path writes a skill, and `agent/skill_store.PermittedStoreBackend` raises `SkillsReadOnlyRefusal`
-on every write verb. Invariants:
+The chemist writes this tier through `POST /skills/mine` (or by accepting a proposal); no agent path
+writes a skill, and `agent/skill_store.PermittedStoreBackend` raises `SkillsReadOnlyRefusal` on
+every write verb. Invariants:
 
 - **Per-actor, resolved per turn.** The namespace closes over the turn's actor when
   `build_langgraph_agent` builds the backend, so another chemist's turn cannot reach it.
@@ -183,9 +183,8 @@ def _count_a_local_load(name: str) -> None:
     """Book one delivered personal-skill body, on the two channels this tier may use.
 
     A bare counter, because a personal skill's name is private vocabulary and a label would put it
-    in
-    a shared exposition. `record_skill_loaded` carries the name in process only (digested before it
-    reaches `turn_costs`) for the distiller's self-confirmation guard.
+    in a shared exposition. `record_skill_loaded` carries the name in process only (digested before
+    it reaches `turn_costs`) for the distiller's self-confirmation guard.
     """
     record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
     record_skill_loaded(name)
@@ -239,8 +238,7 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
     async with _one_writer_per_chemist(actor):
         held = await list_local_skills(store, actor)
         # Refused rather than evicted, counted inside the lock. Replacing a held skill is allowed at
-        # the cap
-        # so one can always be corrected.
+        # the cap so one can always be corrected.
         if name not in held and len(held) >= settings.agent_local_skills_max:
             raise SkillRefused(
                 f"you already keep {len(held)} personal skills, which is this deployment's limit "
@@ -249,10 +247,8 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
                 conflict=True,
             )
         # A name the organisation already publishes is refused here (it would never act, since
-        # `/org` is
-        # mounted after `/mine`). The reverse is allowed, so one person's private name cannot block
-        # a
-        # deployment-wide publication.
+        # `/org` is mounted after `/mine`). The reverse is allowed, so one person's private name
+        # cannot block a deployment-wide publication.
         from chemclaw.agent.org_skills import list_org_skills
 
         if name in await list_org_skills(store):
@@ -279,8 +275,7 @@ async def list_local_skills(store: Any, actor: str) -> list[str]:
 
     Read off the store because the route has no turn and so no mount. Paged
     (`skill_store.list_skill_names`), since the store's default page is 10 and a chemist must be
-    able
-    to see and delete every skill acting on their turns.
+    able to see and delete every skill acting on their turns.
     """
     return await list_skill_names(store, local_skills_namespace(actor))
 

@@ -26,11 +26,9 @@ async def get_note(
 
     404 for an unknown id: a citation is a string in prose, so a miss is a missing note (usually a
     typo'd `[[wikilink]]`). `expand_note` raises `ChemclawError`, whose message is safe to pass
-    through.
-    `hops` is clamped inside `expand_note` against `graph_max_hops`. Read through the front-door
-    module
-    at call time (the suite's patch seam). Revalidated with an `ETag`, `private`; see
-    `api/routes/caching.py`.
+    through. `hops` is clamped inside `expand_note` against `graph_max_hops`. Read through the
+    front-door module at call time (the suite's patch seam). Revalidated with an `ETag`, `private`;
+    see `api/routes/caching.py`.
     """
     try:
         view = await front_door.expand_note(note_id, hops)

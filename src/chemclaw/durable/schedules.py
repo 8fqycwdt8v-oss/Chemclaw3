@@ -131,8 +131,8 @@ def planned_schedules() -> list[PlannedSchedule]:
     # already the enable switch; a second flag could only restate or contradict it.
     if active_ingest_source_names():
         schedules.append(PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
-    # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
-    # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
+    # Opt-in: only where a committed baseline is maintained, so a deployment never fires an eval it
+    # has no baseline for.
     if settings.eval_drift_enabled:
         drift_every = timedelta(minutes=settings.eval_drift_schedule_minutes)
         schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))

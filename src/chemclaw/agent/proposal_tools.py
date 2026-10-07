@@ -1,10 +1,9 @@
 """The agent's one way to suggest a change to its own behaviour — a proposal, never a skill.
 
-`propose_skill` writes a row in `behaviour_proposals` and nothing else; a person accepts it
-through `POST /proposals/...`, so a model never authorizes its own work, and no turn writes a
-skill (`agent/skill_backend.SkillsReadOnlyRefusal`). It is in `authz.STATE_CHANGING_TOOLS` so the
-plan gate sees a turn proposing a behaviour change, and so it is subtracted from every helper's
-surface.
+`propose_skill` writes a row in `behaviour_proposals` and nothing else; a person accepts it through
+`POST /proposals/...`, so a model never authorizes its own work, and no turn writes a skill
+(`agent/skill_backend.SkillsReadOnlyRefusal`). It is in `authz.STATE_CHANGING_TOOLS` so the plan
+gate sees a turn proposing a behaviour change, and so it is subtracted from every helper's surface.
 """
 
 from __future__ import annotations
@@ -81,9 +80,8 @@ def _validated(name: str, body: str) -> str:
     """The name this body declares, checked against `name` and against the tier's own bounds.
 
     Validated at proposal time through `validated_skill` (the same checks `POST /skills/mine`
-    makes),
-    so an accepted proposal can always be written. It adds the check only this tool can make: the
-    frontmatter's name and the `name` argument agree.
+    makes), so an accepted proposal can always be written. It adds the check only this tool can
+    make: the frontmatter's name and the `name` argument agree.
 
     Raises:
         ChemclawError: Worded for the model, naming what is wrong and what to send instead.
@@ -116,9 +114,8 @@ def _what_became_of_it(name: str, outcome: Proposal, *, proposed_now: bool) -> s
     """What to tell the model: proposed, already open, or already decided.
 
     Each calls for a different next move: mention it to the chemist; stop repeating it; or respond
-    to
-    the decision's reason rather than retry. A revived (previously superseded) proposal is waiting
-    again, so it reads as proposed.
+    to the decision's reason rather than retry. A revived (previously superseded) proposal is
+    waiting again, so it reads as proposed.
     """
     if outcome.decided:
         return (

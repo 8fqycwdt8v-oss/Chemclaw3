@@ -372,8 +372,7 @@ def thermochemistry_from_hessian(
         intensities = _ir_intensities(unpack_npy(hessian.dipole_derivatives_npy), vectors, masses)
     else:
         # Unreachable through the server, but a Hessian with neither would otherwise yield a
-        # spectrum of
-        # zero-intensity bands.
+        # spectrum of zero-intensity bands.
         raise ValueError(
             f"the Hessian for {structure.smiles or structure.structure_id} carries neither IR "
             "intensities nor dipole derivatives, so no spectrum can be derived from it"
@@ -419,8 +418,7 @@ def thermochemistry_from_hessian(
         if value < -settings.xtb_imaginary_threshold_cm
     ]
     # The other way of not being a minimum: away from a stationary point the spurious modes are
-    # often
-    # not imaginary, so the frequencies cannot show it. `None` means not assessed (no gradient
+    # often not imaginary, so the frequencies cannot show it. `None` means not assessed (no gradient
     # reported), which stays distinct from stationary.
     gradient = hessian.max_gradient_hartree_per_angstrom
     stationary = (

@@ -1,7 +1,7 @@
-"""One bounded LRU map for every cache keyed by an unbounded identity (session id, user oid,
-principal).
+"""One bounded LRU map for every cache keyed by an unbounded identity.
 
-Shared by the front door's live sessions, the budget counters, the rate limiter's buckets and the
+Such keys are session ids, user oids and principals. Shared by the front door's live sessions,
+the budget counters, the rate limiter's buckets and the
 attachment store. `core/metrics.py`'s label-series cap deliberately does not use it: that cap
 refuses new series rather than evicting old ones, since evicting would let an attacker reset real
 counters.

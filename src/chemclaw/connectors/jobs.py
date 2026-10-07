@@ -200,7 +200,7 @@ def _build_params_model(connector: str, job: JobSpec) -> type[BaseModel]:
 
 
 # The `rationale` argument, documented once for every generated job tool, written for the model so
-# the stored reason is a usable sentence (D-157).
+# the stored reason is a usable sentence.
 _RATIONALE_DOC = [
     "    rationale: Why this run is worth doing, in a sentence or two a chemist would recognise:",
     "        the question it should answer and what prompted it (whose request, which earlier",
@@ -251,7 +251,7 @@ def _docstring(job: JobSpec) -> str:
 
 
 def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
-    """The deterministic id of one connector job run: the idempotency key (D-011).
+    """The deterministic id of one connector job run: the idempotency key.
 
     Public because it is a contract: a duplicate launch must resolve to this id, and in-flight
     histories depend on it staying stable.
@@ -295,8 +295,7 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
 
     Validate, check funding and availability, authorize the expensive trigger, run the declared
     precondition, serialize. The single pre-flight shared by every launcher (the agent tool below
-    and
-    `durable.template_activities.authorize_job_step`), so no launcher can skip a step (D-168).
+    and `durable.template_activities.authorize_job_step`), so no launcher can skip a step.
 
     Args:
         connector: The owning connector's name, for the refusal message only.
@@ -311,8 +310,8 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
         ValidationError: `params` does not satisfy the job's declared schema.
         Exception: Whatever the declared precondition raises to refuse the launch.
     """
-    # Validate here, because a tool body receives the decoded JSON object, not a constructed model
-    # (D-138). `model_validate` also accepts an already-built model.
+    # Validate here, because a tool body receives the decoded JSON object, not a constructed model.
+    # `model_validate` also accepts an already-built model.
     spec = _params_model(connector, job).model_validate(params)
     # First, so an unfunded job is refused before running its precondition (bundle code).
     require_funded_ceiling(connector, job)
@@ -357,11 +356,9 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         params: params_model,  # type: ignore[valid-type]
         rationale: str,
     ) -> str | ConnectorJobResult:
-        # Reject-if-absent: a durable run with no recorded reason is refused (D-157), as a
-        # `ValueError` the
+        # Reject-if-absent: a durable run with no recorded reason is refused, as a `ValueError` the
         # model can correct in the same turn. Checked here, not in `prepare_job_launch`, because the
-        # template
-        # job step has no model to author a reason and records the template run instead.
+        # template job step has no model to author a reason and records the template run instead.
         if not rationale.strip():
             raise ConnectorJobError(
                 f"{job.name}: rationale must say why this run is being started — it is stored with "
@@ -370,7 +367,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # The single shared pre-flight: validate, authorize, check the precondition.
         payload = prepare_job_launch(connector, job, params)
         workflow_id = job_workflow_id(connector, job.name, payload)
-        # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
+        # `require_actor` is the core rule: under Entra, refuse durable work with no user.
         requested_by = require_actor()
         plan_step, plan_hash = get_current_plan_link()
         # `connect()` frames an unreachable broker as a retryable `SubsystemUnavailableError`; do
@@ -387,8 +384,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     task_queue=bundle_queue(connector),
                     payload=payload,
                     # Outside `payload`, hence outside `workflow_id`: identical requests with
-                    # different reasons still
-                    # rejoin one run (D-011).
+                    # different reasons still rejoin one run.
                     rationale=rationale.strip(),
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",
@@ -464,7 +460,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 # nothing for the chemist to poll — the result *is* the tool's return value.
                 return finished
         # Announced on a genuine start so the turn's event stream shows the launch while it is still
-        # streaming (D-042).
+        # streaming.
         record_job_started(handle.id, job.name)
         return handle.id
 

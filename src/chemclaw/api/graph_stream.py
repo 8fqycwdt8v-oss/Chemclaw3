@@ -78,12 +78,9 @@ def root_depth(graph: Any) -> int:
 
     Attribution here is a depth test: events deeper than this come from below the turn's agent. A
     single agent is the stream's root (0); in a turn graph (`agent/turn_graph.py`) every peer is a
-    node
-    one frame down (1), and treating it as root-depth 0 would mark the chemist's agent as a subagent
-    and
-    answer the turn empty. Read from a stamp the builder sets, not derived: every compiled agent has
-    an
-    `active_agent` channel, and node names move with upstream.
+    node one frame down (1), and treating it as root-depth 0 would mark the chemist's agent as a
+    subagent and answer the turn empty. Read from a stamp the builder sets, not derived: every
+    compiled agent has an `active_agent` channel, and node names move with upstream.
 
     Args:
         graph: The compiled graph a turn runs on.
@@ -122,10 +119,9 @@ async def graph_events(
             transcript projection (`api/runner._record_transcript`); events carry no call id, so
             they could not pair a result with its call. `None` collects nothing.
         carry: The turn's per-turn counters (`model_calls`, `billed_tokens`, `handoffs`), seeded
-        into
-            this run's input and updated from it, so the caps span a mid-turn resume — the one case
-            where a turn is two graph invocations and untracked channels would restart at 0. `None`
-            for one invocation per turn.
+            into this run's input and updated from it, so the caps span a mid-turn resume — the one
+            case where a turn is two graph invocations and untracked channels would restart at 0.
+            `None` for one invocation per turn.
 
     Yields:
         `Event`s in the order and with the meanings `api/events.py` declares.
@@ -133,19 +129,15 @@ async def graph_events(
     todos: list[str] = []
     # Calls already reported as failed, by call id. Not read from the `ToolMessage` status, which
     # `agent/tool_authz.answered_failure` rewrites to `"success"`; without this a failed call would
-    # also
-    # emit `tool_result` and its error would enter the grounding corpus. By id, since two calls to
-    # one
-    # tool may differ.
+    # also emit `tool_result` and its error would enter the grounding corpus. By id, since two calls
+    # to one tool may differ.
     failed_calls: set[str] = set()
     # Artefact announcements waiting for the result of the call that wrote them: the signal arrives
     # before the tools node's update, and the contract orders `tool_call` → `tool_result` →
-    # `exhibit`.
-    # Released when the root's tools node completes, not on a helper's update during it.
+    # `exhibit`. Released when the root's tools node completes, not on a helper's update during it.
     held_exhibits: list[Event] = []
     # Previews a document artefact the root agent is still writing. Closed on every root update, so
-    # a
-    # call's last frame precedes its `tool_call`.
+    # a call's last frame precedes its `tool_call`.
     drafts = DraftStream()
     # Read once per turn rather than per event: it is a property of the compiled object, and
     # re-deriving it 400 times a turn would be the same answer 400 times.
@@ -161,10 +153,9 @@ async def graph_events(
             chunk, metadata = payload
             usage.add(graph_usage_tokens(chunk))
             # A model call made inside a tool is the tool's working, never the answer: its usage is
-            # metered
-            # above, but its text is not a token (the runner concatenates tokens into the answer).
-            # Filtered here
-            # rather than tagging calls `nostream`, which would also drop their usage.
+            # metered above, but its text is not a token (the runner concatenates tokens into the
+            # answer). Filtered here rather than tagging calls `nostream`, which would also drop
+            # their usage.
             if (metadata or {}).get("langgraph_node") == _TOOL_NODE:
                 continue
             if len(namespace) <= depth:
@@ -172,19 +163,16 @@ async def graph_events(
                     yield draft
             text = _text_of(chunk)
             # Only the turn's own agent's tokens are the answer, since the runner concatenates
-            # unattributed
-            # `TokenEvent`s. Below that depth a chunk is marked `"subagent"` — the namespace carries
-            # no name.
-            # Usage is counted either way.
+            # unattributed `TokenEvent`s. Below that depth a chunk is marked `"subagent"` — the
+            # namespace carries no name. Usage is counted either way.
             if text:
                 yield TokenEvent(text=text, agent="subagent" if len(namespace) > depth else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
                 # Every id, the empty one included: a refusal is deliberately `status="success"`, so
-                # this set is the
-                # only thing keeping it out of `tool_result` and the grounding corpus. A signal's id
-                # is its own
-                # call's id, so an empty one matches only a `ToolMessage` with the same empty id.
+                # this set is the only thing keeping it out of `tool_result` and the grounding
+                # corpus. A signal's id is its own call's id, so an empty one matches only a
+                # `ToolMessage` with the same empty id.
                 failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
             if isinstance(event, ExhibitEvent):
@@ -193,13 +181,11 @@ async def graph_events(
                 yield event
         elif mode == "updates":
             # Deeper than `depth` means below the turn's agent (on a turn graph a peer is at depth
-            # 1, a helper
-            # inside it at 2; see `root_depth`). Such events are attributed `"subagent"` and a
-            # helper's plan is
-            # withheld, since `PlanEvent` has no `agent` field and must not replace the turn's plan.
-            # Not separated: `trace` and `exchanges` still receive a helper's results, so they enter
-            # the parent's
-            # `ToolCallTrace.outputs`, full-result store and transcript (which records no agent).
+            # 1, a helper inside it at 2; see `root_depth`). Such events are attributed `"subagent"`
+            # and a helper's plan is withheld, since `PlanEvent` has no `agent` field and must not
+            # replace the turn's plan. Not separated: `trace` and `exchanges` still receive a
+            # helper's results, so they enter the parent's `ToolCallTrace.outputs`, full-result
+            # store and transcript (which records no agent).
             below_root = len(namespace) > depth
             if not below_root:
                 for draft in drafts.close():
@@ -220,8 +206,7 @@ async def graph_events(
                 held_exhibits.clear()
         elif mode == "values":
             # Only the outermost graph's channels: reducers have already folded deeper frames into
-            # them, so the
-            # shallowest frame holds the turn's total.
+            # them, so the shallowest frame holds the turn's total.
             if carry is not None and not namespace:
                 _carry_forward(carry, payload)
     # A write the stream never saw a root tools update for — a run cut off between the tool body
@@ -240,9 +225,8 @@ def _with_call_id(event: Event, update: Any) -> Event:
     """`event` carrying the id of the tool call that wrote it, read off the tools node's results.
 
     The signal is raised inside the tool body, which does not know the call id; the `ToolMessage`
-    knows
-    the id and the `exhibit_id`/`revision` the tool returned, so matching on the pair lets a surface
-    settle a draft by `call_id`. Unmatched keeps `""`.
+    knows the id and the `exhibit_id`/`revision` the tool returned, so matching on the pair lets a
+    surface settle a draft by `call_id`. Unmatched keeps `""`.
     """
     if not isinstance(event, ExhibitEvent) or not isinstance(update, dict):
         return event
@@ -264,9 +248,9 @@ async def _until_failure(
     """`stream`'s items until it raises, with the `Exception` recorded in `failure` instead.
 
     A tool that wrote an artefact has committed it whatever the graph does next, so held
-    announcements
-    must still be yielded before failing. A `finally` cannot yield during close or cancellation, so
-    only an `Exception` is caught here; the caller re-raises it after releasing what it held.
+    announcements must still be yielded before failing. A `finally` cannot yield during close or
+    cancellation, so only an `Exception` is caught here; the caller re-raises it after releasing
+    what it held.
     """
     try:
         async for item in stream:
@@ -285,11 +269,9 @@ def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
     """Copy the turn's per-turn counters off the graph's own channels, so a resume continues them.
 
     Read from the `values` stream: with `subgraphs=True` each `updates` payload holds one node, so
-    no
-    fold over updates can recover a fan-out's total, and an undercount here would give a resumed
-    turn
-    fresh allowance. `aget_state` does not carry `UntrackedValue` channels. Taken as `max` with the
-    existing carry, so the count never walks back.
+    no fold over updates can recover a fan-out's total, and an undercount here would give a resumed
+    turn fresh allowance. `aget_state` does not carry `UntrackedValue` channels. Taken as `max` with
+    the existing carry, so the count never walks back.
 
     Args:
         carry: The turn's carry, updated in place.
@@ -308,8 +290,7 @@ def _custom_event(payload: Any, on_signal: Any) -> Event | None:
     """One node's self-report as its event, or `None` for a payload nothing renders.
 
     Matched on shape, since writer payloads have no schema; unknown payloads are dropped.
-    `on_signal`
-    fires here so the runner's job-id ledger sees a signal before its event is yielded.
+    `on_signal` fires here so the runner's job-id ledger sees a signal before its event is yielded.
     """
     if not isinstance(payload, dict):
         return None
@@ -340,17 +321,15 @@ async def _from_update(
     """The events one completed node produces: its calls, its results, and any new plan.
 
     `exchanges`, when given, collects the tool-bearing messages for the transcript projection; this
-    is
-    where they still exist as messages with call ids. `agent` is the caller's attribution — `""` for
-    the turn's own agent, `"subagent"` below it — set on every event the node raises. The namespace
-    holds no helper name (a `task` helper runs inside the tool node), so non-emptiness is the only
-    fact available.
+    is where they still exist as messages with call ids. `agent` is the caller's attribution — `""`
+    for the turn's own agent, `"subagent"` below it — set on every event the node raises. The
+    namespace holds no helper name (a `task` helper runs inside the tool node), so non-emptiness is
+    the only fact available.
     """
     for node, update in (payload or {}).items():
-        # Note for whoever adds the first `interrupt()`: LangGraph delivers it as
-        # `{"__interrupt__": (Interrupt(...),)}`, a tuple, which this `continue` drops, so the turn
-        # would end
-        # as `empty_answer`. Nothing raises one today.
+        # Note for whoever adds the first `interrupt()`: LangGraph delivers it as `{"__interrupt__":
+        # (Interrupt(...),)}`, a tuple, which this `continue` drops, so the turn would end as
+        # `empty_answer`. Nothing raises one today.
         if not isinstance(update, dict):
             continue
         for message in update.get("messages") or []:
@@ -368,17 +347,15 @@ async def _from_update(
             # `isinstance`, not a class-name test, so `ToolMessageChunk` is traced too.
             if isinstance(message, ToolMessage):
                 # A failed call is not a result and must not become evidence (`trace.returned` feeds
-                # the grounding
-                # check); `announce_tool_failures` already raised `tool_failed`. The status test is
-                # a fallback for a
-                # `ToolMessage` from a path that raised no signal (a middleware short-circuit).
+                # the grounding check); `announce_tool_failures` already raised `tool_failed`. The
+                # status test is a fallback for a `ToolMessage` from a path that raised no signal (a
+                # middleware short-circuit).
                 call_id = str(getattr(message, "tool_call_id", ""))
                 if call_id in failed_calls or getattr(message, "status", "success") == "error":
                     logger.debug("tool call %s failed; already reported as tool_failed", call_id)
                 else:
                     # `cut`/`full_ref` come from `response_metadata`, set by the tool chain, the
-                    # only place that saw
-                    # both texts.
+                    # only place that saw both texts.
                     yield _attributed(
                         await trace.returned(
                             str(getattr(message, "tool_call_id", "")),
@@ -392,17 +369,14 @@ async def _from_update(
         plan = _todo_titles(update) if emit_plan else None
         if plan is not None and plan != todos:
             # Only on change and never empty, like `runner._PlanEmitter`: an empty list is the
-            # harness clearing
-            # its plan.
+            # harness clearing its plan.
             todos[:] = plan
             if plan:
                 # Hash the steps (`content` plus `tools` declaration, as `plan_state.session_plan`
-                # answers them), not
-                # the rendered `plan`, or no decision could ever match the hash. Non-empty here, so
-                # `plan_identity` returns a value. One read feeds both `plan_hash` and `scope`, in
-                # the order
-                # `routes/plan._read_plan` uses, so the hash and the scope it authorizes describe
-                # the same plan.
+                # answers them), not the rendered `plan`, or no decision could ever match the hash.
+                # Non-empty here, so `plan_identity` returns a value. One read feeds both
+                # `plan_hash` and `scope`, in the order `routes/plan._read_plan` uses, so the hash
+                # and the scope it authorizes describe the same plan.
                 steps = _plan_steps(update)
                 yield PlanEvent(
                     todos=plan,
@@ -445,8 +419,7 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
 
     Each `{content, status}` item is rendered with its status checkbox so a surface need not infer
     progress. The checkbox is rendering only: `agent/plan_gate.plan_identity` ignores `status`, so
-    an
-    approval stays valid as steps complete.
+    an approval stays valid as steps complete.
     """
     todos = update.get("todos")
     if todos is None:
@@ -481,15 +454,13 @@ def _signal_event(signal: Signal) -> Event | None:
         return QuestionEvent(question=signal.question, options=signal.options)
     if isinstance(signal, HandoffSignal):
         # Raised by the transfer tool itself, once per call, with the peer's real name. Kept above
-        # the tail:
-        # the chain ends in an unguarded `NoteRecordedEvent` default.
+        # the tail: the chain ends in an unguarded `NoteRecordedEvent` default.
         return HandoffEvent(
             from_agent=signal.from_agent, to_agent=signal.to_agent, reason=signal.reason
         )
     if isinstance(signal, ToolFailureSignal):
         # The classification rides on the signal, made by `agent/audit.refusal_reason` from the
-        # exception,
-        # so the event and the audit row carry the same verdict.
+        # exception, so the event and the audit row carry the same verdict.
         return ToolFailedEvent(
             tool=signal.tool, message=signal.message, reason=signal.reason, call_id=signal.call_id
         )
@@ -497,8 +468,7 @@ def _signal_event(signal: Signal) -> Event | None:
         return ExhibitEvent(**signal.model_dump())
     if isinstance(signal, SkillLoadedSignal):
         # Deliberately no event: skill loading is bookkeeping for the cost row
-        # (`turn_costs.skills_loaded`),
-        # not something to show the chemist. Returns explicitly so it cannot fall through to the
-        # `NoteRecordedEvent` default.
+        # (`turn_costs.skills_loaded`), not something to show the chemist. Returns explicitly so it
+        # cannot fall through to the `NoteRecordedEvent` default.
         return None
     return NoteRecordedEvent(note_id=signal.note_id, reference=signal.reference)

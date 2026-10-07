@@ -51,7 +51,7 @@ class XtbJobResult(BaseModel):
     refined: RefinedEnsemble | None = None
     averaged: EnsembleProperty | None = None
     distribution: SpeciesDistribution | None = None
-    # The distribution fanned out over media (D-2026-08-26-a-solvent-is-an-argument-not-a-job).
+    # The distribution fanned out over media.
     species_solvents: SpeciesSolventComparison | None = None
     bonds: BondDissociationSurvey | None = None
 

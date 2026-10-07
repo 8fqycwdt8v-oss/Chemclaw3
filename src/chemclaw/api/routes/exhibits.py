@@ -3,8 +3,7 @@
 A person's edit is a REST write recorded with `author_kind="human"`; the agent learns of it on its
 next turn (`agent/exhibit_notes`). Session-scoped through `resolve_session`: the owner or a member,
 anybody else the same 404 as an unknown id. Members may revise, and each revision records its
-author.
-A write based on anything but the head revision is a 409 `{"code": "stale_revision",
+author. A write based on anything but the head revision is a 409 `{"code": "stale_revision",
 "head_revision": N}`. Each write records author, kind, time and correlation id on the revision row
 and emits one `exhibit.*` log event; no route writes an `AuditEvent`.
 """
@@ -260,10 +259,8 @@ async def export_exhibit(
     """The artefact as a file; a format its kind does not offer is a 404, not a wrong file.
 
     Also 404 for a geometry whose cited calculation artifact was evicted. Bound values export as
-    what
-    they resolve to (empty when the result is gone). An html page exports as `text/plain`: this
-    server
-    never answers `text/html` for an artefact.
+    what they resolve to (empty when the result is gone). An html page exports as `text/plain`: this
+    server never answers `text/html` for an artefact.
     """
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
     if view is None:
@@ -343,9 +340,8 @@ async def _announce(view: ExhibitView, op: Literal["created", "revised"]) -> Non
     """Log the person's write, and push it to the session's other open tabs — best effort.
 
     Uses the `session_events` mailbox claimed by `GET /sessions/{id}/events`: at most once across
-    tabs,
-    and surfaces refetch on focus anyway. A failed mailbox write is counted and does not fail the
-    committed write. No mailbox under the in-memory store.
+    tabs, and surfaces refetch on focus anyway. A failed mailbox write is counted and does not fail
+    the committed write. No mailbox under the in-memory store.
     """
     record_write(view, op)
     if settings.session_store != "postgres":

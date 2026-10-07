@@ -1,34 +1,17 @@
 """`python -m chemclaw.cli.live_benchmark` — score this system on a benchmark somebody else wrote.
 
-**Why this exists.** `make eval` gates 23 metric values over 15 first-party case files, a
-7-document retrieval corpus and a 39-note knowledge graph. Every one of those numbers was written
-here, which makes them honest and makes them incomparable to anything: no number in this repository
-could be put beside another system's, and a number a chemist can argue with is the only kind that
-survives the argument.
+Every `make eval` number is first-party; an external benchmark gives one that compares with other
+systems. ChemBench items are keyed (`target_scores` name one correct option), so scoring is a
+comparison, not a model-graded judgement, and inherits no judge noise.
 
-**Keyed, not graded.** ChemBench items carry `target_scores` naming exactly one correct option, so
-scoring is a comparison rather than a judgement. That is the whole reason a multiple-choice
-benchmark is worth having beside `data/evals/probes/`: the probe corpus measures whether an answer
-is *grounded*, which needs a model to grade it (`evals/live_judge.py`) and inherits that model's
-noise; this measures whether an answer is *right*, and inherits none.
-
-**What it does not measure, said here because the number will be read as if it did.** A
-multiple-choice chemistry question is answered from what the model knows. This system's retrieval,
-its knowledge graph and its calculations have nothing to add to "what compounds form when aniline
-reacts with nitrous acid", so the score is a floor — what the deployment's model brings before this
-system does anything. `make live-ab` over `data/evals/probes/` is where the tools are actually the
-subject.
-
-**Two control arms, and which one answers which question is the whole of
-`D-2026-09-14-tools-were-never-the-variable`.** `--profile tools-removed` removes every capability
-tool and changes nothing else, so a difference against the default arm is attributable to the
-tools. `--profile no-tools` *also* replaces the system prompt wholesale — a profile's
-`instructions:` are a replacement, not an addition — so a difference against it is a prompt result
-whatever the arm is called. The published 62-against-74 pair was the second one read as the first;
-with the prompt held fixed, removing every tool moved 62 to 58.
+It does not measure the tools: multiple-choice questions are answered from the model's knowledge, so
+the score is a floor; `make live-ab` over `data/evals/probes/` measures the tools. Of the two
+control arms, `--profile tools-removed` removes every capability tool and nothing else, so its
+difference is attributable to the tools; `--profile no-tools` also replaces the system prompt, so
+its difference is a prompt effect (`D-2026-09-14-tools-were-never-the-variable`).
 
 Exit codes: 0 when the run completed, 3 when the lane could not be reached (never counted as a
-pass, the posture `live_probes` and `live_turn_cost` already take).
+pass).
 """
 
 import argparse
@@ -72,27 +55,19 @@ class Answered(BaseModel):
     category: str
     chosen: str = ""
     correct: bool = False
-    # An answer that named no option at all. Kept apart from a wrong one because they are different
-    # findings: a model that declines is not a model that guesses, and a benchmark reporting them as
-    # one number cannot tell an abstention from an error.
+    # An answer that named no option: an abstention, kept apart from a wrong guess.
     unparsed: bool = False
-    # The `ErrorCode` of a turn that *failed*, or `""` for a turn that answered. **A third
-    # outcome, and the arms cannot produce it equally.** `_ask` collects the `answer` event and
-    # nothing else, so a turn that hit the loop cap, the spend cap, a connector failure or a
-    # degraded capability arrived here as `answer=""` and booked as an abstention — which is a
-    # claim about the model's judgement. The tool-bearing arm binds every connector and can reach
-    # all of those; the toolless control binds none and structurally cannot, so folding the two
-    # together moves exactly one arm's "it declined" column, in the direction that flatters the
-    # control. An errored turn is `correct=False` — it did not answer — and is *not* `unparsed`.
+    # The `ErrorCode` of a turn that failed, or `""` for one that answered. A third outcome, not an
+    # abstention: only the tool-bearing arm can hit most failures (caps, connector outages), so
+    # folding them into abstentions would flatter the control. An errored turn is `correct=False`
+    # and not `unparsed`.
     error_code: str = ""
 
 
 def load_questions(directory: str) -> list[BenchmarkQuestion]:
     """The vendored subset, checked against the checksum its manifest records.
 
-    Checked rather than trusted, for the reason `mcp_server_kit.load_dataset` gives one repository
-    over: a corpus with no verified checksum cannot be shown to be what the review approved, and a
-    benchmark whose questions changed under it reports a comparison between two different things.
+    A benchmark whose questions changed would compare two different things.
     """
     root = Path(directory)
     manifest = json.loads((root / "dataset.json").read_text(encoding="utf-8"))
@@ -109,9 +84,8 @@ def load_questions(directory: str) -> list[BenchmarkQuestion]:
 def _prompt(question: BenchmarkQuestion) -> str:
     """The question as the system is asked it — options listed, one-option answer requested.
 
-    Deliberately plain. Prompt engineering here would make the number a property of this file
-    rather than of the deployment, and the point of an external benchmark is that somebody else can
-    produce it.
+    Deliberately plain, so the number belongs to the deployment rather than to this file's prompt
+    engineering.
     """
     options = "\n".join(f"- {option}" for option in question.options)
     return (
@@ -120,15 +94,12 @@ def _prompt(question: BenchmarkQuestion) -> str:
     )
 
 
-#: The mhchem/`siunitx` wrappers whose *contents* are the chemistry: `\ce{FeSO4}` is the string a
-#: chemist writes as `FeSO4`, and `\pu{280 nm}` is `280 nm`. The command goes, the argument stays.
+# : The mhchem/`siunitx` wrappers whose contents are the chemistry (`\ce{FeSO4}` is `FeSO4`):
+# : the command goes, the argument stays.
 _MARKUP_WRAPPERS = ("ce", "pu", "text", "mathrm", "mathit")
-#: The symbol commands this corpus actually uses, measured over its 100 items rather than imagined
-#: (`\ce` 155, `\pu` 36, `\Delta` 21, `\circ` 19, `\log` 7, `\propto` 5, `\alpha`/`\beta` 5,
-#: `\times` 2). Each maps to a token its Unicode spelling maps to as well, so the key and an answer
-#: that writes the symbol meet in the middle. Mapped rather than deleted: deleting `\Delta` would
-#: fold "ΔH" and "ΔG" onto each other's neighbourhood, and two options that differ only by a symbol
-#: are exactly the pair a scorer must keep apart.
+# : The symbol commands this corpus uses, each mapped to the token its Unicode spelling also maps
+# : to so a key and an answer meet. Mapped rather than deleted, so options that differ only by a
+# : symbol (ΔH vs ΔG) stay apart.
 _SYMBOL_WORDS = {
     "circ": " deg ",
     "delta": " delta ",
@@ -155,23 +126,10 @@ _WHITESPACE = re.compile(r"\s+")
 def _normalised(text: str) -> str:
     r"""The same string as markup-free lower-case text, so a key and an answer can be compared.
 
-    **The corpus is ChemBench's raw markup and a model's answer is not.** 21 of the 100 keys here
-    contain `\ce{}`, `\pu{}` or math mode, so an exact comparison against the option string was
-    scoring *typography*: `materials_science:polymer_chemistry_19`'s key is
-    `\ce{FeSO4} + t-butyl hydroperoxide`, the model's last line was `FeSO4 + t-butyl hydroperoxide`
-    — the right answer — and the matcher missed it, fell through to its whole-answer fallback and
-    credited a different option. A wrong answer recorded for a right one is worse than an
-    abstention, because it moves the score in the flattering direction on the arm that happens to
-    write plainer prose.
-
-    Measured over this corpus with every option answered in the plain spelling a chemist uses:
-    **88 of 418 options** were mis-scored before this and 0 after, which is the whole of the
-    argument — the digits live in `tests/test_live_benchmark.py`, not here.
-
-    Deliberately not a chemistry parser. It undoes typography — wrappers, braces, math delimiters,
-    script digits, a handful of symbol commands — and nothing else, because anything that
-    *interprets* a formula would make the score a property of this file, the same objection
-    `_prompt` records.
+    Corpus keys carry ChemBench's raw markup (`\ce{}`, `\pu{}`, math mode) and model answers do not,
+    so an exact match would score typography and could credit the wrong option. This undoes
+    typography only — wrappers, braces, math delimiters, script digits, a few symbol commands — and
+    never interprets a formula. `tests/test_live_benchmark.py` holds the corpus-wide check.
     """
 
     def replace(match: re.Match[str]) -> str:
@@ -193,8 +151,7 @@ def _normalised(text: str) -> str:
 def _needle(option: str) -> str:
     r"""One option as a pattern: normalised, escaped, and tolerant of how it is spaced.
 
-    Whitespace becomes `\s*` rather than being deleted, which is the difference between tolerating
-    `\pu{53.2 L}` answered as `53.2L` and deleting the boundaries the lookarounds below depend on.
+    Whitespace becomes `\s*` rather than being deleted, keeping the boundaries the lookarounds need.
     """
     return r"\s*".join(re.escape(part) for part in _normalised(option).split(" ") if part)
 
@@ -202,26 +159,11 @@ def _needle(option: str) -> str:
 def _chosen(answer: str, options: list[str]) -> str:
     r"""Which option the answer names, or `''` when it names none.
 
-    **The last line first, and the whole answer only as a fallback**, because a model that reasons
-    before answering writes every wrong option into its own working. Measured on the first five
-    questions of this subset against a real gateway: scanning the whole answer scored the option
-    `"5"` as `"1"` and `"4"` as `"2"`, matching digits inside sentences like "approximately 1.07%".
-    A scorer that reads the reasoning instead of the answer measures itself.
-
-    **Longest option first**, because one option is routinely a prefix of another ("Only Ag+ is
-    present" against "Ag+ is present, and Pb2+ may be present") and a shortest-first scan credits
-    the wrong one.
-
-    **Word-boundary matching**, and a decimal point is not a boundary: the option `"1"` must not
-    match inside `"1.07"`, while `"n-alkanes"` must still match at the end of a sentence. So a `.`
-    blocks only where a digit is on the other side of it — `(?<!\d\.)` before and `(?!\.\d)`
-    after — which is the difference between a decimal and a full stop. The leading guard was
-    `(?<!\.)`, blocking *any* preceding period, so an option after a full stop
-    (`"…done.n-alkanes"`) scored as an abstention while this paragraph described the symmetric
-    rule.
-    Substring-with-boundaries rather than equality, because a model asked for an option's text
-    routinely returns it inside a sentence, and scoring that as an abstention would measure
-    formatting rather than chemistry.
+    The last line first, the whole answer only as a fallback, since reasoning mentions wrong
+    options. Longest option first, since one option is often a prefix of another. Matching is
+    substring-with-boundaries (a model returns the option inside a sentence), and a `.` blocks a
+    match only when a digit is on its other side — `(?<!\d\.)` before and `(?!\.\d)` after — so
+    `"1"` does not match inside `"1.07"` but an option after a full stop still matches.
     """
     lines = [line for line in answer.strip().splitlines() if line.strip()]
     for haystack in ([lines[-1]] if lines else []) + [answer]:
@@ -238,22 +180,13 @@ async def _ask(
 ) -> tuple[str, str]:
     """Ask one question on its own session; return `(answer text, error code)`.
 
-    One session per question, unlike the probe corpus's scripted follow-ups: these items are
-    independent, and a shared thread would let one question's answer condition the next — which is
-    a different experiment and a contaminated one.
-
-    **The error event is read because this reader used to drop it**, and dropping it is not
-    neutral between the arms: `api/runner.py` turns every failure into an `ErrorEvent`, so a loop
-    cap, a spend cap, a connector outage or a degraded capability left `answer=""` and was scored
-    as the model declining to name an option. Only the arm that binds tools can produce most of
-    those. The code is carried per question so the three outcomes can be told apart after the run
-    rather than argued about.
+    One session per question, so answers cannot condition each other. The error event is read
+    because a failed turn (cap, connector outage) leaves no answer and must not be scored as an
+    abstention.
     """
     session_id = await open_session(client, profile=profile)
     answer, error_code = "", ""
-    # `evals.live.decoded_events` rather than a third reading of the wire format — its docstring
-    # carries the argument, including why the `event:` name this now has access to is still not
-    # what any of the three switches on.
+    # `evals.live.decoded_events` is the one reader of the wire format.
     async with aconnect_sse(
         client, "POST", f"/sessions/{session_id}/messages", json={"message": _prompt(question)}
     ) as source:
@@ -305,10 +238,8 @@ def render(results: list[Answered], profile: str | None) -> str:
         "",
     ]
     if errored:
-        # Stated on its own line and never folded into the abstentions: a turn the system failed
-        # to run is not evidence about chemistry, and only the arm with tools bound can fail most
-        # of these ways. Codes rather than a bare count, because `loop_cap_reached` and
-        # `connector_unavailable` are different repairs.
+        # On its own line, never folded into abstentions: a failed turn is not evidence about
+        # chemistry. Codes, not a count, since each needs a different repair.
         codes = ", ".join(
             f"{code} x{n}" for code, n in sorted(Counter(r.error_code for r in errored).items())
         )

@@ -1,42 +1,17 @@
 """Shared Postgres connect helper and the per-process connection pool.
 
-Why this exists: both the calculation store (`chemclaw.science.calc.postgres_store`) and the
-fingerprint
-store (`chemclaw.science.fingerprints.store`) open short-lived psycopg connections, and a down or
-misconfigured database otherwise surfaces as a raw `psycopg.OperationalError` traceback that
-never says *which* database or *why*. This wraps the connect once (DRY) so every caller
-reports "Postgres unreachable at <host>: <cause>" with the DSN password redacted.
+Every store connects through here, so an unreachable database is reported once, as "Postgres
+unreachable at <host>: <cause>" with the password redacted. That failure is a `ConnectionError`
+(transient, Temporal retries), never a `ChemclawError` (non-retryable bad data).
 
-The failure is raised as `ConnectionError`, deliberately **not** a `ChemclawError`: an
-unreachable database is a transient infrastructure fault, so Temporal should retry the
-activity, whereas `ChemclawError` (a `ValueError`) is marked non-retryable bad data.
+`connection()` is the call-site helper: it borrows from a per-process pool when the process entered
+`pooling()` (front door lifespan, worker entrypoints) and otherwise opens a dedicated connection.
+Pooling removes per-call handshakes that otherwise time out on a busy event loop. Pools are keyed by
+`(event loop, dsn, libpq options, max_size)`. A borrowed connection carries
+`pg_statement_timeout_seconds` by default; `connect()`, used by migrations, does not.
 
-**Pooling.** Connect-per-call was measured at 401 TCP+TLS+auth handshakes for 150 chat turns —
-~2.7 per turn — and the cost is not the database (peak 28 of `max_connections=100`, mostly
-idle) but the *event loop*: a connect that cannot be scheduled within
-`pg_connect_timeout_seconds` fails, and one of the call sites that failed this way is the
-rollback watermark (D-107), a correctness guard whose handler is deliberately non-fatal. So
-the churn did not merely cost latency, it disarmed a guard.
-
-`connection()` is the one call sites use. It borrows from a per-process pool when a process
-has opened one (`pooling()`, entered by the front door's lifespan and each worker's
-entrypoint) and otherwise falls back to a dedicated connect — so a script, a migration, or a
-test keeps today's behavior with no setup. Pools are keyed by
-`(event loop, dsn, libpq options, requested max_size)`: the statement timeout rides on the
-connection's `options`, so two call sites asking for different timeouts must not share
-connections, and the requested size is in the key so that a call site sizing its own pool cannot
-decide the size of the pool a *later* call site borrows from by having arrived first.
-
-**A borrowed connection is bounded by default.** `connection()` applies
-`pg_statement_timeout_seconds` when the caller says nothing, and `connect()` — the dedicated,
-unpooled one the migration runner uses — does not. The asymmetry is the point: a connection you
-own may run an index build for an hour, and one borrowed from a pool the request path shares may
-not (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
-
-Two helpers below take an open cursor rather than opening one, and both are here for the same
-reason: two subsystems in two packages have to ask the identical question of the identical
-transaction. `existing_tables` is one; `apply_vector_recall_settings` — the pgvector recall
-parameters a dense search runs under — is the other.
+`existing_tables` and `apply_vector_recall_settings` take an open cursor because several subsystems
+must ask the same question inside their own transaction.
 """
 
 import asyncio
@@ -60,69 +35,25 @@ from chemclaw.core.metrics_bridge import degraded, record_metric
 
 logger = logging.getLogger(__name__)
 
-# What `operation` says when a call site does not name itself. Every borrowed connection is
-# measured, so the alternative to a default is an unlabelled hole in the distribution exactly where
-# an unaudited call site is — which is the one place a slow query is most likely to hide.
+# `operation` label for call sites that do not name themselves, so no borrow is unmeasured.
 _UNNAMED_OPERATION = "unspecified"
 
-# One pool per (event loop, dsn, merged libpq options, requested max_size). The options string
-# carries the statement timeout, so keying on it keeps the `/readyz` probe's 2s-bounded connection
-# out of the stores' 30s-bounded pool. (It once said "a migration's untimed connection", which was
-# never a pooled connection at all: `migrate` uses `connect`, not `connection`, and never enters
-# `pooling()`.)
-#
-# **The requested size is in the key, and that is what keeps a sizing decision local.** Without it
-# the *first* caller to reach a key would decide how wide that pool is for every caller landing on
-# it afterwards — and the discriminator is a timeout *value*, not a call site, so a future caller
-# asking for the readiness probe's two seconds and saying nothing about size would silently inherit
-# its one connection. Measured on the real app with a second borrower holding that key: `/readyz`
-# answered 503 "database unreachable" in 2.004 s against a healthy, idle database. With the size in
-# the key such a caller gets its own default-sized pool instead, which is one extra pool rather
-# than one silently starved call site.
-#
-# **The loop is part of the key, and that is not defensive.** `psycopg_pool` binds its waiter
-# futures and its background workers to the loop the pool was opened in, so a checkout issued from
-# a *second* loop in the same process is queued on a hand-off callback that will never run on it.
-# Measured with `max_size=1` and an 8 s pool timeout, the holder releasing at t=1.00 s: the
-# cross-loop waiter was served after **8.01 s** — its own timeout expiring — against 1.00 s for the
-# identical hand-off on the pool's own loop. A second loop is not hypothetical here:
-# `evals/retrieval._run_sync` starts one deliberately when a metric is invoked from a coroutine.
-# `agent/checkpointer.close_checkpointer` identifies the same hazard for its own pool; this is the
-# equivalent for these.
-#
-# **The loop object, never `id(loop)`.** CPython reuses an address as soon as the object at it is
-# freed, and an ended loop is freed: six `new_event_loop()`/`close()` cycles produced four distinct
-# ids. Keying on the address therefore reintroduces exactly the hand-off hazard the loop was added
-# to the key to prevent — a live loop handed a pool built for a dead one — with no way to notice.
-# The object is its own identity, and `_forget_pools_of_ended_loops` is what keeps holding a
-# reference to it from being a leak of its own.
+# Pool key. Options carry the statement timeout, so differently bounded callers never share
+# connections. The requested size is in the key so one caller's sizing never decides another's. The
+# loop is in the key because `psycopg_pool` binds waiters to the loop that opened it, so a checkout
+# from a second loop (e.g. `evals/retrieval._run_sync`) would wait out its timeout. The loop object,
+# not `id(loop)`, since addresses are reused; `_forget_pools_of_ended_loops` drops pools of ended
+# loops.
 _PoolKey = tuple[asyncio.AbstractEventLoop, str, str | None, int | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
-# **Every read and every write of the two containers below is under this lock**, and it is a
-# `threading` lock rather than an `asyncio` one because the threads are the hazard: the pools are
-# keyed on their loop precisely so that a *second* loop — `evals/retrieval._run_sync` starts one per
-# live metric call, `durable/eval_drift` runs `run_eval` in a thread inside the worker's `pooling()`
-# — builds its own, which means two threads mutate this dict while a third (a `/metrics` scrape
-# through the bound gauges) walks it. That used to be left to the GIL, and it held only while every
-# access was a single C-level dict op; `_forget_pools_of_ended_loops` added the first Python-level
-# walk and the interpreter is free to switch threads inside one. Measured: three churn threads
-# against three readers, 364 `dictionary changed size during iteration` in two seconds, on
-# `pool_stats` (the gauge silently drops the pool series) and on `_pool_for`, which is the request
-# path — and a `RuntimeError` there is not a psycopg error, so `_failure_kind` returns `None`,
-# nothing recognises it and the route 500s.
-#
-# **Never held across an `await` or across the release of the last reference to a pool.** Both would
-# turn a lock taken for microseconds into one held for seconds: `pool.close()` waits on its workers,
-# and psycopg's `__del__` gathers them with a five-second timeout. The two places that drop pools
-# therefore hand them to a local and let go outside the block.
+# Guards every read and write of the two containers below. A threading lock, because pools of other
+# loops are built from other threads while `/metrics` walks the dict. Never held across an `await`
+# or the release of a pool's last reference: callers move pools to a local and drop them outside.
 _POOL_REGISTRY_LOCK = threading.Lock()
-# Pools this module did not build but this process holds: today the LangGraph checkpointer's
-# autocommit pool (`agent/checkpointer.py`), which every turn's state write goes through. They are
-# registered rather than taught to the metrics separately, because `chemclaw_pg_pool_max_size` is
-# the per-process half of the fleet connection budget and a pool nobody counts is a pool the
-# deployment opens and the dashboard does not show. Their *lifecycle* stays with their owner —
-# `pooling()` closes only what it built — which is why this is a separate list and not `_POOLS`.
+# Pools this module did not build but this process holds (the LangGraph checkpointer's, in
+# `agent/checkpointer.py`), counted in `chemclaw_pg_pool_max_size`. Their lifecycle stays with the
+# owner, so they are separate from `_POOLS`.
 _FOREIGN_POOLS: list[Any] = []
 # Whether this process has entered `pooling()`. Off means `connection()` opens a dedicated
 # connection per call — the pre-pool behavior, which is what a one-shot script or a test wants.
@@ -132,19 +63,14 @@ _POOLING = False
 def _redact(dsn: str) -> str:
     """Return `dsn` with any password removed, so it is safe to echo in an error message.
 
-    Round-trips through libpq's own parser (`conninfo_to_dict`/`make_conninfo`) so every
-    form psycopg accepts is covered — URL userinfo, URL query parameter, and the keyword
-    `host=... password=...` form — not just the userinfo case a URL split can see. A DSN
-    libpq cannot parse is replaced wholesale rather than echoed on a guess.
+    Round-trips through libpq's parser, covering URL userinfo, URL query and keyword forms. An
+    unparseable DSN is replaced wholesale.
     """
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except psycopg.ProgrammingError:
-        # Counted, because this is the one branch whose whole output is `<postgres>`: an operator
-        # reading "Postgres unreachable at <postgres>" cannot tell a redacted DSN from an
-        # unparseable one, and the second means the configured DSN is malformed rather than the
-        # server being down. WARNING rather than ERROR — the caller is already reporting a failure
-        # and this only says the address in that report is uninformative.
+        # Counted, because the output `<postgres>` cannot otherwise distinguish a malformed DSN from
+        # a redacted one. WARNING: the caller already reports the failure.
         degraded(
             logger,
             "db_dsn",
@@ -156,69 +82,24 @@ def _redact(dsn: str) -> str:
     return conninfo.make_conninfo("", **parts)
 
 
-# **Never let this pool serve a query from a generic plan.** psycopg auto-prepares a statement at
-# `prepare_threshold=5`, so the sixth execution is the first *prepared* one — and Postgres's own
-# plancache then serves five custom plans before it will consider a generic one, so the first
-# generic execution is the **eleventh** overall. Measured both ways on one skewed table: with
-# auto-prepare, flat 38 ms through execution 10 and 83 ms from 11; with `prepare=True`, which
-# forces preparation from the first call, the same jump lands at 6. A probe that passes
-# `prepare=True` is measuring a client this code is not.
-#
-# **The statement at risk is the dense vector one, and the deciding variable is the embedding
-# width.** `_dense` in `retrieval/vector_index.py` renders `::vector(N)` from `embedding_dim`,
-# which `core/config` *raises* unless it equals the `vector(1536)` column migration 012 declares.
-# At 1536, `EXPLAIN (GENERIC_PLAN)` on that exact shape is `Seq Scan on note_index` under a `Sort`,
-# and serving it costs **1,762 ms against 0.93 ms** — about 1,890x. At 384 the same statement plans
-# as an HNSW `Index Scan` and measures 0.64 ms either way, which is why a probe at that width finds
-# nothing and concludes the risk is imaginary. It is not imaginary; it is a width no deployment
-# here can have.
-#
-# **What is true today is that `auto` does not take that plan, and that is a cost estimate rather
-# than a guarantee.** At 100k rows the generic plan *estimates* 5,915 against the custom plan's
-# 2,334, so `auto` keeps the custom one — while the plan it declined to use is three orders of
-# magnitude slower in reality. The safety margin is an estimate that is wrong in the fortunate
-# direction, and estimates move with statistics, row counts and a planner upgrade. This setting is
-# what makes the outcome not depend on that.
-#
-# `science/calc/postgres_store`, `ingest/documents/index.py`, `external_index.py` and
-# `science/labels/store.py` carry the same `IS NULL OR` shape; measured on the calc browse
-# statement, `force_generic_plan` is 59 ms against `force_custom_plan`'s 0.95 ms, and `auto`
-# likewise declines it. Same insurance, four more statements.
-#
-# The remedy is the server's own, and it is set here rather than per statement so that a query
-# added next year inherits it: `force_custom_plan` keeps the prepared statement — the parse is
-# still cached — and re-plans each execution with the parameters in hand. **Measured cost on the
-# queries that do not need it**: a point lookup goes 263 µs to 288 µs, about 25 µs.
-#
-# **The checkpointer pool (`agent/checkpointer.py`) is deliberately excluded, and not because its
-# statements are primary-key lookups.** LangGraph's own SQL carries
-# `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses. What makes it safe is
-# *where* the OR sits: behind `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is an
-# `Index Scan Backward using checkpoints_pkey` with both equalities in the `Index Cond` and the OR
-# filtering one thread's checkpoints rather than a corpus. Measured at 200k rows across 2,000
-# threads, ~0.4 ms either way — nothing to buy. The property to preserve when adding a statement
-# there is that one, not "it is a primary-key lookup".
+# Never serve a pooled query from a generic plan. psycopg auto-prepares after five executions and
+# Postgres may then switch to a generic plan; for the dense vector query
+# (`retrieval/vector_index.py` at `vector(1536)`) and the `IS NULL OR` filters elsewhere, the
+# generic plan is a sequential scan orders of magnitude slower. `auto` currently avoids it only by a
+# cost estimate. `force_custom_plan` keeps the parse cached and re-plans with real parameters, for
+# ~25 µs per query. The checkpointer pool is excluded: its OR sits behind
+# `thread_id`/`checkpoint_ns` equalities, so its generic plan is an index scan.
 _FORCE_CUSTOM_PLAN = "-c plan_cache_mode=force_custom_plan"
 
 
 def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str:
     """Return the libpq `options` to connect with: the DSN's own, our plan mode, our timeout.
 
-    psycopg merges a keyword argument *over* the connection string, so passing `options=` would
-    silently discard any `options` the DSN already carries — and only on the connections that ask
-    for a statement timeout, since `None` is dropped rather than merged. An operator who sets
-    `options` in their DSN (a `search_path` for a shared database, `application_name`, `work_mem`)
-    would lose it non-deterministically depending on the call site. Concatenating instead keeps
-    both; libpq reads the last occurrence of a repeated `-c` setting, so our timeout still wins if
-    the DSN happens to set one too.
-
-    This never returns `None` any more, because `_FORCE_CUSTOM_PLAN` above is ours to add on every
-    connection whether or not a statement timeout was asked for. That widens the pool key
-    (`_pool_for` keys on the merged options) by a constant, which merges and splits nothing: every
-    pool gains the same suffix.
+    Concatenated rather than passed as `options=`, which would override any `options` in the DSN
+    (`search_path`, `application_name`, ...). libpq takes the last repeated `-c`, so ours win.
     """
-    # libpq statement_timeout is in milliseconds; passed as a server option so it applies to
-    # every statement on the connection without an extra round trip.
+    # libpq statement_timeout is in milliseconds; passed as a server option so it applies to every
+    # statement on the connection without an extra round trip.
     ours = (
         f"{_FORCE_CUSTOM_PLAN} -c statement_timeout={int(statement_timeout_seconds * 1000)}"
         if statement_timeout_seconds
@@ -227,9 +108,7 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str:
     try:
         existing = conninfo.conninfo_to_dict(dsn).get("options")
     except psycopg.ProgrammingError:
-        # The connect below will fail and say so, but *this* branch silently drops whatever
-        # `options` the DSN carried — a `search_path`, an `application_name`, a `work_mem` — and
-        # that loss is invisible in the connect's own error. Said once, here, where it happens.
+        # This branch drops the DSN's own `options`, which the connect error would not show.
         degraded(
             logger,
             "db_dsn",
@@ -244,21 +123,9 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str:
 class _DatabaseUnavailable(ConnectionError):
     """This module's own "there is no connection to hand you" — never a caller's socket error.
 
-    A `ConnectionError` subclass, so every caller that already tests `ConnectionError` (Temporal's
-    retry classification, `api/runner.py`, `science/bo/campaign_record.py`) is unaffected: the
-    published contract is still "an unreachable or saturated database raises `ConnectionError`".
-
-    **Private because it exists to be narrower than the builtin, not wider.** `_failure_kind` used
-    to classify `isinstance(exc, ConnectionError)` as `kind="unavailable"`, and `ConnectionError`
-    is the *builtin* base of `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`
-    and `ConnectionRefusedError` — every one of which a caller's own HTTP client, MCP session or
-    socket can raise from inside the `connection()` block. Measured: raising
-    `ConnectionResetError("my HTTP client died")` inside the block booked
-    `chemclaw_db_query_failures_total{kind="unavailable"}` and logged a `db.failed` WARNING naming
-    the database, for a fault that had nothing to do with Postgres — the exact thing
-    `_failure_kind`'s own docstring says it does not do ("a `ValueError` from it is not a fact
-    about Postgres"). Raised by both sites in this module that mean it, so nothing that *is* a
-    real outage stopped being counted.
+    A `ConnectionError` subclass, so existing retry classification is unaffected. Private and
+    narrower than the builtin: `_failure_kind` keys on it, so a caller's own `ConnectionResetError`
+    inside a `connection()` block is not booked as a Postgres outage.
     """
 
 
@@ -267,22 +134,9 @@ async def connect(
 ) -> psycopg.AsyncConnection[TupleRow]:
     """Open a *dedicated* Postgres connection, failing fast and clearly when unreachable.
 
-    Uses the configured libpq `connect_timeout` so an unreachable host errors quickly instead
-    of hanging the calling activity until its start-to-close timeout. A connection failure is
-    re-raised as `ConnectionError` carrying the password-redacted DSN and the underlying
-    cause, so an admin immediately sees which database failed and why.
-
-    `statement_timeout_seconds` sets a per-statement wall-clock bound (libpq
-    `statement_timeout`) so a hung query is cancelled rather than burning the enclosing
-    activity's whole budget. Omit (or pass 0/None) for no per-statement bound — the
-    migration runner and the grant applier do exactly that, since an index build may
-    legitimately run long. **This is the one place where omitting the argument means
-    "unbounded"**; `connection()` defaults it instead, because a connection borrowed from a
-    shared pool must never be held open by a single runaway query
-    (D-2026-08-08-a-borrowed-connection-is-bounded-by-default).
-
-    Prefer `connection()`: this opens a connection nobody pools, which is right for a migration
-    or a one-shot script and wrong for anything on a request path.
+    Uses libpq `connect_timeout`; failures become `ConnectionError` with the redacted DSN and cause.
+    `statement_timeout_seconds` omitted (or 0/None) means unbounded, unlike `connection()`; the
+    migration runner and grant applier rely on that. Prefer `connection()` on any request path.
     """
     options = _merged_options(dsn, statement_timeout_seconds)
     try:
@@ -296,73 +150,29 @@ async def connect(
 def _forget_pools_of_ended_loops() -> None:
     """Drop every pool whose event loop has ended, releasing the backends it was still holding.
 
-    Nothing used to do this, and the omission was not a slow leak but a permanent one: only
-    `pooling()`'s `finally` removed a `_POOLS` entry, and it runs once, at process shutdown. So
-    inside a pooled process every `asyncio.run` on a fresh loop built a pool, opened it to
-    `pg_pool_min_size` connections, and abandoned it for the life of the process — measured against
-    a live server as one extra `pg_stat_activity` row per short-lived loop, forever. That path is
-    ordinary rather than exotic: `evals/retrieval._run_sync` starts a loop per live metric call, and
-    `durable/eval_drift` runs `run_eval` in a thread *inside* the background worker's `pooling()`.
-
-    **Dropped, not closed, and that is the only thing available.** `psycopg_pool` schedules a
-    pool's shutdown on the loop it was opened in, so `close()` on an ended loop raises
-    `RuntimeError: Event loop is closed` — the reason `pooling()`'s `finally` skips them too.
-    Releasing the last reference is what shuts the connections: measured, the marked backend
-    disappeared from `pg_stat_activity` the moment the pool was dropped, with no `gc.collect()`
-    needed. That release is the `clear()` below and not the `pop`, which only hands the pool to a
-    local so the drop happens outside the registry lock.
-
-    Called from the two places that ask this module what pools exist — the lookup and the readings
-    — so whichever runs first releases, and neither `chemclaw_pg_pool_max_size` (the per-process
-    half of the `pg_fleet_max_connections` budget) nor `pool_stats`' `pool_available` counts a pool
-    nothing can borrow from. A read that evicts is deliberate: the resource is tied to an owner
-    that no longer exists, and there is no other moment at which anyone learns it has gone.
+    A pool opened on a short-lived loop (`evals/retrieval._run_sync`, `durable/eval_drift`) would
+    otherwise hold its connections for the life of the process. It cannot be closed (`close()` on an
+    ended loop raises), so it is dropped; releasing the last reference closes the connections.
+    Called from the pool lookup and the readings, so neither counts a dead pool.
     """
     with _POOL_REGISTRY_LOCK:
         dead = [key for key in _POOLS if key[0].is_closed()]
         evicted = [_POOLS.pop(key) for key in dead]
-    # Released here, one statement outside the lock, and the placement is right for a reason this
-    # comment used to get wrong: it said dropping the last reference runs psycopg's `__del__`,
-    # which gathers the pool's background workers with a five-second timeout. `AsyncConnectionPool`
-    # has **no** `__del__` in psycopg_pool 3.3.1 — that method is the *sync* pool's, behind an
-    # `if False:` in the shared source — so the drop is not a five-second hazard. What it is, is
-    # the release: measured, the marked backends went 3 -> 0 the moment the last reference fell,
-    # in 0.2 ms. Outside the lock anyway, because a registry the request path reads should not be
-    # held across a refcount drop whose cost is somebody else's implementation detail.
+    # The release happens here, outside the registry lock.
     evicted.clear()
 
 
 def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
     """Return this process's pool for `(dsn, options, max_size)`, constructing it on first use.
 
-    Constructed lazily rather than up front because a process does not know which DSNs it will
-    touch until it touches them (the session store, the calculation store and the fingerprint
-    store may be three different databases or one). Construction is synchronous and the
-    dictionary insert happens before any `await`, so two coroutines racing on the first use of a
-    DSN cannot end up with two pools for it.
-
-    Keyed on the running loop as well, so a second loop builds and owns its own pool instead of
-    borrowing one whose waiters it cannot be woken by — see `_POOLS`. That second loop is usually a
-    second *thread*, which is why the lookup and the insert are one critical section under
-    `_POOL_REGISTRY_LOCK`: this is a request-path read of a dictionary another thread is writing.
-
-    `max_size` is this caller's own ceiling for its own pool, or `None` for `pg_pool_max_size`. It
-    is part of the key rather than applied to whichever pool already exists, so one call site's
-    ceiling is never silently another's — see `_POOLS`.
-
-    **`min_size` is clamped under it, and that is not tidiness.** `pg_pool_min_size` defaults to 2
-    and psycopg refuses `min_size > max_size` with a `ValueError`. Raised *here* that lands on the
-    request path, and it is not a `psycopg.Error`: `_failure_kind` returns `None` so nothing counts
-    or names it, and `/readyz`'s own `except (psycopg.Error, ConnectionError, TimeoutError)` does
-    not catch it either — the route 500s. A one-connection pool keeps exactly one connection warm.
+    Lazy, since a process learns its DSNs by using them. Lookup and insert are one critical section
+    under `_POOL_REGISTRY_LOCK` and precede any `await`, so racing first uses build one pool.
+    `max_size` is this caller's ceiling (`None` = `pg_pool_max_size`). `min_size` is clamped under
+    it, because psycopg's `ValueError` here would surface as an unclassified 500 on the request
+    path.
     """
     _forget_pools_of_ended_loops()
-    # The *effective* width, in the key as well as in the pool. Keying on the raw request let a
-    # caller asking for a falsy size mint a second pool of the default width beside the one that
-    # already existed — same DSN, same options, same ceiling, two pools — because `0` and `None`
-    # are different keys and `0 or default` is the default. Normalising first makes the key say
-    # what the pool is rather than what was asked for, so an explicit `pg_pool_max_size` and an
-    # omitted one are one pool, which is what they are.
+    # Key on the effective width so `0`, `None` and an explicit default are one pool.
     size = max_size or settings.pg_pool_max_size
     key = (asyncio.get_running_loop(), dsn, options, size)
     with _POOL_REGISTRY_LOCK:
@@ -377,14 +187,9 @@ def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
             max_size=size,
             max_idle=settings.pg_pool_max_idle_seconds,
             timeout=settings.pg_pool_timeout_seconds,
-            # `max_idle` only governs when the pool itself decides a connection has sat unused long
-            # enough to close — it does nothing about one that was already killed out from under the
-            # pool by something the pool cannot see: a managed-Postgres vendor's idle limit, a
-            # stateful load balancer's NAT timeout, `idle_in_transaction_session_timeout`. Without
-            # this, the first query on such a connection is handed straight to a caller and fails
-            # with a raw connection-reset error instead of the pool quietly replacing it before
-            # anyone borrows it. `check_connection` runs `SELECT 1` on a connection the background
-            # health-check loop is about to keep, so a dead one is caught and swapped there instead.
+            # Check idle connections before keeping them, so one killed from outside (vendor idle
+            # limit, NAT timeout, `idle_in_transaction_session_timeout`) is replaced instead of
+            # handed to a caller.
             check=AsyncConnectionPool.check_connection,
             # Opened by the caller below: constructing with `open=True` schedules the background
             # workers from `__init__`, which psycopg_pool warns about outside a running loop.
@@ -397,32 +202,11 @@ def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
 def _failure_kind(exc: BaseException) -> str | None:
     """Which of the four database failure classes `exc` is, or `None` if it is not one.
 
-    The four are separated because the operator response differs and nothing could tell them
-    apart: before this, a `statement_timeout` firing raised `QueryCanceled` that no handler in this
-    repository caught, counted or named — `grep deadlock|40001|40P01` over `src/` returned prose
-    only — so a database cancelling a runaway query looked, from every dashboard, exactly like a
-    database that was down.
-
-    Order is load-bearing, because these are not siblings: `QueryCanceled`, `DeadlockDetected` and
-    `SerializationFailure` are all `OperationalError` subclasses in psycopg 3, so a broad
-    `OperationalError` test first would collapse all of them into "unavailable".
-
-    `deadlock` covers a serialization failure too. The label names the *class* — a transaction the
-    server aborted because of a concurrent one — rather than the SQLSTATE, which the log line
-    carries; two label values for one operator response (retry the unit of work) would split the
-    series without splitting the decision.
-
-    Anything that is not a database error at all returns `None` and is not counted: the block a
-    caller runs inside `connection()` is its own code, and a `ValueError` from it is not a fact
-    about Postgres.
-
-    **That last rule is why the first test names `_DatabaseUnavailable` and not `ConnectionError`.**
-    The builtin is the base of `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`
-    and `ConnectionRefusedError`, so testing it counted a caller's *own* dead socket — an HTTP
-    client, an MCP session, a sink driver — as a Postgres outage, complete with a WARNING naming
-    this deployment's database. `_DatabaseUnavailable` is raised only by the two places in this
-    module that mean it (`connect`'s wrap, and the pool-checkout handler), so the class of the
-    exception is now the same statement as the label.
+    Separated because the operator response differs (a cancelled statement is not an outage). Order
+    matters: `QueryCanceled`, `DeadlockDetected` and `SerializationFailure` subclass
+    `OperationalError`. `deadlock` includes serialization failures (same response: retry); the log
+    carries the SQLSTATE. Non-database errors return `None`, and only `_DatabaseUnavailable` (not
+    the builtin `ConnectionError`) counts as unavailable.
     """
     if isinstance(exc, _DatabaseUnavailable):
         return "unavailable"
@@ -440,9 +224,7 @@ def _failure_kind(exc: BaseException) -> str | None:
 def _record_failure(operation: str, dsn: str, exc: BaseException) -> None:
     """Count and name one database failure, once, at the seam every call site already goes through.
 
-    Named as well as counted because the counter says a kind and the line says which `operation`,
-    which database, and what the server called it — and a `sqlstate` is the difference between
-    "the statement timeout fired" and "somebody cancelled it".
+    The log line adds the `operation`, database and `sqlstate` the counter's kind cannot carry.
     """
     kind = _failure_kind(exc)
     if kind is None:
@@ -466,29 +248,9 @@ def _record_failure(operation: str, dsn: str, exc: BaseException) -> None:
 def _record_duration(operation: str, seconds: float) -> None:
     """Record how long one unit of work held a connection, and say so when it was slow.
 
-    **The unit is the block, not the statement**, and that is what `connection()` can honestly
-    measure: it hands out a connection and the caller runs one statement or twenty on it. That is
-    also the quantity a pool cares about — `chemclaw_pg_pool_requests_waiting` rises because
-    somebody *held* a connection, not because one statement was slow — so this is the number that
-    joins the pool gauges to a call site.
-
-    **It is therefore not database latency, and reading it as such is a mistake this measurement
-    invited.** The span runs from before the checkout to after the caller's `with` body, so
-    whatever else the caller does while holding the connection is inside it: measured, a block that
-    ran one `SELECT 1` and then slept three seconds booked 3.029 s and emitted `db.slow` at the
-    2 s threshold. That is
-    the honest reading of *hold* time and a false one of *query* time, and one call site made the
-    difference material — `kg/git_submitter._cluster_lock` takes a Postgres advisory lock and
-    `yield`s across an entire note submission, fetch and push included, so every submission booked
-    a git-push-length sample. It is not wrong that the connection was held that long; what was
-    wrong is that it was booked unlabelled, so a dashboard rendered a remote git push as
-    `{operation="unspecified"}` database latency. The fix on that side is a name
-    (`kg_cluster_submit_lock`), which is what makes such a sample readable instead of alarming.
-
-    Both branches of `connection()` are timed, pooled and dedicated alike: a process that never
-    entered `pooling()` still holds a connection for its block, and dropping half the call sites
-    out of the distribution because of how the connection was obtained would make the metric
-    depend on which process is asking.
+    The unit is the whole `connection()` block, from before checkout to after the body: hold time,
+    which is what pool pressure depends on, not query latency. A call site doing other work while
+    holding a connection should name its `operation`. Pooled and dedicated branches are both timed.
     """
     record_metric(
         lambda m: m.observe("chemclaw_db_query_duration_seconds", seconds, {"operation": operation})
@@ -498,10 +260,8 @@ def _record_duration(operation: str, seconds: float) -> None:
         log_event(
             logger,
             "db.slow",
-            # "spent", not "held": the span opens before `_pool_for`, so a call that waited out
-            # `pg_pool_timeout_seconds` and never got a connection was logged as having held one
-            # for two seconds. That is the wait/hold conflation `chemclaw_pg_pool_requests_waiting`
-            # exists to separate, printed at an operator in the one line they read first.
+            # "spent", not "held": the span includes waiting for a connection that may never have
+            # arrived.
             "database operation %r spent %.3fs waiting for and using a connection "
             "(threshold %.3fs)",
             operation,
@@ -523,53 +283,17 @@ async def connection(
 ) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a connection for the duration of the block — pooled when this process pools.
 
-    The single call site helper: on exit the transaction is committed (or rolled back if the
-    block raised), exactly as `async with await connect(...)` did, and the connection goes back
-    to the pool instead of being torn down. In a process that never entered `pooling()` this is
-    a dedicated connect, so behavior is unchanged for scripts, migrations and tests.
+    Commits on exit (rolls back on error) and returns the connection to the pool; without
+    `pooling()` it is a dedicated connect. Pool exhaustion within `pg_pool_timeout_seconds` raises
+    the same `ConnectionError` as an unreachable database, so Temporal retries both.
 
-    A pool that cannot hand out a connection in `pg_pool_timeout_seconds` raises the same
-    `ConnectionError` an unreachable database raises, and for the same reason: from the caller's
-    point of view "no connection available" and "no database" are one transient infrastructure
-    fault, and Temporal must retry both.
-
-    **The statement timeout defaults.** Omitting `statement_timeout_seconds` (or passing `None`)
-    applies `pg_statement_timeout_seconds`, resolved per call so a monkeypatched or reloaded
-    setting is honoured. It used to mean *no bound*, which made the bound a convention thirty call
-    sites in twenty-two modules happened to keep by writing it out; a thirty-first that forgot
-    would hold a pooled connection for as long as one bad query ran, and nothing would say so.
-    Pass a number to bound a call site differently (`/readyz` bounds its `SELECT 1` at two
-    seconds), or `0` to opt out — but a connection borrowed from a shared pool wanting no bound at
-    all is a dedicated connection, which is what `connect()` is for.
-
-    **`operation` is what the measurement is *about*.** It labels
-    `chemclaw_db_query_duration_seconds` and names the call site in the slow-query and failure
-    lines, so it must be a literal at the call site and low-cardinality — a table, a job, a store
-    method — never a value derived from a request. It defaults rather than being required because
-    thirty call sites in twenty-two modules predate it and an unlabelled hole in the distribution
-    is worse than a coarse label: `unspecified` is a true statement about a call site nobody has
-    named yet, and it is greppable.
-
-    **What is timed is the whole block, not a statement** — see `_record_duration`. A call site
-    that holds a connection across work of its own is measured doing exactly that, which is why a
-    long-holding one owes the metric a name more than a short one does.
-
-    **`pool_max_size` is how a call site pays for what it uses.** Omit it and this borrows from the
-    pool `pg_pool_max_size` sizes, which is right for anything serving a request. Pass a number
-    when the call site's own concurrency is *known* and smaller: `/readyz` is single-flighted
-    (`ops._shared_probe`) and measured at exactly one simultaneous checkout across 1,000 concurrent
-    probes with the cache window off, so it asks for 1 rather than declaring `pg_pool_max_size`
-    connections of the fleet budget it can never use. The number joins the pool key — see `_POOLS`
-    — so it sizes this caller's pool and nobody else's. It does nothing in a process that never
-    entered `pooling()`: there is no pool, and `connect()` opens the one connection asked for.
-
-    **Every borrowed connection is timed and every database failure it raises is classified here**,
-    which is the only place that can see both. `chemclaw_db_unavailable_total` is incremented at
-    two front-door sites, so a `ConnectionError` inside an ingest activity, the outbox drain or the
-    retention sweep incremented nothing at all; `statement_timeout` — 30 s by default — raised a
-    `QueryCanceled` that nothing in this repository caught, counted or named. Both are counted now
-    on `chemclaw_db_query_failures_total{kind}`, from the seam every store already goes through, so
-    a new call site cannot forget to.
+    `statement_timeout_seconds` defaults to `pg_statement_timeout_seconds` (read per call); pass a
+    number to bound differently or `0` to opt out, though an unbounded connection belongs in
+    `connect()`. `operation` labels `chemclaw_db_query_duration_seconds` and the slow/failure logs:
+    a low-cardinality literal, never request-derived. `pool_max_size` sizes this caller's own pool
+    when its concurrency is known and smaller (e.g. the single-flighted `/readyz`); it does nothing
+    without `pooling()`. Every borrow is timed and every database failure classified on
+    `chemclaw_db_query_failures_total{kind}`.
     """
     if statement_timeout_seconds is None:
         statement_timeout_seconds = settings.pg_statement_timeout_seconds
@@ -585,10 +309,8 @@ async def connection(
         await pool.open()  # idempotent; the first caller starts the pool's background workers
         try:
             async with pool.connection() as conn:
-                # One round trip on the *first* borrow against this endpoint and none afterwards,
-                # which is what lets the fleet gauge tell one server spelled two ways from two
-                # servers. Here rather than in the gauge because a scrape must not make a network
-                # call; here rather than at pool construction because no connection exists yet.
+                # One round trip on the first borrow against an endpoint, so the fleet gauge can
+                # tell one server spelled two ways from two servers; never during a scrape.
                 await _learn_server_identity(conn, dsn)
                 yield conn
         except (PoolTimeout, PoolClosed) as exc:
@@ -596,10 +318,8 @@ async def connection(
             # catching them here cannot swallow an error from the caller's block.
             raise _DatabaseUnavailable(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
     except Exception as exc:
-        # `Exception`, not `BaseException`: a cancelled task (Temporal cancelling an activity, a
-        # dropped SSE connection) is not a database failure, and counting it as one would put the
-        # ordinary shutdown path into the metric an operator pages on. Re-raised untouched — this
-        # observes, it never decides.
+        # `Exception`, not `BaseException`: cancellation is not a database failure. Re-raised
+        # untouched.
         _record_failure(operation, dsn, exc)
         raise
     finally:
@@ -609,54 +329,16 @@ async def connection(
 def bind_pool_metrics() -> None:
     """Expose this process's pool gauges, so pool saturation is visible wherever a pool exists.
 
-    Called by `pooling()` rather than by any one process's startup code, which is the whole point:
-    all three of these gauges used to be bound in the front door's `create_app`, so every pooled
-    process that is *not* the front door — every Temporal worker, every connector server — served a
-    `/metrics` surface with no pool reading on it at all. (How many that is is rendered, not
-    written here: two counts in this file said "seventeen pooled processes" while the chart
-    rendered fourteen, which is the same drift `values.yaml` already records against itself.)
-    `requests_waiting` is the signal D-119 introduced to make "the pool is too small" legible, and
-    it was absent from exactly the processes that do the long database work (the retention sweep,
-    the reindex, the chain verification). Binding it where the pool is opened means a process
-    cannot acquire a pool without also acquiring its witness — the same argument
-    D-2026-08-01-every-process-carries-its-own-witness made for probes, which left this behind.
+    Bound by `pooling()` so every pooled process (workers and connector servers, not just the front
+    door) reports `requests_waiting`. `chemclaw_pg_pool_max_size` sums every pool the process holds,
+    not `settings.pg_pool_max_size`: a process routinely holds several, and summed across pods it is
+    compared with `chemclaw_pg_fleet_max_connections` to catch a fleet scaled past its ceiling.
 
-    `chemclaw_pg_pool_max_size` is the per-process half of the fleet connection budget: `sum()` of
-    it across pods is what the deployment may open, and comparing that to
-    `chemclaw_pg_fleet_max_connections` is the only way to see a fleet scaled past its ceiling by
-    hand, since `Settings` validates the shape the chart rendered and never re-runs
-    (D-2026-08-05-the-connection-budget-is-a-fleet-number). It therefore reads the **sum over every
-    pool this process holds**, not `settings.pg_pool_max_size`: a process routinely holds more than
-    one — this module keys on `(dsn, options, requested max_size)` precisely so `/readyz` and the
-    stores do not share
-    connections, and the checkpointer registers a third — and measured against a live server that
-    was three pools and 48 connections reported as 16. That under-count reached the fleet
-    validator too, which multiplied *processes* rather than pools: the shipped chart's floor was
-    **208** against the 136 its values file then provisioned. Those two are kept rather than
-    pointed at, and the distinction is worth stating because this docstring holds both kinds of
-    number: 48-as-16 is this function's own measurement and is *why* the gauge below sums over
-    pools instead of reading `settings.pg_pool_max_size`, so the derivation needs it at the call
-    site; 136 is `D-2026-08-05-the-connection-budget-is-a-fleet-number`'s figure, restated here
-    because the pair is what shows the size of the under-count, and the ADR is the frozen copy of
-    it. Neither is a current reading. Both are fixed — `pg_fleet_pools`
-    counts pools, the readiness probe's pool is charged the one connection it asks for, and
-    `postgres.maxConnections` provisions 256 — and the figure to trust is whichever
-    `tests/test_deploy_chart.py` derives from the rendered chart, not this sentence. It has moved
-    twice since it was written: 208 was the product, 166 is the sum, and a sentence stating either
-    goes stale the next time a replica count does.
-
-    Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
-    its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception
-    `core/logging.py` declares.
+    Imports `core/metrics.py` lazily, per the `core` sibling-import rule (`tests/test_layering.py`).
     """
     from chemclaw.core.metrics import METRICS
 
-    # **`coherent_pool_stats` rather than `pool_stats`, and the difference is the whole point.**
-    # `render()` calls each gauge's source, so three lambdas over `pool_stats()` walked the pools
-    # three times per scrape — publishing a `pool_size`, a `pool_available` and a
-    # `requests_waiting` from three different instants. The saturation question these exist for is
-    # read across all three at once, so a triple that never held together is the one reading they
-    # must not give.
+    # `coherent_pool_stats`, so the three gauges of one scrape describe the same instant.
     METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(coherent_pool_stats()["pool_size"]))
     METRICS.bind_gauge(
         "chemclaw_pg_pool_available", lambda: float(coherent_pool_stats()["pool_available"])
@@ -682,13 +364,8 @@ def bind_pool_metrics() -> None:
 async def pooling() -> AsyncIterator[None]:
     """Pool this process's Postgres connections for the duration of the block.
 
-    Entered once per process — by the front door's lifespan and by each worker's entrypoint —
-    because a pool belongs to one event loop and one process. Everything below `connection()`
-    then borrows instead of connecting, which is what removes the per-call handshake that was
-    timing out under load. On exit every pool is closed so a shutdown does not leave sockets
-    behind for the database to reap.
-
-    Binds the pool gauges on the way in, so every process that pools also reports on its pool.
+    Entered once per process (front door lifespan, worker entrypoints), since a pool belongs to one
+    loop. Binds the pool gauges on entry and closes this loop's pools on exit.
     """
     global _POOLING
     _POOLING = True
@@ -698,57 +375,24 @@ async def pooling() -> AsyncIterator[None]:
     finally:
         _POOLING = False
         reset_pool_snapshot()
-        # **Only the pools this loop opened.** `psycopg_pool` schedules a pool's shutdown on the
-        # loop it was opened in, so closing one built on a *different* loop raises
-        # `RuntimeError: Event loop is closed` from inside the close — after the reference would
-        # otherwise have been cleared, leaving the process holding a pool nobody can close. The
-        # same hazard, and the same treatment, as `agent/checkpointer.close_checkpointer`.
-        #
-        # Dropping such a pool is what releases it, and it is worth being exact about which act
-        # does that: an ended loop does *not* take its pool's connections with it — measured, an
-        # abandoned pool held a live `pg_stat_activity` row until the reference went — so the
-        # `clear()` below is the release rather than a tidy-up after one.
-        # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
-        # instead of at shutdown. Production has one loop per process and closes what it opened.
+        # Only this loop's pools: closing one opened on another loop raises inside the close. Pools
+        # of other loops are released by dropping the reference (`_forget_pools_of_ended_loops`).
         await close_pools_of_this_loop()
         with _POOL_REGISTRY_LOCK:
             abandoned = list(_POOLS.values())
             _POOLS.clear()
-        # The drop happens outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
-        # a registry the request path reads should not be held across a refcount drop.
+        # The drop happens outside the lock, for the reason `_forget_pools_of_ended_loops` gives: a
+        # registry the request path reads should not be held across a refcount drop.
         abandoned.clear()
 
 
 async def close_pools_of_this_loop() -> None:
     """Close and forget every pool the *running* loop opened — before that loop ends.
 
-    **A loop that opened a pool and ends without closing it does not merely leak, it can hang**
-    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` closes its loop
-    through `runners._cancel_all_tasks`, which cancels every remaining task and then *awaits* them
-    all; `psycopg_pool`'s background connect and health-check workers are tasks on that loop, and
-    one that is mid-reconnect does not come back. Measured inside a pooled process with a nested
-    `asyncio.run` on a second thread — the shape `evals/retrieval._run_sync` and
-    `durable/eval_drift` both produce — the nested thread never returned, stack in
-    `_cancel_all_tasks`:
-
-        min_size=1,  max_size=1   ->  0 of 8 rounds hung
-        min_size=2,  max_size=16  ->  3 of 8      (the shipped defaults)
-        min_size=8,  max_size=16  ->  8 of 8
-
-    `min_size=max_size=1` is the one configuration that does not hang, and it is the configuration
-    `tests/test_db_pool.py` pinned — which is why a defect reachable on the shipped defaults had a
-    green test sitting on top of it.
-
-    **This is the *pair* of `_forget_pools_of_ended_loops`, not a duplicate of it.** That function
-    reclaims a pool whose loop has *already* ended, which is all anybody can do by then: psycopg
-    schedules a pool's shutdown on its own loop, so `close()` on a dead one raises
-    `RuntimeError: Event loop is closed`. This one runs while the loop is still alive, which is the
-    only moment `close()` is available — so the abandon-and-reclaim path stays as the fallback for a
-    loop nobody closed, rather than being the plan.
-
-    Safe to call on a loop that opened nothing: it closes the pools keyed on this loop and there are
-    none. Called by `pooling()` on the way out, and by any caller that runs its own loop to
-    completion inside a process that pools.
+    An abandoned pool can hang `asyncio.run`'s shutdown: `_cancel_all_tasks` awaits psycopg's
+    background workers, and one mid-reconnect may never return. This is the live-loop counterpart of
+    `_forget_pools_of_ended_loops`, which can only drop pools afterwards. Safe when the loop opened
+    nothing. Called by `pooling()` and by anyone running its own loop inside a pooled process.
     """
     here = asyncio.get_running_loop()
     with _POOL_REGISTRY_LOCK:
@@ -762,22 +406,9 @@ async def close_pools_of_this_loop() -> None:
 def register_pool(pool: Any) -> None:
     """Count a pool this module did not build in this process's readings.
 
-    For the one pool that is genuinely somebody else's: the LangGraph checkpointer's autocommit
-    pool (`agent/checkpointer.py`), which every turn's state write goes through. It was invisible
-    to `pool_stats` and to `chemclaw_pg_pool_max_size`, so a turn-serving process could open twice
-    what it reported.
-
-    **What registration does not close, and this docstring used to claim it did**: the second half
-    of that sentence read "and a saturated checkpointer stalled turns inside `AsyncPostgresSaver`
-    while `chemclaw_pg_pool_requests_waiting` read 0". Registering the pool does not fix that,
-    because the queue is not the pool's. `AsyncPostgresSaver._cursor` takes the saver's own
-    `asyncio.Lock` *before* it asks the pool for a connection, so turns pile up on the lock and the
-    pool sees one caller. Measured during a deliberate stall: `requests_waiting` still 0.
-    `chemclaw_checkpointer_statements_waiting` is the gauge that moves for that, bound by the
-    module that owns the lock.
-
-    Registration only — the caller keeps the lifecycle, because `close_checkpointer` owns when that
-    pool opens and closes and a second closer is how a live pool gets shut under a running turn.
+    For the LangGraph checkpointer's autocommit pool (`agent/checkpointer.py`). Registration does
+    not surface checkpointer contention, which queues on the saver's own lock before the pool:
+    `chemclaw_checkpointer_statements_waiting` does. The caller keeps the lifecycle.
     """
     with _POOL_REGISTRY_LOCK:
         if pool not in _FOREIGN_POOLS:
@@ -791,36 +422,18 @@ def unregister_pool(pool: Any) -> None:
             _FOREIGN_POOLS.remove(pool)
 
 
-# Dedicated connections a caller holds open and asked to be counted — see `register_connection`.
-# A list of `(connection, conninfo)` rather than a set, because `AsyncConnection` is unhashable
-# in psycopg 3 and the conninfo has to travel with it: the connection itself does not keep the
-# string it was dialled with in a form `pg_endpoint` can read.
+# Dedicated connections registered by `register_connection`, as `(connection, conninfo)`:
+# `AsyncConnection` is unhashable and does not keep a readable conninfo.
 _HELD_CONNECTIONS: list[tuple[Any, str]] = []
 
 
 def register_connection(conn: Any, conninfo: str) -> None:
     """Count one *dedicated* connection a caller holds open, for as long as it holds it.
 
-    **A pool is not the only thing that occupies a backend, and the budget could only see pools**
-    (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). `publish/drivers/postgres.py`
-    opens a bare `AsyncConnection` and keeps it for the driver's life; it is in neither `_POOLS` nor
-    `_FOREIGN_POOLS`, so a process holding one reported a ceiling one lower than it could reach.
-    Registering it as a *pool* is what the `BACKLOG.md` row proposed and it raises:
-    `_process_max_connections` sums `pool.max_size`, and measured,
-    `AttributeError: 'AsyncConnection' object has no attribute 'max_size'`.
-
-    **Counted only where the budget it feeds applies, which is `postgres_dsn`'s server.**
-    `pg_fleet_max_connections` is a ceiling on *that* server, and a result sink points by design at
-    a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`). Charging a
-    foreign warehouse's connection to the primary's budget would be the same error as the
-    under-count, in the other direction — so the endpoint decides, through the same `pg_endpoint`
-    the session-store split already uses. A sink on its own server counts 0 here and is the
-    operator's to size; `deploy/README.md` says so.
-
-    Registration only: the caller keeps the lifecycle, exactly as `register_pool` leaves a foreign
-    pool's close to the module that opens it. A closed connection stops counting without being
-    unregistered, because the count reads `conn.closed` — but `unregister_connection` is still the
-    right call on a deliberate close, so the list does not grow by one per drain.
+    For connections that occupy a backend outside any pool (e.g. `publish/drivers/postgres.py`).
+    Counted only on `postgres_dsn`'s server, since that is the budget `pg_fleet_max_connections`
+    bounds; a sink on another server is the operator's to size. The caller keeps the lifecycle; a
+    closed connection stops counting, but call `unregister_connection` on a deliberate close.
 
     Args:
         conn: The open connection. Counted while `conn.closed` is false.
@@ -838,50 +451,21 @@ def unregister_connection(conn: Any) -> None:
         _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
 
 
-#: `pg_endpoint(dsn) -> system_identifier`, for every endpoint a borrow has already reached.
-#:
-#: **The measurement `pg_endpoint`'s docstring says cannot live there.** That docstring is right
-#: that `Settings()` runs at import with no loop and no pool, so a validator cannot dial; it named
-#: the runtime as the place a measurement could live and nothing had put one there, which is the
-#: `BACKLOG.md` row this closes. A string comparison reads one server spelled two ways as two, so
-#: a split whose halves name one box is charged to two ceilings and the real total is checked by
-#: nothing — a regression against the single summed expression that preceded the split gauge.
-#:
-#: `system_identifier` is the exact answer: assigned once at `initdb`, never changing for the life
-#: of a server, and readable by an unprivileged role — driven against a freshly created
-#: `NOSUPERUSER NOCREATEDB NOCREATEROLE` role, and 1.5 ms on the loopback server `make up` runs.
-#: `inet_server_addr()` is not: measured, one server answers `NULL` over a socket, `127.0.0.1` over
-#: loopback and its bridge address over the bridge, which is the DSN's own spelling laundered
-#: through the kernel.
-#:
-#: **Learned once per endpoint and kept, which is what makes this cost the alert nothing.** The
-#: gauge's own docstring refused a measured identity because it "would be unknown until a pool
-#: filled, so the fleet-ceiling alert would lose its series during a database outage" — true of an
-#: identity read at scrape time, and not of one cached. Before the first borrow this falls back to
-#: the string comparison, which is exactly today's behaviour; after it, the cached value answers,
-#: and it answers through an outage because the value cannot change while the server is the same
-#: server. So the trade the row framed as the decision is not forced, and neither branch is ever
-#: worse than what shipped.
+# `pg_endpoint(dsn) -> system_identifier` for every endpoint a borrow has reached. String comparison
+# reads one server spelled two ways (`localhost`/`127.0.0.1`) as two; the identifier is fixed at
+# `initdb` and readable by an unprivileged role. Learned once and cached, so it survives an outage;
+# before the first borrow the string comparison is used.
 _SERVER_IDENTITY: dict[tuple[str, str], int] = {}
 
-#: Endpoints whose identity could not be read, so the attempt is made **once**. A role without the
-#: grant, or a fork of Postgres with no `pg_control_system()`, would otherwise pay a failed query on
-#: every borrow for the life of the process. One warning, then the string comparison for good.
+# Endpoints whose identity could not be read; tried once, warned once, then string comparison.
 _IDENTITY_UNREADABLE: set[tuple[str, str]] = set()
 
 
 async def _learn_server_identity(conn: Any, dsn: str) -> None:
     """Read one endpoint's `system_identifier`, at most once per process, never during a scrape.
 
-    Called from `connection()` on a borrow that has already succeeded, so it adds one round trip to
-    the *first* borrow against an endpoint and nothing to any later one. It is deliberately not
-    called from the gauge: a Prometheus gauge source is synchronous and a scrape must not make a
-    network call, which is the rule `jobs_in_flight_refresh_seconds` states one subject over.
-
-    Never raises. An endpoint whose identity cannot be read is recorded as unreadable and the
-    caller keeps the string comparison — a worse answer than a measured one and the same answer as
-    before this existed, which is the right direction for a failure in a path that only ever
-    *sharpens* an accounting.
+    Called after a successful borrow in `connection()`. Never raises: an unreadable endpoint is
+    recorded and the string comparison stays.
     """
     endpoint = pg_endpoint(dsn)
     if endpoint is None or endpoint in _SERVER_IDENTITY or endpoint in _IDENTITY_UNREADABLE:
@@ -911,11 +495,8 @@ async def _learn_server_identity(conn: Any, dsn: str) -> None:
 def same_server(one: str, other: str) -> bool:
     """Whether two DSNs name one Postgres server, measured where a borrow has already answered.
 
-    Falls back to `pg_endpoint`'s string comparison when either side is unmeasured, so this is
-    never *less* able to tell two DSNs apart than the comparison it replaces. `None` endpoints keep
-    that comparison's strict branch: two DSNs this cannot compare are treated as one server, which
-    sums their pools against one ceiling rather than checking each against a ceiling that may not
-    exist.
+    Falls back to `pg_endpoint`'s string comparison when either side is unmeasured; `None` endpoints
+    are treated as one server, so pools are summed against one ceiling.
     """
     here, there = pg_endpoint(one), pg_endpoint(other)
     if here is not None and there is not None:
@@ -927,12 +508,7 @@ def same_server(one: str, other: str) -> bool:
 
 
 def _live_held_connections() -> list[tuple[Any, str]]:
-    """Every registered connection this process still holds, dropping the closed ones as it goes.
-
-    A closed one is dropped rather than counted, so a holder that closed without unregistering
-    stops inflating the reading the moment it does — which is the direction that matters for a
-    gauge an alert compares against a ceiling.
-    """
+    """Every registered connection this process still holds, dropping the closed ones as it goes."""
     with _POOL_REGISTRY_LOCK:
         live = [(conn, info) for conn, info in _HELD_CONNECTIONS if not conn.closed]
         _HELD_CONNECTIONS[:] = live
@@ -945,11 +521,7 @@ def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
 
 
 def _held_connections_on_server(dsn: str) -> int:
-    """How many live registered connections this process holds on the *server* `dsn` names.
-
-    The endpoint form above is kept for `_process_max_connections`, whose question is about one
-    configured DSN rather than about whether two DSNs are one box.
-    """
+    """How many live registered connections this process holds on the *server* `dsn` names."""
     return sum(1 for _, info in _live_held_connections() if same_server(info, dsn))
 
 
@@ -963,11 +535,7 @@ def _all_pools() -> list[Any]:
 def _process_max_connections() -> int:
     """How many Postgres connections this process may open — the sum over every pool it holds.
 
-    Not `settings.pg_pool_max_size`, which is one pool's ceiling: see `bind_pool_metrics` for the
-    measurement that separates the two.
-
-    **Plus the dedicated connections a caller registered**, each worth exactly one backend, and only
-    those on `postgres_dsn`'s server — see `register_connection` for why the endpoint decides.
+    Plus registered dedicated connections on `postgres_dsn`'s server (see `register_connection`).
     """
     return sum(int(pool.max_size) for pool in _all_pools()) + _held_connections_on(
         pg_endpoint(settings.postgres_dsn)
@@ -977,39 +545,15 @@ def _process_max_connections() -> int:
 def _session_store_max_connections() -> int:
     """The part of `_process_max_connections()` that lands on a split session store's own server.
 
-    Zero unless `session_store_dsn` names a *different* endpoint from `postgres_dsn` — the decision
-    is `Settings.fleet_connections_per_server`'s and is read from it rather than restated, so the
-    startup check and the runtime alert cannot disagree about how many servers this deployment has.
-    Whatever `pg_endpoint` cannot tell apart, neither half tells apart.
-
-    It exists because `chemclaw_pg_pool_max_size` sums every pool a process holds and a *sum* of
-    pools against a *sum* of ceilings is one check, not two: enumerated, that comparison never
-    fires with both servers inside their own ceilings and stays silent for 49,993 of 200,000 draws
-    where one of them is over. On the shipped topology with the session server declared at 180 it
-    is over from seven front-door replicas and the summed alert waits until thirteen — 1.58x.
-
-    Subtracted from the process total rather than labelled onto it, deliberately:
-    `chemclaw_pg_pool_max_size` answers "what may this process open", which is configuration and
-    needs no database. A label carrying a measured cluster identity would be unknown until a pool
-    filled, so the fleet-ceiling alert would lose its series during a database outage.
-
-    **Which servers there are is measured here, and that is new.** `pg_endpoint` compares strings,
-    so `localhost` against `127.0.0.1` — one server — split the fleet in two, each half charged to
-    its own ceiling and the real total checked by nothing. `same_server` answers it from the
-    `system_identifier` a borrow already read. The subtraction above still stands: what is measured
-    is *how many servers there are*, not what this process may open, so the gauge keeps needing no
-    database and keeps its series through an outage. See `_SERVER_IDENTITY`.
+    Zero unless `session_store_dsn` names a different server, as decided by
+    `Settings.fleet_connections_per_server` and refined by `same_server`. Subtracted from the
+    process total so each server can be checked against its own ceiling; configuration-derived, so
+    the gauge keeps its series through a database outage.
     """
     if not settings.fleet_connections_per_server()[1]:
         return 0
     there = settings.session_store_dsn
-    # **A split the measurement disproves is not a split.** `fleet_connections_per_server` decided
-    # there were two servers from the two DSN strings, at import, with no database to ask. Once a
-    # borrow has answered and the two spellings turn out to name one box, carving anything out of
-    # the process total would charge the whole of it to a server that does not exist — measured,
-    # 32 of 32 against a `localhost`/`127.0.0.1` pair. Zero is the honest answer and it is the one
-    # that restores the pre-split behaviour for this configuration: one sum against one ceiling,
-    # which is the expression the row records as having been regressed.
+    # A split the measurement disproves is not a split: one server, one sum, one ceiling.
     if same_server(settings.postgres_dsn, there):
         return 0
     return sum(
@@ -1020,10 +564,8 @@ def _session_store_max_connections() -> int:
 def pool_stats() -> dict[str, int]:
     """Aggregate pool counters across this process's pools, for the metrics surface.
 
-    Aggregated rather than per-DSN because the thing an operator alerts on is "is the front door
-    waiting for connections?", which is a process-level question; naming each DSN would leak a
-    host into a metric label for no operational gain. Foreign pools are included for the same
-    reason they are registered at all — see `register_pool`.
+    Process-level, because the alert question is whether this process waits for connections; per-DSN
+    labels would leak hosts. Includes registered foreign pools.
     """
     total: dict[str, int] = {"pool_size": 0, "pool_available": 0, "requests_waiting": 0}
     for pool in _all_pools():
@@ -1033,33 +575,18 @@ def pool_stats() -> dict[str, int]:
     return total
 
 
-#: How long one walk of the pools stands in for the next, in seconds.
-#:
-#: **This is a coherence window, not a cache for speed.** `render()` reads every gauge by calling
-#: its own source, so three gauges bound to three `pool_stats()` lambdas walked the pools three
-#: times per scrape and published a triple that never existed together — harmless for a trend and
-#: wrong for the one question D-119 introduced them to answer, which is read across all three at
-#: once: is the pool full *and* are callers waiting.
-#:
-#: One second against a scrape interval of 15-30 s: long enough that the three reads of a single
-#: render see one instant, and far too short to make a scrape stale. The alternative the backlog
-#: row offered — collapsing the three into one labelled family — was declined because the names are
-#: what existing dashboards and alerts select on, and they are three quantities rather than three
-#: values of one.
+# How long one walk of the pools serves later gauge reads, in seconds: a coherence window so the
+# three pool gauges of one render describe one instant, far shorter than a scrape interval.
 _POOL_SNAPSHOT_WINDOW_SECONDS = 1.0
 
-#: `(taken_at, stats)` for the most recent walk, or `None`. Guarded by `_POOL_SNAPSHOT_LOCK`
-#: because `/metrics` can be scraped concurrently and two renders must not interleave a half-built
-#: snapshot — which would reintroduce exactly the incoherence this exists to remove.
+# `(taken_at, stats)` of the latest walk, or `None`; guarded by `_POOL_SNAPSHOT_LOCK` so concurrent
+# renders never see a half-built snapshot.
 _POOL_SNAPSHOT: tuple[float, dict[str, int]] | None = None
 _POOL_SNAPSHOT_LOCK = threading.Lock()
 
 
 def coherent_pool_stats() -> dict[str, int]:
     """`pool_stats()`, but one walk per scrape rather than one per gauge.
-
-    Every gauge bound to this within `_POOL_SNAPSHOT_WINDOW_SECONDS` of the first reads the *same*
-    walk, so `pool_size`, `pool_available` and `requests_waiting` describe one instant.
 
     Returns:
         A copy, so a caller cannot mutate the shared snapshot for the gauges that follow it.
@@ -1070,9 +597,8 @@ def coherent_pool_stats() -> dict[str, int]:
         cached = _POOL_SNAPSHOT
         if cached is not None and now - cached[0] < _POOL_SNAPSHOT_WINDOW_SECONDS:
             return dict(cached[1])
-    # Walked outside the lock: `get_stats()` touches every pool, and holding the lock across it
-    # would serialise concurrent scrapes behind the walk rather than behind the snapshot. A race
-    # here costs one extra walk and stores whichever finished last, which is still one instant.
+    # Walked outside the lock so concurrent scrapes do not serialise on it; a race costs one extra
+    # walk.
     fresh = pool_stats()
     with _POOL_SNAPSHOT_LOCK:
         _POOL_SNAPSHOT = (now, fresh)
@@ -1082,8 +608,7 @@ def coherent_pool_stats() -> dict[str, int]:
 def reset_pool_snapshot() -> None:
     """Drop the cached walk, so the next read takes a fresh one.
 
-    For tests, and for `pooling()`'s exit: a process that has closed its pools should not answer a
-    later scrape from a window opened while they were live.
+    For tests, and for `pooling()`'s exit so closed pools are not reported.
     """
     global _POOL_SNAPSHOT
     with _POOL_SNAPSHOT_LOCK:
@@ -1093,13 +618,8 @@ def reset_pool_snapshot() -> None:
 def vector_recall_settings() -> dict[str, str]:
     """The pgvector recall parameters the configuration asks a dense query to run under.
 
-    Empty is the default and means "issue no statement": pgvector's own `ef_search` (40) and
-    `iterative_scan` (`off`) stand, the dense path costs exactly the round trips it did before this
-    existed, and a server without `hnsw.iterative_scan` (pgvector < 0.8, where the reserved `hnsw.`
-    prefix makes an unknown parameter an error rather than an ignored placeholder) is never handed
-    one. See `core/config/retrieval.py` for why neither knob is the first thing to reach for — the
-    measured cause of the large `within=` shortfalls was stale planner statistics, and these address
-    only the residual.
+    Empty by default, meaning no statement is issued, so pgvector's defaults stand and older servers
+    without `hnsw.iterative_scan` are never sent it. See `core/config/retrieval.py`.
     """
     wanted: dict[str, str] = {}
     if settings.hnsw_ef_search:
@@ -1112,35 +632,10 @@ def vector_recall_settings() -> dict[str, str]:
 async def apply_vector_recall_settings(cur: Any) -> None:
     """Put the configured pgvector recall parameters on this cursor's transaction, if any are set.
 
-    `set_config(name, value, is_local => true)` rather than `SET LOCAL` because the values come from
-    configuration: `SET` accepts no placeholders, so the alternative is interpolating an
-    operator-supplied value into statement text. One `unnest` over two arrays applies however many
-    are set in a single round trip, and nothing is sent at all when none are — which is the default,
-    so a dense path costs exactly what it did before this existed.
-
-    **Transaction-local is the load-bearing half, not an implementation detail.** `connection()`
-    commits on exit and pooled connections are reused, so a session-level `SET` here would leak one
-    query's widened candidate list onto every later borrower of that connection — including the
-    unscoped searches that never wanted it. `is_local => true` makes the setting die with the
-    transaction that asked for it.
-
-    **Here rather than on one index, because the shape these knobs govern is on both.** They were
-    introduced for the note index (`chemclaw.retrieval.vector_index`) and cited a residual on the
-    *document* one (`chemclaw.ingest.documents.index`), which read them nowhere — so the knob did
-    nothing for the case named as its reason. Measured on the document index, live PostgreSQL 16 /
-    pgvector 0.8.0, 20,000 chunks with one file row each, `ANALYZE`d: the plan really is a
-    `Nested Loop Semi Join` over an `Index Scan using document_chunks_embedding_idx`, i.e. the
-    eligibility `EXISTS` sits *above* the HNSW scan — the shape in which `ef_search` decides how
-    many candidates survive the filter — for an unfiltered query and for tags matching 100%, 50%,
-    20% and 10% of the corpus; at 5% and below the planner abandons the vector index for an exact
-    plan.
-
-    **The shortfall itself did not reproduce, and that is worth saying plainly.** 20 queries × 6
-    selectivities × 4 settings of the two knobs: **0 of 480 searches returned fewer than `top_k`**,
-    and the HNSW scan handed the semi join 62 rows where `ef_search=40` would suggest 40. So this is
-    applied because the plan permits the shortfall and the knob must be able to reach the plan, not
-    because this corpus exhibits one — the same conclusion `PostgresNoteIndex.__init__` reached when
-    it re-measured its own.
+    `set_config(name, value, is_local => true)` because `SET` takes no placeholders; one `unnest`
+    applies all of them in one round trip, and nothing is sent when none are set. Transaction-local
+    is required: pooled connections are reused, so a session setting would leak onto later
+    borrowers. Both dense searches (note index and document index) call this.
 
     Args:
         cur: An open async cursor. Taken rather than opened here so the settings join the
@@ -1160,19 +655,9 @@ async def apply_vector_recall_settings(cur: Any) -> None:
 async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
     """Which of `tables` exist on this connection's `search_path`.
 
-    One query rather than a guard inside each statement, because a guard inside the statement
-    cannot work: `DELETE FROM t` resolves `t` when the statement is *parsed*, long before any
-    `WHERE` runs. Measured against a schema with no checkpointer — a `WHERE to_regclass(...) IS NOT
-    NULL` guard never got evaluated and the whole erasure failed with `relation "checkpoints" does
-    not exist`.
-
-    Here rather than private to one caller because two subsystems ask the same question about the
-    same tables, and for the same reason: the LangGraph checkpoint tables are created by
-    `AsyncPostgresSaver.setup()` rather than by a migration in `infra/sql`, so a deployment that has
-    never run the graph engine does not have them. Erasure must not become the one operation such a
-    deployment cannot perform (`agent/leaver.py`), and neither must the nightly retention sweep
-    (`durable/retention.py`) — a sweep that fails outright on a missing table stops pruning every
-    other table too.
+    A guard inside the statement cannot work: `DELETE FROM t` resolves `t` at parse time. Shared
+    because the LangGraph checkpoint tables exist only after `AsyncPostgresSaver.setup()`, and both
+    erasure (`agent/leaver.py`) and retention (`durable/retention.py`) must work without them.
 
     Args:
         cur: An open async cursor. Taken rather than opened here so the check joins whatever
@@ -1197,19 +682,14 @@ async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
 def _iso_stamp(value: Any) -> Any:
     """A `TIMESTAMPTZ` column as `datetime.isoformat()`'s string, NULL as `""`, else untouched.
 
-    **A validator rather than a SQL-side cast, because the string is on the wire.** `::text` would
-    convert in the server and spell the instant `2026-09-16 10:00:00+00`, where every reader of the
-    models that use this — `GET /pending`, the effect ledger, an evidence pack — has always been
-    handed `2026-09-16T10:00:00+00:00`. A row factory binds columns by name and converts nothing,
-    so the conversion lives in the model, and in one place so the spelling cannot drift per seam.
-    Anything that is neither a `datetime` nor `None` is left for pydantic to validate.
+    A validator rather than a SQL `::text` cast, which would spell the instant differently from what
+    every reader has been given. Other values are left for pydantic.
     """
     if isinstance(value, datetime):
         return value.isoformat()
     return "" if value is None else value
 
 
-#: A `TIMESTAMPTZ` column carried as the ISO string the seams reading it have always exposed. A
-#: NULL reads as the empty string — "still waiting", "never settled", "recorded nothing" — rather
-#: than as `None`, which is what each model's own nullable field means by it.
+# A `TIMESTAMPTZ` column as the ISO string its readers expect; NULL reads as "" (still waiting,
+# never settled), not `None`.
 IsoStamp = Annotated[str, BeforeValidator(_iso_stamp)]

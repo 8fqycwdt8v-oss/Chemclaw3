@@ -3,8 +3,8 @@
 An approval must bound what the approved plan may do
 (D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool). Only the model knows which
 tools carry out a step, so `write_todos` takes a required `tools` list beside `content` and
-`status`; a call without it fails argument validation and the model rewrites it. An empty list
-means the step changes nothing.
+`status`; a call without it fails argument validation and the model rewrites it. An empty list means
+the step changes nothing.
 
 A declaration is not an authorization: `declared_scope` is read only to record what a human
 approved, and the gate reads the recorded scope from `plan_approvals`. `plan_identity` hashes each
@@ -126,10 +126,8 @@ class ScopedTodoListMiddleware(TodoListMiddleware):
     """`TodoListMiddleware`, with every step declaring the tools it will call.
 
     Keeps upstream's prompt, parallel-rewrite guard, `todos` channel and `write_todos` name; only
-    the
-    argument schema is widened and the two texts gain a paragraph. Upstream's wording is read from
-    the
-    instance's attributes (pinned in `tests/test_upstream_surface.py`).
+    the argument schema is widened and the two texts gain a paragraph. Upstream's wording is read
+    from the instance's attributes (pinned in `tests/test_upstream_surface.py`).
     """
 
     def __init__(self) -> None:
@@ -166,7 +164,6 @@ def declared_scope(todos: Iterable[Mapping[str, Any]]) -> frozenset[str]:
     """Every tool this plan's steps declare — the scope a human approving it would authorize.
 
     The union over steps, because the gate judges a call against the plan: a batch commonly ticks
-    step
-    N while running step N+1's tool.
+    step N while running step N+1's tool.
     """
     return frozenset(name for todo in todos for name in step_declaration(todo))

@@ -51,12 +51,9 @@ def revalidatable(request: Request, response: Response, payload: BaseModel) -> R
     """Stamp the caching policy on `response`; return a 304 when the caller already holds `payload`.
 
     `None` means "send the payload": the headers are already on the injected `Response`. A returned
-    304
-    is used as-is, so it carries the validator and policy itself, with no body (RFC 9110 §15.4.5).
-    The
-    payload is computed first in both routes — the ETag and the ownership gate need the read — so
-    this
-    saves the transfer and re-render, not the server's work.
+    304 is used as-is, so it carries the validator and policy itself, with no body (RFC 9110
+    §15.4.5). The payload is computed first in both routes — the ETag and the ownership gate need
+    the read — so this saves the transfer and re-render, not the server's work.
     """
     etag = _etag(payload)
     headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}

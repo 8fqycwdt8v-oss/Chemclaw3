@@ -105,8 +105,7 @@ class PostgresCampaignStore:
                 ),
             )
             # `DO NOTHING` yields no row when a retried durable run already wrote this suggestion;
-            # read
-            # back the original id so the retry is invisible to the caller.
+            # read back the original id so the retry is invisible to the caller.
             row = await cursor.fetchone()
             if row is None:
                 cursor = await conn.execute(

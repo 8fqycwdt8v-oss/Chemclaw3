@@ -1,10 +1,9 @@
 """Profiles as files: the authoring path for a per-use-case agent.
 
-A profile is a YAML file discovered like a skill: `profiles/<name>.yaml` in the configured tree,
-or `connectors/<name>/profiles/<p>.yaml` declared by a bundle's manifest. The stem is the name;
-the body is `AgentProfile`'s validated schema (`extra="forbid"`), so a typo fails at startup.
-A profile can only narrow (`chemclaw.agent.profiles`), so a dropped file cannot widen what its
-caller may do.
+A profile is a YAML file discovered like a skill: `profiles/<name>.yaml` in the configured tree, or
+`connectors/<name>/profiles/<p>.yaml` declared by a bundle's manifest. The stem is the name; the
+body is `AgentProfile`'s validated schema (`extra="forbid"`), so a typo fails at startup. A profile
+can only narrow (`chemclaw.agent.profiles`), so a dropped file cannot widen what its caller may do.
 """
 
 import logging

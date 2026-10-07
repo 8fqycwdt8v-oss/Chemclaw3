@@ -9,8 +9,8 @@ Reports, per criterion, one of four verdicts and decides nothing about the batch
   disagreeing bases). Caught per criterion so one bad unit does not hide the other results.
 
 A `within` result whose own uncertainty straddles a bound is flagged by
-`SpecificationResult.limit_within_uncertainty` without changing the verdict: whether to
-investigate is a judgment. Limits are inclusive (USP General Notices 7.20).
+`SpecificationResult.limit_within_uncertainty` without changing the verdict: whether to investigate
+is a judgment. Limits are inclusive (USP General Notices 7.20).
 """
 
 from __future__ import annotations
@@ -84,9 +84,8 @@ class SpecificationResult:
     verdict: Verdict
     #: `None` exactly when the verdict is `not_measured`.
     measured: Measurement | None
-    # True when the result is `within` but its uncertainty reaches past a bound. Always False for
-    # any
-    # other verdict and when no uncertainty was reported ("not stated" is not "zero").
+    #: True when the result is `within` but its uncertainty reaches past a bound. Always False for
+    #: any other verdict and when no uncertainty was reported ("not stated" is not "zero").
     limit_within_uncertainty: bool
     detail: str
 
@@ -130,8 +129,7 @@ def _score(criterion: AcceptanceCriterion, result: Measurement) -> Specification
     """One measured criterion, with the comparison's own refusal turned into a verdict.
 
     `Measurement.compare` raises `UnitError` across dimensions or disagreeing bases; that becomes
-    one
-    `indeterminate` row rather than failing the whole evaluation.
+    one `indeterminate` row rather than failing the whole evaluation.
     """
     breaches: list[str] = []
     try:
@@ -176,9 +174,8 @@ def _uncertainty_reaches_a_bound(criterion: AcceptanceCriterion, result: Measure
     """Does the result's own spread cross a limit it is otherwise inside?
 
     Only asked when an uncertainty was reported. The value is shifted by the uncertainty (which is
-    in
-    the result's own unit) and compared via `Measurement.compare`, which handles unit conversion of
-    the bounds.
+    in the result's own unit) and compared via `Measurement.compare`, which handles unit conversion
+    of the bounds.
     """
     if result.uncertainty is None:
         return False

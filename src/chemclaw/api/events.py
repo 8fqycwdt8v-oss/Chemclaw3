@@ -89,10 +89,9 @@ class PlanEvent(BaseModel):
 
 
 # Which agent raised an event, when it was not the one the chemist is talking to. Empty means the
-# main
-# agent, which keeps the field additive. The only other value is `"subagent"`: the graph namespace
-# carries no name, so a surface must read this as "not the main agent", never as an identity. Only
-# events a helper can raise carry it.
+# main agent, which keeps the field additive. The only other value is `"subagent"`: the graph
+# namespace carries no name, so a surface must read this as "not the main agent", never as an
+# identity. Only events a helper can raise carry it.
 _AGENT_FIELD = Field(
     default="",
     description="The specialist that raised this event; empty for the main agent.",
@@ -143,20 +142,18 @@ class JobStartedEvent(BaseModel):
     # without parsing the id. Defaulted so the field is additive for any existing consumer.
     kind: str = "job"
     # The plan step the launch served (the todo's content), so a surface can badge it. Empty when
-    # not
-    # launched from a plan step.
+    # not launched from a plan step.
     plan_step: str = ""
 
 
 class ToolQueuedEvent(BaseModel):
     """A queued tool call is waiting for a compute slot (`queued`), or has just got one (`running`).
 
-    Emitted while the turn waits on a tool the connector's manifest queues
-    (`connectors/queued.py`): once when the call is still waiting after the first poll, again when
-    the waiting count moves, and once when a worker picks it up. The card for the open `tool_call`
-    of the same `tool` is what it annotates. `waiting` is the broker's approximate backlog on that
-    connector's queue — how many calls are waiting, not a strict place in line — and `None` where
-    the broker could not say.
+    Emitted while the turn waits on a tool the connector's manifest queues (`connectors/queued.py`):
+    once when the call is still waiting after the first poll, again when the waiting count moves,
+    and once when a worker picks it up. The card for the open `tool_call` of the same `tool` is what
+    it annotates. `waiting` is the broker's approximate backlog on that connector's queue — how many
+    calls are waiting, not a strict place in line — and `None` where the broker could not say.
     """
 
     type: Literal["tool_queued"] = "tool_queued"
@@ -257,21 +254,19 @@ class AwaitingAnswerEvent(BaseModel):
 
     **The row existed and nothing delivered it.** `AwaitAnswerWorkflow._push` has always written an
     `awaiting-answer` row into `session_events`, and `GET /sessions/{id}/events` claimed
-    `("job_completed", "job_failed")` — so the notification was written, never claimed, and aged
-    out under retention. The only trace a chemist got was the
-    `record_job_started(handle.id, "awaiting")` beside it, which arrives as a `job_started` of a
-    kind no surface recognises: an ask rendered as a durable job that ran for seven days and then
-    silently expired.
+    `("job_completed", "job_failed")` — so the notification was written, never claimed, and aged out
+    under retention. The only trace a chemist got was the `record_job_started(handle.id,
+    "awaiting")` beside it, which arrives as a `job_started` of a kind no surface recognises: an ask
+    rendered as a durable job that ran for seven days and then silently expired.
 
-    **Both pushes come through here, and `state` tells them apart.** The workflow notifies on
-    open and on every reminder with `state="waiting"`, and once more with `state="expired"` when the
+    **Both pushes come through here, and `state` tells them apart.** The workflow notifies on open
+    and on every reminder with `state="waiting"`, and once more with `state="expired"` when the
     deadline passes unanswered — "told, not silently abandoned", as that call site puts it. The two
     differ in exactly three fields — the open adds `kind`, `asked_of` and `due_at` — and share the
-    rest, `subject` included. An
-    expiry carries fewer fields than an open (no `kind`, no `asked_of`, no `due_at`), which is why
-    every field but `request_id` has a default — `state`'s default is `waiting`, the value the open
-    push carries: a model that required them would fail validation on exactly the outcome nobody is
-    watching for.
+    rest, `subject` included. An expiry carries fewer fields than an open (no `kind`, no `asked_of`,
+    no `due_at`), which is why every field but `request_id` has a default — `state`'s default is
+    `waiting`, the value the open push carries: a model that required them would fail validation on
+    exactly the outcome nobody is watching for.
 
     **It is a notification, not the record.** `GET /pending` is authoritative — it filters to what
     the caller may actually answer, and this stream is scoped to one session — so a client should
@@ -281,8 +276,8 @@ class AwaitingAnswerEvent(BaseModel):
 
     type: Literal["awaiting_answer"] = "awaiting_answer"
     request_id: str
-    # `waiting` on the open and on every reminder; `expired` when the deadline passed unanswered. A
-    # repeated state is collapsed per connection.
+    #: `waiting` on the open and on every reminder; `expired` when the deadline passed unanswered. A
+    #: repeated state is collapsed per connection.
     state: str = "waiting"
     subject: str = ""
     #: The service's own vocabulary for what kind of answer is wanted (`measurement`, …). One of
@@ -342,29 +337,26 @@ class AnswerEvent(BaseModel):
     confidence did not run, so the turn is routed to review with an explicit reason appended to
     `unsupported_claims` rather than a bare flag beside a high `confidence`.
 
-    With every knob off — which is no longer the default, since `answer_shape_gate_enabled` ships
-    on — the scored fields stay `None`/`False`/empty and
-    `verified_by` stays `None`. **What says the checks did not run is `checks_run`, and nothing
-    said it before**: those defaults are what a check *finds*, so an answer the shape gate scanned
-    and cleared serialized identically to one nothing looked at (measured: the same bytes,
-    character for character). `confidence`/`verified_by` are the verifier's own "did not run"; the
-    shape gate had no field at all.
+    With every knob off — which is no longer the default, since `answer_shape_gate_enabled` ships on
+    — the scored fields stay `None`/`False`/empty and `verified_by` stays `None`. **What says the
+    checks did not run is `checks_run`, and nothing said it before**: those defaults are what a
+    check *finds*, so an answer the shape gate scanned and cleared serialized identically to one
+    nothing looked at (measured: the same bytes, character for character).
+    `confidence`/`verified_by` are the verifier's own "did not run"; the shape gate had no field at
+    all.
     """
 
     type: Literal["answer"] = "answer"
     text: str
     # Which honesty checks ran on this answer; `[]` means none. With the shipped defaults it
-    # includes
-    # `answer-shape`. Additive and defaulted for the surfaces in `Chemclaw3_ui` and
-    # `Chemclaw3_mock`; the
-    # vocabulary is imported from `agent.verifier`.
+    # includes `answer-shape`. Additive and defaulted for the surfaces in `Chemclaw3_ui` and
+    # `Chemclaw3_mock`; the vocabulary is imported from `agent.verifier`.
     checks_run: list[AnswerCheck] = []
     confidence: float | None = None
     unsupported_claims: list[str] = []
     review_required: bool = False
     # Which check produced `confidence`, if any; `None` means verification was off. A reviewer needs
-    # to
-    # know whether a flagged answer was scored by the weaker citation gate.
+    # to know whether a flagged answer was scored by the weaker citation gate.
     verified_by: Literal["judge", "citation-gate"] | None = None
     # Whether a review panel upheld an objection to this answer, as distinct from `review_required`.
     challenged: bool = False
@@ -387,11 +379,9 @@ class ToolFailedEvent(BaseModel):
     message: str
     agent: str = _AGENT_FIELD
     # Which kind of deliberate refusal this is, if any — a gate working, not a fault, so a consumer
-    # must
-    # not report it as an outage. The vocabulary is `core.turn_signals`', the same table
+    # must not report it as an outage. The vocabulary is `core.turn_signals`', the same table
     # `agent/audit.refusal_reason` uses. `None` is an ordinary failure. Additive, defaulted and
-    # closed
-    # for the two consuming repositories.
+    # closed for the two consuming repositories.
     reason: RefusalReason | None = None
     # The provider's id for the failed call, matching its `exhibit_draft` frames, so a surface drops
     # exactly that draft. `""` when not attributed to one call.
@@ -461,11 +451,11 @@ class ToolResultEvent(BaseModel):
     18-chunk evidence sweep.
 
     `result_ref` is the third thing the same split produces, and it is what closes it. `note_ids`
-    and `numbers` let a scorer check *ids* and *figures* against the full result; they cannot give
-    a surface the result's **shape**, so a `ScreenResult`'s severities and citations, a
-    `ChargeTable`'s rows and a solvent ranking still reached the chemist as prose about them.
-    This carries a reference to the stored full text — fetched from
-    `GET /sessions/{id}/tool-results/{ref}` — instead of the payload, so the wire budget the preview
+    and `numbers` let a scorer check *ids* and *figures* against the full result; they cannot give a
+    surface the result's **shape**, so a `ScreenResult`'s severities and citations, a
+    `ChargeTable`'s rows and a solvent ranking still reached the chemist as prose about them. This
+    carries a reference to the stored full text — fetched from `GET
+    /sessions/{id}/tool-results/{ref}` — instead of the payload, so the wire budget the preview
     exists to keep is untouched: a surface pulls the one result it decided to render, once, rather
     than every result being streamed to every consumer.
 
@@ -494,9 +484,9 @@ class ToolResultEvent(BaseModel):
     share of `agent_max_tool_result_chars` is cut head-and-tail before the model reads it; the full
     text is kept for the chemist, never offered back to the model. `preview`, `note_ids`, `numbers`
     and `values` stay on what the model read, because they are what a grounding check asks about.
-    One case keeps `result_ref` on the cut: the full text was over `stream_max_result_bytes` (or
-    its write failed), and then the fetched text is the model's own, carrying the cut's notice
-    in-band — so it never reads as whole.
+    One case keeps `result_ref` on the cut: the full text was over `stream_max_result_bytes` (or its
+    write failed), and then the fetched text is the model's own, carrying the cut's notice in-band —
+    so it never reads as whole.
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -528,15 +518,13 @@ ErrorCode = Literal[
     "spend_cap_reached",
     "bad_tool_arguments",
     # The conversation no longer fits the model's context window. Nothing is broken; the remedy is a
-    # new
-    # session or a narrower question.
+    # new session or a narrower question.
     "context_length",
     # The model gateway refused this deployment's credential (401/403). Only an operator can fix it
     # (`CHEMCLAW_LLM_API_KEY`). Never retryable.
     "llm_auth",
     # A queued message that never ran: withdrawn by its sender or the owner, its sender removed, or
-    # the
-    # session deleted. Nothing failed or was spent; a surface must not render it as an error.
+    # the session deleted. Nothing failed or was spent; a surface must not render it as an error.
     "queue_cancelled",
     # One view of a turn fell a full buffer behind and was cut off; the turn and other views run on.
     # Retryable: reopen the view, or read the answer from the transcript.

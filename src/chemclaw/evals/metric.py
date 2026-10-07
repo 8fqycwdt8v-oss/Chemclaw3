@@ -72,7 +72,7 @@ class EvalCase(BaseModel):
 
 
 class MetricError(ChemclawError):
-    """A metric could not be computed for a case (missing/invalid inputs, G4)."""
+    """A metric could not be computed for a case (missing/invalid inputs)."""
 
 
 # A metric is a pure function: it reads a case and returns its scored result.
@@ -133,7 +133,7 @@ def is_live(name: str) -> bool:
 
 
 def get_metric(name: str) -> Metric:
-    """Resolve a registered metric, or raise with the known names (G4)."""
+    """Resolve a registered metric, or raise with the known names."""
     fn = _REGISTRY.get(name)
     if fn is None:
         raise ValueError(f"unknown metric {name!r}; known: {sorted(_REGISTRY)}")

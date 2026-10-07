@@ -1,14 +1,14 @@
 """Attaching a database this system does not own: resolve its driver, read its credentials.
 
-Shared by the warehouse ELN and corpora (`ingest/eln/warehouse/`), the result store
-(`publish/`) and the external vector store (`retrieval/vectors/`). Drivers are `module:callable`
-references resolved on first use, so an unused client is never imported. Keys ending in `_env`
-name an environment variable that is read at connect time and registered for log redaction, so
-manifests carry no secrets and rotation needs no deploy.
+Shared by the warehouse ELN and corpora (`ingest/eln/warehouse/`), the result store (`publish/`) and
+the external vector store (`retrieval/vectors/`). Drivers are `module:callable` references resolved
+on first use, so an unused client is never imported. Keys ending in `_env` name an environment
+variable that is read at connect time and registered for log redaction, so manifests carry no
+secrets and rotation needs no deploy.
 
-The driver's signature is the schema (D-2026-08-26-the-driver-s-signature-is-the-schema): every
-key of a `connection:` block except `driver:` is passed as a keyword argument, so a new database
-is one driver plus one manifest. The error type is a parameter because Temporal matches
+The driver's signature is the schema (D-2026-08-26-the-driver-s-signature-is-the-schema): every key
+of a `connection:` block except `driver:` is passed as a keyword argument, so a new database is one
+driver plus one manifest. The error type is a parameter because Temporal matches
 `non_retryable_error_types` by class name, and each seam lists its own (`BindingError`,
 `SinkConnectionError`).
 """
@@ -150,8 +150,8 @@ def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
         if parameter is None:
             continue  # `signature_mismatch` owns the unknown-key case, and names it better.
         accepted = _ACCEPTED_SCALARS.get(parameter.annotation)
-        # `bool` is a subclass of `int`, so `isinstance` alone would let `True` through an `int`
-        # or `float` parameter — the coercion `_ACCEPTED_SCALARS` says it refuses.
+        # `bool` is a subclass of `int`, so `isinstance` alone would let `True` through an `int` or
+        # `float` parameter — the coercion `_ACCEPTED_SCALARS` says it refuses.
         if accepted is None:
             continue
         if isinstance(value, accepted) and (bool in accepted or not isinstance(value, bool)):
@@ -237,13 +237,12 @@ def open_connection(
     driver = resolve_driver(reference, error=error, what=f"{what} driver")
     options = connect_options(connection, error=error, what=what)
     # Re-run the validators' signature check: a deployment's own manifests were never validated in
-    # CI,
-    # and the constructor's `TypeError` would be retried by every job instead of failing as `error`.
+    # CI, and the constructor's `TypeError` would be retried by every job instead of failing as
+    # `error`.
     if mismatch := signature_mismatch(driver, connection):
         raise error(f"{what} driver {reference!r} {mismatch}")
     # Log which database this pod attached to. Resolved secrets sit in `options` under their stem,
-    # so
-    # `_is_address` filters by key.
+    # so `_is_address` filters by key.
     logger.info(
         "opening %s via %s (%s)",
         what,

@@ -1,7 +1,7 @@
 """The agent's way to *write* a protocol, having spent the turn reading the record.
 
-The writing half beside `agent/protocol_tools.py`: the structured ask, the design that comes out
-of it, and the revisions an edit produces. Nothing here decides chemistry; that judgment lives in
+The writing half beside `agent/protocol_tools.py`: the structured ask, the design that comes out of
+it, and the revisions an edit produces. Nothing here decides chemistry; that judgment lives in
 `skills/protocol-generation` and `skills/hte-campaign-design`. What is here is the shape of the
 answer, the checks it must survive, and the store it lands in. `checks.evidence_present` is a
 blocker, so a design citing no precedent and no tool cannot be stored.
@@ -86,8 +86,7 @@ def _readable(document: BaseModel) -> str:
 
     Every model here carries model-written free text that is stored and replayed into later turns.
     Defanged rather than framed, since a design is this system's own document, not evidence; the
-    whole
-    payload rather than a field list, so new string fields are covered.
+    whole payload rather than a field list, so new string fields are covered.
     """
     return defang(document.model_dump_json())
 
@@ -109,7 +108,8 @@ _NUMBER_WORDS = frozenset(
     ninety hundred thousand dozen half quarter single double triple""".split()
 )
 
-#: Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared as.
+# : Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared
+# as.
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -228,8 +228,7 @@ async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary
 
     Applies `owner_permits`, the same rule as the HTTP layer, to an explicit `design_id`.
     `design_id_for` scopes derived ids by owner; this holds when an id is passed in. A design with
-    no
-    header yet (`None`) is writable: that write creates it and records the owner.
+    no header yet (`None`) is writable: that write creates it and records the owner.
     """
     header = await store.summary(design_id)
     if header is not None and not owner_permits(header.opened_by, require_actor()):
@@ -281,9 +280,8 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
 
     The seam between the pure check `no_documented_failure` (in `protocols`, which may import only
     `core` and `science`) and the knowledge graph (`memory/failure.failures_against`). Offloaded to
-    a
-    thread because loading notes parses the corpus off disk. Never raises: an unreadable corpus says
-    less rather than refusing a design, and is counted through `degraded()`.
+    a thread because loading notes parses the corpus off disk. Never raises: an unreadable corpus
+    says less rather than refusing a design, and is counted through `degraded()`.
     """
     cited = [ref.ref for ref in design.evidence if ref.ref]
     structures = [smiles for _, smiles in used_structures(design)]
@@ -305,8 +303,7 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
         )
         return []
     # Inside the guard because the reduction can raise too (`RecordedFailure.id` requires a
-    # non-empty
-    # id), and callers rely on this never raising.
+    # non-empty id), and callers rely on this never raising.
     try:
         return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
     except ValidationError as exc:
@@ -324,9 +321,8 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     """Runs the record already holds that resemble this design and that it does not cite.
 
     The same seam shape as `recorded_failures`, for `precedent_consulted`. It offers and never
-    cites:
-    writing hits into `design.evidence` would let `evidence_present` pass on an ungrounded design.
-    Already-cited hits are dropped by comparing in the citation's own spelling
+    cites: writing hits into `design.evidence` would let `evidence_present` pass on an ungrounded
+    design. Already-cited hits are dropped by comparing in the citation's own spelling
     (`external_record_ref`). Never raises; failures are counted through `degraded()`.
     """
     reaction = design.request.reaction_smiles.strip()
@@ -345,8 +341,8 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
         )
         return []
     # Inside the guard: `Match.similarity` is an unconstrained float while
-    # `UncitedPrecedent.similarity`
-    # is bounded to [0, 1], so a rounding overshoot or `nan` would raise.
+    # `UncitedPrecedent.similarity` is bounded to [0, 1], so a rounding overshoot or `nan` would
+    # raise.
     try:
         return [
             UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
@@ -393,24 +389,22 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
             design of that ask belonging to another chemist.
     """
     require_quotes_are_verbatim(request, get_current_user_texts())
-    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather
-    # than one they overwrite in turn.
+    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather than
+    # one they overwrite in turn.
     design_id = design_id_for(request, owner=require_actor(), salt=salt)
     store = _store()
     await _require_writable(store, design_id)
     head = await store.read(design_id)
     # Re-structuring the same ask reaches the same design id, so the corrected ask lands and the
     # existing procedure and plate are carried forward. Checks are graded at the design's stage, so
-    # a
-    # protocol contradicting the corrected ask is visible.
+    # a protocol contradicting the corrected ask is visible.
     design = (
         head.design.model_copy(update={"request": request})
         if head is not None
         else ExperimentDesign(request=request)
     )
     # An identical document is not a revision; appending one would retire an `approved` status for
-    # no
-    # change.
+    # no change.
     if head is not None and design == head.design:
         return _readable(
             receipt(
@@ -530,9 +524,8 @@ async def draft_experiment_protocol(
         arms=list(arms or []),
         evidence=list(evidence),
         # The previous plate (well assignments and run order) is carried forward when no format is
-        # passed;
-        # a randomised order is not recoverable. Passing `plate_format` is what asks for a new
-        # layout.
+        # passed; a randomised order is not recoverable. Passing `plate_format` is what asks for a
+        # new layout.
         layout=previous.design.layout,
     )
     if plate_format:
@@ -729,8 +722,7 @@ class PlateReadout(BaseModel):
     # an outcome was named, because "every outcome at once" is not a table a surrogate can take.
     observations: list[dict[str, float | str]] = Field(default_factory=list)
     # Why `observations` is empty although an outcome was named: its latest values span more than
-    # one
-    # unit. Reported beside the readout, which the chemist needs to fix that.
+    # one unit. Reported beside the readout, which the chemist needs to fix that.
     observations_refused: str = ""
 
 
@@ -926,15 +918,14 @@ class ExperimentArms(BaseModel):
     factors: list[Factor]
     arms: list[ProtocolArm]
     constants: dict[str, str]
-    #: What the translation could not supply, one sentence each — units above all. Read these
-    #: before drafting; none of them is optional and none is checked downstream.
+    # : What the translation could not supply, one sentence each — units above all. Read these :
+    # before drafting; none of them is optional and none is checked downstream.
     notes: list[str]
 
 
-# The description is short because a tool docstring is sent on every model call
-# (D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not). This tool turns BO suggestions into
-# labelled factor levels and arms so the model does not transcribe a candidate table by hand;
-# `protocols/from_bo.py` carries the full rationale.
+# The description is short because a tool docstring is sent on every model call. This tool turns BO
+# suggestions into labelled factor levels and arms so the model does not transcribe a candidate
+# table by hand; `protocols/from_bo.py` carries the full rationale.
 @tool
 async def experiment_arms_from_campaign(campaign_id: str, prefix: str = "arm") -> str:
     """Turn a campaign's latest suggestion into the factors and arms to draft a protocol from.

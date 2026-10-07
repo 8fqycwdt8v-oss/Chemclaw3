@@ -73,7 +73,7 @@ def _run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
 
 
 def _expected_ids(case: EvalCase) -> set[str]:
-    """The gold set of note ids this query should surface, from the case reference (G4)."""
+    """The gold set of note ids this query should surface, from the case reference."""
     if case.reference is None:
         raise MetricError("retrieval metrics need a reference with `expected_note_ids`")
     raw = case.reference.get("expected_note_ids")

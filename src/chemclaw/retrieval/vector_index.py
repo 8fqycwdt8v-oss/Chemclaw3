@@ -138,8 +138,8 @@ class NoteIndex(Protocol):
 
 
 # Version of the note-text derivation behind every stored row, folded into the note-side key:
-# `embedding_config_key()` cannot see a change to what text is embedded. Bump it whenever the
-# text a fresh index would store differs from what an existing row holds — the composition in
+# `embedding_config_key()` cannot see a change to what text is embedded. Bump it whenever the text a
+# fresh index would store differs from what an existing row holds — the composition in
 # `kg.search.search_text` *or* the normalisation `upsert` applies. A bump hides old rows from dense
 # reads and empties their fingerprints, so the next reindex rewrites them (lexical reads do not
 # filter on it).
@@ -306,20 +306,16 @@ class PostgresNoteIndex:
         )
         # The `> 0` floor mirrors the in-memory reference: without it pgvector returns the top-k
         # nearest unconditionally and a small corpus would cite unrelated notes. The `within` scope
-        # is
-        # in the SQL (NULL = unrestricted); with HNSW in use it is a post-filter over the candidate
-        # list,
-        # so a selective scope can return fewer than k (hence "mostly" in `NoteIndex.search_dense`).
-        # `settings.hnsw_ef_search` / `hnsw_iterative_scan` trade latency for recall, applied per
-        # query
-        # by `db.apply_vector_recall_settings`; both default to leaving the server alone.
+        # is in the SQL (NULL = unrestricted); with HNSW in use it is a post-filter over the
+        # candidate list, so a selective scope can return fewer than k (hence "mostly" in
+        # `NoteIndex.search_dense`). `settings.hnsw_ef_search` / `hnsw_iterative_scan` trade latency
+        # for recall, applied per query by `db.apply_vector_recall_settings`; both default to
+        # leaving the server alone.
         scope = "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[])) "
         # The `note_id` tie-break sorts the k rows in the outer query, not the table: in the inner
         # ORDER BY it stops the planner using the vector index. It makes equal-similarity order
-        # match
-        # the in-memory reference. `embedding_key` is a read predicate too: rows from another model
-        # of
-        # the same width would otherwise be scored against the new model's query.
+        # match the in-memory reference. `embedding_key` is a read predicate too: rows from another
+        # model of the same width would otherwise be scored against the new model's query.
         self._dense = (
             "SELECT note_id, score FROM ("
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
@@ -330,12 +326,10 @@ class PostgresNoteIndex:
             ") AS hits ORDER BY score DESC, note_id"
         )
         # Match any term; rank notes matching every term first; honour a `-term` exclusion — the
-        # rule
-        # `chemclaw.core.fulltext` builds once and `InMemoryNoteIndex.search_lexical` states. The
-        # widening is over the parsed query's clauses, not its lexemes, so negation survives. One
-        # statement rather than query-then-retry: the `lexeme @@ all_terms` sort key guarantees
-        # complete
-        # matches lead.
+        # rule `chemclaw.core.fulltext` builds once and `InMemoryNoteIndex.search_lexical` states.
+        # The widening is over the parsed query's clauses, not its lexemes, so negation survives.
+        # One statement rather than query-then-retry: the `lexeme @@ all_terms` sort key guarantees
+        # complete matches lead.
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, any_terms) AS score "
             f"FROM note_index, {TSQUERY_TERMS} "
@@ -453,8 +447,7 @@ class PostgresNoteIndex:
         Only rows the current embedding configuration produced are scored.
         """
         # A zero query vector has cosine 0 to everything (no hit, as in the reference);
-        # short-circuit
-        # so pgvector never orders by a NaN distance.
+        # short-circuit so pgvector never orders by a NaN distance.
         if not any(query_embedding):
             return []
         params = {
@@ -574,8 +567,7 @@ async def reindex_notes(
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         # A missing directory is a deployment fault (unmounted volume, wrong `knowledge_path`) and
-        # is
-        # reported loudly; a present but empty one is a fresh corpus and stays at DEBUG.
+        # is reported loudly; a present but empty one is a fresh corpus and stays at DEBUG.
         if not directory.exists():
             log.warning(
                 "note re-index found no notes: %s does not exist. Nothing is re-embedded and the "

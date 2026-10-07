@@ -1,8 +1,8 @@
 """The agent tool over the operational read model — one tool, four readings.
 
 One tool with an `aspect` enum rather than four tools, because every tool schema ships in every
-turn's prefix and the four readings share their arguments and guidance. It is `read_only`: a
-reading is a projection of rows this system already wrote.
+turn's prefix and the four readings share their arguments and guidance. It is `read_only`: a reading
+is a projection of rows this system already wrote.
 """
 
 from typing import Literal

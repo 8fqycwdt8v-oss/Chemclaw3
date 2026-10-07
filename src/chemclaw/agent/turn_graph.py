@@ -45,8 +45,7 @@ def peer_roster() -> list[str]:
     """The profile names this deployment wants as peers, in declaration order.
 
     Order is kept because handoff tools are built in roster order and the prefix must be
-    byte-identical
-    across processes.
+    byte-identical across processes.
 
     Returns:
         The configured peer names, empty when the feature is off (the shipped default).
@@ -58,8 +57,7 @@ def refuse_an_unknown_peer_roster(known: list[str]) -> None:
     """Raise at startup if the peer roster names a profile that does not exist.
 
     `build_turn_graph` skips an unknown name per turn with a warning; this makes a misspelling fail
-    at
-    boot instead.
+    at boot instead.
 
     Args:
         known: `registered_profile_names()`.
@@ -81,8 +79,8 @@ def root_surface(profile: AgentProfile, connectors: list[Any] | None) -> frozens
 
     Unions both halves: in-process names via `bindable_capability_tools(profile)` (which sees
     generated launchers and applies the builder's filters, so it predicts what the root binds) and
-    the
-    open connector tools' names, without which every peer would silently lose its connector tools.
+    the open connector tools' names, without which every peer would silently lose its connector
+    tools.
 
     Args:
         profile: The root profile — the agent a chemist talks to when a turn opens.
@@ -100,9 +98,8 @@ def _peer_surface(root: frozenset[str], peer: AgentProfile) -> frozenset[str]:
     """What one peer may reach: the root's surface intersected with what its profile names.
 
     A roster profile with `tool_names is None` narrows to nothing, not to everything, so a peer's
-    name
-    means something (as for `helper_profile`). Takes `root`, never the handing agent: that is the
-    invariant.
+    name means something (as for `helper_profile`). Takes `root`, never the handing agent: that is
+    the invariant.
 
     Args:
         root: `root_surface(...)` for this turn.
@@ -114,10 +111,10 @@ def _peer_surface(root: frozenset[str], peer: AgentProfile) -> frozenset[str]:
     return root & roster_names(peer)
 
 
-# The `AgentProfile` fields a peer brings with it, because none of them carries authority; every
-# other field comes from the root. Defined by exclusion so a new field added to `AgentProfile`
-# defaults to root-derived. `tests/test_turn_graph.py` checks the set against the model's fields and
-# that a peer cannot change whether the plan gate applies.
+#: The `AgentProfile` fields a peer brings with it, because none of them carries authority; every
+#: other field comes from the root. Defined by exclusion so a new field added to `AgentProfile`
+#: defaults to root-derived. `tests/test_turn_graph.py` checks the set against the model's fields
+#: and that a peer cannot change whether the plan gate applies.
 PEER_OWNED_FIELDS: frozenset[str] = frozenset({"name", "instructions", "effort", "model_route"})
 
 
@@ -145,9 +142,8 @@ def _peer_connectors(connectors: list[Any] | None, surface: frozenset[str]) -> l
 
     The connector half of the invariant: connector tools are already-open `BaseTool`s that
     `tool_names` never sees, so without this a peer would bind every tool the root opened. Uses the
-    same
-    `surface` that bounds the in-process tools and `refuse_undeclared_writes`, so the halves cannot
-    drift.
+    same `surface` that bounds the in-process tools and `refuse_undeclared_writes`, so the halves
+    cannot drift.
 
     Args:
         connectors: The open connector tools for this turn, as the root opened them.
@@ -166,9 +162,9 @@ def _peer_profile(root: AgentProfile, peer: AgentProfile, surface: frozenset[str
 
     Built from the root, overriding only `PEER_OWNED_FIELDS`. Allow-lists (`mcp_server_names`,
     `skill_names`) are narrowed against the root's; `harness_enabled`/`harness_autonomy` are the
-    root's
-    outright, because they decide whether the plan gate attaches and `api/runner` reads the root's
-    answer for the whole turn — a peer must not turn the gate off, nor on under an ungated root.
+    root's outright, because they decide whether the plan gate attaches and `api/runner` reads the
+    root's answer for the whole turn — a peer must not turn the gate off, nor on under an ungated
+    root.
 
     Args:
         root: The profile the turn's root agent runs under.
@@ -205,8 +201,7 @@ def build_turn_graph(
 
     `None` rather than a one-node graph, which would change the stream's namespace depth, the
     checkpointed channels and answer attribution for nothing; without peers a deployment runs the
-    same
-    object as before.
+    same object as before.
 
     Args:
         model: As `build_langgraph_agent`. Each peer resolves its own model through its profile.
@@ -279,8 +274,7 @@ def build_turn_graph(
 
     if len(peers) < 2:
         # One peer is no mesh; fall back to the single agent, and warn so the deployment knows the
-        # roster
-        # did not take effect.
+        # roster did not take effect.
         logger.warning(
             "peer roster: %s named, but nothing survived beside the root, so this turn runs as a "
             "single agent",

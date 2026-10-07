@@ -289,7 +289,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # `bo-candidate`).
         "job-result",
         # The agent's reasoned proposal for the next run in a series, argued from the record
-        # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
+        # rather than from a surrogate model; the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
         # A field of competing explanations ranked by pairwise comparison
@@ -483,7 +483,7 @@ class Note(TemporalWindow):
     conditions: ProcessConditions | None = None
     calc_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
-    # Typed edges in structured form, for the metadata a body wikilink cannot carry (STO-8/9).
+    # Typed edges in structured form, for the metadata a body wikilink cannot carry.
     # Additive: a note may use body links, this field, or both.
     relations: list[Relation] = Field(default_factory=list)
     body: str = ""

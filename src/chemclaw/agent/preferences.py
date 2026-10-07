@@ -2,8 +2,8 @@
 
 How one chemist works (project, preferred solvents, units, rejected analogies) is personal and
 revisable, so it lives here keyed by `Principal.oid` rather than in the shared knowledge graph,
-which holds what the organisation knows. Degrades to in-memory when no database is configured,
-and a preference is never a hard dependency of a turn.
+which holds what the organisation knows. Degrades to in-memory when no database is configured, and a
+preference is never a hard dependency of a turn.
 """
 
 import logging
@@ -72,8 +72,7 @@ class PreferenceStore:
         """Borrow a connection with the configured per-statement timeout.
 
         Pooled when the process opened a pool, a dedicated connect otherwise. A down database
-        reports
-        "Postgres unreachable at <host>", and a hung query is cancelled.
+        reports "Postgres unreachable at <host>", and a hung query is cancelled.
         """
         async with db.connection(self._dsn) as conn:
             yield conn
@@ -83,12 +82,10 @@ class PreferenceStore:
 
         Returns whether it was stored as durably as the deployment is configured for (always True in
         memory mode). The error is swallowed so personalization degrades rather than failing a turn,
-        but
-        the caller must not claim the preference persists when this returns False.
+        but the caller must not claim the preference persists when this returns False.
         """
         # Popped before set so insertion order is write order: eviction deletes from the front and
-        # recall
-        # keeps the tail, matching the Postgres ordering.
+        # recall keeps the tail, matching the Postgres ordering.
         self._memory.pop((owner, key), None)
         self._memory[(owner, key)] = value
         self._evict_in_memory(owner)
@@ -119,9 +116,8 @@ class PreferenceStore:
         """The `preferences_recall_limit` most recent preferences `owner` has set, key-sorted.
 
         The limit bounds prompt spend, since `StandingPreferences` appends this list to every model
-        call;
-        the row cap in `remember` bounds storage. Selected by recency, sorted by key for a stable
-        reading.
+        call; the row cap in `remember` bounds storage. Selected by recency, sorted by key for a
+        stable reading.
         """
         if settings.session_store == "postgres":
             try:
@@ -134,8 +130,7 @@ class PreferenceStore:
                 logger.warning("could not read preferences for %s", owner, exc_info=True)
                 if not any(row_owner == owner for row_owner, _key in self._memory):
                     # An empty fallback after a failed read would read as "no preferences"; raise
-                    # instead, since a
-                    # wrong answer is worse than a failed one.
+                    # instead, since a wrong answer is worse than a failed one.
                     raise
         # The same two bounds as the Postgres path: the last `preferences_recall_limit` by insertion
         # (write) order, then key-sorted.
@@ -151,8 +146,7 @@ class PreferenceStore:
         """Hold the in-memory fallback to the same row cap as the table.
 
         In memory mode this dict is the configured store. Its front is the least recently written
-        entry
-        because `remember` pops before it sets.
+        entry because `remember` pops before it sets.
         """
         cap = settings.preferences_max_per_owner
         keys = [pair for pair in self._memory if pair[0] == owner]
@@ -163,8 +157,7 @@ class PreferenceStore:
         """Drop one preference — a chemist must be able to take a preference back.
 
         Returns whether the deletion reached the configured store; otherwise the preference would
-        look
-        removed now and reappear next session.
+        look removed now and reappear next session.
         """
         self._memory.pop((owner, key), None)
         if settings.session_store != "postgres":
@@ -206,7 +199,7 @@ async def remember_preference(key: str, value: str) -> str:
         Confirmation of what was stored.
     """
     owner = require_actor()
-    # Refused rather than cut at write time, so what is stored is what will be rendered. Measured on
+    # Refused rather than cut at write time, so what is stored is what will be rendered. Sized on
     # the rendered line, which is what the cap bounds, not on `key + value`.
     rendered = len(_rendered_line(key, value))
     if rendered > settings.preferences_entry_max_chars:
@@ -365,13 +358,11 @@ class StandingPreferences(AgentMiddleware[Any, Any, Any]):
     """Put this chemist's preferences in front of the model on every call, not only when asked.
 
     Pushed rather than pulled, with `STANDING_PREFERENCES_RULE`, because a preference the model must
-    remember to recall is only a suggestion
-    (D-2026-10-02-standing-preferences-are-pushed-not-pulled).
-    Appended to the system message per request and never written to the thread, so the conversation
-    window cannot cut it and a `forget_preference` takes effect on the next call; it is charged as
-    prefix. Async only in effect: the sync hook passes through because `create_agent` puts the
-    middleware in both chains. Never fails a turn: no actor or an unreadable store means no section,
-    recorded as a degradation.
+    remember to recall is only a suggestion. Appended to the system message per request and never
+    written to the thread, so the conversation window cannot cut it and a `forget_preference` takes
+    effect on the next call; it is charged as prefix. Async only in effect: the sync hook passes
+    through because `create_agent` puts the middleware in both chains. Never fails a turn: no actor
+    or an unreadable store means no section, recorded as a degradation.
     """
 
     def wrap_model_call(

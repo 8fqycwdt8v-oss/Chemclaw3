@@ -90,11 +90,10 @@ def open_qdrant_client() -> QdrantClient:
         "url": settings.vector_store_url,
         "api_key": settings.vector_store_api_key.get_secret_value() or None,
         "timeout": int(settings.vector_store_timeout_seconds),
-        # Unconditional: extra keywords are forwarded into the client's own `httpx.AsyncClient`
-        # (a caller-supplied `http_client` is refused). Without it a proxy variable on the pod would
+        # Unconditional: extra keywords are forwarded into the client's own `httpx.AsyncClient` (a
+        # caller-supplied `http_client` is refused). Without it a proxy variable on the pod would
         # carry embedded note text and query vectors off-address, past a guard that sees only the
-        # dial
-        # to the proxy.
+        # dial to the proxy.
         "trust_env": False,
     }
     # The private-CA bundle the other transports honour, passed only when configured: the unset

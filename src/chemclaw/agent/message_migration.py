@@ -4,8 +4,8 @@
 chemists still read, so they are converted rather than dropped. `to_langchain` is pure (dict in,
 message out) and testable without Postgres; `convert_stored_messages` is the resumable pass that
 rewrites rows. Each row is stamped with the shape it holds and both shapes read, so a non-atomic
-rollout is safe. The pre-conversion payload is kept in `message_original` by the same statement
-that overwrites `message`, so a rollback is one statement
+rollout is safe. The pre-conversion payload is kept in `message_original` by the same statement that
+overwrites `message`, so a rollback is one statement
 (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step):
 
     UPDATE session_messages
@@ -34,8 +34,8 @@ from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
-# The stamp naming which shape a row's `message` holds. Absent means MAF, so historical rows need
-# no rewrite to gain one.
+# The stamp naming which shape a row's `message` holds. Absent means MAF, so historical rows need no
+# rewrite to gain one.
 MAF_SHAPE = "maf"
 LANGCHAIN_SHAPE = "langchain"
 
@@ -233,17 +233,16 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
                 async with conn.cursor() as cur:
                     await cur.executemany(_MARK_CONVERTED, updates)
                     # `rowcount`, not `len(updates)`: a row a concurrent pass converted first
-                    # matches nothing and is
-                    # not this pass's work.
+                    # matches nothing and is not this pass's work.
                     converted += cur.rowcount
                 await conn.commit()
 
 
 if __name__ == "__main__":
     # Its own entrypoint rather than a step inside `core.migrate`, which imports no other
-    # subpackage.
-    # Run after the schema: in the chart the DDL is `pre-upgrade` (additive, safe for the running
-    # release) and this pass is `post-upgrade` (it rewrites rows the previous release still serves).
+    # subpackage. Run after the schema: in the chart the DDL is `pre-upgrade` (additive, safe for
+    # the running release) and this pass is `post-upgrade` (it rewrites rows the previous release
+    # still serves).
     outcome = asyncio.run(convert_stored_messages())
     print(f"converted {outcome.converted} stored message(s)")
     if outcome.refused:

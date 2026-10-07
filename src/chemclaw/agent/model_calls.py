@@ -3,20 +3,20 @@
 Two `wrap_model_call` middlewares; neither is a policy, and removing them changes no answer.
 
 **`RecordModelCalls`** counts and times every model call by outcome, using
-`llm_provider.classify_model_failure` (rate limit, context length, timeout, transport, auth,
-error), so outages and a too-long thread are distinguishable. The SDK's own retries
-(`llm_max_retries`) happen below `ainvoke`, so one recorded call may be several wire attempts and
-a `timeout`/`transport` outcome is the state after the SDK gave up. A call cancelled by turn
-teardown is not counted.
+`llm_provider.classify_model_failure` (rate limit, context length, timeout, transport, auth, error),
+so outages and a too-long thread are distinguishable. The SDK's own retries (`llm_max_retries`)
+happen below `ainvoke`, so one recorded call may be several wire attempts and a
+`timeout`/`transport` outcome is the state after the SDK gave up. A call cancelled by turn teardown
+is not counted.
 
-**`PromoteInvalidToolCalls`** handles tool calls whose arguments do not parse. LangChain puts
-them on `AIMessage.invalid_tool_calls`, which the agent never iterates, so the call would silently
-vanish. They are moved onto `tool_calls` carrying the raw document under `_UNPARSED_ARGUMENTS`,
-and `refuse_unparsed_arguments` raises before the body runs. The call is then an ordinary failing
-tool call with an audit row, span, gates, `tool_failed` event and a `ToolMessage` the model reads
-inside its own loop, counted by the loop and spend caps. Retrying inside `wrap_model_call` instead
-would sit outside every bound the graph has. Calls in a reply cut off at the output limit are
-demoted and refused the same way, since upstream's partial-JSON repair makes them look complete.
+**`PromoteInvalidToolCalls`** handles tool calls whose arguments do not parse. LangChain puts them
+on `AIMessage.invalid_tool_calls`, which the agent never iterates, so the call would silently
+vanish. They are moved onto `tool_calls` carrying the raw document under `_UNPARSED_ARGUMENTS`, and
+`refuse_unparsed_arguments` raises before the body runs. The call is then an ordinary failing tool
+call with an audit row, span, gates, `tool_failed` event and a `ToolMessage` the model reads inside
+its own loop, counted by the loop and spend caps. Retrying inside `wrap_model_call` instead would
+sit outside every bound the graph has. Calls in a reply cut off at the output limit are demoted and
+refused the same way, since upstream's partial-JSON repair makes them look complete.
 `chemclaw_invalid_tool_calls_total` and a WARNING record each malformed emission for operators.
 """
 
@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 # `tests/test_invalid_tool_calls.py` checks no registered tool declares it.
 _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
 
-# Prefix for a promoted call's id when the provider gave none, suffixed with its index in the
-# reply, because stream readers key on call id and two `""` ids would collide.
+# Prefix for a promoted call's id when the provider gave none, suffixed with its index in the reply,
+# because stream readers key on call id and two `""` ids would collide.
 _UNPARSED_CALL_ID = "unparsed-call-"
 
 # Set beside `_UNPARSED_ARGUMENTS` on a call that parsed only because upstream completed a document
@@ -69,8 +69,7 @@ def model_call_middleware() -> list[Any]:
     """The two model-call observers, as the list `build_langgraph_agent` splices in.
 
     The promotion is outside the recorder. Spliced innermost so the recorded duration is the
-    provider
-    call, not first-party middleware above it.
+    provider call, not first-party middleware above it.
     """
     return [PromoteInvalidToolCalls(), RecordModelCalls()]
 
@@ -188,9 +187,8 @@ def _bounded_text(value: object) -> str:
     """The tool **name** the model emitted, bounded by the audit budget and deliberately not repr'd.
 
     Bounded because nothing upstream limits a tool name and it reaches logs, audit rows and the
-    event
-    stream. Not repr'd because `_metric_label` compares it against the bound tool names; escaping
-    happens at the sinks instead.
+    event stream. Not repr'd because `_metric_label` compares it against the bound tool names;
+    escaping happens at the sinks instead.
     """
     limit = settings.agent_audit_max_arg_chars
     text = str(value)
@@ -203,8 +201,7 @@ def _bounded_reason(value: object) -> str:
     The tail, because upstream's message starts with the tool name and a copy of the argument
     document; the parse reason is at the end. Escaped (unlike `_bounded_text`), because the text
     embeds the model's document and reaches a single-line log unquoted, where a newline could forge
-    a
-    record. An empty error stays empty, since `_count_invalid` tests it for truthiness.
+    a record. An empty error stays empty, since `_count_invalid` tests it for truthiness.
     """
     text = str(value)
     if not text:
@@ -214,12 +211,10 @@ def _bounded_reason(value: object) -> str:
     if len(quoted) <= limit:
         return quoted
     # Slice the text and quote the slice, never the reverse, so an escape sequence is never cut in
-    # half.
-    # A search because `repr` expands each character by up to four. The range starts at 1 because
-    # `text[-0:]` is the whole string; an index of 0 means nothing fits and is handled below. The
-    # keys
-    # are non-decreasing (prepending a character never shortens the quoted form), as `bisect_right`
-    # requires.
+    # half. A search because `repr` expands each character by up to four. The range starts at 1
+    # because `text[-0:]` is the whole string; an index of 0 means nothing fits and is handled
+    # below. The keys are non-decreasing (prepending a character never shortens the quoted form), as
+    # `bisect_right` requires.
     longest = bisect_right(range(1, len(text) + 1), limit, key=lambda n: len(repr(text[-n:])))
     # The ellipsis alone is the honest answer when nothing fits: the budget says there is no room,
     # and something was still cut.
@@ -317,8 +312,7 @@ class PromoteInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
 
     `ToolNode` iterates only `tool_calls`, so a call left on `invalid_tool_calls` bypasses every
     control. Moved one field over, it becomes an ordinary failing tool call that the announcer,
-    audit,
-    span, gates and `surface_domain_errors` all handle, at the cost of one graph iteration.
+    audit, span, gates and `surface_domain_errors` all handle, at the cost of one graph iteration.
 
     The document travels under `_UNPARSED_ARGUMENTS` rather than as `{}`, because several tools take
     no required argument and would run on empty arguments; the sentinel makes the call refusable
@@ -358,22 +352,20 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
             continue
         promoted: list[Any] = list(message.tool_calls or [])
         # Bounded, because each promoted call becomes an audit row, a stream event and a
-        # `ToolMessage`;
-        # `_count_invalid` has already counted every one (see `agent_max_promoted_invalid_calls`).
+        # `ToolMessage`; `_count_invalid` has already counted every one (see
+        # `agent_max_promoted_invalid_calls`).
         ceiling = settings.agent_max_promoted_invalid_calls
         entries = message.invalid_tool_calls[:ceiling] if ceiling else message.invalid_tool_calls
         for index, call in enumerate(entries):
             promoted.append(
                 {
                     # Bounded because the name becomes `request.tool_call["name"]` and reaches the
-                    # audit row, span and
-                    # event stream unbounded. Escaping stays at the sinks so `_metric_label` is
-                    # unaffected.
+                    # audit row, span and event stream unbounded. Escaping stays at the sinks so
+                    # `_metric_label` is unaffected.
                     "name": _bounded_text(call.get("name") or UNKNOWN_TOOL),
                     # The model's own id pairs the `tool_failed` event with the `tool_call` the
-                    # stream already emitted.
-                    # A missing id becomes a synthetic one unique within the reply, since stream
-                    # readers key on it.
+                    # stream already emitted. A missing id becomes a synthetic one unique within the
+                    # reply, since stream readers key on it.
                     "id": str(call.get("id") or "") or f"{_UNPARSED_CALL_ID}{index}",
                     "args": {
                         _UNPARSED_ARGUMENTS: bounded_repr(call.get("args")),
@@ -402,8 +394,8 @@ def _demote_cut_off_calls(response: Any) -> None:
     Upstream's `parse_partial_json` closes a truncated document, so a cut-off call looks valid; the
     reply's `finish_reason` is what reveals it. Every call in the reply is demoted, since the merged
     message does not record which call was being written, and the model re-issues them together.
-    Demoted rather than refused here so `_promote` and `refuse_unparsed_arguments` handle it
-    (D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run). Marked with `_CUT_OFF_ERROR`.
+    Demoted rather than refused here so `_promote` and `refuse_unparsed_arguments` handle it, marked
+    with `_CUT_OFF_ERROR`.
     """
     for message in _messages_of(response):
         if not isinstance(message, AIMessage) or not message.tool_calls:

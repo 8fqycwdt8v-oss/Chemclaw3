@@ -9,14 +9,14 @@ asks, because `active_agent` is checkpointed) and counted by `repeat_guard`.
 `Command(goto=…, graph=Command.PARENT)` navigates in the enclosing graph, `agent/turn_graph.py`,
 which computes each peer's surface as the root surface ∩ the peer's profile; these tools name a
 `goto` and nothing else, so a handoff redistributes the turn's authority and cannot extend it
-(D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it). Only the turn
-graph passes them to `build_langgraph_agent(handoffs=…)`, so a `task` helper never holds one.
+(D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it). Only the turn graph
+passes them to `build_langgraph_agent(handoffs=…)`, so a `task` helper never holds one.
 
 The schema is one `reason` string plus two injected arguments. `tool_call_id` lets the handoff
-answer its own call (an unanswered `tool_calls` entry is rejected on the next request). `state`
-lets the inner message list travel up with the command: `Command(graph=PARENT)` terminates the
-inner agent without merging its state, so without it the `AIMessage` carrying the call never
-reaches the parent thread. `add_messages` keys on id, so re-sending is not duplication.
+answer its own call (an unanswered `tool_calls` entry is rejected on the next request). `state` lets
+the inner message list travel up with the command: `Command(graph=PARENT)` terminates the inner
+agent without merging its state, so without it the `AIMessage` carrying the call never reaches the
+parent thread. `add_messages` keys on id, so re-sending is not duplication.
 """
 
 import logging
@@ -63,9 +63,9 @@ asking another agent for it that you could not have reached yourself. If a tool 
 from your own surface, say so — do not hand over in the hope that somebody else has it.""")
 
 
-# Characters a minted handoff tool name may carry; every other one is folded to `_`. An
-# allow-list, because profile names are unvalidated file stems. Two names that fold together are a
-# collision, which `handoff_tools` refuses.
+# Characters a minted handoff tool name may carry; every other one is folded to `_`. An allow-list,
+# because profile names are unvalidated file stems. Two names that fold together are a collision,
+# which `handoff_tools` refuses.
 _TOOL_NAME_CHARS = re.compile(r"[^0-9A-Za-z_]")
 
 
@@ -82,8 +82,7 @@ def is_handoff_tool_name(name: str) -> bool:
 
     A shape rather than a set because `authz.changes_the_conversation` asks it per call with no peer
     roster in hand. The whole shape, not just the prefix: refusals interpolate the name unreduced,
-    so
-    a model-invented `transfer_to_x | …` must not match.
+    so a model-invented `transfer_to_x | …` must not match.
     """
     suffix = name.removeprefix(HANDOFF_PREFIX)
     return (
@@ -134,8 +133,7 @@ def handoff_tools(
         )
     # The minted names can collide when the profile names do not (`property-lookup` and
     # `property_lookup`): one peer would be unreachable and the provider would reject two functions
-    # of
-    # one name.
+    # of one name.
     minted = [handoff_tool_name(name) for name in names]
     if len(set(minted)) != len(minted):
         collided = sorted({name for name in minted if minted.count(name) > 1})
@@ -182,8 +180,7 @@ def _one_handoff_tool(
         state: Annotated[dict[str, Any], InjectedState],
     ) -> Command[Any] | str:
         # The cap is checked here rather than in a middleware so the hop is declined while the agent
-        # keeps
-        # control: a refused tool result the model can act on, not an ended turn.
+        # keeps control: a refused tool result the model can act on, not an ended turn.
         refusal = refuse_a_handoff_past_the_cap(state, max_handoffs) or refuse_a_later_handoff(
             state, tool_call_id, bound_handoffs
         )
@@ -191,15 +188,12 @@ def _one_handoff_tool(
             return refusal
 
         # The `ToolMessage` answers the call (an unanswered one is rejected on the next request),
-        # and the
-        # whole inner message list travels with it because `Command(graph=PARENT)` does not merge
-        # the inner
-        # state. `graph=Command.PARENT` puts the `goto` in the turn graph, where the node names
-        # live.
+        # and the whole inner message list travels with it because `Command(graph=PARENT)` does not
+        # merge the inner state. `graph=Command.PARENT` puts the `goto` in the turn graph, where the
+        # node names live.
 
         # Announced here rather than reconstructed by the stream: the carried message list would
-        # replay
-        # every earlier hop, and a tool name cannot recover a peer name containing `-`.
+        # replay every earlier hop, and a tool name cannot recover a peer name containing `-`.
         record_handoff(from_agent=handing, to_agent=peer, reason=reason)
 
         handed = ToolMessage(
@@ -208,8 +202,7 @@ def _one_handoff_tool(
             name=handoff_tool_name(peer),
         )
         # The winner answers the later handoffs in this message, because ToolNode drops the losers'
-        # own
-        # results and PatchToolCalls would otherwise fill them with a false "cancelled" message.
+        # own results and PatchToolCalls would otherwise fill them with a false "cancelled" message.
         refused = [
             ToolMessage(
                 content=later_handoff_refusal(bound_handoffs[call["name"]]),
@@ -225,9 +218,8 @@ def _one_handoff_tool(
                 "messages": [*state.get("messages", []), handed, *refused],
                 "active_agent": peer,
                 # Per-turn count so a chain can be bounded. Written as the running total, not `1`:
-                # `TurnTotal`
-                # folds each writer's advance, so a constant delta would count every hop after the
-                # first as zero.
+                # `TurnTotal` folds each writer's advance, so a constant delta would count every hop
+                # after the first as zero.
                 "handoffs": int(state.get("handoffs", 0) or 0) + 1,
             },
         )
@@ -268,10 +260,8 @@ def refuse_a_later_handoff(state: Any, tool_call_id: str, bound_handoffs: Mappin
     """The refusal for a handoff that is not the first bound one in its assistant message, or `""`.
 
     ToolNode runs every call but applies only the first `Command(graph=PARENT)`, so without this
-    both
-    bodies would announce a handoff and only one would happen. The first is kept. Returns `""` when
-    no
-    assistant message carrying the call is found.
+    both bodies would announce a handoff and only one would happen. The first is kept. Returns `""`
+    when no assistant message carrying the call is found.
     """
     calls = _bound_handoff_calls(state, tool_call_id, bound_handoffs)
     if not calls or calls[0].get("id") == tool_call_id:
@@ -284,8 +274,7 @@ def refuse_a_handoff_past_the_cap(state: Any, limit: int) -> str:
     """The refusal text when the turn has handed over `limit` times (0 disables), or `""`.
 
     A refusal rather than a jump: the agent keeps control and its other tools, and the text names
-    the
-    cap and what to do instead (`agent/refusal_route.py`).
+    the cap and what to do instead (`agent/refusal_route.py`).
     """
     if limit <= 0:
         return ""

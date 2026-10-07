@@ -1,41 +1,16 @@
-"""Side-channel for things a tool learns that the turn's event stream must surface (gaps RCH-4/5).
+"""Side-channel for things a tool learns that the turn's event stream must surface.
 
-`api/events.py` has carried `JobStartedEvent` since F2 and the chat UI has rendered it since
-F2-T2, but nothing ever emitted one: a tool that launches a durable job returns a job id *into the
-model's context*, and the runner — which only sees the model's streamed updates — has no way to know
-a job started. The same is true of a note write: `record_knowledge_note` commits the note and
-returns a reference to the model, so without this the chemist never learns their contribution
-landed — the note is readable by everyone the instant it is written, and the conversation that
-produced it would be the last place to say so.
+A tool that launches a durable job or records a note returns its result into the model's context,
+but the chemist must also see that it happened. Signals are published on LangGraph's custom stream
+(`get_stream_writer()`), the same stream the tokens ride, so their order relative to everything else
+is the stream's own. The information stays out of the model-facing tool signature, so the model
+cannot fabricate "a job started" or "a note was recorded".
 
-The carrier is LangGraph's own custom stream (`get_stream_writer()`), which is what the rebuild
-bought here. It was a task-local contextvar buffer the runner drained after every streamed update,
-plus a `begin_turn`/`end_turn` pair the runner's non-awaiting `finally` had to police, plus two
-extra drains at the points where "there is no next iteration to carry the last signal" — one after
-the graph returned and one after a mid-turn resume. All of that existed because MAF had no
-side-channel, so ordering had to be reconstructed by the reader. A writer publishes into the same
-stream the tokens ride, so the order is the stream's rather than something the runner maintains,
-and the three drains and the reset go with it.
-
-What did *not* change is why a side-channel exists at all: the information must stay out of the
-*model-facing* tool signature, so the model cannot fabricate "a job started" or "a note was
-recorded". A tool returns its job id to the model; it reports the launch to the chemist here.
-
-**In `core/` rather than `agent/`, since the R2 layering move**: a few pydantic records and one
-publish call, with both ends outside the conversation layer — a connector job or a template step
-records the signal, and the front-door stream renders it. That is also why the LangGraph import
-here is declared rather than avoided (`tests/test_third_party_layering.py`): moving this into
-`agent/` to keep the kernel engine-free would make `connectors/` and `templates/` import layer 1,
-which is the worse trade. The event types it feeds still live in `api/events.py`; nothing here
-imports them, and that one-way relationship is what lets the recording side stay ignorant of the
-transport.
-
-**One sink, not one per kind.** A second mechanism carrying job ids only (`job_events`, a
-Replit-only addition, D-091) was built independently and folded in here rather than kept beside
-this one: two sinks read separately leave the *relative order* of a launched job and a recorded
-note undefined, which is precisely what a transcript must get right. Its four caller-facing names
-survived the fold as aliases and were removed in D-149 — three had never had a caller, and the
-fourth discarded the `kind` this module's whole point is to carry.
+In `core` because both ends are outside the conversation layer (connector jobs and template steps
+record; the front-door stream renders), so the LangGraph import here is declared in
+`tests/test_third_party_layering.py`. The event types live in `api/events.py` and are not imported
+here. One sink for all kinds, so the relative order of a launched job and a recorded note is
+defined.
 """
 
 from typing import Any, Literal
@@ -66,9 +41,8 @@ class ToolQueuedSignal(BaseModel):
     tool: str
     job_id: str
     state: Literal["queued", "running"]
-    # Calls waiting on the connector's interactive queue when this was read — the broker's
-    # approximate backlog, so "about this many ahead or beside you", never a strict rank. `None`
-    # where the broker could not say.
+    # Calls waiting on the connector's interactive queue when read: the broker's approximate
+    # backlog, never a strict rank. `None` where the broker could not say.
     waiting: int | None = None
 
 
@@ -86,17 +60,10 @@ class NoteRecordedSignal(BaseModel):
     reference: str
 
 
-#: The kinds of deliberate refusal a failing tool call can carry.
-#:
-#: **One definition, because three places have to agree and two of them are contracts.**
-#: `agent/audit.refusal_reason` produces it from the exception, `ToolFailureSignal` carries it out
-#: of the tool chain, and `api/events.ToolFailedEvent` puts it on the wire for `Chemclaw3_ui` and
-#: `Chemclaw3_mock` to mirror. Written here rather than beside the event because `core` is the one
-#: layer both the agent and the API may import — the alternative was a `cast` at the boundary,
-#: which is a static-typing device standing in for the agreement this makes structural.
-#:
-#: Adding a gate means adding its reason here, which is what makes `refusal_reason`'s table and the
-#: wire's closed set unable to drift apart.
+# The kinds of deliberate refusal a failing tool call can carry. One definition shared by
+# `agent/audit.refusal_reason` (produces it), `ToolFailureSignal` (carries it) and
+# `api/events.ToolFailedEvent` (puts it on the wire for `Chemclaw3_ui` and `Chemclaw3_mock`). In
+# `core` because both the agent and the API may import it. A new gate adds its reason here.
 RefusalReason = Literal["dry_run", "undeclared_write", "plan_gate", "repeat", "authz"]
 
 
@@ -118,31 +85,15 @@ class ToolFailureSignal(BaseModel):
 
     tool: str
     message: str
-    # The call this failure belongs to, so a consumer can match it to the `tool_call` event rather
-    # than to the tool *name*. Additive and defaulted, because a signal shape is a contract two
-    # other repositories read; empty means "not attributed", never "the first call to this tool".
-    #
-    # It exists because matching by name is wrong in the one case that matters: a model may issue
-    # two calls to the same tool in a single batch, and suppressing the result of both because one
-    # failed loses a real answer.
+    # The call this failure belongs to, so consumers match on the call rather than the tool name
+    # (two calls to one tool in a batch must not both be suppressed). Defaulted because the signal
+    # is a cross-repository contract; empty means "not attributed".
     call_id: str = ""
-    # **Which gate refused this call, or empty for a genuine fault.** Exactly the vocabulary
-    # `agent/audit.refusal_reason` already classifies — that table is the one place the five gates
-    # are named, and this field is what carries its verdict out of the process.
-    #
-    # It is a field rather than something the consumer re-derives, and that is the correction. The
-    # stream used to recover *one* of the five by testing whether `message` started with
-    # `"PlanNotApprovedError:"`, on the argument that a new field here is "a third repository's
-    # contract for a fact this side can already derive". That argument held while there was one
-    # reason; at five it buys five copies of a class name living in a module that cannot see the
-    # classes, checked against a string `failure_detail` truncates. The exception is in scope where
-    # the signal is recorded (`agent/tool_authz.announce_tool_failures`), so the classification is
-    # taken there, from the exception, by the table that already owns the question.
-    #
-    # `None` rather than a defaulted `str`, and still additive: a signal built without it is
-    # exactly the ordinary fault every failure emitted before this field existed already was —
-    # never "a refusal whose kind we could not work out". Typed as the closed set rather than as
-    # `str` so a gate whose reason the wire cannot express fails here, in the change that added it.
+    # Which gate refused this call, or `None` for a genuine fault, classified from the exception by
+    # `agent/audit.refusal_reason` where the signal is recorded
+    # (`agent/tool_authz.announce_tool_failures`) rather than re-derived by consumers from message
+    # text. Typed as the closed set, so a gate whose reason the wire cannot express fails in the
+    # change that added it.
     reason: RefusalReason | None = None
 
 
@@ -168,13 +119,7 @@ class SkillLoadedSignal(BaseModel):
     self-confirming, since that is the one the agent can propose into.
     """
 
-    # The name alone, because the name alone is what any consumer of this asks about.
-    #
-    # **A `tier` field stood here, carried by nothing.** Its comment said it was for the question
-    # "which of my turns loaded judgment I wrote myself" — which is a question about
-    # `turn_costs.skills_loaded`, and that column never held it: `_TurnLedger` folds both tiers into
-    # one set on purpose, so the field was written by two producers and read by no line in `src/`.
-    # A field justified by a row it does not reach is the shape this repository deletes on sight.
+    # The name alone: that is all any consumer asks about.
     skill: str
 
 
@@ -238,32 +183,17 @@ Signal = (
 )
 
 
-# The key a signal rides under in the graph's custom stream. Namespaced because the channel is
-# shared: any node may write any payload to it (`gather_evidence`'s per-source counts do), and
-# `api/graph_stream._custom_event` dispatches on shape rather than on a schema neither side owns.
+# The key a signal rides under in the shared custom stream (other nodes write their own payloads),
+# so `api/graph_stream._custom_event` can dispatch by shape.
 _KEY = "chemclaw_signal"
 
 
 def _emit(signal: Signal) -> None:
     """Publish one signal on the turn's stream, or drop it where nothing is streaming.
 
-    **The guard is the design, not a precaution.** `get_stream_writer()` resolves the writer off
-    LangGraph's ambient runnable config, and outside a graph it does not return `None` — it raises.
-    The same tools run in two places: a chat turn's tool node, where a writer exists and a chemist
-    is watching, and a Temporal activity replaying a template step
-    (`agent/tool_invocation.invoke_governed`), where neither is true. Letting the second raise would
-    fail a durable job because a tool tried to *narrate*.
-
-    **Two exception types for one condition, both measured**, which is why this catches a pair that
-    otherwise looks careless. A bare call outside any runnable context raises `RuntimeError: Called
-    get_config outside of a runnable context`. A call from inside `StructuredTool.ainvoke` — a
-    runnable context, but not a graph — raises `KeyError: '__pregel_runtime'` instead, because the
-    config exists and the runtime key in it does not. That second one *is* the template-step path,
-    so catching only the first left the exact caller this guard was written for still failing.
-
-    Dropping here costs nothing that was not already lost. The only consumers are the front door's
-    stream and `api/graph_stream`, so a signal recorded in an activity had no reader before this
-    either — it accumulated in a buffer nobody drained.
+    The same tools run in a chat turn's tool node (writer present) and in a Temporal activity
+    replaying a template step (no graph, no watcher), and a tool narrating must never fail a durable
+    job. Outside a graph there is no reader, so dropping loses nothing.
     """
     writer = stream_writer_or_none()
     if writer is None:
@@ -274,20 +204,10 @@ def _emit(signal: Signal) -> None:
 def stream_writer_or_none() -> Any | None:
     """The graph's custom-stream writer, or `None` where there is no graph to write to.
 
-    **One helper because two call sites were asserting two different things about one upstream
-    call.** This module caught `(RuntimeError, KeyError)` and `retrieval/fanout.py` caught
-    `(RuntimeError, LookupError)` — and since `KeyError` is a `LookupError`, the second strictly
-    subsumed the first, so a change upstream would have broken one and not the other.
-
-    The exception types are an accident of the implementation, not a contract: `get_stream_writer`
-    reaches a private config key by bare subscript, which is why it raises `RuntimeError` off any
-    runnable context but `KeyError` inside `StructuredTool.ainvoke` — both measured.
-    `AttributeError` is caught too, for the plausible upstream shape where the runtime resolves to
-    `None` and is then attributed.
-
-    The cost of getting this wrong is specific: the same tools run in a chat turn's tool node and in
-    a Temporal activity replaying a template step, where no graph exists. An unguarded call fails a
-    durable job because a tool tried to narrate.
+    `get_stream_writer` raises rather than returning `None` off a graph, and which exception is an
+    implementation accident: `RuntimeError` outside any runnable context, `KeyError` inside
+    `StructuredTool.ainvoke` (the template-step path), and plausibly `AttributeError` in future. One
+    helper so every caller catches the same set.
     """
     try:
         return get_stream_writer()
@@ -298,11 +218,8 @@ def stream_writer_or_none() -> Any | None:
 def record_job_started(job_id: str, kind: str) -> None:
     """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming.
 
-    The plan step is folded in here rather than threaded through every launcher: the link is
-    ambient by design (`core.plan_context`, bound per tool call by the harness's middleware), so
-    reading it at the one place every launch announcement passes stamps all of them uniformly —
-    the connector jobs, the report, the memory synthesis — and a caller outside the harness
-    contributes the empty string without knowing the field exists.
+    The plan step is read here from the ambient `core.plan_context`, so every launch announcement is
+    stamped uniformly and callers outside the harness contribute an empty string.
     """
     plan_step, _ = get_current_plan_link()
     _emit(JobSignal(job_id=job_id, kind=kind, plan_step=plan_step))
@@ -328,11 +245,8 @@ def record_exhibit(signal: ExhibitSignal) -> None:
 def record_skill_loaded(skill: str) -> None:
     """Note that this turn read one skill's body. A no-op where nothing is streaming.
 
-    Called from the two backends that deliver a skill body, rather than from the tool that asks for
-    one: `read_file` is a general verb and the decision that a given path *is* a skill body lives in
-    the backend, beside the counter that already books it. One producer per tier, both of them the
-    same call the counter is taken on, so the array and the counter cannot disagree about what a
-    load is.
+    Called from the two backends that deliver a skill body (one per tier), beside the counter that
+    books the load, so the per-turn array and the counter agree on what a load is.
     """
     _emit(SkillLoadedSignal(skill=skill))
 
@@ -347,9 +261,9 @@ def record_tool_failure(
 ) -> None:
     """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming.
 
-    `reason` is `agent/audit.refusal_reason`'s verdict where the caller had an exception to
-    classify, and `None` otherwise — a tool that *returns* its failure has no exception and so no
-    gate to name: the gates refuse by raising.
+    `reason` is `agent/audit.refusal_reason`'s verdict when there was an exception, `None`
+    otherwise:
+    gates refuse by raising, so a returned failure names no gate.
     """
     _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id, reason=reason))
 
@@ -357,12 +271,8 @@ def record_tool_failure(
 def record_handoff(from_agent: str, to_agent: str, reason: str) -> None:
     """Announce that control moved to `to_agent`, from inside the tool that moved it.
 
-    **This name existed before and was deleted for having no caller**
-    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): the specialist team
-    that was supposed to call it never did, and a function kept alive by a test that calls it
-    directly is a claim that a control exists. It returns with a caller in the same commit —
-    `agent/handoff.py`'s transfer tool — which is the condition that ADR set and the one
-    `tests/test_event_producers.py` now enforces one layer out.
+    Called by `agent/handoff.py`'s transfer tool; `tests/test_event_producers.py` requires every
+    event producer to have a caller.
 
     Args:
         from_agent: The peer giving up control; empty only if the turn graph could not name it.

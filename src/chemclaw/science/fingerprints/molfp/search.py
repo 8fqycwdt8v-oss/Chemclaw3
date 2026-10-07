@@ -1,10 +1,8 @@
-"""High-level molecule search over a fingerprint store (plan step 3.3).
+"""High-level molecule search over a fingerprint store.
 
-The two molecule capability entry points the MCP server and agent call:
-`find_similar_molecules` (Tanimoto neighbors) and `find_substructure_matches` (molecules
-containing a query fragment). Both take the store as a seam so they are backend-agnostic
-and testable with the in-memory store. Defaults (top_k, threshold) come from config — the
-capability surfaces them; the `reaction-search` skill decides how to set them (G6).
+`find_similar_molecules` (Tanimoto neighbors) and `find_substructure_matches` (molecules containing
+a fragment). Both take the store as a seam. Defaults come from config; the `reaction-search` skill
+decides how to set them.
 """
 
 import asyncio
@@ -82,20 +80,10 @@ class MoleculeHit(BaseModel):
 async def indexed_structure(store: FingerprintStore, note_id: str) -> str | None:
     """The indexed structure whose `compound_note_id` is `note_id`, or `None` if none is.
 
-    The inverse of `MoleculeHit.for_molecule`, for a reader handed only the id — `expand_note`,
-    when no note of that id was ever written. That is most of them: a hit's id names the note an
-    ingest *would* produce, and since `D-2026-08-25-a-corpus-is-evidence-not-an-eln` an ELN run is a
-    record rather than a note, so a molecule indexed from one has a structure-derived id and no
-    note behind it. Found live: one turn called `expand_note` on thirteen such ids and got "no note
-    with id" thirteen times.
-
-    A scan, because the id is a hash and the index is keyed by structure. Over the slice
-    `substructure_matches` already scans (`substructure_scan_max_records`, same order), hashing each
-    stored label with `compound_id_of_standard`: labels are standardized at ingest, so re-running
-    RDKit over each — ~6.6 ms apiece — would be the whole cost for no change in the answer. What the
-    scan does cost is the store's own row fetch, which `PostgresFingerprintStore.all_records`
-    records (~2 s at the shipped cap, most of it the unused `bits` column); it runs only when the
-    id names no note, which is the path that used to fail outright.
+    The inverse of `MoleculeHit.for_molecule`, for `expand_note` on a hit id with no note behind it
+    (e.g. a molecule indexed from an ELN record). A scan, since the id is a hash: over the same
+    capped slice `substructure_matches` reads, hashing each stored (already standardized) label with
+    `compound_id_of_standard`. Runs only when the id names no note.
     """
     for record in await store.all_records(limit=settings.substructure_scan_max_records):
         if compound_id_of_standard(record.label) == note_id:
@@ -118,19 +106,13 @@ async def find_similar_molecules(
 ) -> FingerprintSearch[MoleculeHit]:
     """Return molecules structurally similar to `smiles`, most similar first.
 
-    `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
-    on an unparseable query so the caller never searches with a meaningless fingerprint.
+    `top_k` and `threshold` default to the configured values. Raises `FingerprintError` on an
+    unparseable query.
 
-    Returns a `FingerprintSearch`, not a bare list, so "we have no analog on file" and "nothing
-    has been indexed" cannot arrive as the same empty list — see that model's docstring. For the
-    same reason a full page carries `hits_truncated` when more molecules cleared the threshold than
-    `top_k` could hold: the page is a floor, and it read as a total. `approximate` is the third
-    member of that family and comes straight off the store: a deployment may search the index
-    approximately (`fingerprint_search_exactness`), and under that trade an empty result is no
-    longer evidence that we have no analog on file. `index_partial` is the fourth, and it is the
-    one that survives a *definition* change rather than a configuration: a corpus mid-rebuild
-    holds rows this store cannot compare, and one rebuilt row is enough to make `index_empty`
-    False while the search still answers over a fraction of the corpus.
+    Returns a `FingerprintSearch` so an empty answer says why: `index_empty` (nothing indexed),
+    `hits_truncated` (more cleared the threshold than `top_k` holds), `approximate` (the store
+    searched approximately, so empty is not proof of absence), and `index_partial` (a definition
+    rebuild is in progress and only part of the corpus is comparable).
     """
     matches, truncated = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
     return FingerprintSearch[MoleculeHit](
@@ -148,83 +130,26 @@ async def find_substructure_matches(
 ) -> FingerprintSearch[MoleculeHit]:
     """Return stored molecules that contain the `query` fragment.
 
-    The query is interpreted as SMARTS (the right language for a substructure pattern; a
-    plain SMILES is also valid SMARTS), with a SMILES parse as a fallback for the rare
-    string that fails as SMARTS. Exact RDKit matching over the corpus — a structural
-    filter, not a similarity score. Guards on the model-supplied query (G4/SEC-4): its
-    length is bounded by `substructure_query_max_length` (SMARTS matching is subgraph
-    isomorphism, worst-case exponential, run in-process with no statement_timeout analog)
-    and an empty/zero-atom pattern is rejected rather than silently matching nothing
-    (RDKit parses "" to a 0-atom pattern, which would read as "no precedent exists").
-    The scan is bounded to `substructure_scan_max_records` (a full-table load into the
-    worker heap is the failure mode) and the result to `fingerprint_max_top_k` (a broad
-    fragment like "C" matches essentially every organic molecule — an unbounded hit list
-    would flood the model context). **`index_partial` is deliberately not set here and its
-    absence is not an omission**: this scan reads `all_records`, which is unfiltered by
-    definition on purpose (a stale-definition row's stored SMILES is still a correct
-    substructure hit), so a corpus mid-rebuild is searched whole by this entry point and only
-    by this one. Hitting either cap is reported **in the result**
-    (`scan_truncated`/`hits_truncated`, and the `verdict` sentence built from them), not only in
-    the log: the log is read by an operator after the fact, while the payload is what the model
-    holds when it writes the answer, and a scan the record cap cut short used to render as "this
-    is a genuine negative result".
+    The query is SMARTS (a SMILES is valid SMARTS), with a SMILES parse as fallback; exact RDKit
+    matching, not a score. Guards on the model-supplied query: length is bounded by
+    `substructure_query_max_length` (subgraph isomorphism is worst-case exponential) and an empty
+    pattern is rejected. The scan is capped at `substructure_scan_max_records` and the result at
+    `fingerprint_max_top_k`; hitting either is reported in the result
+    (`scan_truncated`/`hits_truncated`, `verdict`) because the model never sees the log.
+    `index_partial` is not set: this reads stored SMILES, not bits, so the whole corpus is searched
+    regardless of fingerprint definition.
 
-    **The matching itself no longer re-parses the corpus.** It used to: one `Chem.MolFromSmiles`
-    per stored record per query, which is 326 ms over a 4,991-molecule corpus before any chemistry
-    happens. `substructure_index` holds that slice pre-parsed in RDKit's `SubstructLibrary`,
-    screened by pattern fingerprint in C++ — 12.9 ms for the same query, 8-25x across the four
-    query classes measured there, under the conditions that module records. It is only a win
-    because the index is **cached across queries**: building it costs 1,155 ms, so a per-query
-    rebuild would be three times *slower* than the loop it replaces, and the cache's key and its
-    bound are that module's subject. This is the in-process
-    index, not `docs/planning/DEFERRED.md`'s `pattern_bits` GIN screen, which is a database-side
-    prefilter for a corpus far past this cap; that row stays open.
+    Matching uses the cached `substructure_index` (`SubstructLibrary`), falling back to
+    `_match_record_by_record` when no index is available within this caller's bounds; the index
+    build has its own budget (`substructure_index_build_timeout_seconds`), separate from the match
+    budget.
 
-    **And the loop is still here, because an index is an optimisation and a search is not.**
-    `index_for` returns `None` when there is no index to be had inside this caller's bounds, and
-    `_match_record_by_record` then answers exactly as this function did before the index existed.
-    What that fixes is a corpus past roughly 20,000 records, which could previously never be
-    searched at all: the build was charged against `substructure_match_timeout_seconds`, nothing is
-    cached when a build is abandoned, and so every retry restarted from zero — measured, three
-    failures out of three against 2.01 s and 2,684 hits for the loop over the same corpus. The
-    build now has its own budget (`substructure_index_build_timeout_seconds`), which is the
-    separation the defect was: how long an index may take to build and how long a chemist waits for
-    an answer were one number.
-
-    Each hit carries the compound note to cite (`MoleculeHit`), so a functional-group query
-    lands on the graph directly instead of via a substring search for the SMILES.
-
-    Returns a `FingerprintSearch` for the same reason similarity search does: "no indexed molecule
-    bears this group" and "nothing is indexed" are different answers. Here the distinction is free
-    — the scan already holds every record it could have matched — and it is *not* scoped to the
-    store's fingerprint definition, because this search re-matches the stored SMILES with RDKit and
-    never touches the bits, so a stale-definition row is still a real molecule in the corpus.
-
-    The matching itself runs **off the event loop** in a worker thread, bounded by
-    `substructure_match_timeout_seconds`. Bounding the inputs is not enough: a short but
-    adversarial recursive SMARTS can still match for minutes, and this call is served by the
-    async front door, so an in-loop scan would stall *every* session's stream, not just its
-    own. On timeout the caller gets a `FingerprintError` naming the bound.
-
-    **The bound is carried into the worker as a deadline, not only awaited from outside it.**
-    `asyncio.wait_for` releases the caller and cannot stop the thread, so a scan that outran the
-    bound used to run the *whole remaining corpus* out in the background — measured, a 60-character
-    SMARTS against a corpus of 121-atom hyperbranched molecules costs 343 ms *per molecule*, so a
-    5 s bound over the shipped 5 000-record cap orphans a thread for ~28 minutes. Those threads come
-    from the loop's default executor, which is also where `chemclaw.api.auth` validates every bearer
-    token. `_scan_for_matches` therefore checks the deadline itself and gives up there. Honest
-    limit, narrowed rather than removed: RDKit exposes no interruption hook, so the thread still
-    runs to the end of the work it is inside when the deadline passes.
-
-    **What "the work it is inside" now means is one chunk rather than one molecule**, because the
-    matching runs through a C++ `GetMatches` call that cannot be interrupted mid-way. The chunk is
-    sized in *time* rather than in records — `substructure_scan_deadline_slice_seconds` of work at
-    the rate the preceding chunk actually ran at, starting from a single record — so on the
-    pathological corpus the measurement above came from it settles at one or two molecules, which is
-    the granularity this paragraph has always claimed, while an ordinary corpus is covered in about
-    seven calls. A fixed number of records would have been the wrong unit, for the same reason the
-    bound exists: per-molecule cost spans five orders of magnitude here.
-    `CorpusIndex.labels_matching` carries that arithmetic.
+    Matching runs in a worker thread bounded by `substructure_match_timeout_seconds`, and the bound
+    is passed in as a deadline the scan checks itself, since `asyncio.wait_for` cannot stop a thread
+    and the default executor is shared (e.g. with token validation). RDKit cannot be interrupted
+    mid-call, so the scan works in chunks sized in time (`substructure_scan_deadline_slice_seconds`;
+    see `CorpusIndex.labels_matching`). On timeout the caller gets a `FingerprintError` naming the
+    bound. Each hit carries the compound note to cite.
     """
     max_length = settings.substructure_query_max_length
     if len(query) > max_length:
@@ -239,10 +164,7 @@ async def find_substructure_matches(
         # *rule* for what a valid pattern is now lives in one place (`core.chem`).
         raise FingerprintError(str(exc)) from exc
     cap = settings.substructure_scan_max_records
-    # Read one row past the cap to *observe* truncation instead of inferring it from
-    # `len(records) == cap`, which cannot tell "there were more" from "that was all of them" and
-    # so turned a corpus sitting exactly on the cap into `SEARCH INCOMPLETE` over a clean
-    # negative. One extra row is the whole cost; the surplus is dropped before matching.
+    # Read one row past the cap to observe truncation; a corpus exactly at the cap is complete.
     probed = await store.all_records(limit=cap + 1)
     scan_truncated = len(probed) > cap
     records = probed[:cap]
@@ -254,21 +176,15 @@ async def find_substructure_matches(
         )
     timeout = settings.substructure_match_timeout_seconds
     try:
-        # Both halves of one bound: the deadline stops the worker, `wait_for` still releases the
-        # caller — the deadline is only checked between records, so one pathological molecule can
-        # outlast it and the caller must not wait for that. Both raise `TimeoutError`, so the
-        # refusal below is the same either way.
+        # Both halves of one bound: the deadline stops the worker between chunks; `wait_for`
+        # releases the caller if one chunk outlasts it. Both raise `TimeoutError`.
         scan = await asyncio.wait_for(
             asyncio.to_thread(_scan_for_matches, records, pattern, time.monotonic() + timeout),
             timeout=timeout,
         )
     except TimeoutError as exc:
-        # The scan says how far it got and which of the two scans it was; `wait_for`'s own
-        # TimeoutError carries no message at all, which is exactly the case where the thread is
-        # still inside one uninterruptible chunk and nobody can say. Naming the real one matters
-        # because the remedies differ: this message used to say "the match exceeded 5.0s, narrow
-        # the pattern" over a corpus whose *indexing* had run out of time with the pattern never
-        # matched once, so the one thing it told a chemist to do could not have helped.
+        # Name which scan gave up (indexing or matching) and how far it got, since the remedies
+        # differ; a bare `wait_for` timeout carries no message.
         gave_up = str(exc) or "the scan was still inside one chunk when the bound passed"
         raise FingerprintError(
             f"substructure search for {query!r} exceeded {timeout}s over {len(records)} "
@@ -286,10 +202,8 @@ async def find_substructure_matches(
         subject="molecule",
         hits=scan.hits,
         index_empty=not records,
-        # A row whose stored structure no longer parses was fetched and never matched, which is
-        # what `scan_truncated` means — "not every stored record was examined". Folded in here
-        # rather than given a flag of its own: the model's move is identical either way (do not
-        # report a miss as a negative), and a second boolean would split one instruction in two.
+        # An unparseable stored row was never matched, which is what `scan_truncated` means: a miss
+        # is not a negative.
         scan_truncated=scan_truncated or bool(scan.unreadable),
         hits_truncated=scan.hits_truncated,
     )
@@ -298,20 +212,9 @@ async def find_substructure_matches(
 class ScanOutcome(NamedTuple):
     """What one substructure pass found, and the two ways it fell short of the whole corpus.
 
-    A tuple rather than three positional returns because the two caveats are read together and
-    each answers a different question: `hits_truncated` says the count is a floor,
-    `unreadable` says the *corpus* was not fully examined and so a miss is not a negative.
-
-    **A `records_reached` field was added here and removed again, and the reason is worth keeping.**
-    The deadline's property is a claim about records — "it stopped instead of going on matching
-    every remaining record" — so carrying the count out looked like the way to assert it. But the
-    two scan paths do not agree about what it *means*: the index excludes unreadable rows from
-    `self.labels` and stops its `while` on the hit `limit`, while `_match_record_by_record` iterates
-    to the end after the cap, so one corpus measured **341** against **3300**. A field two paths
-    disagree about is worse than no field, and it bought nothing: on an *unmatchable* pattern a scan
-    can only return no hits by examining everything, so `hits == []` already witnesses the
-    whole-corpus control. The count the property actually needs is the one on the **bounded** run,
-    and that is `ScanDeadlineExceeded.reached`, where a single path produces it.
+    `hits_truncated` says the count is a floor; `unreadable` says the corpus was not fully examined,
+    so a miss is not a negative. No record count is carried: the two scan paths count differently,
+    and the bounded run's count is on `ScanDeadlineExceeded.reached`.
     """
 
     hits: list[MoleculeHit]
@@ -324,34 +227,10 @@ def _scan_for_matches(
 ) -> ScanOutcome:
     """Match `pattern` against the corpus slice, stopping at the result cap or at `deadline`.
 
-    Split out as a plain synchronous function so it can run in a worker thread: it is the only
-    part of the search that burns CPU, and keeping it separate makes the async wrapper's one
-    responsibility — bounding it — obvious. That is also why the index below is built here rather
-    than in the coroutine: a build is the most expensive thing on this path, and it belongs off the
-    event loop with the matching it serves.
-
-    A record whose stored SMILES no longer parses is skipped rather than aborting the scan (one bad
-    row must not hide every real hit) — and **counted**, because skipping it silently meant a corpus
-    whose one azide row carried a malformed label still answered "this is a genuine negative
-    result". The parse now happens once, when the index is built (`CorpusIndex`), for the reason
-    that docstring gives: the holder skips sanitisation, so nothing downstream of it would ever
-    notice a malformed row.
-
-    Returns the matches **and whether a match was left out**, rather than letting the caller infer
-    truncation from `len(matches) == cap`: a corpus holding exactly `cap` matches is complete, and
-    reporting it as partial is the same class of untrue statement in the other direction. Which is
-    why the scan asks for **one more hit than it may return** — `maxResults=cap + 1` — and treats
-    the surplus as the observation. `maxResults=cap` would reproduce exactly the inference this
-    refuses, since the search would stop at the cap-th match without ever asking whether another
-    existed. One surplus match is also all it costs: the search stops at the first match it cannot
-    return instead of scanning on to find every remaining one, which is what the per-record loop
-    here had to do.
-
-    **`deadline` is what makes the wall-clock bound true of the *thread* and not only of the
-    caller** — see `find_substructure_matches` for the measurement, and
-    `CorpusIndex.labels_matching` for why a chunk is a time slice rather than a record count. A scan
-    that gives up raises rather than returning what it had: a partial scan reported as a result is
-    the "no precedent exists" answer this module refuses everywhere else.
+    Synchronous so it runs in a worker thread, index build included. Unparseable records are skipped
+    and counted, so a malformed row cannot turn a search into a false negative. The search asks for
+    one more hit than it may return (`maxResults=cap + 1`), so truncation is observed rather than
+    inferred. Past the deadline it raises rather than returning a partial scan as a result.
 
     Args:
         records: The capped corpus slice to match, in id order.
@@ -364,9 +243,7 @@ def _scan_for_matches(
 
     Raises:
         ScanDeadlineExceeded: The deadline passed before every record was examined. A
-            `TimeoutError`, so the caller turns it into the same `FingerprintError`
-            `asyncio.wait_for` produces; it carries `reached`, which is the scan's own unit and the
-            one place the deadline's property can be asserted from.
+        `TimeoutError`, so the caller handles it like `asyncio.wait_for`'s; it carries `reached`.
     """
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
@@ -394,23 +271,10 @@ def _match_record_by_record(
 ) -> tuple[list[str], int]:
     """Match `pattern` by parsing each stored SMILES in turn — the scan with no index behind it.
 
-    **This is the floor the index has to beat, and therefore also the floor it falls back to.** An
-    index is an optimisation: when one is not available — the corpus is too large to index inside
-    `substructure_index_build_timeout_seconds`, another thread is still building this corpus's,
-    the caller has no time to build one — the honest answer is the algorithm that needs no index,
-    not a refusal. Measured on 19,996 NCI records, this answers the amide query in 2.01 s where
-    charging the build to the match budget failed on three attempts out of three.
-
-    It is what `find_substructure_matches` did before `rdSubstructLibrary` arrived, with one
-    deliberate difference: it keeps *parsing* after the hit cap is reached, so `unreadable` counts
-    the whole slice. That is what the indexed path reports, and two paths that disagreed about
-    whether every stored record was examined would make `scan_truncated` a property of which one
-    ran. Only the subgraph matching stops at the cap, which is the part that can run for minutes on
-    an adversarial pattern. **It is not free and the number is here rather than the claim**: over
-    4,999 NCI records at the shipped `fingerprint_max_top_k` of 100, a broad query that fills the
-    cap in its first few hundred records costs 334 ms parsing the rest against 40 ms stopping
-    there. That is the price of `scan_truncated` meaning the same thing on both paths, and it is
-    paid only when there is no index.
+    The fallback when no index is available (corpus too large to index in budget, another thread
+    building it, no time to build). It keeps parsing past the hit cap so `unreadable` covers the
+    whole slice, matching the indexed path's meaning of `scan_truncated`; only the subgraph matching
+    stops at the cap.
 
     Args:
         records: The capped corpus slice to match, in id order.
@@ -419,17 +283,13 @@ def _match_record_by_record(
         deadline: `time.monotonic()` value past which the scan stops.
 
     Returns:
-        The matching labels in stored order, at most `limit` of them, and how many stored rows
-        could not be parsed at all.
+        The matching labels in stored order, at most `limit` of them, and how many stored rows could
+        not be parsed at all.
 
     Raises:
         ScanDeadlineExceeded: The deadline passed before every candidate was examined. The same
-            class the indexed path raises, so an `except` upstream needs no second name — but the
-            *numbers* on it are this path's: `total` is every record, where the index counts only
-            the rows it
-            could parse. `because` keeps the two messages distinguishable, which they are on
-            purpose, since a corpus too large to index and one too slow to match have different
-            remedies.
+        class the indexed path raises; `total` counts every record here, and `because` distinguishes
+        the messages since the remedies differ.
     """
     found: list[str] = []
     unreadable = 0

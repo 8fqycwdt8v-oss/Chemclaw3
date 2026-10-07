@@ -1,4 +1,4 @@
-"""The front door's cross-cutting HTTP armour: headers, body caps, CORS, observability, the boot guard.
+"""The front door's cross-cutting HTTP armour: headers, body caps, CORS, the boot guard.
 
 Everything here applies to every request or to the process, never to one route; routes live in
 `chemclaw/api/routes/`. `create_app` (`api/app.py`) is the only caller of the installers. The
@@ -43,8 +43,7 @@ logger = logging.getLogger(__name__)
 
 # What a client is told when the process cannot take the work right now — as an error event on an
 # open turn stream or as a 503 body. Either way: back off and retry. Which infrastructure was full
-# is
-# not the browser's business.
+# is not the browser's business.
 AT_CAPACITY = "server at capacity; retry shortly"
 
 # CSP for the self-served chat UI: same-origin except the inline `<style>` in index.html (hence
@@ -78,10 +77,8 @@ async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
     """Turn an unreachable durable subsystem into a retryable 503 instead of an unhandled 500.
 
     Relays the exception's own message, because `SubsystemUnavailableError` is written for a human
-    by
-    contract (`core/errors.py`): it names the subsystem and carries no hostname or driver text,
-    which
-    live on `__cause__`. Counted on its own per-request counter.
+    by contract (`core/errors.py`): it names the subsystem and carries no hostname or driver text,
+    which live on `__cause__`. Counted on its own per-request counter.
     """
     METRICS.increment("chemclaw_subsystem_unavailable_total")
     # `exc_info` so the operator's log carries the `__cause__` the client's message omits.
@@ -91,8 +88,8 @@ async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-# Server addresses already reported by `arrived_over_the_network`, so the SECURITY line is said once
-# per socket. Bounded, since an unauthenticated caller chooses the address.
+#: Server addresses already reported by `arrived_over_the_network`, so the SECURITY line is said
+#: once per socket. Bounded, since an unauthenticated caller chooses the address.
 _REPORTED_EXPOSURES: set[str] = set()
 _MAX_REPORTED_EXPOSURES = 8
 
@@ -145,9 +142,8 @@ def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
 
     Without `entra_required` every request is the shared dev principal and every authorization gate
-    is
-    open, so binding a non-loopback interface refuses to boot. `service_allow_insecure=true` is the
-    explicit opt-out (boots with a loud warning). Loopback is decided by
+    is open, so binding a non-loopback interface refuses to boot. `service_allow_insecure=true` is
+    the explicit opt-out (boots with a loud warning). Loopback is decided by
     `core.http.is_loopback_host`.
     """
     if settings.entra_required or is_loopback_host(settings.service_host):
@@ -174,10 +170,8 @@ class _SecurityHeaders:
     """Stamp the browser security headers onto every response — pure ASGI, never buffering.
 
     Not `BaseHTTPMiddleware`, which runs the app as a second task and turns a request cancelled
-    before
-    responding (a client giving up, a draining pod) into a spurious 500. This wraps only `send`, so
-    an
-    SSE stream passes byte for byte.
+    before responding (a client giving up, a draining pod) into a spurious 500. This wraps only
+    `send`, so an SSE stream passes byte for byte.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -209,16 +203,12 @@ class _RequestObservability:
 
     Pure ASGI, for `_SecurityHeaders`' reason. `route` is the FastAPI route template, never the raw
     path, which is attacker-controlled — a cardinality bomb and a redaction cost. Starlette merges
-    the
-    matched route into this scope, so the template is readable after the app runs; unmatched
-    requests
-    share one `<unmatched>` series.
+    the matched route into this scope, so the template is readable after the app runs; unmatched
+    requests share one `<unmatched>` series.
 
     Installed innermost: inside the security headers and body cap, so a 500 answered here carries
-    the
-    headers and a correlation id; outside `ExceptionMiddleware`, so handler 4xx responses are
-    recorded.
-    The body cap's 413 and CORS preflights are answered above it and are not in this log.
+    the headers and a correlation id; outside `ExceptionMiddleware`, so handler 4xx responses are
+    recorded. The body cap's 413 and CORS preflights are answered above it and are not in this log.
     `tests/test_api_observability.py` checks routes × status classes stays within the registry's
     per-counter series cap.
     """
@@ -246,8 +236,7 @@ class _RequestObservability:
             if message["type"] == "http.response.start":
                 status = int(message["status"])
                 # Default `headers` before anything reads it: it is optional in ASGI and
-                # `MutableHeaders` raises
-                # without it, which would leave the connection hanging.
+                # `MutableHeaders` raises without it, which would leave the connection hanging.
                 message.setdefault("headers", [])
                 answered = True
                 # `setdefault`, so a route's own id is kept. Every response carries one for bug
@@ -272,8 +261,8 @@ class _RequestObservability:
                 )
                 if answered:
                     # Already on the wire (an SSE stream that died mid-answer): nothing truthful
-                    # left to send, and
-                    # `status` stays as the client was told. The log line is the record.
+                    # left to send, and `status` stays as the client was told. The log line is the
+                    # record.
                     raise
                 status = 500
                 await _answer_internal_error(send, correlation)
@@ -388,8 +377,7 @@ def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> N
     """Make the authenticated caller ambient for the rest of this request.
 
     Called from `require_principal`, which every authenticated route passes, so every log line on
-    any
-    route names its actor. A no-op outside `_RequestObservability`, which owns the reset.
+    any route names its actor. A no-op outside `_RequestObservability`, which owns the reset.
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
@@ -401,8 +389,7 @@ def bind_request_session(request: Request, session_id: str) -> None:
     """Make the resolved session ambient for the rest of this request.
 
     Called from `api/deps.resolve_session`, because the session id is a routed path parameter
-    unknown
-    at request entry. Same no-op rule and reset owner as `bind_request_actor`.
+    unknown at request entry. Same no-op rule and reset owner as `bind_request_actor`.
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
@@ -497,8 +484,8 @@ def _record_request(
         correlation_id=correlation,
         actor=str(scope.get(_SCOPE_ACTOR, "")),
         # The session the ownership gate resolved, never `path_params`, which holds the
-        # unauthenticated
-        # caller's raw string before any dependency runs. `bind_request_session` stamps it clipped.
+        # unauthenticated caller's raw string before any dependency runs. `bind_request_session`
+        # stamps it clipped.
         session_id=str(scope.get(_SCOPE_SESSION, "")),
     )
 
@@ -524,10 +511,8 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
         method=request.method,
         error_count=len(errors),
         # Locations of the first few errors, clipped: the tail of `loc` can be a caller-chosen
-        # string.
-        # `isinstance`, as in `_render_errors`, because not every producer of a
-        # `RequestValidationError` is
-        # pydantic.
+        # string. `isinstance`, as in `_render_errors`, because not every producer of a
+        # `RequestValidationError` is pydantic.
         first_locations=[
             clip_for_log(".".join(str(part) for part in e.get("loc", ())))
             for e in errors[:5]

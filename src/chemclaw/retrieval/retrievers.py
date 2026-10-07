@@ -145,10 +145,8 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
         if not _in_window(note, since, until):
             continue
         # Currency is judged as of the period asked about: today with no window (a superseded note
-        # is
-        # not an answer to "what now"), and not at all with one, since a note `_in_window` admits
-        # was
-        # current somewhere inside the period by construction (`valid_to >= valid_from`).
+        # is not an answer to "what now"), and not at all with one, since a note `_in_window` admits
+        # was current somewhere inside the period by construction (`valid_to >= valid_from`).
         if not windowed and not note.is_current(today):
             continue
         notes[note.id] = note
@@ -191,16 +189,14 @@ def _rank_by_terms(
             else settings.retrieval_default_confidence
         )
         # `coverage`, not `len(counts)`: widening is keyed on substring matches, while `counts`
-        # holds
-        # only whole-token matches and is the weight.
+        # holds only whole-token matches and is the weight.
         scored.append(
             (coverage, _relevance(counts, document_frequency, population), confidence, note)
         )
     complete = [entry for entry in scored if entry[0] == len(terms)]
     # RRF reads each list as best-first, so order by this leg's relevance; note id breaks ties.
     # Rank, then cut to `retrieval_top_k`, then materialize, so this leg is bounded like its
-    # siblings
-    # and does not crowd the merge.
+    # siblings and does not crowd the merge.
     ranked = sorted(
         complete or scored,
         key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
@@ -411,8 +407,7 @@ class FingerprintReactionRetriever:
         kept = [match for match in matches if match.id in eligible]
         if len(matches) >= self._depth(page) and len(kept) < page:
             # The deeper search was exhausted without filling a page, so more matches may lie
-            # further down;
-            # say so rather than return a short list that reads as complete.
+            # further down; say so rather than return a short list that reads as complete.
             log.warning(
                 "filtered reaction search returned %d of %d wanted hits after scanning the "
                 "%d-neighbour limit; raise CHEMCLAW_RETRIEVAL_FILTER_OVERFETCH to look deeper",

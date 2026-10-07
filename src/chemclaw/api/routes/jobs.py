@@ -15,9 +15,8 @@ from chemclaw.core.session_context import reset_current_session_id, set_current_
 from chemclaw.durable.job_record import JobRecordSummary
 
 # Header carrying the next page's cursor, as on `GET /sessions`: the body is a bare JSON array the
-# UI
-# parses as one. The value is the last row's `job_id`; the store resolves its position, so nothing
-# about the ordering is disclosed.
+# UI parses as one. The value is the last row's `job_id`; the store resolves its position, so
+# nothing about the ordering is disclosed.
 _NEXT_CURSOR = "X-Next-Cursor"
 
 
@@ -36,10 +35,8 @@ async def list_jobs(
     exposure of `rationale` text is recorded in `SECURITY.md` under "Accepted exposures".
 
     Paged by `job_record_search_limit`. `after` resumes strictly after the named run;
-    `X-Next-Cursor`
-    is present only when more matched. A keyset rather than an offset, since runs are recorded while
-    a
-    listing is read.
+    `X-Next-Cursor` is present only when more matched. A keyset rather than an offset, since runs
+    are recorded while a listing is read.
     """
     found = await front_door.search_job_records(text=text, connector=connector, after=after)
     if found.hits_truncated:
@@ -83,8 +80,7 @@ async def _can_read(request: Request, session_id: str, principal: Principal) -> 
     """Whether `principal` may read `session_id` — the session gate's answer, as a boolean.
 
     The gate's 404 covers both stranger and unknown id; a 403 cannot arise from a read. Anything
-    else
-    (store unreachable) propagates.
+    else (store unreachable) propagates.
     """
     try:
         await _resolve_session(request, session_id, principal)
@@ -120,11 +116,9 @@ def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
     App decorators rather than `APIRouter` + `include_router`: since FastAPI 0.139 `include_router`
-    is
-    lazy, leaving opaque `_IncludedRouter` nodes that route-table walkers
+    is lazy, leaving opaque `_IncludedRouter` nodes that route-table walkers
     (`tests/test_route_auth_coverage.py`, `tests/test_service.py`) cannot see, and a standalone
-    router
-    has no `dependency_overrides_provider`, which disables `app.dependency_overrides`.
+    router has no `dependency_overrides_provider`, which disables `app.dependency_overrides`.
     """
     app.get("/jobs")(list_jobs)
     app.get("/jobs/{job_id}")(get_job)

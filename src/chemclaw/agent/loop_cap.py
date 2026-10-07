@@ -1,15 +1,15 @@
 """Make the model loop's runaway cap observable, so a capped turn stops looking finished.
 
-`enforce_loop_cap` is a `before_model` hook over `ChemclawState.model_calls`: it counts each
-model call, and at `harness_max_loop_iterations` it ends the graph and marks the turn, so the
-number that enforces the limit is the number that records it. The channels are untracked
-(`TurnTotal`, `TurnFlag`), so the count is per run with nothing to reset; a resumed turn is
-floored by the thread itself (`calls_already_made`), and a fan-out by a shared per-turn watch.
+`enforce_loop_cap` is a `before_model` hook over `ChemclawState.model_calls`: it counts each model
+call, and at `harness_max_loop_iterations` it ends the graph and marks the turn, so the number that
+enforces the limit is the number that records it. The channels are untracked (`TurnTotal`,
+`TurnFlag`), so the count is per run with nothing to reset; a resumed turn is floored by the thread
+itself (`calls_already_made`), and a fan-out by a shared per-turn watch.
 
-A graph that reaches the cap gets exactly one further call with tools switched off and a note
-asking for the answer from what it has (`AnswerAtTheCap`); only a second arrival ends it. The
-last iteration of a capped loop is one that wanted a tool, so stopping there would leave
-narration or nothing. The cost is one call per graph run that reaches the cap.
+A graph that reaches the cap gets exactly one further call with tools switched off and a note asking
+for the answer from what it has (`AnswerAtTheCap`); only a second arrival ends it. The last
+iteration of a capped loop is one that wanted a tool, so stopping there would leave narration or
+nothing. The cost is one call per graph run that reaches the cap.
 
 Two readers: `loop_capped(state)` reads the flag off the state a finished run returns (tests,
 template steps); `loop_hit_cap()` reads a task-local mutable record the hook marks, for
@@ -39,10 +39,9 @@ class _LoopWatch:
     `capped` is set once the loop was stopped by its cap. `calls` is what the channel cannot be: a
     number every concurrent branch reads and advances. `SubAgentMiddleware` hands every helper in a
     `task` batch the same pre-superstep `model_calls`, so without a shared count each of `W`
-    branches
-    would spend the whole remaining allowance. The contextvar is copied into each branch's task but
-    the object is shared, as with `spend_cap`'s `TurnUsage`. Off the request path there is no watch
-    and the cap falls back to the channel and the thread.
+    branches would spend the whole remaining allowance. The contextvar is copied into each branch's
+    task but the object is shared, as with `spend_cap`'s `TurnUsage`. Off the request path there is
+    no watch and the cap falls back to the channel and the thread.
     """
 
     capped: bool = False
@@ -84,9 +83,8 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     First-party rather than `ModelCallLimitMiddleware`, which counts in `after_model` (skippable by
     any `after_model` hook that jumps), fabricates an assistant message on `exit_behavior="end"`,
     keeps a private counter that `SubAgentMiddleware` strips (so helpers would each get a full
-    budget),
-    and checkpoints a counter nobody reads. `ModelCallLimitMiddleware` is unsafe to compose with any
-    middleware that jumps from `after_model`. Revisit when upstream moves the increment to
+    budget), and checkpoints a counter nobody reads. `ModelCallLimitMiddleware` is unsafe to compose
+    with any middleware that jumps from `after_model`. Revisit when upstream moves the increment to
     `before_model` and offers a non-message exit.
 
     The run ends rather than raising, after one tool-less call whose answer goes out and is marked
@@ -94,11 +92,9 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     """
     # The count has three floors. The channel is untracked, so a resumed turn reads 0; the thread
     # (this turn's assistant messages) is the floor for that. On an ordinary turn the two are equal
-    # at
-    # the comparison. The turn-wide watch count is the only floor a sibling branch can move, so a
+    # at the comparison. The turn-wide watch count is the only floor a sibling branch can move, so a
     # fan-out of width `W` does not spend `W` allowances. (The billed-token budget has no thread
-    # floor
-    # and still resets on resume.)
+    # floor and still resets on resume.)
     watch = _watch.get()
     # Two numbers: `own` (this branch's count) is what the channel advances to, so `TurnTotal` folds
     # one advance per real call; `turn` is what the cap compares against. Writing `turn + 1` would
@@ -109,8 +105,8 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     if calls >= settings.harness_max_loop_iterations:
         record_loop_cap()
         # `loop_capped` is written only here: a capped turn and one that used its last call and
-        # finished
-        # both reach exactly `cap`, so only a flag set by the branch that fires distinguishes them.
+        # finished both reach exactly `cap`, so only a flag set by the branch that fires
+        # distinguishes them.
         if state.get("loop_wrap_up"):
             # The second arrival: the tool-less call already happened, so nothing further is
             # authorised.
@@ -168,8 +164,7 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
         return request.override(
             tool_choice="none" if request.tools else None,
             # A `request_note`, not a bare `HumanMessage`, so the conversation window does not treat
-            # it as the
-            # newest turn and cut the chemist's question.
+            # it as the newest turn and cut the chemist's question.
             messages=[*request.messages, request_note(WRAP_UP_NOTE)],
         )
 
@@ -253,9 +248,8 @@ def calls_already_made(messages: Any) -> int:
     The cap channels are untracked, so a resumed turn would start from zero; this re-derives the
     count from state that survives a pod death: assistant messages since the last human one (the
     turn, not the conversation). Used as a floor (`max`); on an ordinary turn it equals the channel
-    at
-    the comparison, so over-counting by one would cap early. The call in flight at a pod death left
-    no message, so a resume may get one extra call.
+    at the comparison, so over-counting by one would cap early. The call in flight at a pod death
+    left no message, so a resume may get one extra call.
 
     Args:
         messages: The thread, oldest first, as the checkpoint holds it.

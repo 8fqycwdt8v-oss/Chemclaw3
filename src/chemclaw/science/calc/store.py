@@ -36,8 +36,8 @@ class CorruptCacheRow(ValueError):
     """
 
 
-# The version of ChemClaw's own contribution to a stored result — the half no `calc_version`
-# covers (our own arithmetic, or a persisted payload's shape changing under a stable version).
+# The version of ChemClaw's own contribution to a stored result — the half no `calc_version` covers
+# (our own arithmetic, or a persisted payload's shape changing under a stable version).
 #
 # The calculation server has a constant of the same name; the two compose rather than match.
 # `connectors.calc.remote.remote_key` folds this value over a `params_hash` the server has already
@@ -236,8 +236,7 @@ class StoredResult(BaseModel):
     created_at: datetime | None = None
     # The 3-D geometry this calculation ran *on* (never the one it produced), as the server reported
     # it, so "have we relaxed this conformer?" is a query. Not `input_hash`, which also covers
-    # solvent
-    # and other arguments. Empty for a molecule-keyed calculator.
+    # solvent and other arguments. Empty for a molecule-keyed calculator.
     structure_id: str = ""
     # The `CALCULATION_EPOCH` this row was written under, so `find` can drop superseded rows (`get`
     # needs no help: the epoch is in `params_hash`). Empty means written before migration 090 — such
@@ -449,9 +448,9 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
     return True
 
 
-#: Computations in flight, by key, **per event loop**: a second miss on a key already being
-#: computed awaits the first instead of duplicating it. Per loop because an `asyncio.Future`
-#: belongs to one; weak on the loop so the ledger dies with it. Cross-process dedup is deferred
+#: Computations in flight, by key, **per event loop**: a second miss on a key already being computed
+#: awaits the first instead of duplicating it. Per loop because an `asyncio.Future` belongs to one;
+#: weak on the loop so the ledger dies with it. Cross-process dedup is deferred
 #: (`docs/planning/DEFERRED.md`).
 _Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
 _IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
@@ -513,8 +512,8 @@ async def cached_compute(
         # cancelled.
         _credit_saved_seconds(saved)
         return result, True
-    # The future carries the computation's wall clock, which waiters need to credit what their
-    # join saved.
+    # The future carries the computation's wall clock, which waiters need to credit what their join
+    # saved.
     future: asyncio.Future[tuple[ResultPayload, float]] = asyncio.get_running_loop().create_future()
     in_flight[slot] = future
     try:
@@ -527,13 +526,10 @@ async def cached_compute(
         result = checked_payload(key, await compute())
         elapsed = time.perf_counter() - started
         # Offered before it is persisted, on the miss branch only (hits stay write-free). The order
-        # is
-        # the guarantee: persist-then-publish would lose a publication permanently on a crash
-        # between
-        # them, because every later call is a hit. Publish-then-persist turns that crash into one
-        # recompute, and the outbox's `ON CONFLICT DO NOTHING` absorbs the re-enqueue. The outbox
-        # row
-        # carries its own payload, and `enqueue_payload` never raises.
+        # is the guarantee: persist-then-publish would lose a publication permanently on a crash
+        # between them, because every later call is a hit. Publish-then-persist turns that crash
+        # into one recompute, and the outbox's `ON CONFLICT DO NOTHING` absorbs the re-enqueue. The
+        # outbox row carries its own payload, and `enqueue_payload` never raises.
         await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
         await store.put(
             StoredResult(
@@ -542,8 +538,8 @@ async def cached_compute(
                 compute_seconds=elapsed,
                 structure_id=structure_id,
                 # The epoch folded into `key` from the same constant. Stamped here rather than
-                # defaulted on the
-                # model, so rows read back from before migration 090 stay "unrecorded".
+                # defaulted on the model, so rows read back from before migration 090 stay
+                # "unrecorded".
                 epoch=CALCULATION_EPOCH,
             )
         )

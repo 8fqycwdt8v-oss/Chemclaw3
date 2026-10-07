@@ -328,12 +328,11 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
 
 
 def health_url(manifest: ConnectorManifest) -> str | None:
-    """Where to probe this connector, moved to wherever its endpoint actually is (D-131).
+    """Where to probe this connector, moved to wherever its endpoint actually is.
 
     The health probe must not read `health_url` off the manifest: `connector_urls` moves the
-    endpoint
-    in every cluster, and the declared URL is a loopback dev default. The move re-applies the
-    difference between the manifest's health and endpoint URLs at the effective address, because
+    endpoint in every cluster, and the declared URL is a loopback dev default. The move re-applies
+    the difference between the manifest's health and endpoint URLs at the effective address, because
     deployments differ in path layout (one Service per bundle vs. the dev composite's `/<name>/`
     mounts), not just host.
 

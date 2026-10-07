@@ -1,16 +1,11 @@
 """An artefact as a file a chemist can keep: Markdown, CSV, a SMILES list or an XYZ geometry.
 
-**Which formats a kind offers is decided in one function**, `render_export`, and the route asks it:
-a kind/format pair it does not render is a 404 rather than a file that is the wrong shape.
-SDF and SVG are produced on the client from what it already draws (RDKit WASM, the chart's own DOM),
-so the server takes no new rendering path and an export is always plain text. A geometry that cites
-a calculation artifact is the one export whose bytes are not in the spec, so `resolve_export` is the
-async entry the route calls and `render_export` the pure half every other kind is.
+`render_export` alone decides which formats a kind offers; an unsupported pair is a 404. SDF and SVG
+are produced client-side, so every server export is plain text. `resolve_export` is the async entry
+for a geometry citing a calculation artifact; `render_export` is the pure half.
 
-**Every CSV cell goes through `protocols.export.csv_cell`**, the one formula-injection guard this
-system has: a cell that opens with `=`, `+`, `-`, `@`, a tab or a CR is prefixed so a spreadsheet
-reads it as text, and a number is left exactly as it is. An artefact's cells are text the model or a
-chemist wrote, often from tool output, which is the text this repository treats as untrusted.
+Every CSV cell goes through `protocols.export.csv_cell`, the one formula-injection guard: a cell
+opening with `=`, `+`, `-`, `@`, tab or CR is prefixed so a spreadsheet reads it as text.
 """
 
 from __future__ import annotations
@@ -38,11 +33,9 @@ MEDIA_TYPES: dict[str, str] = {
     "csv": "text/csv; charset=utf-8",
     "smi": "chemical/x-daylight-smiles; charset=utf-8",
     "xyz": "chemical/x-xyz; charset=utf-8",
-    # **Text, never `text/html`, and the extension does not change that.** A page the model wrote
-    # is untrusted markup; served as HTML from this origin it would run with the front door's
-    # cookies and its `connect-src`. The file a chemist saves opens in their browser from disk if
-    # they choose — the one place it may run besides the UI's sandbox origin
-    # (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`).
+    # Text, never `text/html`: model-written markup served from this origin would run with the front
+    # door's cookies. It runs only in the UI's sandbox origin, or from disk if a chemist opens the
+    # saved file.
     "html": "text/plain; charset=utf-8",
 }
 
@@ -54,12 +47,9 @@ _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 def render_export(spec: Spec, fmt: str) -> str | None:
     """The artefact as a file of format `fmt`, or `None` when its kind does not offer that format.
 
-    Offered: a document as `md`; a table as `csv` or `md`; a structures panel as `smi` or `csv`; a
-    chart as `csv`; an html page as `html` — served as plain text (`MEDIA_TYPES`). A spec arrives
-    resolved: every binding is its value, and one that no longer resolves is an empty cell. A
-    pinned result and a link have no file of their own — the pane opens what they point at — so
-    every format answers `None` for them. A geometry is `xyz` when it carries its
-    block inline; one citing a calculation artifact needs a read, which is `resolve_export`'s.
+    Offered: document as `md`; table as `csv` or `md`; structures as `smi` or `csv`; chart as `csv`;
+    html as `html` (served as plain text); geometry as `xyz` when inline. A pinned result and a link
+    have no file. The spec arrives resolved; a binding that no longer resolves is an empty cell.
     """
     if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.xyz is not None:
         return _with_newline(spec.xyz)
@@ -108,9 +98,8 @@ def render_export(spec: Spec, fmt: str) -> str | None:
 async def resolve_export(spec: Spec, fmt: str) -> str | None:
     """`render_export`, plus the one format whose text is read from the calc artifact store.
 
-    `None` both when the kind does not offer `fmt` and when what a geometry cites is gone, or is
-    an artifact now over the download cap — the route answers 404 to each, because none has a file
-    to give. A `structure_id` the reader's view already resolved arrives here as inline `xyz`.
+    `None` when the kind does not offer `fmt`, or the cited geometry is gone or over the download
+    cap; the route answers 404.
     """
     if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.xyz is None:
         text = await geometry_xyz(spec)
@@ -126,8 +115,8 @@ def export_filename(title: str, exhibit_id: str, revision: int, fmt: str) -> str
 def safe_filename(text: str, fallback: str) -> str:
     """`text` cut to what a `Content-Disposition` filename may carry, or `fallback` if nothing is.
 
-    Every run of characters outside `[A-Za-z0-9._-]` becomes one `-`, and leading or trailing dots
-    and dashes go, so neither a quote nor a line break nor a path separator reaches the header.
+    Runs outside `[A-Za-z0-9._-]` become one `-` and edge dots and dashes are stripped, so no quote,
+    line break or path separator reaches the header.
     """
     return _FILENAME_SAFE.sub("-", text).strip("-.")[:60] or fallback
 

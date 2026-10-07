@@ -3,8 +3,8 @@
 `record_confirmed_answer` captures a chemist's confirmed or corrected answer as an episodic
 `interaction` note on the same write path as every other agent note.
 
-`recall_observations` reads the ungated observation tier (D-161) and is a separate tool on
-purpose: an observation is not evidence and must never arrive as a chunk in the evidence list.
+`recall_observations` reads the ungated observation tier (D-161) and is a separate tool on purpose:
+an observation is not evidence and must never arrive as a chunk in the evidence list.
 """
 
 from pydantic import BaseModel, Field, computed_field
@@ -130,8 +130,7 @@ def _readable(observation: Observation) -> Observation:
     (`agent/tool_framing.defanged_payload`) rather than a field list, which also covers fields added
     later. `statement`, the field citations are made against, is framed in an envelope instead, from
     the unescaped original because `frame_untrusted` defangs its own content. The store keeps the
-    plain
-    statement.
+    plain statement.
     """
     safe = defanged_payload(observation)
     return safe.model_copy(
@@ -173,8 +172,8 @@ async def recall_observations(limit: int = 0) -> ObservationRecall:
         `total_open`, and a `verdict`.
     """
     if not settings.observations_enabled:
-        # No database is touched while the tier is off — the answer is about the deployment, and
-        # a disabled tier must not cost a connection to say so.
+        # No database is touched while the tier is off — the answer is about the deployment, and a
+        # disabled tier must not cost a connection to say so.
         return ObservationRecall(enabled=False)
     # A statement is corpus-mined free text, so it is framed like any retrieved evidence chunk.
     found = await open_observations(limit or None)

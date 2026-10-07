@@ -12,9 +12,9 @@ re-derives it against the installed tblite, and pins the suggestion shortlist as
 from difflib import get_close_matches
 from typing import Any
 
-# Every name `Calculator.add("alpb-solvation", ...)` accepts, lowercase, aliases included
-# (`h2o`, `mecn`, and tblite's own `dichlormethane`). Matching is case-insensitive and trimmed,
-# as tblite's is.
+# Every name `Calculator.add("alpb-solvation", ...)` accepts, lowercase, aliases included (`h2o`,
+# `mecn`, and tblite's own `dichlormethane`). Matching is case-insensitive and trimmed, as tblite's
+# is.
 ALPB_SOLVENTS = frozenset(
     {
         "acetone",

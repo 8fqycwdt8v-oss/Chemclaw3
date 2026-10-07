@@ -7,9 +7,9 @@ identically and fail closed.
 
 Consumption is recorded on the row (`consumed_at`) and folded into `decision`, so an approval is
 spent durably and cannot be revived by a session rebuild. Each row also carries `scope`, the tool
-names the plan's steps declared when the human read it, stamped by the decision and never
-re-derived from the live plan; the plan hash covers each step's declaration, so a widened plan is
-a different plan. A `status` flip changes neither.
+names the plan's steps declared when the human read it, stamped by the decision and never re-derived
+from the live plan; the plan hash covers each step's declaration, so a widened plan is a different
+plan. A `status` flip changes neither.
 """
 
 from collections.abc import Collection
@@ -50,8 +50,7 @@ _CONSUME_ALL = (
 )
 
 
-# Whose turn last wrote a plan, keyed by plan identity
-# (`D-2026-09-27-in-a-shared-session-the-sender-governs`). Last writer wins. A session with no
+# Whose turn last wrote a plan, keyed by plan identity; last writer wins. A session with no
 # `session_owners` row records no author, and the decision route falls back to the owner rule.
 _AUTHOR_UPSERT = (
     "INSERT INTO plan_authors (session_id, plan_hash, actor) "
@@ -195,8 +194,7 @@ class InMemoryPlanApprovalStore:
 
     Not a test double: it is the backend `session_store="memory"` deployments (the CLI) get, so the
     gate holds there too. Append-only and scanned backwards to reproduce `_LATEST` exactly; growth
-    is
-    bounded in practice by one process's session and deployed fleets use Postgres.
+    is bounded in practice by one process's session and deployed fleets use Postgres.
     """
 
     def __init__(self) -> None:

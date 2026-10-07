@@ -137,8 +137,7 @@ def bo_regret(case: EvalCase) -> MetricResult:
         raise MetricError("bo_regret needs a reference with `optimum`")
     best = _scalar(case.output.get("best_value"), "output.best_value")
     optimum = _scalar(case.reference.get("optimum"), "reference.optimum")
-    # Required, no default: silently assuming "maximize" would sign-flip the
-    # regret of a minimize campaign (G4).
+    # Required, no default: assuming "maximize" would sign-flip the regret of a minimize campaign.
     direction = case.output.get("direction")
     if direction is None:
         raise MetricError("output.direction is required (maximize/minimize)")

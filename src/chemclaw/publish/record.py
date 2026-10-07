@@ -85,7 +85,7 @@ class SubjectMember(BaseModel):
     compound_id: str = ""
     smiles: str = ""
     # The geometry, when this member is one. Content-addressed and byte-identical on both sides of
-    # the calc wire (D-2026-08-21).
+    # the calc wire.
     structure_id: str = ""
     stoichiometry: float = 1.0
     charge: int | None = None

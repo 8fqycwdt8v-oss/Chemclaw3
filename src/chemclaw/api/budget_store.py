@@ -16,12 +16,12 @@ from typing import Any, NamedTuple
 from chemclaw.core import db
 from chemclaw.core.config import settings
 
-# Book one turn against a principal, resetting the window first if it has rolled over.
-#
-# The `CASE` arms repeat one predicate rather than use a CTE, keeping the reset in the same
-# statement. Under concurrency a conflicting writer blocks on the row lock and re-evaluates against
-# the latest committed row, not its snapshot, so no update is lost; `tests/test_budget_window.py`
-# pins this.
+#: Book one turn against a principal, resetting the window first if it has rolled over.
+#:
+#: The `CASE` arms repeat one predicate rather than use a CTE, keeping the reset in the same
+#: statement. Under concurrency a conflicting writer blocks on the row lock and re-evaluates against
+#: the latest committed row, not its snapshot, so no update is lost; `tests/test_budget_window.py`
+#: pins this.
 _BOOK = """
     INSERT INTO budget_usage (actor, window_start, turns, tokens)
     VALUES (%(actor)s, now(), 1, %(tokens)s)
@@ -40,10 +40,10 @@ _BOOK = """
         EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
 """
 
-# A principal's row, live or expired, with where its window started and how old it is.
-#
-# Returned even when expired, so `BudgetTracker._reconcile` can tell "window ended" from "never
-# booked". The age uses Postgres's `now()`, the same clock as `_BOOK`.
+#: A principal's row, live or expired, with where its window started and how old it is.
+#:
+#: Returned even when expired, so `BudgetTracker._reconcile` can tell "window ended" from "never
+#: booked". The age uses Postgres's `now()`, the same clock as `_BOOK`.
 _USAGE = """
     SELECT turns, tokens,
         EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
@@ -55,8 +55,7 @@ class Window(NamedTuple):
     """What a principal has spent in the current durable window, and which window that is.
 
     `start` identifies the window (`window_start` as epoch seconds, identical on every pod); `age`
-    is
-    its elapsed seconds by Postgres's clock, which the in-process counter uses to roll with it.
+    is its elapsed seconds by Postgres's clock, which the in-process counter uses to roll with it.
     """
 
     turns: int

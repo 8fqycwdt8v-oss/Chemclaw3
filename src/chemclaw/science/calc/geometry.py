@@ -26,14 +26,13 @@ logger = logging.getLogger(__name__)
 # `elements` is a plausible name for a composition, and a scan carries `positions` of its own kind.
 _GEOMETRY_FIELDS = ("elements", "positions")
 
-# What survives a projection beyond the address: which molecule (`smiles`), which electronic
-# state (`charge`/`multiplicity`), and which calculation produced it (`origin`, usable as a
-# `calc_ref`).
+# What survives a projection beyond the address: which molecule (`smiles`), which electronic state
+# (`charge`/`multiplicity`), and which calculation produced it (`origin`, usable as a `calc_ref`).
 _KEPT_FIELDS = ("smiles", "charge", "multiplicity", "origin")
 
-# Default values omitted from a projection, since a neutral singlet is what every reader
-# assumes. Charge and multiplicity are omitted together or not at all, so a radical's state is
-# always stated whole.
+# Default values omitted from a projection, since a neutral singlet is what every reader assumes.
+# Charge and multiplicity are omitted together or not at all, so a radical's state is always stated
+# whole.
 _DEFAULT_STATE = {"charge": 0, "multiplicity": 1}
 
 

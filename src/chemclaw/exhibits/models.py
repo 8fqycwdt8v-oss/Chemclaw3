@@ -1,29 +1,18 @@
 """What an artefact is: a spec per kind, the shapes the API serves, and the errors a write can meet.
 
-**The spec is validated here and nowhere else**, for both of its writers. The agent's tools take an
-untyped `dict` (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` measured the typed
-union at 1,989 prefix tokens against 961) and the REST routes take a JSON body; both arrive at
-`parse_spec`, so a spec the model may not write is one a browser may not write either, and the
-refusal is worded the same way for both.
+Both writers — the agent's tools (an untyped `dict`, to keep the prompt small) and the REST routes —
+go through `parse_spec`, so the same spec is refused the same way for both.
 
-**Shape and caps are two checks, on purpose.** `parse_spec` is the shape — the closed set of kinds,
-`extra="forbid"` everywhere, literal values only — and it is what a read runs too, so a stored
-revision always comes back typed. `require_writable` is the caps (bytes, rows, structures, points,
-atoms) and the RDKit parse of every SMILES, and only a *write* runs it: a deployment that lowers a
-cap must not make the artefacts it already holds unreadable, and re-parsing two hundred molecules on
-every read would pay for a check whose answer cannot have changed. The one write-time check that is
-not here is whether what a geometry cites is stored — it is a database read, so it is async and
-lives in `exhibits.sources` beside the store it asks.
+Shape and caps are separate checks. `parse_spec` (closed kinds, `extra="forbid"`) also runs on read,
+so a stored revision always comes back typed. `require_writable` (byte, row, structure, point and
+atom caps, RDKit parse of every SMILES) runs only on write, so lowering a cap never makes stored
+artefacts unreadable. Whether a cited geometry exists is checked in `exhibits.sources`, since it
+needs a database read.
 
-**A value may be bound rather than written**
-(`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`): where a kind takes a literal
-cell, property, SMILES or series, it also takes
-`{"$bind": {"result": "r:<hex>", "pointer": "/json/pointer"}}`, and a table may take `rows_from`
-instead of `rows`. The shape is checked here; whether the result exists, the pointer resolves and
-the value fits is `exhibits.bindings`', which reads the session's stored results. So the positions
-a binding may occupy also admit `null` — what a binding whose stored result is gone resolves to —
-and a literal `null` there is refused on write by `require_writable`, which is where the literal
-contract is held.
+A value may be bound rather than written: positions taking a literal also take `{"$bind": {"result":
+"r:<hex>", "pointer": "/json/pointer"}}`, and a table may take `rows_from`. The shape is checked
+here; resolution is `exhibits.bindings`'. Those positions also admit `null` (a swept binding's
+value), which `require_writable` refuses as a literal.
 """
 
 from __future__ import annotations
@@ -59,23 +48,17 @@ ExhibitKind = Literal[
     "document", "table", "structures", "chart", "result", "link", "geometry", "html"
 ]
 
-#: The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`).
-#:
-#: Named here, below `agent`, because two readers in this package need the set as well as the
-#: agent: **an artefact tool's own result is never evidence and never bindable**
-#: (`exhibits.grounding`, `exhibits.bindings`). `read_exhibit` returns the artefact back to the
-#: model — every figure the agent wrote included — so counting its stored result as a tool result
-#: would ground every figure the moment the agent read its own work, and a `$bind` into it would be
-#: provenance pointing at the agent's own transcription.
+# The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`). Named
+# here because grounding and bindings need the set: an artefact tool's own result is never evidence
+# or bindable, since `read_exhibit` returns the agent's own figures.
 EXHIBIT_TOOLS: frozenset[str] = frozenset({"create_exhibit", "revise_exhibit", "read_exhibit"})
 
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
 PUSH_KIND = "exhibit"
 
-#: The shape a minted id takes — `xb-` and sixteen random hex digits (the frozen wire contract).
-#: Every id a caller names is held to it (`ExhibitRef`, the routes' path segment), so a malformed
-#: one is refused as malformed rather than looked up.
+# The minted id shape — `xb-` and sixteen hex digits (frozen wire contract). Every caller-named id
+# is held to it, so a malformed one is refused rather than looked up.
 EXHIBIT_ID = re.compile(r"^xb-[0-9a-f]{16}$")
 
 #: A finite JSON number, and never a boolean: `true` is not a yield, and pydantic's lax mode would
@@ -117,8 +100,8 @@ class Binding(_Spec):
 class RowsFrom(_Spec):
     """A whole table bound to one array in a stored result, one row per element.
 
-    `columns` maps a column key to a pointer *relative to each element*; an element that lacks it
-    gives an empty cell, because a list of records with an optional field is the ordinary case.
+    `columns` maps a column key to a pointer relative to each element; a missing field gives an
+    empty cell.
     """
 
     result: str = Field(pattern=RESULT_TARGET)
@@ -241,9 +224,8 @@ class LinkSpec(_Spec):
     id: str = Field(min_length=1)
 
 
-#: Every element symbol an XYZ line may name, H to Og, in the spelling RDKit's periodic table uses.
-#: A literal set rather than an RDKit lookup: this package parses SMILES through `core.chem` and
-#: imports no toolkit of its own, and the table does not change.
+# Every element symbol an XYZ line may name, H to Og, as RDKit spells them. A literal set: this
+# package imports no toolkit, and the table does not change.
 ELEMENTS: frozenset[str] = frozenset(
     """
     H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br
@@ -257,17 +239,11 @@ ELEMENTS: frozenset[str] = frozenset(
 def xyz_atom_count(xyz: str, *, max_atoms: int | None = None) -> int:
     """How many atoms one standard XYZ block holds, having checked every line of it.
 
-    `max_atoms` refuses a block whose count line declares more, read off the first line before the
-    text is split: a cited artifact is up to `calc_artifact_max_download_bytes`, and splitting and
-    checking tens of megabytes of lines to refuse it on its count afterwards is the cost the cap
-    exists to avoid. The block is still checked whole when the count is within it.
-
-    The layout is the one every program writes: an atom count, a comment line (which may be
-    empty), then exactly that many `El x y z` lines in ångström. Trailing blank lines are allowed;
-    anything else after the atoms — a second frame, a stray line — is refused, because an artefact
-    shows one structure and a silently dropped frame is a geometry nobody asked for. The element is
-    matched case-insensitively (`CL` is chlorine) against `ELEMENTS`, and every coordinate must be
-    a finite number.
+    `max_atoms` refuses a block whose count line declares more before splitting the text, so a large
+    cited artifact is refused cheaply. Layout: an atom count, a comment line (may be empty), then
+    exactly that many `El x y z` lines in ångström; trailing blank lines are allowed, anything else
+    (a second frame) is refused. Elements match case-insensitively against `ELEMENTS`; coordinates
+    must be finite.
 
     Raises:
         ValueError: naming the line and what is wrong with it.
@@ -313,9 +289,8 @@ def _absent(value: object) -> bool:
 class GeometrySource(_Spec):
     """A calculation by-product a geometry is read from: `science.calc.artifacts.ArtifactRef`'s key.
 
-    Only the two fields that address a stored artifact — which calculation, and the file's role —
-    so the reference is the one `fetch_artifact` and a note's `artifact_refs` already spell as
-    `<calc_key>#<name>`. Whether it exists is checked when it is written (`exhibits.sources`).
+    The two fields that address a stored artifact, spelled `<calc_key>#<name>` like `fetch_artifact`
+    and a note's `artifact_refs`. Existence is checked at write time (`exhibits.sources`).
     """
 
     calc_key: str = Field(min_length=1)
@@ -334,22 +309,17 @@ STRUCTURE_ID = r"^st_[0-9a-f]{16}$"
 class GeometrySpec(_Spec):
     """One 3D structure: inline XYZ, a stored calculation artifact, or a stored structure.
 
-    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds —
-    every calculation result names its geometry by it and none hands the model coordinates — and
-    is resolved to XYZ from the structure store when the artefact is read
-    (`exhibits.sources.resolved_geometry`), so a reader is served `xyz` and the stored revision
-    keeps the address. `highlight_atoms` are **0-based** indices into the atom lines, held inside
-    the inline block's atom count here and inside a cited one's when it is written
-    (`exhibits.sources.require_source_stored`). `energy_hartree` is a label the viewer shows, not a
-    figure anything here computes.
+    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds
+    (calculation results name geometries by it); it is resolved to XYZ on read
+    (`exhibits.sources.resolved_geometry`) while the revision keeps the address. `highlight_atoms`
+    are 0-based atom indices, checked against the atom count. `energy_hartree` is a display label.
     """
 
     kind: Literal["geometry"]
     format: Literal["xyz"] = "xyz"
-    # `xyz?`, `source?` and `energy_hartree?` are *absent* in the wire contract, not `null`, so a
-    # client testing `"source" in spec` reads the same answer it would from the writer's object.
-    # Excluded per field rather than by a wrapping serializer, which would publish the spec's JSON
-    # schema as an empty object and hide every field from the OpenAPI document.
+    # `xyz?`, `source?` and `energy_hartree?` are *absent* in the wire contract, not `null`.
+    # Excluded per field rather than by a wrapping serializer, which would hide the fields from the
+    # OpenAPI schema.
     xyz: str | None = Field(default=None, exclude_if=_absent)
     source: GeometrySource | None = Field(default=None, exclude_if=_absent)
     structure_id: str | None = Field(default=None, pattern=STRUCTURE_ID, exclude_if=_absent)
@@ -378,10 +348,9 @@ class GeometrySpec(_Spec):
 class HtmlSpec(_Spec):
     """A page the model wrote, rendered only inside the UI's sandbox origin, never by this server.
 
-    The backend stores and exports it as text and never serves it as `text/html`
-    (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`); the
-    page runs in an opaque-origin iframe on a separate origin with `connect-src 'none'`. `height` is
-    the frame's initial height in CSS pixels, which the frame may report back.
+    Stored and exported as text, never served as `text/html`; it runs in an opaque-origin iframe
+    with `connect-src 'none'`. `height` is the frame's initial CSS height, which the frame may
+    report back.
     """
 
     kind: Literal["html"]
@@ -471,13 +440,10 @@ def require_writable(
 ) -> None:
     """Refuse a spec, title or note over a cap, a SMILES RDKit cannot read, or unstorable text.
 
-    The write-time half of validation (see the module docstring for why it is not `parse_spec`).
-    `spec` is what the artefact will *show* — every binding resolved (`exhibits.bindings`) — so the
-    row, point and structure caps and the RDKit parse bound what a reader is served; `stored` is
-    the spec as it is kept, with its bindings, and is held to the byte cap too. Without `stored` the
-    spec is its own stored form, which is the case for every spec with no binding in it.
-    `vanished` names the paths of bindings a revision carried unchanged whose result retention has
-    since swept (`exhibits.bindings.Bound.vanished`): those read `null`, and may.
+    The write-time half of validation. `spec` is what will be shown (bindings resolved), so the
+    content caps and RDKit parse bound what a reader is served; `stored` is the spec as kept, also
+    held to the byte cap (defaults to `spec`). `vanished` names carried bindings whose result was
+    swept; those may read `null`.
 
     Raises:
         InvalidExhibit: naming the cap and the value, or the SMILES and why RDKit refused it.
@@ -512,8 +478,7 @@ def require_writable(
 def require_creatable(spec: Spec) -> None:
     """Refuse a new artefact of a kind this deployment has switched off — today only `html`.
 
-    Create only: an html artefact a session already holds still lists, reads and revises when the
-    switch goes off, as `agent_exhibits_enabled` leaves what a chemist pinned in place.
+    Create only: existing html artefacts still list, read and revise when the switch is off.
 
     Raises:
         InvalidExhibit: the spec is `html` and `agent_html_artefacts_enabled` is off.
@@ -528,9 +493,8 @@ def require_creatable(spec: Spec) -> None:
 def _require_literal(spec: Spec, vanished: Collection[str] = ()) -> None:
     """Refuse a binding left unresolved, and a `null` where only a binding's absence may put one.
 
-    The positions a binding occupies admit `null` so that a binding whose stored result is gone
-    still reads (see the module docstring); a *writer* sending one is not that, and is refused here
-    as it was refused by the shape before bindings existed.
+    Bound positions admit `null` only so a swept binding still reads; a writer sending one is
+    refused.
     """
     sites: list[tuple[str, object]] = []
     if isinstance(spec, TableSpec):
@@ -595,10 +559,8 @@ def _require_within_counts(spec: Spec) -> None:
             )
 
 
-#: What no `text` or `jsonb` column can hold: NUL, the C0 controls other than tab and the two line
-#: breaks, and an unpaired UTF-16 surrogate. Refused rather than stripped — stripping would store a
-#: document that is not the one that was sent (`protocols/store.require_storable` makes the same
-#: argument for a design).
+# What no `text` or `jsonb` column can hold: NUL, C0 controls other than tab and the two line
+# breaks, and unpaired surrogates. Refused rather than stripped, so what is stored is what was sent.
 _UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
 
 
@@ -660,15 +622,13 @@ class ExhibitBinding(BaseModel):
 class ExhibitView(ExhibitHeader):
     """One revision of an artefact: its header, the revision's own record, and its spec.
 
-    `spec` is what a renderer shows — every binding replaced by its value — and `raw_spec` the
-    revision as stored, bindings and all, with `bindings` naming each. For a spec with no binding
-    the two specs are one and `bindings` is empty. The store fills `spec` and `raw_spec` alike;
-    `exhibits.bindings.resolved_view` is what turns the one into the other for a reader.
+    `spec` is what a renderer shows (bindings resolved); `raw_spec` is the revision as stored, with
+    `bindings` naming each. The store fills both alike; `exhibits.bindings.resolved_view` resolves
+    them for a reader.
 
-    `unverified_figures` lists the numerals an agent-authored revision states that no tool in this
-    session returned — *unchecked*, not wrong: the figure may be the chemist's own, or arithmetic,
-    or a value the grounding scan could not see. Empty for a human revision and wherever nothing
-    was checked. A bound value is never one: it is the tool's own.
+    `unverified_figures` lists numerals an agent revision states that no tool in this session
+    returned — unchecked, not wrong. Empty for a human revision, where nothing was checked, and
+    never includes a bound value.
     """
 
     revision: int

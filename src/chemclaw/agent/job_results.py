@@ -55,16 +55,14 @@ async def await_job_results(
                 "job_id": job_id,
                 "status": "failed",
                 # `exc.__cause__ or exc`: the client-side `WorkflowFailureError` wraps the product's
-                # own sentence;
-                # the wrapper alone reads "Workflow execution failed".
+                # own sentence; the wrapper alone reads "Workflow execution failed".
                 "summary": failure_reason(exc.__cause__ or exc),
             }
 
     try:
         outcomes = await asyncio.wait_for(
             # `return_exceptions` so one failed job does not cancel the others' waits; this path
-            # must degrade
-            # to waiting for the next turn rather than fail an answer.
+            # must degrade to waiting for the next turn rather than fail an answer.
             asyncio.gather(*(_collect(job_id) for job_id in job_ids), return_exceptions=True),
             timeout=timeout_seconds,
         )
@@ -78,12 +76,9 @@ async def await_job_results(
         )
     else:
         # Exceptions that are not a failed workflow (broker unreachable, result not a connector
-        # envelope)
-        # are not reported to the model, since the job may still be running and push-back delivers
-        # it next
-        # turn. They are logged per job for the operator, with `exc_info=False` because no exception
-        # is
-        # active here.
+        # envelope) are not reported to the model, since the job may still be running and push-back
+        # delivers it next turn. They are logged per job for the operator, with `exc_info=False`
+        # because no exception is active here.
         for job_id, outcome in zip(job_ids, outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 degraded(

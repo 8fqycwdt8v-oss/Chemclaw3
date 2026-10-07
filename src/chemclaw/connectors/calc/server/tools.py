@@ -648,10 +648,10 @@ async def _calibrated(property_name: str) -> tuple[str, str]:
     """The current version and unit for a calibrated property, or raise naming the alternatives.
 
     The version comes from the server, never derived here: the ledger is keyed exactly on
-    `(calc_type, calc_version, input_hash)` (D-139), and a locally derived version would be
-    well-formed, match nothing, and report a confident `UNCALIBRATED`. `tests/test_calc_remote.py`
-    asserts no derivation exists. The current version, not a pooled figure, because the chemist is
-    asking about the calculator about to answer them.
+    `(calc_type, calc_version, input_hash)`, and a locally derived version would be well-formed,
+    match nothing, and report a confident `UNCALIBRATED`. `tests/test_calc_remote.py` asserts no
+    derivation exists. The current version, not a pooled figure, because the chemist is asking about
+    the calculator about to answer them.
     """
     entry = _CALIBRATED.get(property_name)
     if entry is None:

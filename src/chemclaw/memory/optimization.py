@@ -1,22 +1,11 @@
-"""Group same-transformation runs into an optimization campaign + note (plan Phase 5, episodic).
+"""Group same-transformation runs into an optimization campaign and note.
 
-The episodic-memory artifact for **process development on one transformation**: a screen where
-the same reaction is run repeatedly with varied conditions/reagents to move an output (yield,
-purity, robustness). Distinct from `chemclaw.memory.chains` (which links product→reactant across a
-synthetic route) — here the members are the *same* chemistry, grouped by DRFP similarity
-(`chemclaw.memory.similarity`). The note lays out every run's conditions and outcomes side by side
-in the order they were performed, each row naming what it changed relative to the run before it
-(`chemclaw.memory.progression`), and cites each via `[[reaction-<id>]]`, so a chemist — or the
-agent — can read what was tried, in what order, and what moved the result. The comparative
-skeleton is deterministic; the analysis (which change was the lever, what to try next) is the
-`optimization-campaign-synthesis` and `experiment-progression` skills' judgment.
-
-**Nothing applies that judgment automatically.** Both skills are loaded on demand in a chat turn
-and no durable path invokes either, so this note stays the comparative table unless a model reaches
-for one — which is fine, because the table is a complete answer to "what was tried and what moved
-the result". The phrase this replaced read as a pipeline that does not exist; see
-`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` for the sibling case where
-the body was not usable on its own.
+Episodic memory for process development on one transformation: the same reaction run repeatedly with
+varied conditions. Unlike `chemclaw.memory.chains` (product to reactant along a route), members are
+the same chemistry grouped by DRFP similarity (`chemclaw.memory.similarity`). The note lays out
+every run side by side in performed order, with what each changed relative to the previous
+(`chemclaw.memory.progression`), citing each via `[[reaction-<id>]]`. The table is deterministic and
+complete on its own; analysis is left to on-demand skills.
 """
 
 from datetime import date
@@ -49,9 +38,8 @@ def find_optimization_campaigns(
 ) -> list[OptimizationCampaign]:
     """Group reactions of the same transformation (DRFP similarity) into optimization series.
 
-    Clusters by DRFP Tanimoto >= `threshold` (default `optimization_similarity_threshold`,
-    tight — same reaction, not merely related). A cluster with a single member is not a
-    campaign (nothing was optimized) and is dropped. Deterministic (sorted output).
+    Clusters by DRFP Tanimoto >= `threshold` (default `optimization_similarity_threshold`, tight:
+    the same reaction). Single-member clusters are dropped. Deterministic (sorted output).
     """
     floor = threshold if threshold is not None else settings.optimization_similarity_threshold
     fingerprints = reaction_fingerprints(reactions)
@@ -71,36 +59,19 @@ def optimization_campaign_note(
 ) -> Note:
     """Build an agent `optimization-campaign` note: the runs in time order, with their deltas.
 
-    Each run is one table row — its reaction note (cited), the date it was performed, headline
-    temperature/time, yield, the outcome-quality columns this campaign actually recorded
-    (`_quality_columns`), and **what it changed relative to the run before it** — followed by a
-    per-run block carrying the hypothesis it was testing and a short procedure excerpt, so the
-    intent and the process detail are visible, not just the numbers.
-
-    The ordering is chronological (D-162), because a campaign is usually not a screen run in one
-    afternoon: it is a technician working one step for weeks, each day's experiment chosen in
-    response to yesterday's result. Grouped by similarity alone, that reads as an unordered set,
-    and the trajectory — the variable being walked, what the last three runs ruled out — is
-    unreadable. When the runs carry no dates the note says so rather than implying a sequence.
-
-    The note stays output-neutral: it surfaces the recorded conditions, outcomes and changes and
-    leaves *what mattered* to the skill's analysis and to the chemist who reads the note.
+    One table row per run (cited reaction, date, setpoints, yield, recorded quality columns, and
+    what changed vs the previous run), then a per-run block with its hypothesis and procedure
+    excerpt. Chronological because a campaign is usually worked day by day; without dates the note
+    says so. Output-neutral: it reports what was recorded and leaves what mattered to the reader.
     """
-    # The series *is* the ordering: every row is read off a step, and the run behind it is looked
-    # up by id. Zipping two independently-sorted lists would have paired them positionally, which
-    # is right only for as long as two functions agree on a sort — and being the same length, a
-    # disagreement would have mispaired every row silently rather than raising.
+    # Rows are read off the ordered series and looked up by id, rather than zipping two separately
+    # sorted lists that could mispair silently.
     series = progression([reactions[rid] for rid in campaign.reaction_ids])
     members = [reactions[step.reaction_id] for step in series.steps]
     pairs = list(zip(series.steps, members, strict=True))
-    # Every column but the two that are always answerable goes through `drop_empty_columns`, and
-    # that includes the three headline setpoints. They used to be hardcoded, on the assumption that
-    # an ELN always records a temperature, a time and a yield — true of a columnar source and false
-    # of one that keeps its conditions in prose, where all three render `—` on every row. That is
-    # the exact reading `drop_empty_columns` exists to prevent ("a column of dashes invites a reader
-    # to conclude the quantity was measured and found absent"), and the turn-time comparison in
-    # `agent.condense` has always applied it to the same three. Two tables built from one renderer
-    # disagreeing about which columns are real is the drift this module was extracted to stop.
+    # Every column except the two always-answerable ones goes through `drop_empty_columns`,
+    # including the setpoints, which a prose-only source may not record; the turn-time comparison
+    # applies the same rule.
     columns = [("Run", [f"[[reaction-{step.reaction_id}]]" for step, _ in pairs])] + [
         *drop_empty_columns(
             [
@@ -135,11 +106,8 @@ def optimization_campaign_note(
         created_by="agent",
         source="memory:optimization-grouping",
         body=body,
-        # The day this grouping's anchor run was performed — `min(reaction_ids)`, the single
-        # member id `note_id` is keyed on, not the member *set*, which would move this date under a
-        # stable id on every cluster growth. See `jobs.supported_from`. Absent, the note is
-        # open-ended and `durable/digest._is_new` correctly never reports it to anyone with a
-        # watermark.
+        # The anchor run's date (see `jobs.supported_from`); absent, the digest never reports the
+        # note.
         valid_from=minted_on,
     )
 
@@ -147,13 +115,8 @@ def optimization_campaign_note(
 def _run_detail(reaction: OrdReaction) -> str:
     """The per-run block: the hypothesis it tested, then its procedure excerpt (each if any).
 
-    Both are ELN free text — what a technician typed, or a warehouse column a binding mapped — and
-    this block lands in a note that is readable the moment it is written and that the graph reads
-    citations out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a
-    real outgoing edge to a note the campaign never referenced, forged by whoever wrote the
-    procedure and indistinguishable to a reader from one this system derived. Same rule and same
-    reason as `retrieval.harness.report_note`, which carried the identical defect over retrieved
-    chunks.
+    Both are ELN free text, so wikilinks are stripped to their targets: otherwise the text could
+    forge graph edges the campaign never cited.
     """
     lines = []
     if reaction.hypothesis:
@@ -166,22 +129,11 @@ def _run_detail(reaction: OrdReaction) -> str:
 
 
 def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
-    """The outcome columns beyond yield — purity and the impurity profile — as `(header, cells)`.
+    """The outcome columns beyond yield (purity and the impurity profile) as `(header, cells)`.
 
-    A process campaign is rarely optimizing yield: it is optimizing the impurity that yield hides,
-    and this is the one artifact built for side-by-side reading, so the three numbers a chemist
-    actually compares belong in its rows. They sit between Yield and "Changed vs previous" —
-    outcomes grouped together, with the widest free-text column left last.
-
-    What is decided *here* is which three candidates an `OrdReaction` can offer. Whether a
-    candidate survives is `comparison.drop_empty_columns`' rule — a column appears only if some run
-    recorded it — which lives there because the turn-time digest needs the same rule over its own
-    columns, and a second copy is how the two come to disagree about what `—` means.
-
-    **The rule is applied by the caller, over every column at once, not here.** This function used
-    to drop its own and hand back survivors, which was harmless only for as long as the setpoint
-    columns beside it were assumed always-present; once those go through the same filter, running it
-    twice is one filter too many to reason about. Candidates in, filtering out.
+    A process campaign often optimizes the impurity the yield hides, so these belong in the table,
+    placed between Yield and "Changed vs previous". Returns candidates only; the caller applies
+    `comparison.drop_empty_columns` over all columns at once.
     """
     return [
         ("Purity (%)", [cell(run.purity_percent) for run in members]),

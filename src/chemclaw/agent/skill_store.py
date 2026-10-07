@@ -311,8 +311,10 @@ class PermittedStoreBackend(StoreBackend):
         raise SkillsReadOnlyRefusal(self._refusal)
 
     async def awrite(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse. Overridden because `StoreBackend.awrite` is native rather than a thread wrapper, and
-        it is the path an async agent takes.
+        """Refuse.
+
+        Overridden because `StoreBackend.awrite` is native rather than a thread wrapper, and it is
+        the path an async agent takes.
         """
         raise SkillsReadOnlyRefusal(self._refusal)
 

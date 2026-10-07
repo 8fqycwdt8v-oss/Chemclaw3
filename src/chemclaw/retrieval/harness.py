@@ -324,8 +324,9 @@ def report_note(report: Report, *, drafted_on: date | None = None) -> Note:
             # renders under it.
             lines.extend(_gap_notices(section, whole=False))
         elif section.retrieval_failed:
-            # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap
-            # is visible to the reader (and re-runnable), never silently absent (F10-D2).
+            # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap is
+            # visible to
+            # the reader (and re-runnable), never silently absent.
             lines.extend(_gap_notices(section, whole=True))
             continue
         elif not section.supported:

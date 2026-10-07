@@ -1,9 +1,9 @@
 """The harness's pre-execution approval, applied to the act rather than latched onto the session.
 
 Under `harness_autonomy="plan_only"` the agent proposes a plan and a human approves it before
-anything state-changing runs (D-137, D-167). The unit an approval authorizes is an action, so the
-check is a `wrap_tool_call` middleware at the tool-invocation boundary, as for per-tool RBAC; a
-check at turn start would read the previous plan before the model rewrites it.
+anything state-changing runs (D-167). The unit an approval authorizes is an action, so the check is
+a `wrap_tool_call` middleware at the tool-invocation boundary, as for per-tool RBAC; a check at turn
+start would read the previous plan before the model rewrites it.
 
 Reads stay open: the agent must be able to research in order to build the plan it needs approved.
 The line is drawn at state change (`authz.side_effecting_call`), so an unapproved session can
@@ -55,11 +55,9 @@ def plan_identity(steps: Sequence[Mapping[str, Any]]) -> str | None:
 
     Framework-free, so every reader keys approvals identically. `None` for an empty plan, because a
     constant every session proposes cannot be meaningfully decided on. It hashes each step's
-    `content`
-    and its declaration (via `plan_scope.step_declaration`), so a rewrite that widens `tools` is a
-    different plan
-    (D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read). `status` is not
-    hashed, so an approved plan does not revoke itself by making progress.
+    `content` and its declaration (via `plan_scope.step_declaration`), so a rewrite that widens
+    `tools` is a different plan. `status` is not hashed, so an approved plan does not revoke itself
+    by making progress.
 
     Args:
         steps: The plan's steps as `write_todos` writes them, carrying `content` and the `tools`
@@ -98,10 +96,9 @@ async def plan_author(session_id: str, plan_hash: str) -> str | None:
 def approval_binds(approver: str, actor: str | None) -> bool:
     """Whether an approval `approver` gave authorizes a turn `actor` is running.
 
-    An approval is its approver's consent to their own next turn, not the session's
-    (D-2026-09-27-in-a-shared-session-the-sender-governs). With no actor on the turn it is open when
-    identity is not enforced and closed when it is; a blank approver binds nobody once identity is
-    enforced.
+    An approval is its approver's consent to their own next turn, not the session's. With no actor
+    on the turn it is open when identity is not enforced and closed when it is; a blank approver
+    binds nobody once identity is enforced.
     """
     if not actor or not approver:
         return not settings.entra_required
@@ -134,8 +131,7 @@ def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
 
     The sentence is for the chemist; the footer tells the model the sanctioned path is a
     `write_todos` call followed by waiting for approval. `tool_name` is not reduced: it is reached
-    only
-    past `authz.side_effecting_call`, so it is a name this repository owns.
+    only past `authz.side_effecting_call`, so it is a name this repository owns.
     """
     return PlanNotApprovedError(
         routed(
@@ -156,16 +152,14 @@ def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprov
     """The refusal a call outside the approved plan's declared tools earns.
 
     A different sentence from `plan_approval_refusal` because the remedy differs: rewrite the plan
-    so
-    a step declares this tool and have it approved. It names what the approval covers; the footer
+    so a step declares this tool and have it approved. It names what the approval covers; the footer
     points at that list rather than repeating it, since the scope is model-authored and long. Same
     exception class, so audit and the refusal reason are unchanged. Each declared name is reduced by
     `framing.safe_id`, because it is model-authored text interpolated into the refusal grammar.
     """
     declared = ", ".join(safe_id(name) for name in sorted(scope)) or "no tools at all"
     # With an empty scope the first clause is dropped: pointing at an empty list would be a
-    # fabricated
-    # path.
+    # fabricated path.
     rewrite = (
         f"rewrite the plan so a step declares {tool_name} and ask for that plan to be approved"
     )
@@ -238,12 +232,11 @@ async def consume_turn_approval(session_id: str) -> None:
 
     Called once when a turn finishes, from `chemclaw.api.runner.run_turn`, at the end because the
     approved plan executes within the turn. Not from the runner's `finally`: on disconnect that runs
-    under `CancelledError`, where an `await` re-raises and skips the rest of the cleanup (D-130).
+    under `CancelledError`, where an `await` re-raises and skips the rest of the cleanup.
     `spend_approval_after_teardown` covers torn-down turns that already acted.
 
     Session-wide, not hash-targeted, so a plan reworded mid-turn cannot leave the old plan's
-    approval
-    live. Idempotent. Never raises: the gate fails closed on the next call anyway.
+    approval live. Idempotent. Never raises: the gate fails closed on the next call anyway.
     """
     try:
         await plan_approval_store().consume_all(session_id)
@@ -258,8 +251,8 @@ async def consume_turn_approval(session_id: str) -> None:
         )
 
 
-#: Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING`
-#: shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
+# : Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING` :
+# shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
 _PENDING_SPENDS: set[Any] = set()
 
 
@@ -310,9 +303,9 @@ def rewrite_todos_in_batch(request: Any) -> Any:
     """This batch's `write_todos` argument, whole: `None` (no rewrite), items, or `_UNANSWERABLE`.
 
     Shared by `plan_after_batch` and `plan_link` so they agree on what the batch's rewrite is. Read
-    off the assistant message, because `ToolNode` gives every call the same pre-batch state.
-    `None` when the message is not found or has no `write_todos`; `_UNANSWERABLE` for two rewrites
-    or a `todos` argument that is not a list of mappings.
+    off the assistant message, because `ToolNode` gives every call the same pre-batch state. `None`
+    when the message is not found or has no `write_todos`; `_UNANSWERABLE` for two rewrites or a
+    `todos` argument that is not a list of mappings.
     """
     messages = (request.state or {}).get("messages") or []
     this_call = request.tool_call.get("id")
@@ -324,8 +317,8 @@ def rewrite_todos_in_batch(request: Any) -> Any:
         if not rewrites:
             return None
         if len(rewrites) > 1:
-            # Two rewrites gathered concurrently: which one lands last is a race, so "the plan
-            # this batch produces" has no answer.
+            # Two rewrites gathered concurrently: which one lands last is a race, so "the plan this
+            # batch produces" has no answer.
             return _UNANSWERABLE
         items = (rewrites[0].get("args") or {}).get("todos")
         if not isinstance(items, list) or not all(isinstance(item, Mapping) for item in items):
@@ -335,14 +328,13 @@ def rewrite_todos_in_batch(request: Any) -> Any:
 
 
 def plan_after_batch(request: Any) -> Any:
-    """The plan this batch atomically produces: `None` (no rewrite), a list of steps, or
-    `_UNANSWERABLE`.
+    """The plan this batch atomically produces: `None`, a list of steps, or `_UNANSWERABLE`.
 
     A call batched beside a plan rewrite is judged against the plan the batch writes. The canonical
     harness batch (status flip beside the next step's tool) keeps the same identity and passes on
     its
-    standing approval; a genuine rewrite needs its own approval. `None` when the message cannot be
-    found, in which case the pre-batch plan is judged.
+    standing approval; a genuine rewrite needs its own approval. `None` (no rewrite, or the message
+    cannot be found) means the pre-batch plan is judged.
     """
     items = rewrite_todos_in_batch(request)
     if items is None or items is _UNANSWERABLE:
@@ -398,16 +390,13 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     """Refuse a state-changing tool whose session has no approval for its current plan.
 
     The plan is the turn's `todos` (`TodoListMiddleware`). `request.state` is a snapshot taken
-    before
-    the whole tool batch, so a call batched beside a `write_todos` is judged against the plan the
-    batch writes (`plan_after_batch`); a status flip keeps the identity, a real rewrite needs its
-    own
-    approval, and an unanswerable batch is refused without asking the store.
+    before the whole tool batch, so a call batched beside a `write_todos` is judged against the plan
+    the batch writes (`plan_after_batch`); a status flip keeps the identity, a real rewrite needs
+    its own approval, and an unanswerable batch is refused without asking the store.
 
-    An approval authorizes only the tools its plan declared
-    (D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool). The scope is read from the
-    recorded `plan_approvals.scope`, never from the live plan, so a later rewrite cannot widen it;
-    since the identity covers each step's declaration, a widened plan has no approval at all.
+    An approval authorizes only the tools its plan declared. The scope is read from the recorded
+    `plan_approvals.scope`, never from the live plan, so a later rewrite cannot widen it; since the
+    identity covers each step's declaration, a widened plan has no approval at all.
 
     Raises:
         PlanNotApprovedError: The plan behind this call has no live approval
@@ -422,16 +411,15 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
         await _record_plan_author(request)
         return result
     # The *call* rather than the tool: `write_file` is durable under `/memories/` but turn-local
-    # under
-    # `/scratch/`, which an unapproved turn needs to draft a plan.
+    # under `/scratch/`, which an unapproved turn needs to draft a plan.
     if not side_effecting_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
     # No session means no plan to approve. Session-less paths are governed elsewhere:
     #
     # - A template `agent` step never reaches this middleware (`harness_enabled=False`);
-    #   `step_profile`
-    #   removes every side-effecting tool the step did not declare before the graph is built.
+    #   `step_profile` removes every side-effecting tool the step did not declare before the graph
+    #   is built.
     # - A template `tool` step reaches it via `invoke_governed`; the tool is named in a reviewed,
     #   git-committed template, and an agent-composed workflow may name no side-effecting tool.
     # - The CLI stamps no session id; it is the operator's own terminal.

@@ -44,8 +44,7 @@ class RequestLimiter:
     """Token buckets keyed by principal, bounded in the number of principals it will track.
 
     The key is attacker-influenced, so the map is a `BoundedLru`: past the cap the
-    least-recently-seen
-    principal is evicted and starts with a fresh burst.
+    least-recently-seen principal is evicted and starts with a fresh burst.
     """
 
     def __init__(self, *, per_minute: float, burst: float, max_principals: int) -> None:
@@ -66,8 +65,7 @@ class RequestLimiter:
         """Spend one token for `principal_id`, or raise `RateLimited`.
 
         `now` is injectable so tests drive refill without sleeping. Monotonic time, so a wall-clock
-        step
-        cannot grant or refuse refills.
+        step cannot grant or refuse refills.
         """
         moment = time.monotonic() if now is None else now
         bucket = self._buckets.get(principal_id)  # marks the principal recently seen

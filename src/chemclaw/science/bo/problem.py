@@ -58,9 +58,8 @@ class CategoricalParameter(BaseModel):
     #
     # A descriptor vector per category lets the surrogate interpolate between options instead of
     # learning each label independently (`chemclaw.science.bo.featurize` fills it from
-    # `structures`).
-    # Both are carried in the spec: `structures` records what was featurized, `descriptors` what the
-    # surrogate saw, so featurization cannot change mid-campaign.
+    # `structures`). Both are carried in the spec: `structures` records what was featurized,
+    # `descriptors` what the surrogate saw, so featurization cannot change mid-campaign.
 
     kind: Literal["categorical"] = "categorical"
     name: str = Field(min_length=1)
@@ -134,10 +133,8 @@ class LinearConstraint(BaseModel):
 
     # Rationale here, not in the docstring (see `CategoricalParameter`). One kind covers `<=`, `>=`
     # and `==`; `kind` discriminates it from `ExcludeConstraint`, so a later widening stays
-    # additive.
-    # Continuous parameters only: BoFire refuses a constraint naming a categorical, and the
-    # validator
-    # exists to name the parameter in that error.
+    # additive. Continuous parameters only: BoFire refuses a constraint naming a categorical, and
+    # the validator exists to name the parameter in that error.
 
     kind: Literal["linear"] = "linear"
     parameters: list[str] = Field(min_length=1)
@@ -364,9 +361,9 @@ class Observation(BaseModel):
     # would put an unmeasured run on the Pareto front. A failed measurement is an absent run.
     values: dict[str, Annotated[float, Field(allow_inf_nan=False)]] = Field(default_factory=dict)
     provenance: str = "measured"
-    # The surrogate's posterior sd at this point **when it was proposed**, from the `Candidate`.
-    # Not named `uncertainty`: it is the model's prior belief, not the error of `value`. `None` for
-    # a seed point.
+    # The surrogate's posterior sd at this point **when it was proposed**, from the `Candidate`. Not
+    # named `uncertainty`: it is the model's prior belief, not the error of `value`. `None` for a
+    # seed point.
     surrogate_sd: float | None = Field(default=None, ge=0.0)
 
 
@@ -486,8 +483,7 @@ class FitQuality(BaseModel):
         """
         if self.r2 is None:
             # Returned whole: there is no score for the caveats below to qualify. The range is
-            # stated
-            # because the runs may differ by an amount no assay resolves.
+            # stated because the runs may differ by an amount no assay resolves.
             return (
                 f"The {self.n_observations} run(s) supplied for {self.objective!r} carry **no "
                 f"usable variance** — their whole range is {self.response_range:.2g}, which is "
@@ -559,8 +555,8 @@ def _roman(number: int) -> str:
 #: model (space-filling). E, G and K are omitted deliberately.
 DESIGN_CRITERIA: tuple[str, ...] = ("d-optimal", "a-optimal", "i-optimal", "space-filling")
 
-#: The model a design is optimal *for*. The same factors and budget give a different design for
-#: a linear model than a quadratic one, and a linear-optimal design cannot see curvature. Names are
+#: The model a design is optimal *for*. The same factors and budget give a different design for a
+#: linear model than a quadratic one, and a linear-optimal design cannot see curvature. Names are
 #: BoFire's own strings.
 DESIGN_FORMULAE: tuple[str, ...] = (
     "linear",

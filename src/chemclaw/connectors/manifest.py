@@ -7,7 +7,7 @@ fails `make connector-validate` instead of silently vanishing.
 Three kinds of tool stay in core by rule: conversation plumbing (another process does not have the
 turn), the graph writers (one write path stamps provenance; a connector reaches the graph only by
 returning a `Note` in a job envelope), and the knowledge graph's own reads (core is its main
-consumer, so a bundle would take no dependency closure with it; D-115).
+consumer, so a bundle would take no dependency closure with it).
 
 Transport and auth vary by kind and are discriminated unions here, in the manifest, not in
 `core/config/`: config says which attached things exist and where, a manifest says what each one
@@ -204,12 +204,10 @@ def _check_classification(
 ) -> None:
     """Raise unless every served tool is in exactly one of `state_changing` and `read_only`.
 
-    The classification decides whether the plan gate refuses a tool under an unapproved plan
-    (D-167),
-    and every way of getting it wrong (a typo, an omission, a default) fails open. So it is a strict
+    The classification decides whether the plan gate refuses a tool under an unapproved plan, and
+    every way of getting it wrong (a typo, an omission, a default) fails open. So it is a strict
     partition, and an empty `tools` list is refused too: it would bind the server's whole surface
-    with
-    nothing classified as state-changing.
+    with nothing classified as state-changing.
     """
     served = set(tools)
     # Checked before the partition, whose set comparisons would hide a duplicated name until a
@@ -265,10 +263,9 @@ def _check_knowledge_reads(knowledge_read: list[str], read_only: list[str]) -> N
 # branch in `connectors.registry._mcp_connection`. `tools` (the agent-facing allow-list) lives on
 # the endpoint, so an allow-list with nothing to serve it is unrepresentable.
 #
-# `state_changing` names the tools the plan gate refuses under an unapproved plan (D-167);
-# `knowledge_read` names the subset of `read_only` that consults the record. Both are declared by
-# the bundle, because what a tool does is the capability's own fact, and a copy in core would go
-# stale.
+# `state_changing` names the tools the plan gate refuses under an unapproved plan; `knowledge_read`
+# names the subset of `read_only` that consults the record. Both are declared by the bundle, because
+# what a tool does is the capability's own fact, and a copy in core would go stale.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 
@@ -532,9 +529,8 @@ class ConnectorManifest(BaseModel):
     profiles: list[str] = Field(default_factory=list)
     # The knowledge-graph vocabulary this bundle's `publish_to_graph` jobs mint, unioned into
     # `KNOWN_NOTE_TYPES`/`KNOWN_RELATIONS` by `chemclaw.kg.note.known_note_types` and its sibling.
-    # The
-    # vocabulary stays closed (an undeclared name still fails `make kg-validate`), but a bundle can
-    # extend it without a core edit (D-118). Validated for shape only.
+    # The vocabulary stays closed (an undeclared name still fails `make kg-validate`), but a bundle
+    # can extend it without a core edit. Validated for shape only.
     note_types: list[str] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
     # Whether an empty `connectors_enabled` turns this bundle on. Declaring a capability and binding

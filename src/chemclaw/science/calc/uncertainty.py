@@ -26,8 +26,8 @@ from chemclaw.core.errors import ChemclawError
 # propagated one.
 Method = Literal["reported", "propagated", "none"]
 
-# How an uncertainty was obtained, in the words a note reader sees; beside `Method` so every
-# method has prose.
+# How an uncertainty was obtained, in the words a note reader sees; beside `Method` so every method
+# has prose.
 _METHOD_PROSE: dict[Method, str] = {
     "reported": "the model's own reported error",
     "propagated": "propagated from the inputs",

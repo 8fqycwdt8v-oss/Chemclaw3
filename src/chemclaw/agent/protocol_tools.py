@@ -155,8 +155,8 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
                     source=note.source or "",
                     title=note.type,
                     conditions=note.conditions,
-                    # The date the run was performed, which is what makes the comparison a
-                    # timeline rather than a listing (D-162 puts it on `valid_from`).
+                    # The date the run was performed (`valid_from`), which makes the comparison a
+                    # timeline.
                     performed_at=note.valid_from,
                     text=_procedure(note),
                 )
@@ -188,10 +188,8 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     if missing:
         # Said out loud rather than dropped, so a partial comparison does not read as complete. On
         # `unresolved`, not `degraded`: these refs have no row at all, while `degraded` means a row
-        # whose
-        # prose is missing.
+        # whose prose is missing.
         result = result.model_copy(update={"complete": False, "unresolved": missing})
     # Rendered here so the payload sent is exactly this string, not a library's `str()` fallback of
-    # a
-    # pydantic model.
+    # a pydantic model.
     return result.render()

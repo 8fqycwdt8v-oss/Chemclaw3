@@ -102,9 +102,7 @@ class SqlResultSink:
         return self._warehouse
 
     async def _known_columns(self, warehouse: Warehouse) -> dict[str, set[str]]:
-        """Which columns the site's schema actually has, probed once and cached for the sink's
-        lifetime.
-        """
+        """The columns the site's schema actually has, probed once per sink and cached."""
         if self._columns is not None:
             return self._columns
         # Qualified by the schemas on the search path the writes resolve through, so a same-named

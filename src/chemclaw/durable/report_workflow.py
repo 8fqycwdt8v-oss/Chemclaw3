@@ -384,8 +384,8 @@ class DevelopmentReportWorkflow:
         # Rendered once and used for both the note and the delivery attachment; `report_note` is
         # pure, so calling it in workflow code emits no command.
         drafted = report_note(report)
-        # The note reference *is* this workflow's result, so the publish is not
-        # best-effort — but it shares the bounded-attempts discipline (G4).
+        # The note reference *is* this workflow's result, so the publish is not best-effort, but it
+        # still has bounded attempts.
         note_ref = await publish_note(
             record_report_note, [report, request.requested_by, request.correlation_id]
         )

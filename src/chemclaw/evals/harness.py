@@ -90,7 +90,7 @@ class EvalReport(BaseModel):
 
 
 class EvalCaseError(ChemclawError):
-    """A case file could not be read or is not a valid eval case (G4)."""
+    """A case file could not be read or is not a valid eval case."""
 
 
 def run_eval(cases: list[EvalCase], case_set_version: str) -> EvalReport:

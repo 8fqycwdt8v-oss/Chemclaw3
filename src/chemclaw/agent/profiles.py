@@ -1,8 +1,8 @@
 """Named agent profiles — the seam for per-use-case agent configuration.
 
-A profile is an override set over `build_langgraph_agent`'s existing dimensions (instructions,
-tool and MCP subsets, harness mode, model route, skills). Every field defaults to `None`, meaning
-"use the global default", so this module imports neither the agent nor `settings`, and
+A profile is an override set over `build_langgraph_agent`'s existing dimensions (instructions, tool
+and MCP subsets, harness mode, model route, skills). Every field defaults to `None`, meaning "use
+the global default", so this module imports neither the agent nor `settings`, and
 `AgentProfile(name="default")` is today's agent.
 
 A profile attenuates and never authorizes: the subsets only narrow the advertised surface, and
@@ -44,29 +44,23 @@ class AgentProfile(BaseModel):
     # silently taking the plan gate off.
     harness_autonomy: HarnessAutonomy | None = None
     # Reasoning effort, overriding `llm_effort` for this profile. A `Literal` so a misspelled value
-    # is
-    # rejected: the endpoint would drop it silently or answer 400. Kept in sync with `LlmSettings`
-    # by
-    # `tests/test_llm_effort.py`, since this module imports no settings.
+    # is rejected: the endpoint would drop it silently or answer 400. Kept in sync with
+    # `LlmSettings` by `tests/test_llm_effort.py`, since this module imports no settings.
     effort: Literal["low", "medium", "high"] | None = None
     # Which entry of `settings.model_routes` builds this agent's model — a route key, never a model
-    # id,
-    # so no site's model name is checked in. `None` takes the `"agent"` route. A model is not a
+    # id, so no site's model name is checked in. `None` takes the `"agent"` route. A model is not a
     # capability, so this does not need to narrow; cost is bounded by `agent/spend_cap.py`. A key
-    # with
-    # no entry in `model_routes` reuses the model already built.
+    # with no entry in `model_routes` reuses the model already built.
     model_route: str | None = None
     # Which skills this agent may reach, narrowing the discovered set; `None` leaves the surface to
     # `agent/skill_access.py`. It lets an A/B arm vary skills while holding the tool surface still.
     # An unknown name is caught by `make skill-validate`, not at build time, because the skills tree
-    # is
-    # deployment configuration; it narrows to nothing.
+    # is deployment configuration; it narrows to nothing.
     skill_names: frozenset[str] | None = None
     # What this profile is for, in one sentence, written for the model deciding whether to delegate
-    # to
-    # it; unset on profiles nobody rosters. A written field rather than a derived first sentence, so
-    # roster entries are distinguishable. `subagents.describe_helper` appends the tools the helper
-    # actually bound.
+    # to it; unset on profiles nobody rosters. A written field rather than a derived first sentence,
+    # so roster entries are distinguishable. `subagents.describe_helper` appends the tools the
+    # helper actually bound.
     description: str | None = Field(default=None, max_length=MAX_MANIFEST_TEXT_CHARS)
 
 

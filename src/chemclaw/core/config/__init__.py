@@ -16,7 +16,7 @@ rules spanning sections live on the composed class here.
 Collection fields: a delimited string (like `PATH`) when the elements are bare keys or paths, read
 through a derived `*_list`/`*_dirs` property; a plain mapping (`connector_urls`) for a per-name
 override of one scalar. Config says which and where; a manifest says what. A field describing the
-internals of one attached thing belongs in its manifest (D-118, D-120).
+internals of one attached thing belongs in its manifest (D-118).
 """
 
 import logging
@@ -657,18 +657,14 @@ class Settings(
 
         Without the secret, `agent/framing.py::_envelope_nonce` is random per process, so a durable
         session replayed in a later process carries envelopes whose tag no longer matches and its
-        retrieved
-        content is no longer marked as data.
+        retrieved content is no longer marked as data.
 
         Warned, not raised, because the shipped chart is this configuration and raising would fail
-        every
-        pod on upgrade. The loss is bounded: defanging is unaffected, and any tool call an injected
-        instruction reaches still passes authorization, the plan gate and audit
-        (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`).
+        every pod on upgrade. The loss is bounded: defanging is unaffected, and any tool call an
+        injected instruction reaches still passes authorization, the plan gate and audit.
 
         Uses the standard logger because `core/logging.py` imports this module; at import the line
-        goes to
-        stderr via `logging.lastResort` (`tests/test_config.py` pins it).
+        goes to stderr via `logging.lastResort` (`tests/test_config.py` pins it).
         """
         if self.session_store == "postgres" and not self.framing_envelope_secret.get_secret_value():
             logging.getLogger(__name__).warning(

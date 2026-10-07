@@ -347,8 +347,7 @@ def initial_candidates(
             )
         # Re-ask until `n` distinct points are collected; each ask advances the strategy's RNG.
         # Bounded by `_SEED_DRAW_ROUNDS`, because exclusions can make feasible points rare and an
-        # `ask`
-        # returning nothing would otherwise spin forever.
+        # `ask` returning nothing would otherwise spin forever.
         candidates: list[Candidate] = []
         seen: set[tuple[tuple[str, ParamValue], ...]] = set()
         for _attempt in range(max(_SEED_DRAW_ROUNDS, _SEED_DRAW_ROUNDS * n)):
@@ -412,9 +411,8 @@ def _require_fresh_points_exist(
     run = distinct_feasible_candidate_count(problem, observations)
     if run < space:
         # Fresh cells remain. The threshold is zero fresh points, not `space_exhausted`'s "cannot
-        # fill
-        # a batch", which is the durable loop's stop signal and would refuse an ask that can answer
-        # partly.
+        # fill a batch", which is the durable loop's stop signal and would refuse an ask that can
+        # answer partly.
         return
     raise ValueError(
         f"this decision space holds {space} distinct condition(s) and all {run} have been run, so "
@@ -537,18 +535,15 @@ def _fit_quality_from(
             surrogate = surrogate_api.map(by_output[objective.name])
             _, test, _ = surrogate.cross_validate(frame, folds=folds)
             # R² has no denominator without variance (`get_metric` answers 1.0 for a flat response).
-            # The
-            # spread is taken off the same frame the folds are cut from and reported beside the
-            # score,
-            # since R² is scale-free.
+            # The spread is taken off the same frame the folds are cut from and reported beside the
+            # score, since R² is scale-free.
             column = frame[objective.name]
             spread = float(column.max() - column.min())
             scores.append(
                 FitQuality(
                     objective=objective.name,
                     # Relative, not `spread == 0.0`: a drift below the assay's own noise can still
-                    # score a high
-                    # R². See `bo_flat_response_relative_spread`.
+                    # score a high R². See `bo_flat_response_relative_spread`.
                     r2=(
                         None
                         if _is_flat(spread, column)
@@ -815,8 +810,7 @@ def _require_design_fits_the_ceiling(
     ):
         # A reduced design over a non-two-level factor is refused by `_fractional_design`, whose
         # error is the one the caller can act on; this arithmetic would describe a design that
-        # cannot
-        # be built.
+        # cannot be built.
         return
     corners = 1
     categorical_combinations = 1
@@ -864,8 +858,7 @@ def factorial_design(
     """
     if problem.constraints:
         # `FractionalFactorialStrategy` rejects every constraint class; this refusal exists to give
-        # a
-        # message the caller can act on instead of a pydantic error naming a BoFire class.
+        # a message the caller can act on instead of a pydantic error naming a BoFire class.
         stated = "; ".join(constraint.describe() for constraint in problem.constraints)
         raise ValueError(
             f"a factorial screen cannot honour a constraint ({stated}): it enumerates the corners "
@@ -1109,7 +1102,6 @@ def optimal_design(
         n_terms=0 if space_filling else _model_terms(problem, formula),
         duplicate_runs=duplicates,
         # Only constraints `_constraint_breaches` verified on the returned runs; exclusions are
-        # refused
-        # above, so this is every constraint the design carries.
+        # refused above, so this is every constraint the design carries.
         honoured_constraints=sum(isinstance(c, LinearConstraint) for c in problem.constraints),
     )

@@ -35,8 +35,7 @@ class WorkflowStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Short docstrings here: pydantic publishes a class docstring as the JSON-schema `description`
-    # on
-    # every model call, so rationale goes in comments.
+    # on every model call, so rationale goes in comments.
     id: str = Field(min_length=1, description="Unique within the workflow; later steps use it.")
     tool: str = Field(
         default="",
@@ -80,8 +79,7 @@ def _document(
     ]
     if contradictory:
         # Refused rather than resolved by precedence: the branch below would silently drop the tool,
-        # and
-        # the approver sees only the rendered document.
+        # and the approver sees only the rendered document.
         raise ComposedWorkflowError(
             f"step(s) {contradictory} each have to be exactly one thing: a `tool` to call, a `job` "
             "to run, or a `prompt` to reason with. Split them, or drop the fields that do not "
@@ -132,10 +130,10 @@ async def compose_workflow(
 
     **A durable job step is allowed and will not run until a person approves this workflow.** Say so
     when you hand the name back: its owner approves it where they are — `/approve-workflow` at a
-    terminal, the workflow screen on the front door — and it covers the steps exactly as they
-    stand, so composing it again needs approving again. Two jobs that do
-    not read each other are fine; one that waits for another will not fit, because a job's budget is
-    most of the whole run's — split that into two workflows.
+    terminal, the workflow screen on the front door — and it covers the steps exactly as they stand,
+    so composing it again needs approving again. Two jobs that do not read each other are fine; one
+    that waits for another will not fit, because a job's budget is most of the whole run's — split
+    that into two workflows.
 
     Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}`. A
     step naming no earlier step runs at the same time as its neighbours, so do not chain steps that
@@ -238,8 +236,7 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
         )
 
     # Checked again at run time: `side_effecting_tools()` grows when a bundle is enabled, so a step
-    # that
-    # was a read when composed may be a write now.
+    # that was a read when composed may be a write now.
     problems = [
         *step_problems(workflow.document, TemplateSurface.resolve(with_signatures=False)),
         *run_ceiling_problems(workflow.document),
@@ -259,8 +256,7 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
     if withheld:
         raise ComposedWorkflowError(f"the {name!r} workflow is not approved to run: {withheld[0]}")
     # Scoped by owner and version: the run id is an idempotency key, and unscoped two chemists' (or
-    # two
-    # versions') workflows of one name would rejoin each other's runs.
+    # two versions') workflows of one name would rejoin each other's runs.
     return await start_template_run(
         workflow.document,
         dict(inputs),

@@ -71,10 +71,9 @@ class _FallbackObserved(BaseCallbackHandler):
     """Notice that the *fallback* endpoint was asked — the only observable this failover has.
 
     `RunnableWithFallbacks` reports nothing when the primary fails, so this handler is attached to
-    the
-    fallback model: one `on_chat_model_start` is exactly one failover. It rides on the model
-    instance
-    because `bind_tools` keeps constructor callbacks. It increments a counter and logs a WARNING.
+    the fallback model: one `on_chat_model_start` is exactly one failover. It rides on the model
+    instance because `bind_tools` keeps constructor callbacks. It increments a counter and logs a
+    WARNING.
     """
 
     def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
@@ -98,8 +97,8 @@ def _failover_exceptions() -> tuple[type[BaseException], ...]:
     return (APIConnectionError, InternalServerError)
 
 
-# What an endpoint says when the thread is too long. Matched on the message because it arrives as
-# an ordinary `BadRequestError`. The spellings are the vendors' (a gateway relays the vendor's
+# What an endpoint says when the thread is too long. Matched on the message because it arrives as an
+# ordinary `BadRequestError`. The spellings are the vendors' (a gateway relays the vendor's
 # sentence), so Anthropic's `prompt is too long` stays. An unrecognised phrasing falls through to
 # `error`; `tests/test_agent_observability_model.py` pins the live spellings.
 _CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
@@ -162,9 +161,8 @@ def _is_context_length(exc: BaseException) -> bool:
     """Whether this is the provider refusing a thread that no longer fits.
 
     `ContextOverflowError` (raised by `langchain_openai` on both the plain and streamed paths) is
-    read
-    first. Otherwise only a `BadRequestError` qualifies, by `code` (`context_length_exceeded`) or by
-    message, so an unrelated error quoting the phrase is not misread.
+    read first. Otherwise only a `BadRequestError` qualifies, by `code` (`context_length_exceeded`)
+    or by message, so an unrelated error quoting the phrase is not misread.
     """
     if isinstance(exc, ContextOverflowError):
         return True
@@ -185,16 +183,15 @@ def _openai_compatible_model(
 
     The private-CA bundle goes in through the httpx clients, since `ChatOpenAI` builds its own SDK
     client. `stream_usage` is passed explicitly: upstream disables it whenever a base URL or client
-    is
-    set, and without usage chunks every turn is metered at zero tokens and the spend cap is
-    disarmed.
-    It is a setting so an endpoint rejecting `stream_options` has a way out; it defaults on.
+    is set, and without usage chunks every turn is metered at zero tokens and the spend cap is
+    disarmed. It is a setting so an endpoint rejecting `stream_options` has a way out; it defaults
+    on.
     """
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
-    # The fallback endpoint reuses the primary's model and credential unless it names its own:
-    # the common case is a second replica of one internal deployment, not a different vendor.
+    # The fallback endpoint reuses the primary's model and credential unless it names its own: the
+    # common case is a second replica of one internal deployment, not a different vendor.
     base_url = settings.llm_fallback_base_url if fallback else settings.llm_base_url
     chosen = model or (settings.llm_fallback_model if fallback else "") or settings.llm_model
     # Unwrapped here and nowhere earlier: both settings are `SecretStr`, so `or` on them would
@@ -205,8 +202,8 @@ def _openai_compatible_model(
     return ChatOpenAI(
         model=chosen,
         base_url=base_url,
-        # Only the fallback instance gets one, and that asymmetry is the whole signal: this
-        # endpoint is asked only after the primary raised (`_FallbackObserved`).
+        # Only the fallback instance gets one, and that asymmetry is the whole signal: this endpoint
+        # is asked only after the primary raised (`_FallbackObserved`).
         callbacks=[observer] if observer is not None else None,
         # A `SecretStr` keeps the key out of reprs and log lines.
         api_key=SecretStr(key or _KEYLESS_PLACEHOLDER),
@@ -247,11 +244,10 @@ def _tls_http_clients() -> tuple[Any, Any]:
     """The sync and async httpx clients every chat call goes out on. Both, always.
 
     A client this process does not build trusts the environment: httpx's default `trust_env=True`
-    would send prompts and the gateway bearer through an ambient `HTTP_PROXY`, past `netguard`
-    (D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address). So both clients are built here
-    with `trust_env=False`, CA bundle or not. Cached per process (not per turn) so each turn does
-    not
-    open a new connection pool; the async pool binds to the first loop that uses it.
+    would send prompts and the gateway bearer through an ambient `HTTP_PROXY`, past `netguard`. So
+    both clients are built here with `trust_env=False`, CA bundle or not. Cached per process (not
+    per turn) so each turn does not open a new connection pool; the async pool binds to the first
+    loop that uses it.
 
     Returns:
         `(sync_client, async_client)`, in the order `ChatOpenAI` takes them.
@@ -259,7 +255,6 @@ def _tls_http_clients() -> tuple[Any, Any]:
     import httpx
 
     # CA pinning and refusing an ambient proxy are `core/http.gateway_client_kwargs`, shared with
-    # the
-    # embedding client.
+    # the embedding client.
     kwargs = gateway_client_kwargs(settings.llm_tls_ca_bundle)
     return httpx.Client(**kwargs), httpx.AsyncClient(**kwargs)
