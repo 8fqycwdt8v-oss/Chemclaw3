@@ -87,9 +87,7 @@ def test_an_artifact_citation_implies_a_citation_of_the_run_that_produced_it() -
 
 
 def test_the_reverse_lookup_is_gone_and_stays_gone_until_something_calls_it() -> None:
-    """The reverse lookup ("which notes rest on this key") is gone and stays gone until something
-    calls
-    it.
+    """The reverse lookup ("which notes rest on this key") stays gone until something calls it.
 
     It had no caller and, once its producer bundle was deleted, no writer. An absence test, so
     re-adding it is a deliberate decision with a caller in hand. `cited_calculations` stays: it has

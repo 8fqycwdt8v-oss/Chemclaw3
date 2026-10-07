@@ -1,21 +1,15 @@
 """A busy shared session is a line, every participant can watch a turn, and the inbox finds members.
 
-`D-2026-10-01-a-queued-message-waits-in-its-senders-request`. Three properties, each driven at the
-outermost thing production calls (`tasks/lessons.md` rule 55):
+- The line: a message sent during another turn waits in order and runs as its own sender; only
+  the sender or owner may withdraw it, a removed member's message does not run, a full line is a
+  409, and a stranger can neither join nor read it.
+- Fan-out: each participant follows the turn on its own buffer; a stalled watcher is cut off
+  with `stream_lagged`, and leaving never stops the turn.
+- The inbox: `GET /plans/pending` lists a plan the caller authored in a session they are a
+  member of, and no one else's.
 
-- **The line.** A message sent while another turn runs waits in the session's line, in order, and
-  runs as *its own sender* — their oid and their roles, read from inside the running graph. Only the
-  sender or the owner may withdraw it; a member removed while waiting does not have it run; a full
-  line is a 409; a stranger can neither join it nor read it.
-- **Fan-out.** Any participant can follow the running turn, each on a buffer of their own: a stalled
-  watcher is cut off with `stream_lagged` without holding the turn or the sender, a watcher leaving
-  never stops the turn, and nobody can watch a session they are not in.
-- **The inbox.** `GET /plans/pending` lists a plan the caller authored in a session they are only a
-  member of — and neither the owner's plan there nor a member's plan in the owner's inbox.
-
-The HTTP cases run the app under a real uvicorn server on loopback (`tests.test_detach._Served`),
-because "a second request while the first stream is open" cannot be expressed through `TestClient`
-or httpx's ASGI transport, both of which buffer a response whole.
+HTTP cases run under a real uvicorn server (`tests.test_detach._Served`), since the in-process
+transports buffer a response whole.
 """
 
 import asyncio
@@ -61,10 +55,8 @@ _ISSUER = "https://issuer.test/line/v2.0"
 async def _reauthorize_by_header(request: Request, principal: Principal) -> Principal:
     """The head-of-line re-check, re-resolving the sender the way `_by_header` first did.
 
-    These cases authenticate by a test header rather than a token, so the production re-check —
-    which re-validates the bearer token — would refuse every waiting message. The one case that
-    *is* about the token puts the real `auth.reauthorize` back and signs real ones
-    (`test_a_message_whose_token_expires_while_it_waits_does_not_run`).
+    These cases authenticate by header, so the token re-check is replaced; the token-expiry test
+    restores the real `auth.reauthorize`.
     """
     fresh = _by_header(request)
     assert fresh.oid == principal.oid
@@ -505,11 +497,9 @@ def _sign(key: Any, person: Principal, lifetime: float) -> str:
 def test_a_message_whose_token_expires_while_it_waits_does_not_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real tokens, nothing patched in the seam: an expired sender is refused at the head.
+    """A message whose sender's token expires while it waits ends `queue_cancelled` and never runs.
 
-    Ben's POST is admitted on a token valid for two more seconds; Ana's turn holds the session past
-    that. The message must end `queue_cancelled`, saying why, and must never reach the model — the
-    review's P2 (#503), where only membership used to be read again.
+    Real tokens, nothing patched in the seam.
     """
     monkeypatch.setattr(turns_module, "reauthorize", auth.reauthorize)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -587,11 +577,7 @@ class _TwoGates(_Ledger):
 def test_a_sender_at_their_cap_when_their_turn_comes_is_refused_at_the_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The per-actor cap is counted again at the head: what held at sending need not hold now.
-
-    The cap is off while Ben's message joins Ana's line and while he starts a turn of his own
-    elsewhere; it is on by the time his message reaches the head, which is the shape a burst of
-    concurrent POSTs takes past the check each of them passed alone.
+    """The per-actor turn cap is counted again when a waiting message reaches the head of the line.
     """
     agent = _TwoGates()
 
@@ -854,9 +840,7 @@ def test_the_inbox_lists_a_plan_the_caller_authored_in_a_session_they_are_only_a
 ) -> None:
     """Bob's own plan in Alice's session reaches Bob's inbox; Alice's plan there does not.
 
-    And the mirror: Alice's inbox does not list Bob's plan in her own session, because only its
-    author may decide it. Plans are distinguished by their steps, so each assertion names whose
-    plan it saw.
+    And Alice's inbox does not list Bob's plan, since only its author may decide it.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
@@ -888,13 +872,10 @@ def test_the_inbox_lists_a_plan_the_caller_authored_in_a_session_they_are_only_a
 def test_an_inbox_row_says_whose_conversation_the_plan_is_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`PendingPlan.owner` (Chemclaw3 #503): the owner of record, on own rows and on a member's.
+    """`PendingPlan.owner` names the conversation's owner, on own rows and on a member's.
 
-    Without it a client could tell a plan in somebody else's conversation from one in its own only
-    by matching the row against `GET /sessions/shared` — and opening a shared one as the reader's
-    own gives them an owner's controls. The in-process membership store keeps no owner, so it is
-    given the one the durable store reads off `session_owners`, which is what a member's row carries
-    in production.
+    Without it a client could open a shared session as its own and show owner controls. The
+    in-process membership store is given the owner the durable store reads from `session_owners`.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")

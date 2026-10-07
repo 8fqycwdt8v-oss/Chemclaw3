@@ -1,19 +1,12 @@
 """A turn the loop cap stops still answers, and a helper the cap stops says so.
 
-Driven live against a real model (dl-01, 2026-09-27, both delegation arms): the supervisor sent
-three helpers on a six-source sweep, the helpers spent the turn's shared iteration allowance
-between them, each handed back its last sentence of narration ("Let me also check…") as its
-report, and the supervisor was stopped at its next model call. The chemist got **no answer at
-all** — `loop_cap_reached` over an empty turn.
+When helpers spend the shared iteration allowance, the supervisor must not fall silent. Two
+halves, asserted on a compiled graph because both live in the wiring:
 
-Two halves, asserted on a compiled graph because both live in the wiring:
-
-- **the helper's report says it was cut short** (`agent/tool_result_shape.cut_short_report`, applied
-  on the one path both result-rewriting middlewares share), so the caller cannot read narration as
-  findings;
-- **every graph that reaches the cap gets one tool-less call to write its answer**
-  (`loop_cap.enforce_loop_cap` + `loop_cap.AnswerAtTheCap`), and only a second arrival ends it —
-  so the supervisor answers the chemist, from what its helpers managed, instead of falling silent.
+- the helper's report says it was cut short (`agent/tool_result_shape.cut_short_report`), so the
+  caller cannot read narration as findings;
+- every graph reaching the cap gets one tool-less call to write its answer
+  (`loop_cap.enforce_loop_cap` + `loop_cap.AnswerAtTheCap`), and only a second arrival ends it.
 """
 
 import asyncio
@@ -203,12 +196,11 @@ def test_a_second_arrival_at_the_cap_ends_the_graph() -> None:
 def test_a_capped_helper_report_the_mark_pushes_over_the_ceiling_keeps_the_helpers_own_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The two behaviours of `tool_framing`'s outer pass, composed: mark, bound, keep the original.
+    """A cut-short mark that pushes a report over the ceiling keeps the helper's own text in full.
 
-    A report just under the ceiling passes the inner `bound_tool_results` whole; the cut-short mark
-    this pass adds pushes it over, so this pass cuts it and keeps its full text for the chemist
-    (`tool_result_size.kept_in_full`, #473). What is kept must be what the helper returned — the
-    system's mark is a note to the calling model, not part of the tool's output.
+    The outer pass of `tool_framing` marks, bounds, and keeps the original via
+    `tool_result_size.kept_in_full`. What is kept is what the helper returned; the mark is a note to
+    the calling model, not tool output.
     """
     from langgraph.types import Command
 

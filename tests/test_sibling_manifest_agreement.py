@@ -1,81 +1,15 @@
-"""Two repositories declare one fact three times, and until now nothing compared the copies.
+"""Cross-repository agreement between this repository and a `Chemclaw3-mcp` checkout.
 
-`Chemclaw3-mcp`'s `manifests/README.md` bans a second copy of a declaration *inside* that fleet —
-"a copy here would be a second declaration of one fact", which is why every entry there is a
-symlink to the server's own `connector.yaml`. Then it ships exactly that across the repository
-boundary and asserts the agreement in prose:
+1. Bundles declared in both trees must agree on every key: the endpoint's tools, read-only
+   partition and token variable, and every bundle-level key (`skills`, `profiles`, `note_types`,
+   `relations`, `jobs`), since discovery is first-directory-wins and the loser is dropped
+   silently. Known differences live in `_ARGUED_DIVERGENCES`.
+2. Backend seams (`calc`, `rxnlabel`) have no manifest here, so every hardcoded call site is
+   checked against the fleet's `tool-surface.json`, in both directions: every name sent is
+   served, and every served tool is called or declined with a reason.
 
-1. **`chem`, `rxnpredict` and `safety`** have a `connector.yaml` in *both* trees. Both declare the
-   bundle's tool list, its read-only partition and its bearer token variable. Whichever directory
-   comes first on `CHEMCLAW_CONNECTORS_DIR` wins the name outright — the loser is not merged, not
-   warned about and not logged — so a tool the fleet adds is simply absent in the shipped-first
-   order that `infra/live/e2e-full-stack/up.sh` uses, and `connector validation passed` either way.
-
-   **And it compared three endpoint keys while claiming the surface.** `_SURFACE_FIELDS` was
-   `("tools", "read_only", "state_changing")`, so the five keys a manifest declares *outside* its
-   endpoint — `skills`, `profiles`, `note_types`, `relations`, `jobs` — were read by nothing. One of
-   the five was diverging the whole time: `safety` declares `skills: [safety-screening]` here and no
-   `skills:` key in the fleet, and in the wiring order both of that repository's own documents
-   publish, the manifest with no skills won the name and the 132-line SKILL.md carrying *why an
-   empty result is never "safe"* became unreachable — silently, with `CHEMCLAW_SKILLS_DIR` the only
-   remedy and no document in either repository naming it. That is fixed at the mechanism
-   (`connectors/registry._bundle_content_dirs` reads every directory carrying an enabled bundle's
-   name, not only the winner's), and the comparison now covers every bundle-level key, derived from
-   `ConnectorManifest` so a sixth is compared the day it is added. A divergence is either caught or
-   written down in `_ARGUED_DIVERGENCES` with what makes it harmless.
-
-2. **The backend seams** have a manifest in *neither* direction that covers them. `calc` is
-   `mount: backend`, deliberately unloadable as a connector here, and this repository reaches it
-   from inside `science/calc/store.py::cached_compute` — so its physics tool names and their
-   argument dicts are hardcoded in `connectors/calc/compose.py` and `remote.py` with nothing
-   between them and the server. The fleet records `servers/calc/tool-surface.json` precisely as the
-   rename tripwire, and nothing here read it. `tests/calc_server_fake.py` is a hand-written
-   reproduction of that same contract, so a fleet rename left the whole suite green and failed at
-   runtime, on the seam that carries every calculation this system does.
-
-   **There are two such seams, and for nine days this file said there was one.** `rxnlabel` is the
-   other `manifests-internal/` backend — `ingest/labels/labeller.py` puts three tool names and their
-   argument keys on its wire — and `_callers`' docstring gave "a different surface and **no
-   `tool-surface.json`**" as the reason it was out of scope. That file has shipped in
-   `servers/rxnlabel/` since 2026-09-05; the sentence was written on 2026-09-14, in a wave titled
-   "the cross-repo contracts", in the file whose whole subject is
-   `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it`. So the recorded surface
-   existed, the reason for not reading it was false, and the seam carrying every atom map and every
-   reaction name in the corpus had no tripwire. Re-measured when the reader was added: three call
-   sites, every tool served, no undeclared argument, no required argument missing — sound, and
-   unchecked, which is the same pair `calc` was in on 2026-09-07. A seam is a **value** now
-   (`_Seam`), so the next one is a row rather than a paragraph explaining its absence.
-
-Measured on 2026-09-07 before any of this was written, both contracts were **sound** — the tool
-lists agreed as sets, and zero argument keys were undeclared. That is the finding, not a
-counter-argument to it: an agreement nothing checks is one that holds until somebody's merge, and
-the whole subject of `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` is
-that a claim about another repository has to be checked by reading that repository.
-
-**And the seam's own tripwire covered the modules it named rather than the seam**
-(`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). `_CALLERS` was two
-paths while this docstring and the test below both said "every hardcoded `calc` call": run against
-the tree on 2026-09-14, five modules hold such calls. The two unread ones were
-`connectors/calc/server/tools.py` (11 sites) and `connectors/bo/calculators.py` (2) — the half of
-the seam carrying `predict_pka`, `predict_solubility` and `compute_xtb_energy`. Every name they put
-on the wire is one the fleet records, so nothing was broken; the tripwire simply did not exist
-there. `_callers()` derives the list from who imports a dispatcher, and 13 sites became 26.
-
-**And it read the seam in one direction only.** "Every name this repository sends is one the fleet
-serves" catches a rename; it is silent about the fleet *growing*, and on 2026-09-18 two of the
-tools `servers/calc/tool-surface.json` records were named by no site here. Both turned out to be
-declined on purpose and for measured, structural reasons — `optimize_geometry` derives the same
-cache key as `relax_structure` while returning a different payload, and `predict_logd` is the one
-tool the server answers `calculation_key` with no key for — so nothing was broken and nothing was
-written down either. A per-seam declined table is where that goes, reconciled against the derived
-difference in both directions, so a tool arriving in the fleet is a decision somebody takes rather
-than a silence.
-
-**Opt-in, and it can only skip or fail.** Reading a few YAML files and one JSON file needs a
-checkout and no build, which is the property that makes these plausible to run in CI where the
-schema measurement in `tests/test_context_floor.py` is not. Without a checkout each skips with the
-reason in the message and `tests/conftest.py::_report_sibling_skips` says how many — a skip is not
-a pass, and how many it was is what the run says rather than what this paragraph does.
+Opt-in: each test needs a sibling checkout and skips without one; `tests/conftest.py` reports
+how many skipped.
 """
 
 from __future__ import annotations
@@ -100,13 +34,10 @@ from tests.siblings import (
     sibling_root,
 )
 
-#: The endpoint fields that decide what a turn may call and how it authenticates — the ones where a
-#: disagreement between the two trees changes behaviour rather than documentation.
+#: The endpoint fields that decide what a turn may call and how it authenticates.
 #:
-#: `url` and `health_url` are deliberately absent: hosting is a deployment fact, both manifests say
-#: so in their own headers, and `CHEMCLAW_CONNECTOR_URLS` or the chart moves them. `description` is
-#: absent for the same reason it is not asserted anywhere else — it is prose a model reads, and its
-#: cost is what `tests/test_context_floor.py` bounds.
+#: `url` and `health_url` are deployment facts; `description` is prose bounded by
+#: `tests/test_context_floor.py`.
 _SURFACE_FIELDS = ("tools", "read_only", "state_changing")
 
 
@@ -116,30 +47,12 @@ _NOT_CONTENT = frozenset({"name", "description", "endpoint"})
 
 
 def _content_keys(mine: dict[str, Any], theirs: dict[str, Any], where: str) -> tuple[str, ...]:
-    """Every *bundle-level* key to compare for one pair of manifests, from two directions at once.
+    """Every bundle-level key to compare for one pair of manifests.
 
-    `_SURFACE_FIELDS` covers the endpoint. Everything a manifest declares outside it — `skills`,
-    `profiles`, `note_types`, `relations`, `jobs` — went uncompared, and one of the five was
-    diverging: `safety` declares `skills: [safety-screening]` here and no `skills:` key in the
-    fleet. That divergence is argued and harmless (see `_ARGUED_DIVERGENCES`), and the reason to
-    compare all five anyway is that nothing could tell an argued one from an accident. A
-    `note_types` or `relations` key the fleet gained and this tree did not would take a note type
-    out of `make kg-validate`'s vocabulary in whichever order wins; a `jobs` divergence would move a
-    durable launcher and its `connector-<name>` queue.
-
-    **The scope is the union of what the model declares and what the two files declare, and that is
-    the second version of this function.** The first read `ConnectorManifest.model_fields` alone,
-    which is a derivation and was still unanchored: emptying it — or narrowing it to a tuple that
-    happens to omit `skills` — turned the whole comparison, *including the stale-row half that is
-    supposed to notice such a change*, into a loop over nothing, and the mutation ran green. Driven.
-    Taking the keys off the files as well means the subject population is the thing under test:
-    while either manifest declares `skills:`, `skills` is compared, whatever this repository's model
-    says this week.
-
-    The model half is kept because it is what makes a *newly added* key compared before either file
-    uses it, and because it is the basis for refusing a key neither side's model knows — `extra=
-    "forbid"` refuses one at load time here, but the fleet's copy is never loaded by this process,
-    so a key nothing understands would otherwise be compared and agree.
+    The union of what `ConnectorManifest` declares and what either file declares: the model half
+    covers a newly added key before either file uses it, and the file half keeps a narrowed model
+    from emptying the comparison. A key neither model knows is refused, since the fleet's copy is
+    never loaded here.
     """
     declared = frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT
     present = (frozenset(mine) | frozenset(theirs)) - _NOT_CONTENT
@@ -156,12 +69,8 @@ def _content_keys(mine: dict[str, Any], theirs: dict[str, Any], where: str) -> t
 def _comparable(value: Any) -> Any:
     """One manifest value in a form two files can be compared by, ignoring what decides nothing.
 
-    A list of strings is an allow-list and its order decides nothing — the same argument
-    `test_a_bundle_declared_in_both_trees_declares_the_same_surface` makes for `tools`, where the
-    two files genuinely differ in order today. A list of mappings is the `jobs:` block, keyed by
-    each job's `name` because that name is the launcher's tool name and therefore its identity.
-    A missing key and an empty list are the same declaration, which is what makes `skills:` absent
-    comparable to `skills: []`.
+    String lists are allow-lists compared as sets; `jobs:` mappings are keyed by `name`; a missing
+    key equals an empty list.
     """
     if value is None:
         return frozenset()
@@ -179,12 +88,7 @@ def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 
 #: Bundle-level keys that legitimately differ between the two trees, keyed `(bundle, key)`, each
-#: carrying **why** and **what makes it harmless**. A divergence is therefore either caught or
-#: written down — which is the property the comparison existed to have and did not, because it only
-#: ever looked at three endpoint keys.
-#:
-#: Every row is real and was measured: every other key of every shared bundle agrees today,
-#: `default_enabled` included — the fleet declares the five process-development bundles opt-in too.
+#: with why the difference is harmless.
 _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
     ("safety", "skills"): (
         "the fleet's manifest declares no `skills:` on purpose, and says so in its own header: a "
@@ -248,23 +152,9 @@ def _manifest(path: Path) -> dict[str, Any]:
 def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
     """A bundle name both trees declare must mean the same bundle in both — every key of it.
 
-    Three things are compared and the third one is new. The endpoint's `_SURFACE_FIELDS` and its
-    `auth.token_env` decide what a turn may call and how it authenticates; **everything else a
-    manifest declares** — `_content_keys`, derived rather than transcribed — decides what judgment,
-    which agent profiles, which note types, which relations and which durable launchers a deployment
-    reaches. Only the first two were read for as long as this file existed, and `safety.skills` was
-    diverging the whole time.
-
-    **As sets, not as lists, and the difference is measured rather than assumed.** `chem`'s twelve
-    tools are in a different order in the two files today — `enumerate_torsions` is fifth there and
-    twelfth here — and order decides nothing: the list is an allow-list, `_allowed` filters a
-    served surface through it, and the model is sent whatever `tools/list` answers. A list
-    comparison would have failed on that the day it was written, which is the fastest way to teach
-    a reader to bump a check rather than read it.
-
-    The bundles themselves are **derived** from the two trees rather than transcribed — the names
-    both declare — so a fourth port is checked from the commit that lands it, without this file
-    being taught the name.
+    Compares `_SURFACE_FIELDS`, `auth.token_env` and every `_content_keys` key. Compared as sets,
+    since tool order differs and decides nothing. Bundles are derived from both trees, so a new
+    shared bundle is checked without editing this file.
     """
     root = _sibling_or_skip()
     here = bundles_declared_here()
@@ -381,9 +271,7 @@ def _e2e_connectors_dir(fleet: Path) -> str:
 def _opt_in_here() -> set[str]:
     """Every bundle this tree's own manifest declares `default_enabled: false`.
 
-    Read off this repository's files, because the opt-in decision is this repository's whatever
-    the fleet's copy says. It used to be derived from divergence rows, which existed only while the
-    fleet disagreed and would have emptied the set the day it adopted the flag — which it now has.
+    Read from this repository, which owns the opt-in decision.
     """
     return {
         name
@@ -395,12 +283,8 @@ def _opt_in_here() -> set[str]:
 def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every bundle this tree declares opt-in is unbound under `up.sh`'s own wiring.
 
-    The `default_enabled` divergence rows this file used to carry said the opposite — that in the
-    four-repo lane the fleet's copy wins the name and these bundles bind — and nothing checked it:
-    `up.sh` lists this tree's connectors first and discovery is first-directory-wins, so this
-    tree's `default_enabled: false` decides there too.
-    Driven through `registry.enabled()` with the exported directory order and no enable-list — the
-    lane itself now names every bundle, so this holds the claim for an operator who empties it.
+    `up.sh` lists this tree's connectors first and discovery is first-directory-wins. Driven through
+    `registry.enabled()` with the exported order and no enable-list.
     """
     from chemclaw.connectors import registry
     from chemclaw.core.config import settings
@@ -420,21 +304,10 @@ def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.Monk
 
 
 def test_the_compared_key_set_is_anchored_in_both_the_model_and_the_two_files() -> None:
-    """The bundle-level comparison's scope, pinned from both directions it is built from.
+    """The compared key set is anchored in both the model and the two files.
 
-    Needs no checkout: it is about `_content_keys` rather than about the manifests, which is exactly
-    why it can hold the half the real fixture cannot reach. Two independent narrownesses were
-    measured as surviving mutations of the comparison above, and each has an assertion here:
-
-    * **The model half alone is not an anchor.** Deriving the scope from
-      `ConnectorManifest.model_fields` only meant a narrowed tuple emptied the comparison *and* the
-      check that was supposed to notice, together. So a key a file declares is compared whatever the
-      model says.
-    * **The file half alone is not an anchor either**, and its own purpose is invisible to the real
-      pair: taking the *intersection* of the two files rather than the union left every real
-      assertion green, because the fleet's manifest is never loaded by this process and a key only
-      it declares would be compared against nothing. That is what the `unknown` refusal is for,
-      and the union is what feeds it.
+    Needs no checkout. A model-only scope can be narrowed to nothing, and an intersection of the
+    files would miss a key only the fleet declares; the union feeds the unknown-key refusal.
     """
     known = sorted(frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT)
     assert known, "ConnectorManifest declares no bundle-level content keys; the scope is now empty"
@@ -472,24 +345,15 @@ _SRC = REPO_ROOT / "src"
 class _Seam(NamedTuple):
     """One MCP server this repository calls with tool names and argument keys typed into `src/`.
 
-    **A value rather than four module constants, because there is more than one such seam and the
-    second one had no tripwire for nine days while this file's own prose said it could not have
-    one** (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` applied to this
-    file). `_callers`' docstring said `rxnlabel` has "a different surface and **no
-    `tool-surface.json`**"; that server has shipped `servers/rxnlabel/tool-surface.json` since
-    2026-09-05, and the sentence was written on 2026-09-14 — in a wave titled "the cross-repo
-    contracts", in the file whose subject is that ADR. The recorded surface existed and nothing read
-    it, so a top-level rename on either side was caught by nobody. Making the seam a value is what
-    stops the next one being described instead of checked.
+    A value, so each seam is a row checked against its own `tool-surface.json`.
 
     Attributes:
         name: What this seam is called, for a failure message and for the declined table beside it.
-        module: The dotted module that *defines* the dispatchers. Resolved through `find_spec`, so
-            renaming it fails loudly here rather than silently emptying this seam's caller set —
-            `tasks/lessons.md`'s "derive the scope, do not assert that it is non-empty".
+        module: The dotted module that defines the dispatchers, resolved through `find_spec` so a
+            rename fails loudly rather than emptying the caller set.
         dispatchers: The function or method names that put `(tool, arguments)` on the wire.
         surface: The fleet-relative path of the `tool-surface.json` that server records.
-        declined: Tools the fleet serves that nothing here calls, each with the measured reason.
+        declined: Tools the fleet serves that nothing here calls, each with the reason.
     """
 
     name: str
@@ -502,10 +366,7 @@ class _Seam(NamedTuple):
 def _module_path(dotted: str) -> str:
     """One dotted module as a repository-relative path, or a failure naming what moved.
 
-    `find_spec` rather than a path built from the dots, because that is the form a rename cannot
-    survive quietly: a moved module empties a `rglob` filter and leaves every assertion downstream
-    trivially satisfied, which is the hole `tasks/lessons.md` records as "derive the scope, do not
-    assert that it is non-empty".
+    `find_spec`, so a moved module fails rather than emptying a filter.
     """
     spec = importlib.util.find_spec(dotted)
     assert spec is not None and spec.origin is not None, (
@@ -518,25 +379,8 @@ def _module_path(dotted: str) -> str:
 def _callers(seam: _Seam) -> tuple[str, ...]:
     """Every module in `src/` that imports one of `seam`'s dispatchers, plus the module defining it.
 
-    **Derived, because the hand-kept list covered half the seam while claiming all of it**
-    (`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). It read
-    `compose.py` and `remote.py` — 13 call sites — and the docstring below said "every hardcoded
-    `calc` call". Measured against the tree on 2026-09-14 there are **five** modules holding such
-    calls: those two, plus `connectors/calc/server/tools.py` (11 sites) and
-    `connectors/bo/calculators.py` (2), which were unread. Every tool name they put on the wire is
-    one the fleet records today — so nothing was broken, and the tripwire for the half of the seam
-    that carries `predict_pka`, `predict_solubility` and `compute_xtb_energy` had simply never
-    existed.
-
-    The import is what scopes this, not the function name — and the scoping is per seam, which is
-    the whole reason a seam is a value. `ingest/labels/labeller.py` defines its own `_call`, the
-    same spelling `calc` uses, against a server with an entirely different surface: matching on the
-    name alone would check its three call sites against `calc`'s tools and fail on a server it never
-    talks to. Each seam is therefore read against **its own** `tool-surface.json`.
-
-    The defining module is added unconditionally, because it does not import what it defines, and
-    its own call sites are as hardcoded as any importer's — `remote.py`'s `calculation_key` calls
-    were the original reason this was ever a list.
+    Derived from imports, not names, so another module's same-named `_call` is not checked against
+    the wrong server. The defining module is added because it does not import what it defines.
     """
     definer = _module_path(seam.module)
     found = [definer]
@@ -559,11 +403,8 @@ _Bindings = dict[str, frozenset[str] | None]
 def _literal_strings(node: ast.AST, bound: _Bindings) -> frozenset[str] | None:
     """The string values an expression can take, or `None` when that is not decidable here.
 
-    Three shapes appear at these call sites and all three are decidable: a plain literal; the
-    ternary `"compute_fukui_at" if prop == "fukui" else "compute_properties_at"`; and a name bound
-    to one of those a few lines above the call. Anything else returns `None` and the caller
-    *fails* rather than skipping it — a checker that quietly passes over the call site it cannot
-    parse is the shape this whole file exists to end.
+    Decidable shapes: a literal, a ternary of literals, and a name bound to one of those. `None`
+    makes the caller fail rather than skip the site.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return frozenset({node.value})
@@ -579,9 +420,7 @@ def _literal_strings(node: ast.AST, bound: _Bindings) -> frozenset[str] | None:
 def _bindings(tree: ast.Module) -> _Bindings:
     """Every name in one module assigned a decidable set of tool-name strings.
 
-    Module-wide rather than per-scope, and deliberately so: a name assigned an undecidable value
-    *anywhere* maps to `None`, so an ambiguity anywhere makes the call site that uses that name
-    fail loudly rather than resolve against a binding from another function.
+    Module-wide: an undecidable assignment anywhere maps the name to `None`, so ambiguity fails.
     """
     bound: _Bindings = {}
     for node in ast.walk(tree):
@@ -601,16 +440,9 @@ def _bindings(tree: ast.Module) -> _Bindings:
 def _typed_tools(seam: _Seam) -> dict[str, frozenset[str]]:
     """Each module-level dispatcher whose `tool` parameter is a `Literal`, with its members.
 
-    **The resolution for a call site whose tool expression is not a literal, and the reason it is
-    sound is the type checker rather than this file.** `remote_version` is reached from
-    `connectors/calc/server/tools.py::_calibrated` with a value looked up in `_CALIBRATED`, which no
-    AST walk can resolve without learning that one module's private table — the
-    allowlist-of-its-own-exceptions shape. Typing the parameter moves the declaration onto the
-    dispatcher instead: `mypy --strict` proves every value passed is a member, so the members *are*
-    what that site can put on the wire, and every one of them is checked against the fleet below.
-
-    A dispatcher that is a method (`rxnlabel`'s `_call`) or whose `tool` is a plain `str` has no
-    entry, so its sites resolve as before or fail loudly as before.
+    For call sites whose tool expression is a table lookup, `mypy --strict` proves the value is a
+    member, so the members are what the site can send. Methods and plain-`str` dispatchers have no
+    entry.
     """
     module = importlib.import_module(seam.module)
     typed: dict[str, frozenset[str]] = {}
@@ -638,10 +470,8 @@ _Site = tuple[str, str, ast.expr, frozenset[str], _Bindings]
 def _hardcoded_calls(seam: _Seam) -> list[_Site]:
     """Each `(module, dispatcher, tool expression, argument keys, name bindings)` written there.
 
-    A site counts when its *arguments* are a dict literal, because that is what a hardcoded
-    contract looks like: the keys are typed into this repository and nothing checks them. A
-    dispatcher handed a caller's `arguments` parameter — `remote_compute`'s single `_call`, and
-    `cached_remote`'s own body — is a pass-through and declares nothing, so it is not a site.
+    A site counts when its arguments are a dict literal; a pass-through of a caller's `arguments`
+    declares nothing.
     """
     sites: list[_Site] = []
     for relative in _callers(seam):
@@ -682,12 +512,7 @@ def _recorded_surface(root: Path, seam: _Seam) -> dict[str, dict[str, Any]]:
 def _assert_every_call_names_a_served_tool(seam: _Seam) -> None:
     """Every hardcoded call on `seam` names a tool, and only arguments, its server declares.
 
-    One body over two seams, because the check is identical and a second copy is the shape that
-    drifts: the `calc` half was written first and the `rxnlabel` half was, for nine days, a sentence
-    in `_callers`' docstring saying no surface existed to check.
-
-    A renamed tool or a renamed argument fails here, in the pull request that syncs the checkouts,
-    rather than at runtime against a pod.
+    A rename on either side fails here rather than at runtime against a pod.
     """
     root = _sibling_or_skip()
     surface = _recorded_surface(root, seam)
@@ -724,33 +549,16 @@ def _assert_every_call_names_a_served_tool(seam: _Seam) -> None:
             )
 
 
-#: The fleet `calc` tools no hardcoded site here names, and the measured reason each is declined.
+#: The fleet `calc` tools no hardcoded site here names, and the reason each is declined.
 #:
-#: **A table, because this one can be reconciled and `_CALLERS` could not.** The tuple that
-#: `_callers()` replaced was a list of caller modules with nothing on the other side of it: a ninth
-#: caller was simply absent, and absence is what no assertion can see. The set of *declined tools*
-#: is the opposite shape — the fleet publishes what it serves and `_hardcoded_calls()` derives what
-#: is called, so this table is subtracted from a derived difference in both directions on every
-#: run. It cannot silently gain a stale row (a tool that starts being called fails), lose a needed
-#: one (a tool the fleet adds and nothing calls fails), or outlive its subject (a tool the fleet
-#: withdraws fails). The reason string is the part a machine cannot check, which is exactly the
-#: part worth writing down.
+#: Reconciled in both directions against the derived difference, so a stale, missing or orphaned
+#: row fails.
 #:
-#: Both reasons are structural rather than preferential, and both were measured on this commit
-#: against the fleet checkout rather than read off a comment:
-#:
-#: * `optimize_geometry` derives the **same** `calc_key` as `relax_structure` —
-#:   `identity.COMPUTE_TOOLS` routes both through `_from_spec` with an `OptSpec`, and the key does
-#:   not carry the tool name. Driven for `CCO`, `optimize_geometry({"smiles": "CCO"})` and
-#:   `relax_structure` on the structure `optimization_inputs` embeds from it produce one identical
-#:   string. The two return different payloads — a summary without coordinates, and the full result
-#:   with them — so caching either under that key poisons the other, and
-#:   `connectors/calc/server/tools.py::optimize_geometry` composes `embed_structure` plus
-#:   `relax_structure` instead.
-#: * `predict_logd` answers `calculation_key` with **no key at all** (`calc_key=None`, plus a
-#:   caveat naming the pKa to key instead), so `cached_remote` refuses it outright as a miswiring
-#:   rather than recomputing it forever. `connectors/calc/server/tools.py::predict_logd` calls the
-#:   cached `predict_pka` and finishes locally.
+#: * `optimize_geometry` derives the same `calc_key` as `relax_structure` but returns a different
+#:   payload, so caching either under that key would poison the other; the local tool composes
+#:   `embed_structure` and `relax_structure` instead.
+#: * `predict_logd` returns no key from `calculation_key`, so `cached_remote` refuses it; the local
+#:   tool calls the cached `predict_pka` and finishes locally.
 _CALC_DECLINED: dict[str, str] = {
     "optimize_geometry": (
         "shares `relax_structure`'s cache key while returning a different payload, so this "
@@ -764,16 +572,10 @@ _CALC_DECLINED: dict[str, str] = {
 }
 
 
-#: The fleet `rxnlabel` tools no hardcoded site here names, and the measured reason each is
-#: declined. The same shape as `_CALC_DECLINED` and reconciled the same way, which is what makes
-#: this seam's second direction an accounting rather than a silence.
+#: The fleet `rxnlabel` tools no hardcoded site here names, reconciled like `_CALC_DECLINED`.
 #:
-#: Both rows are one decision read twice, and it is `ingest/labels/labeller.py`'s own: *"The batch
-#: tools are the ones the drain calls. A 13M-row corpus at one round trip per reaction is 13M round
-#: trips; at `label_batch_size` it is 65,000. The single-reaction tools exist on the server for a
-#: person asking about one reaction, and are not called from here."* Declining them is therefore not
-#: a gap — the batch tool is strictly more general, and a caller that wanted one reaction would send
-#: a batch of one.
+#: The drain calls only the batch tools; the single-reaction tools exist for interactive use, and a
+#: batch of one covers them.
 _RXNLABEL_DECLINED: dict[str, str] = {
     "name_reaction": (
         "the single-reaction form of `name_reactions`, which is what the drain calls: one round "
@@ -802,11 +604,9 @@ _CALC_SEAM = _Seam(
     declined=_CALC_DECLINED,
 )
 
-#: `rxnlabel` is a backend exactly as `calc` is — `manifests-internal/`, `mount: backend`, no
-#: manifest on this side — so the same argument that made the `calc` seam worth reading applies to
-#: it verbatim, and it had no reader. Its dispatcher is a *method*, `RxnLabelServer._call`, which is
-#: why a seam carries its defining module: `labeller.py` imports nothing and would be invisible to
-#: an importer walk.
+#: `rxnlabel` is a backend like `calc`. Its dispatcher is a method, `RxnLabelServer._call`, which
+#: is why a seam names its defining module: `labeller.py` imports nothing an importer walk could
+#: see.
 _RXNLABEL_SEAM = _Seam(
     name="rxnlabel",
     module="chemclaw.ingest.labels.labeller",
@@ -819,9 +619,7 @@ _RXNLABEL_SEAM = _Seam(
 def _tools_named(seam: _Seam) -> set[str]:
     """Every tool name `seam`'s hardcoded sites put on the wire.
 
-    A site whose tool expression cannot be resolved to literals contributes nothing here and is
-    *not* reported here either: the check above fails on exactly that, and a second assertion about
-    it would be one cause reported twice.
+    Unresolvable sites contribute nothing; the check above already fails on them.
     """
     typed = _typed_tools(seam)
     named: set[str] = set()
@@ -831,17 +629,10 @@ def _tools_named(seam: _Seam) -> set[str]:
 
 
 def _assert_every_served_tool_is_called_or_declined(seam: _Seam) -> None:
-    """The seam is accounted for in *both* directions, not only in the one that breaks loudly.
+    """Every tool the fleet serves on `seam` is called here or declined with a reason.
 
-    The check above reads the seam from this side: every name this repository puts on the wire must
-    be one the fleet serves. That direction catches a rename. It cannot catch the other thing a tool
-    surface does — grow. A tool the fleet adds that nothing here calls is either a capability this
-    repository is missing or a duplicate of something it already composes, and both of those are
-    decisions somebody should take deliberately; today they arrive as silence.
-
-    So the difference is derived and reconciled against the seam's declined table. Nothing here
-    states how many tools are served, how many are called, or how many are declined —
-    `tool-surface.json` and `_hardcoded_calls` answer the first two, and the third is what is left.
+    The other direction catches renames; this one catches the fleet growing, so a new tool is a
+    deliberate decision rather than silence.
     """
     root = _sibling_or_skip()
     surface = _recorded_surface(root, seam)
@@ -858,11 +649,7 @@ def _assert_every_served_tool_is_called_or_declined(seam: _Seam) -> None:
 
 
 def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """`calc`, the seam that carries every calculation this system runs.
-
-    It is the one connector with no manifest in either direction — `mount: backend` is what makes it
-    unloadable as a connector here, deliberately — so nothing in it was checked against the server
-    on the other end until the fleet's `servers/calc/tool-surface.json` gained a reader.
+    """`calc`, the seam that carries every calculation, calls only tools the fleet records serving.
     """
     _assert_every_call_names_a_served_tool(_CALC_SEAM)
 
@@ -870,17 +657,8 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
 def test_every_tool_the_calibration_table_names_is_one_the_calc_seam_checks() -> None:
     """`_CALIBRATED`'s tool names are exactly what the seam walker reads at `remote_version`.
 
-    Needs no fleet checkout, which is the point: the two tests above skip without one, and this is
-    the half that says they would have *seen* a calibrated tool had they run. The table used to put
-    its names on the wire through `remote_version`, which was not a dispatcher here, with a
-    tuple-unpacked local no walker could resolve — so a third calibrated row naming a tool the fleet
-    does not serve was checked by nothing. Measured when that was found: both names the table held
-    were also named literally at other sites, so nothing was unchecked yet and a new row would be.
-
-    Equality rather than a subset, in both directions and for two different failures: a table row
-    naming a tool outside `CalibratedTool` puts a name on the wire the walker does not attribute to
-    any site, and a `CalibratedTool` member no row uses is a name the walker counts as *called* —
-    which would quietly satisfy the declined-table accounting for a tool nothing reaches.
+    Needs no checkout. Equality in both directions: an unlisted row would send an unchecked name,
+    and an unused `CalibratedTool` member would count as called and satisfy the declined accounting.
     """
     from chemclaw.connectors.calc.server.tools import _CALIBRATED
 
@@ -911,15 +689,7 @@ def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reas
 
 
 def test_the_rxnlabel_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """`rxnlabel`, the second backend seam, which had no reader although its surface existed.
-
-    `servers/rxnlabel/tool-surface.json` has shipped since 2026-09-05. This file's own prose said it
-    did not — written 2026-09-14, in a wave about the cross-repo contracts — so the seam carrying
-    every atom map and every reaction name in the corpus was checked by nothing, and a top-level
-    rename on either side would have been caught by nobody. Measured when this test was written:
-    three call sites, every tool served, no undeclared argument, no required argument missing. That
-    is the finding rather than a reason not to check it, exactly as it was for `calc`.
-    """
+    """`rxnlabel`, the second backend seam, calls only tools the fleet records serving."""
     _assert_every_call_names_a_served_tool(_RXNLABEL_SEAM)
 
 
@@ -931,18 +701,7 @@ def test_every_rxnlabel_tool_the_fleet_serves_is_called_here_or_declined_with_a_
 def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet() -> None:
     """`compute_thermochemistry` is composed here out of primitives and must not be served there.
 
-    A real invariant rather than a corrected sentence. The fleet's own rule forbids duplicating a
-    Chemclaw3 capability, and a `compute_thermochemistry` appearing there would give this family
-    two answers to one question — the failure that rule exists to prevent — with nothing in either
-    tree noticing.
-
-    This test used to carry a second half, asserting that `predict_logd` *is* served and composed
-    here anyway. That half is now `_CALC_DECLINED`'s, where it is derived rather than named: a tool
-    this repository declines to call is exactly a tool the fleet serves and nothing here reaches, so
-    the
-    fleet withdrawing it fails
-    `test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason` with the
-    reason string it invalidated. Two assertions about one fact is one cause reported twice.
+    A fleet copy would give the family two answers to one question.
     """
     root = _sibling_or_skip()
     surface: dict[str, dict[str, Any]] = json.loads(
@@ -957,17 +716,10 @@ def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet
 
 
 def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> None:
-    """`tests/calc_server_fake.py` reproduces the real server's surface, so the two are compared.
+    """`tests/calc_server_fake.py` serves exactly the surface the fleet records.
 
-    The fake is what makes the cache, the composites and the ledger testable without a quantum
-    chemistry program, and its own docstring is careful about reproducing properties measured
-    against the running server. What it could not do is notice the running server changing: a tool
-    renamed in `Chemclaw3-mcp` leaves every test here green and the deployment broken, which is the
-    failure mode a hand-written stand-in always has and the reason this assertion is cheap.
-
-    `_KEYED` and `_UNKEYED` are the fake's own declaration of what the server serves — the two
-    tables `calculation_key` dispatches on — so they are the honest basis, not the `_<name>`
-    methods, which include private helpers and omit the tools an override supplies.
+    The fake cannot notice the real server changing, so the two are compared. `_KEYED` and
+    `_UNKEYED` are the fake's declaration of what it serves.
     """
     root = _sibling_or_skip()
     surface = json.loads(
@@ -988,21 +740,11 @@ _CHART_VALUES = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemc
 
 
 def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
-    """Enabling a fleet server must not need a NetworkPolicy edit or a Secret-plumbing edit.
+    """Every fleet server has an egress port and a token slot in the chart.
 
-    Two things stand between this release and a `Chemclaw3-mcp` server besides its address: a
-    `networkPolicy.egressPorts` entry carrying the port it answers on (a NetworkPolicy restricts by
-    port independently of its `to:` list, so a missing port drops every packet whatever the
-    destinations say) and a `secrets.optionalKeys` slot for the variable its manifest names as
-    `auth.token_env` (without one the bearer has nowhere to come from but the plaintext ConfigMap,
-    and every call raises `MissingConnectorCredential`). Both were hand-maintained, and both had
-    holes: `pyexec`'s port 8899 was missing, and none of the five off-by-default process-development
-    bundles nor `pyexec` had a token slot — only the kind lane's values file added them.
-
-    Derived from the fleet's own manifests — `manifests/` and `manifests-internal/` both, since the
-    backends (`calc`, `rxnlabel`) are dialled over the same policy — rather than from its
-    `MODULES.md` table, because the manifest is what that repository's fleet test holds the port
-    registry against, and it is the file that names the token variable.
+    A NetworkPolicy restricts by port independently of its destinations, and without a
+    `secrets.optionalKeys` slot the bearer has nowhere to come from. Derived from the fleet's
+    `manifests/` and `manifests-internal/`, which name both the port and `auth.token_env`.
     """
     root = _sibling_or_skip()
     values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))

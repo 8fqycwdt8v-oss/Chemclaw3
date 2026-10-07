@@ -1,20 +1,9 @@
-"""F9-T3: the autonomy metrics, and the claim that their transcripts are the real thing.
+"""The autonomy metrics, and the claim that their transcripts are the real thing.
 
-The row asked for plan quality, a plan-vs-single-shot A/B and a runaway/abort rate, all computable
-on a scripted transcript. Two things about that are easy to get wrong and are what these tests are
-for:
-
-- **A hand-written transcript can encode a shape the front door never emits.** Then every metric
-  scores a fiction, reports healthy numbers, and gates nothing. So one test here drives the real
-  `run_turn` with a fake agent and asserts the events it produces are exactly what the committed
-  cases contain — that is the only assertion that makes the other ones mean anything.
-- **The iteration cap used to emit no event, and the metric paid for it.** A loop that stops at
-  `harness_max_loop_iterations` and returns normally left `runaway_rate` inferring a cap from
-  residue — an answer sent with todos still open — and thereby scoring a turn that correctly
-  deferred to a durable job as a runaway, because a deferral leaves exactly that residue.
-  The cap is observable now (`chemclaw.agent.loop_cap` → `ErrorEvent(code="loop_cap_reached")`),
-  so the metric reads the outcome instead of guessing at it. Both halves are pinned below: the
-  deferral is not a runaway, and the explicit signal is.
+Plan quality, a plan-vs-single-shot comparison and a runaway rate, scored on scripted transcripts.
+One test drives the real `run_turn` and asserts its events match the committed cases, so the
+metrics do not score a fiction. The iteration cap emits `loop_cap_reached`, so `runaway_rate`
+reads that signal instead of inferring from open todos (which a deferral also leaves).
 """
 
 import asyncio
@@ -64,12 +53,10 @@ def test_the_autonomy_metrics_are_registered() -> None:
 
 
 def test_a_capped_loop_is_a_runaway_and_says_so_in_the_transcript() -> None:
-    """The signal that replaced the residue: the runner states the cap fired.
+    """A capped loop is a runaway and says so in the transcript.
 
-    `chemclaw.agent.loop_cap` observes the loop's last decision and `run_turn` emits
-    `loop_cap_reached` for it — the third member of the exhaustion family. That the *runner* really
-    emits it for a really capped MAF loop is pinned in `tests/test_langgraph_agent.py`; what is
-    pinned here is that the metric scores it, which is the half an eval case can see.
+    That the runner emits `loop_cap_reached` is pinned in `tests/test_langgraph_agent.py`; here,
+    that the metric scores it.
     """
     capped = [
         {"type": "plan", "todos": ["[ ] never finished"]},
@@ -88,9 +75,7 @@ def test_a_capped_loop_is_a_runaway_and_says_so_in_the_transcript() -> None:
 def test_a_cut_off_turn_counts_even_though_it_planned_nothing() -> None:
     """The other runaway class: exhaustion the front door reports, with no plan behind it.
 
-    `turn_timeout` and `budget_exhausted` are the two codes the front door reports for a turn that
-    was stopped rather than finished. A turn can burn its budget before emitting any plan at all, so
-    this path must not depend on there being one.
+    `turn_timeout` and `budget_exhausted` mark a stopped turn, which may never have planned.
     """
     cut_off = [
         {"type": "token", "text": "thinking"},
@@ -122,11 +107,10 @@ def test_a_turn_with_no_plan_at_all_is_not_a_runaway() -> None:
 
 
 def test_an_open_step_is_not_by_itself_a_runaway() -> None:
-    """The residue heuristic is gone, and its absence is the behaviour worth pinning.
+    """An open step is not by itself a runaway.
 
-    An open step at the end of a turn is ordinary: the agent deferred it to a durable job, or asked
-    the chemist something, or planned further than one turn's worth of work. Only the guard firing
-    makes it a runaway, and the guard now says so itself.
+    A turn may defer to a durable job, ask the chemist, or plan beyond one turn; only the cap firing
+    makes a runaway.
     """
     open_step = [{"type": "plan", "todos": ["[ ] a"]}, _ANSWER]
     result = _score(
@@ -171,10 +155,7 @@ def test_plan_quality_scores_the_plan_the_turn_ended_with() -> None:
 def test_plan_quality_ignores_the_checkbox_and_would_score_zero_without_stripping_it() -> None:
     """`PlanEvent.todos` are display strings, and the prefix is not part of the step's identity.
 
-    This is the specific mutation the metric would otherwise die of: comparing `"[x] a"` against a
-    reference of `"a"` intersects to nothing, so a perfect plan scores 0.0 and the gate fires on
-    every healthy turn until someone writes the checkboxes into the references — where they would
-    then flip as work completed.
+    Comparing `"[x] a"` against `"a"` would score a perfect plan 0.0.
     """
     result = _score(
         "plan_quality",
@@ -245,9 +226,7 @@ def test_a_transcript_naming_an_event_the_front_door_cannot_emit_is_rejected() -
 def test_a_turn_that_never_planned_is_an_error_not_a_score_of_zero() -> None:
     """Refusing beats scoring: absent evidence and bad evidence must not share a number.
 
-    A plan-quality of 0.0 says "it planned badly". A turn with no plan did not plan at all, and
-    reporting the two identically would let a harness that stopped emitting plans look like a
-    quality regression a reviewer would go hunting for in the prompt.
+    0.0 means "planned badly"; a turn with no plan must raise instead.
     """
     with pytest.raises(MetricError, match="no PlanEvent"):
         _score(
@@ -262,9 +241,8 @@ def test_a_turn_that_never_planned_is_an_error_not_a_score_of_zero() -> None:
 def test_plan_execute_utility_scores_the_helped_share_not_the_net_delta() -> None:
     """One float has to be comparable across case sets, and `net_delta` is not.
 
-    The two tasks below help by 1.0 on their own scale; a third measured in percent yield would
-    dominate any sum of deltas and move the drift band for reasons having nothing to do with
-    planning. The share is bounded and unit-free; the deltas stay in the provenance.
+    The helped share is bounded and unit-free; a task in other units would dominate a sum of deltas.
+    The deltas stay in the provenance.
     """
     result = _score(
         "plan_execute_utility",
@@ -309,11 +287,8 @@ def test_the_direction_is_honoured_so_a_lower_is_better_metric_is_not_inverted()
 def test_a_yaml_yes_is_not_a_token_baseline() -> None:
     """`bool` is a subclass of `int`, and YAML writes `yes` where a reader sees a word.
 
-    `if not isinstance(baseline, (int, float))` therefore let `baseline_tokens: yes` through as a
-    baseline of **1**, and the four committed turns of `autonomy-turn-cost` scored 1100.0 instead
-    of raising — a number in the drift band `make eval-baseline-check` watches, derived from a
-    reference nobody wrote. `metrics._scalar` guards the identical hazard one file over and says
-    why in its own docstring; this metric did not.
+    So `baseline_tokens: yes` must be refused rather than read as a baseline of 1, as
+    `metrics._scalar` already does.
     """
     assert yaml.safe_load("baseline_tokens: yes") == {"baseline_tokens": True}
     turns = [{"correlation_id": "cost-01", "input_tokens": 1000, "output_tokens": 100}]

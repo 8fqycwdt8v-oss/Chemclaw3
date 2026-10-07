@@ -1,12 +1,9 @@
 """One authorship model — a person and an agent — across notes, the audit trail and transcripts.
 
-`D-2026-09-27-an-author-is-a-person-and-an-agent` decided the shape once (`core/authorship.py`):
-`actor` is the human principal something was written for, `agent` the agent that wrote it, `None`
-when a human wrote it directly and `""` when an agent did and goes unnamed. These tests hold each
-subsystem to it from the entry point production calls — `record_note`, `save_messages`, the
-transcript route's projection, `fork_session`, `erase_actor`, and migration 109's own statements —
-rather than from the model, because a model every subsystem imports and none of them writes is the
-shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted.
+`D-2026-09-27-an-author-is-a-person-and-an-agent` (`core/authorship.py`): `actor` is the human
+something was written for, `agent` the agent that wrote it — `None` when a human wrote it
+directly, `""` for an unnamed agent. Each subsystem is held to it from the entry point production
+calls, not from the model.
 """
 
 from pathlib import Path
@@ -46,9 +43,8 @@ _MIGRATION = (
 def test_the_unnamed_agent_is_what_the_audit_trail_has_always_written() -> None:
     """The shared encoding was taken from `audit_events.agent`, so the trail needed no migration.
 
-    If this ever disagrees, one of the three subsystems has started spelling "an agent, unnamed"
-    differently from the others, and every row the trail already holds would read as a named agent
-    called `""` — or as no agent at all — depending on which side moved.
+    If this disagrees, one subsystem spells "an unnamed agent" differently and existing rows would
+    be misread.
     """
     event = AuditEvent(
         correlation_id="c", actor="oid-a", tool="t", arguments="", outcome="ok", latency_ms=0
@@ -188,9 +184,8 @@ async def test_the_memory_store_answers_the_same_authorship() -> None:
 async def test_migration_109_backfills_the_owner_and_the_speaker_and_invents_nobody() -> None:
     """The backfill's rule, driven by the migration's own statements over pre-109 rows.
 
-    Rows whose authorship is NULL/NULL are exactly what the table held before 109: the file is
-    idempotent, so re-running it over them is the backfill. Both stored shapes, a session with no
-    owner row and one with a NULL owner, so every branch of the rule has a row to decide.
+    NULL/NULL rows are what the table held before 109, and the file is idempotent, so re-running it
+    is the backfill. Both stored shapes (no owner row, NULL owner) are covered.
     """
     await migrated_db_or_skip()
     rows = [

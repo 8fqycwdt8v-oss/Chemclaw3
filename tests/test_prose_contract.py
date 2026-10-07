@@ -1,11 +1,8 @@
-"""The agent's prose must only name capability the agent has (gap IDEA-7).
+"""The agent's prose must only name capability the agent has.
 
-This check exists because two shipped defects were the same shape and no gate saw either:
-`skills/experiment-design/SKILL.md` pointed the agent at `BoCampaignWorkflow` (no tool exposed it),
-and `skills/deep-research/SKILL.md` named `find_similar_reactions(...)` when the agent's actual MCP
-tool is `similar_reactions` — so loading that skill taught the agent three tool names that would
-fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make skill-validate` only
-checks frontmatter.
+`mypy` cannot see prose and `make skill-validate` only checks frontmatter, so a skill or tool
+description naming a tool, workflow or note type that does not exist would teach the model calls
+that fail. These tests resolve every such name against the live surface.
 """
 
 import re
@@ -48,59 +45,15 @@ def test_shipped_prose_names_only_real_tools() -> None:
 def _model_facing_descriptions() -> dict[str, str]:
     """Every text this system ships to a model, by name.
 
-    **Five sources, and each one was added because the guards below were green over it.** The
-    universe started as `registered_tools()` — the in-process agent tools — which left every
-    first-party connector bundle's served tool module outside, and that is the entire `calc`
-    surface: the bundle that *lost* DFT was the one the guards could not see. Driven then: a
-    sentence naming DFT, HPC, Nextflow and `compute_dft_energy` at once, inserted into
-    `connectors/calc/server/tools.py::report_measurement`, left this file green, while the same
-    sentence in a registered tool red it immediately.
-
-    Five more classes were outside until 2026-09-22, and `D-2026-09-15`'s "What keeps it true"
-    had already claimed the guards ran "over the whole model-facing surface, bundles included" —
-    the same error one level out. They are the durable jobs' assembled docstrings (which are *all*
-    of the `results` bundle, since it serves no tool module), every `SKILL.md` a turn can load, the
-    system prompt's own blocks, the deployment profiles' `instructions:` and `description:`, and
-    the template launchers' assembled docstrings. Driven then: every forbidden string at once in
-    `connectors/results/connector.yaml`'s job description left this file green.
-    `test_a_forbidden_sentence_in_any_of_them_is_caught` is that drive kept, one class and one
-    sentence at a time.
-
-    **Two of the five were found by a review of the first widening, which is the point.** It
-    scanned `_INSTRUCTION_BLOCKS` and not `_SAFETY_BLOCKS`, although `instructions_for` appends the
-    latter to *every* profile — so for a profile turn, which skips `_INSTRUCTION_BLOCKS` entirely,
-    the universe held none of the system prompt at all; and it left the profiles' own prose out,
-    which `agent/profiles.py` says **is** the system prompt.
-
-    **The seventh class is prompt text outside `agent/chemclaw_agent.py`**, which was not
-    enumerable until it was declared: it carries `core/model_prose.ModelProse` and `_marked_prose`
-    reads it. `durable/hypothesis_tournament.py` was the live instance that forced it — a prompt
-    saying "There is no DFT and no cluster here", correct text of exactly the exempted kind.
-
-    **What is still outside, so this docstring does not repeat that error a third time**: a marker
-    is only as good as whoever remembers it, and nothing refuses an unmarked prompt constant. A
-    derived rule was measured first and does not work here: following module-level strings into a
-    function that calls a model found six, one of them prompt text, and missed the helper and peer
-    briefs entirely, because those reach the model through middleware arguments rather than a
-    message built beside the call. Prose written inline in a function body — refusal and tool-result
-    sentences, mostly — is outside too, until it is hoisted into a marked constant.
-
-    No count is written here. The one that was said 31 registered tools against a surface of 114,
-    and both had moved; `test_the_universe_reaches_every_class_the_model_reads` asserts that each
-    class contributes *and how much*, because a review showed a class can go half silent while
-    every other test in this file stays green.
-
-    The served bundle tools are read off their own source with `ast`: their `@server.tool()`
-    docstrings ship to the model through a served manifest, and importing them here would drag
-    each bundle's dependency closure into a lane that does not need it.
-
-    **Widening the universe was coupled to the patterns, and that coupling is resolved rather
-    than deferred.** Shipped prose in the added classes legitimately *names* the removed tier and
-    the removed gate in order to say they are gone. Measured: over today's universe the three
-    patterns as they stood before this work produce **ten occurrences across eight texts**, and
-    every one of them is correct text. `_TRUE_ABOUT_WHAT_IS_GONE` and two narrowings below are
-    what resolve it, and the measurement that chose that shape over the one `BACKLOG.md` proposed
-    is recorded there.
+    Seven classes: in-process tool docstrings, connector bundles' served tool docstrings (read with
+    `ast`, so no bundle's dependencies are imported), durable-job docstrings as assembled, every
+    loadable `SKILL.md`, the system prompt's blocks (both `_INSTRUCTION_BLOCKS` and the
+    `_SAFETY_BLOCKS` appended to every profile), deployment profiles' `instructions:` and
+    `description:`, template launchers' docstrings, and module constants marked
+    `core/model_prose.ModelProse`. Unmarked prompt text built inline in a function body is outside.
+    `test_the_universe_reaches_every_class_the_model_reads` asserts each class contributes, and how
+    much. Shipped prose that correctly names the removed tier or gate is handled by
+    `_TRUE_ABOUT_WHAT_IS_GONE`.
     """
     import ast
     import inspect
@@ -138,13 +91,11 @@ def _model_facing_descriptions() -> dict[str, str]:
 
 
 def _job_tool_docstrings() -> dict[str, str]:
-    """The durable-job tools' descriptions — assembled, not read off the manifest.
+    """The durable-job tools' descriptions, assembled as `connectors/jobs.py::_docstring` sends
+    them.
 
-    `connectors/jobs.py::_docstring` is what the model is actually sent: the job's summary, then
-    its `description:`, then one line per declared parameter. Reading the manifest's
-    `description:` alone would miss the summary and every parameter description, which are the
-    same prose by another route. The `results` bundle ships no served tool module at all, so
-    before this its entire model-facing surface was these entries and nothing else.
+    The summary, the `description:` and one line per declared parameter; the `results` bundle's
+    whole model-facing surface is these entries.
     """
     from chemclaw.connectors.jobs import _docstring
     from chemclaw.connectors.registry import discovered
@@ -158,12 +109,8 @@ def _job_tool_docstrings() -> dict[str, str]:
 
 
 def _shipped_skill_bodies() -> dict[str, str]:
-    """Every `SKILL.md` a turn can load — the bundle-local ones and the repository's own.
-
-    Both, because the axis that matters is whether the model reads it, and it reads both. The
-    bundle skills reach a turn through `registry.skills_dirs`; `skills/` is architecture layer 3
-    and is loaded on demand by name. A skill is longer than a docstring and is loaded whole, so
-    a sentence about a removed tier costs more here than in the text this guard started on.
+    """Every `SKILL.md` a turn can load: bundle-local (`registry.skills_dirs`) and the repository's
+    own.
     """
     import chemclaw
 
@@ -186,17 +133,10 @@ def _shipped_skill_bodies() -> dict[str, str]:
 
 
 def _instruction_block_texts() -> dict[str, str]:
-    """The system prompt's own blocks, which are sent on every turn rather than on demand.
+    """The system prompt's own blocks, sent on every turn.
 
-    **Both groups, and leaving `_SAFETY_BLOCKS` out was the gap a review found.** `instructions_for`
-    appends them to *every* profile — including the six that set `instructions:` and therefore skip
-    `_INSTRUCTION_BLOCKS` entirely, so for a profile turn they were the only part of the system
-    prompt this file could have scanned and it scanned none of it. One of the four is itself prose
-    about the removed gate ("records it for everyone at once with no review step"), which is the
-    class these guards police.
-
-    Indexed by position: a `PromptBlock` has no name, and its text is the identity anyway — the
-    assertion messages below quote the match, so the index is only there to keep the keys apart.
+    Both groups: `_SAFETY_BLOCKS` is appended to every profile, including those that replace
+    `_INSTRUCTION_BLOCKS`. Indexed by position because a `PromptBlock` has no name.
     """
     found = {f"block:{index}": block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
     found.update({f"safety:{index}": block.text for index, block in enumerate(_SAFETY_BLOCKS)})
@@ -206,10 +146,8 @@ def _instruction_block_texts() -> dict[str, str]:
 def _profile_prose() -> dict[str, str]:
     """Every deployment profile's `instructions:` and `description:`.
 
-    `agent/profiles.py` says of the first in as many words that it **is** the system prompt, and
-    `agent/subagents.py` puts the second into the `task` helper's own description, which
-    "lands in the prefix of every model call". Read off `data/profiles/` rather than through
-    `get_profile`, because a profile that fails to load is still a file somebody shipped.
+    The first is the system prompt; the second goes into the `task` helper's description. Read off
+    `data/profiles/` directly so a profile that fails to load is still scanned.
     """
     root = Path(__file__).resolve().parents[1] / "data" / "profiles"
     found: dict[str, str] = {}
@@ -222,15 +160,10 @@ def _profile_prose() -> dict[str, str]:
 
 
 def _template_launcher_docstrings() -> dict[str, str]:
-    """The fixed-procedure launchers, whose docstrings `templates/registry.py` assembles.
+    """The fixed-procedure launchers' docstrings, as `templates/registry.py` assembles them.
 
-    The same shape as the durable jobs one class up — a docstring built from a `data/templates/`
-    manifest and bound onto the agent — and outside the universe for the same reason: nothing here
-    is a Python function anybody wrote.
-
-    **Every enabled launcher, bound or withheld** (`templates.registry.withheld_reason`): a launcher
-    withheld because its capability is off here is bound the day a deployment turns it on, and its
-    docstring is what that deployment's model is sent.
+    Every enabled launcher, bound or withheld: a withheld launcher is bound the day a deployment
+    turns its capability on.
     """
     import inspect
 
@@ -244,12 +177,10 @@ def _template_launcher_docstrings() -> dict[str, str]:
 
 
 def _marked_prose() -> dict[str, str]:
-    """Every module-level constant marked `ModelProse` — the prompt text outside the agent module.
+    """Every module-level constant marked `ModelProse`: prompt text outside the agent module.
 
-    The class this universe could not enumerate until it was declared: a prompt written as a string
-    constant in an ordinary module has no decorator, manifest or directory saying a model reads it.
     `core/model_prose.py` is the declaration and `validate_prose_contract.marked_prose` the one
-    loader, shared with `make prose-validate`, which also refuses a marker the loader cannot reach.
+    loader, shared with `make prose-validate`.
     """
     found = prose.marked_prose()
     assert found, "no marked prose found; this test is reading the wrong tree"
@@ -257,24 +188,14 @@ def _marked_prose() -> dict[str, str]:
 
 
 #: The tier `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, by the names it went under.
-#:
-#: `conceptual[- ]DFT` is carved out rather than exempted sentence by sentence: it is the name of a
-#: shipped panel (`publish/properties.py`'s `conceptual_dft` group, `project.py`'s Fukui
-#: projection), derived from GFN2-xTB frontier orbitals and reaching no DFT tier at all. A term of
-#: art that happens to contain the word is not the class this guard is about. It appears in
-#: exactly **one** text tree-wide (`skills/reactivity-descriptors`), so the carve-out saves one
-#: exemption and not the three a first draft of this comment claimed — kept as a carve-out anyway,
-#: because it is a rule about a word's meaning rather than a judgement about one sentence.
+#: `conceptual[- ]DFT` is carved out: it names a shipped GFN2-xTB descriptor panel, a rule about a
+#: word's meaning rather than an exemption for one sentence.
 _A_REMOVED_TIER = re.compile(
     r"(?<!conceptual-)(?<!conceptual )\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy"
     r"|agents/job_status"
 )
 
-#: The deleted PR-gate, named by its machinery. Widened 2026-09-22 with the phrasings the
-#: `BACKLOG.md` row measured as missing — `PRs`, the review queue, the knowledge gate — which cost
-#: **zero** new offenders over the widened universe, so that widening is free. The one `\bPRs?\b`
-#: occurrence is the "PR" inside the exempted `PR gate` sentence, at an offset `\bPR[- ]gate\b`
-#: already matched.
+#: The deleted PR-gate, named by its machinery: PRs, the review queue, the knowledge gate.
 _REVIEW_MACHINERY = re.compile(
     r"\bPR[- ]gate\b|pull requests?|\bPRs?\b|NoteProposal|review queue|knowledge gate",
     re.IGNORECASE,
@@ -282,50 +203,22 @@ _REVIEW_MACHINERY = re.compile(
 
 #: A promise that something the model does waits for a person.
 #:
-#: **`propose[sd]? (?:what|it|them|the)` was dropped**, on evidence, and a first draft of this
-#: comment got both of its numbers wrong. Measured over the widened universe: it produced **six**
-#: occurrences across five texts, of which four propose an *experiment* rather than a review
-#: ("propose the next point(s)", "name the limit and propose the experiment that would settle it"),
-#: which is the behaviour `D-2026-08-26-semiempirical-is-the-whole-tier` asks for in as many words.
-#: Against the three shipped `synthesize_memory` defects this guard exists for it caught **one**,
-#: not zero — "propose what it finds for review" — and all three are independently caught by
-#: `for review` and `pull requests?`, which is what makes the drop lossless *on those strings*.
-#:
-#: **It is not lossless on the defect's shape, and widening the vocabulary back is measured to be
-#: worse.** Rename the review object and the original walks through: "propose what it finds to a
-#: reviewer, who accepts or rejects it" passes every pattern here. Driven, the obvious widening —
-#: `reviewers?`, `approve[sd]?`, `sign-off`, `accepts or rejects` — produces **fourteen**
-#: occurrences over nine texts, of which at least twelve are correct, several of them saying that
-#: *nobody* approves (`skills/playbook-distillation`, `skills/knowledge-graph-write`) and three
-#: describing the workflow approval that genuinely exists (`compose_workflow`). That is the
-#: false-positive shape `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured and
-#: declined. So this is a keyword guard with a recall limit, said here rather than implied: it
-#: catches the machinery and the stock phrase, and a paraphrase gets past it.
+#: `propose ... (what|it|them|the)` is not matched: most hits propose an experiment, which is wanted
+#: behaviour, and the known defects are caught by `for review` and `pull requests?`. This is a
+#: keyword guard with a recall limit: a paraphrase naming a "reviewer" passes, because widening to
+#: reviewer/approve/sign-off vocabulary mostly matches correct text (including the real workflow
+#: approval in `compose_workflow`).
 _A_REVIEW_PROMISE = re.compile(
     r"for (?:review|approval|acceptance)|awaits? review|pending review", re.IGNORECASE
 )
 
-#: Shipped sentences that match a pattern above and are *correct*, each with why.
+#: Shipped sentences that match a pattern above and are correct, each with why.
 #:
-#: **The shape the row proposed is disqualified by the one true positive this file has.** It
-#: suggested "sentence-level with a negation/past-tense exclusion". Driven against the original
-#: defect — `get_durable_job_status`'s "**used to** degrade to a bare status, because the DFT job
-#: returned its own typed result and had its own status tool" — such an exclusion matches it and
-#: turns the guard green over the exact text it was written to catch. History about a removed tier
-#: is *always* past tense; that is what makes it history. So the discriminator cannot be the tense.
-#:
-#: An exemption is therefore a literal quote that **contains** the match, keyed by the one text it
-#: belongs to, and `test_every_exemption_still_quotes_shipped_prose` fails the day one of these
-#: sentences is reworded — so it cannot outlive the text it was written for.
-#:
-#: **Two narrowings a review drove, because the first spelling could swallow real prose.** It
-#: flattened whitespace and then matched a quote anywhere in any of the texts, so a quote could
-#: form across a line break out of words that were never one sentence, and the accidental span
-#: then exempted whatever fell inside it. Driven: *"...never present one as if it were\nDFT runs
-#: are dispatched to the cluster queue..."* went green while the same offence one line later was
-#: caught. So the key is the text name — an exemption reaches one text, not a hundred and
-#: eighty-seven — and a quote has to end at a **clause boundary**: end of text, or punctuation.
-#: The accidental span above ends mid-word and no longer exempts anything.
+#: Tense cannot discriminate: history about a removed tier is always past tense, including the
+#: defect this guard was written for. So an exemption is a literal quote containing the match, keyed
+#: by the one text it belongs to, and it must end at a clause boundary (end of text or punctuation)
+#: so a span assembled across flattened line breaks cannot exempt anything.
+#: `test_every_exemption_still_quotes_shipped_prose` fails when a quoted sentence is reworded.
 _TRUE_ABOUT_WHAT_IS_GONE: dict[tuple[str, str], str] = {
     ("block:5", "never present one as if it were DFT"): (
         "The system prompt telling the model not to overclaim the method. Actionable, and the "
@@ -356,10 +249,8 @@ _TRUE_ABOUT_WHAT_IS_GONE: dict[tuple[str, str], str] = {
     ),
 }
 
-#: What may **not** follow an exempted quote: another word. A quote that runs straight on into one
-#: is not a clause, it is a run of words that happened to line up after the whitespace was
-#: flattened — see `_TRUE_ABOUT_WHAT_IS_GONE`. Punctuation of any kind ends a clause, including the
-#: opening bracket of the citation two of the three shipped quotes are followed by.
+#: What may not follow an exempted quote: another word. Any punctuation ends a clause, including a
+#: citation's opening bracket.
 _A_WORD_CHARACTER = re.compile(r"\w")
 
 
@@ -380,11 +271,8 @@ def _exempt_spans(name: str, flat: str) -> list[tuple[int, int]]:
 def _first_offence(text: str, pattern: re.Pattern[str], name: str = "") -> str | None:
     """The first match in `name`'s text not covered by one of `name`'s exemptions, or `None`.
 
-    Whitespace is flattened first, so a quote in `_TRUE_ABOUT_WHAT_IS_GONE` does not have to
-    reproduce a `SKILL.md`'s line wrapping — rewrapping a paragraph is not a change in what the
-    model is told, and an exemption that broke on it would teach people to delete exemptions. Two
-    of the three shipped quotes do span a line break in their source, so this is load-bearing
-    rather than a convenience.
+    Whitespace is flattened first so an exemption need not reproduce line wrapping; some shipped
+    quotes span a line break.
     """
     flat = " ".join(text.split())
     exempt = _exempt_spans(name, flat)
@@ -431,11 +319,9 @@ def test_the_universe_reaches_every_class_the_model_reads() -> None:
         "model-facing text it has; the universe must reach them"
     )
 
-    # **A class that goes *partly* silent is the failure this test was blind to.** Driven by a
-    # review: breaking the repository-skills half of `_shipped_skill_bodies` dropped 36 of 43 skill
-    # texts and every poison parametrisation below stayed green, because the poison is injected
-    # whether or not the loader still returns anything. So each class is counted against the tree
-    # rather than against a number written here.
+    # Each class is counted against the tree, not a written number, so a loader that goes partly
+    # silent fails here even though the poison tests below inject regardless of what the loader
+    # returns.
     root = Path(__file__).resolve().parents[1]
     package = Path(chemclaw.__file__).parent
     expected = {
@@ -469,12 +355,9 @@ def test_the_universe_reaches_every_class_the_model_reads() -> None:
 def test_a_forbidden_sentence_in_any_of_them_is_caught(
     monkeypatch: pytest.MonkeyPatch, loader: str, poison: str
 ) -> None:
-    """The measurement in `BACKLOG.md` run again, and now it reds.
+    """A forbidden sentence injected into any model-facing class is caught.
 
-    The row drove exactly this and got green: "every forbidden string at once in
-    `connectors/results/connector.yaml`'s job `description:` left both guards green". Poisoning
-    each loader in turn is the same drive, one class and one sentence at a time, so a class that
-    silently stops being scanned fails here rather than going quiet.
+    Poisoning each loader in turn means a class that silently stops being scanned fails here.
     """
     real = globals()[loader]
     guard = (
@@ -534,12 +417,10 @@ def test_a_marker_inside_a_function_is_refused(
 
 
 def test_every_exemption_still_quotes_shipped_prose() -> None:
-    """A stale exemption is a hole nobody can see — it covers a span that is no longer there.
+    """Every exemption still quotes shipped prose in the text it is keyed to.
 
-    Worse than dead code: rewording an exempted sentence silently leaves the exemption behind to
-    match some *other* sentence later, which is exactly the "a control that is satisfied while the
-    thing it protects is false" shape this file exists to find. The owner is checked too, so an
-    exemption cannot survive its text being renamed and quietly stop applying.
+    A stale exemption could later match some other sentence; checking the owner stops one surviving
+    a renamed text.
     """
     texts = {name: " ".join(text.split()) for name, text in _model_facing_descriptions().items()}
     orphaned = sorted(
@@ -554,12 +435,9 @@ def test_every_exemption_still_quotes_shipped_prose() -> None:
 
 
 def test_every_exemption_is_needed() -> None:
-    """The control for the test above: an exemption that guards nothing is noise with authority.
+    """Every exemption is needed: removing it must turn its text red.
 
-    Both halves, because a review found the *other* exemption map in this file had quietly become
-    decoration — `_A_LIVE_GATE` exempted `propose_skill` from a pattern that, after the narrowing
-    above, no longer matched its docstring at all, so deleting the map entirely was a no-op. It is
-    deleted. This test is what would have said so.
+    An exemption that guards nothing is noise with authority.
     """
     texts = _model_facing_descriptions()
     assert texts, "no model-facing text found; this test is reading the wrong tree"
@@ -592,11 +470,10 @@ def test_every_exemption_is_needed() -> None:
 
 
 def test_an_exemption_cannot_form_across_a_line_break() -> None:
-    """The attack a review drove, kept: a quote assembled out of words that were never a clause.
+    """An exemption cannot form across a line break.
 
-    The first spelling flattened whitespace and then matched exemptions anywhere in any text, so
-    the tail of one line plus the head of the next could spell an exempted quote and swallow the
-    offence that followed. The control is the same offence one line later, which was always caught.
+    The tail of one line plus the head of the next must not spell an exempted quote and swallow the
+    offence that follows; the same offence one line later is the control.
     """
     owner = "block:5"
     swallowed = (
@@ -620,18 +497,11 @@ def test_an_exemption_reaches_only_the_text_it_names() -> None:
 
 
 def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
-    """A tool's docstring is its schema description, and it is re-sent on every model call.
+    """No model-facing text describes the removed DFT/HPC tier.
 
-    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the DFT tier, the HPC launcher and every
-    tool that reached them. What it could not delete is prose *about* them sitting in a docstring
-    that is still shipped: `get_durable_job_status` carried 184 tokens explaining that a case "used
-    to degrade to a bare status, because the DFT job returned its own typed result and had its own
-    status tool (`agents/job_status.py`)" — on every turn, describing a system the model cannot
-    reach, at the model's expense.
-
-    This is the narrow, checkable half of the wider rule. The wider one — rationale belongs in a
-    `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
-    removed tier is not judgment.
+    A tool docstring is re-sent on every model call, so prose about a system the model cannot reach
+    costs tokens and misleads. Naming a removed tier is checkable; where rationale belongs in
+    general stays a review rule.
     """
     offenders = {
         name: found
@@ -646,33 +516,12 @@ def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None
 
 
 def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
-    """The same failure as the tier above, on the control that was removed instead of the hardware.
+    """No model-facing text tells the model to expect a review gate.
 
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR-gate: knowledge lands in
-    `knowledge/` the moment it is learned. `synthesize_memory` went on telling the model it would
-    "propose what it finds for review", that "only this half opens pull requests", and that its
-    result is "the list of pull requests opened" — three present-tense statements about a control
-    that does not exist, in the text the model plans against. A model told its writes are reviewed
-    is a model reasoning about a safety net nobody is holding, which is worse than the wasted
-    tokens the tier check is about.
-
-    Scanned over the same surface and with the same argument: what is asserted is the text, not the
-    binding.
-
-    **One tool proposes for a person to decide, and says so, and that is not this defect.** The ADR
-    above drew an axis rather than banning a word: knowledge is recorded because it does not change
-    what the agent does, and a *skill* is gated because it does. `propose_skill` is the gated side
-    (`D-2026-09-18-a-proposal-is-not-a-skill-and-a-route-is-not-a-tool`), so telling the model its
-    proposal waits for the chemist is the opposite failure to the one here — it is true, and a model
-    that did not know it would report a change that has not happened.
-
-    That used to need a per-tool exemption (`_A_LIVE_GATE`, naming the test that held the gate
-    real). It does not any more, and the reason is worth keeping: narrowing `_A_REVIEW_PROMISE` to
-    require the review *object* — the thing that was deleted — made `propose_skill`'s docstring
-    stop matching, so the exemption became a map that changed no result. A review found it, and it
-    is deleted rather than left as authority over nothing;
-    `test_every_exemption_is_needed` now drives that question for every exemption this file has, by
-    removing each one and requiring the text to red without it.
+    Knowledge lands the moment it is learned
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`); a model told its writes are reviewed
+    reasons about a safety net nobody holds. `propose_skill` truthfully says its proposal waits for
+    the chemist, and `_A_REVIEW_PROMISE` requires the deleted review object, so it does not match.
     """
     offenders: dict[str, str] = {}
     for name, text in _model_facing_descriptions().items():
@@ -728,11 +577,10 @@ def test_pointing_the_agent_at_a_workflow_is_caught(monkeypatch: object) -> None
 
 
 def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> None:
-    """The `experiment-batch` case (D-164): reachable tool, unwritable artifact.
+    """A note type the graph does not know is caught (D-164).
 
-    Two shipped skills told the agent to propose a `protocol` / `experiment-batch` note. Both
-    calls succeed and open a branch; `kg-validate` then rejects it on the PR the agent just
-    created. Rule 1 could not see it — the tool name was real, only the type was not.
+    A real tool told to write an unknown note type fails only at validation, which rule 1 cannot
+    see.
     """
     import chemclaw.cli.validate_prose_contract as module
 
@@ -775,11 +623,7 @@ _MISSING_RECIPE = "/".join(("nonexistent", "recipe.py"))
 
 
 def test_the_shipped_operator_documents_name_only_things_that_exist() -> None:
-    """Rules 5-7 over the docs a human operates from — the state this PR had to reach.
-
-    A verification pass found 40 mismatches here: module paths dead since the D-148 package move,
-    a `.github/workflows/deploy.yml` that never existed, and ADR ids with no file. None was visible
-    to any gate, which is why they had accumulated across five documents.
+    """Rules 5-7 over the operator documents: every module path, workflow file and ADR id resolves.
     """
     assert check_operator_prose() == []
 
@@ -842,12 +686,9 @@ def test_an_adr_id_with_no_file_is_caught(monkeypatch: pytest.MonkeyPatch) -> No
 def test_a_sub_decision_label_an_adr_defines_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`D-A5a` is a real label inside `D-048`, and prose should be able to name it.
+    """A sub-decision label an ADR defines (`D-A5a` inside `D-048`) is accepted.
 
-    This is the clause that keeps the rule honest rather than merely strict. The first version
-    rejected every `D-A*` token, which would have forced the docs to drop a label that says
-    precisely which half of a two-part decision is meant. Derived by scanning the ADRs, so an
-    invented label is still caught.
+    Derived by scanning the ADRs, so an invented label is still caught.
     """
     monkeypatch.setattr(
         prose, "_operator_sources", lambda: {"fake.md": "ADR **D-048** (Teilentscheidung D-A5a)."}
@@ -876,13 +717,10 @@ def test_a_prefix_written_in_prose_is_not_read_as_a_key(monkeypatch: pytest.Monk
 
 
 def test_the_planning_documents_are_deliberately_out_of_scope() -> None:
-    """Stated as a test because it is a decision that must not be undone by accident.
+    """The planning documents are deliberately out of scope.
 
-    Turning these rules on over the planning directory reports 175 further mismatches, and they
-    are a different defect: a ticket that says "create the QM tools module" names a file D-118
-    later deleted, so there is no path to correct it to — the sentence needs rewording.
-    Mechanically rewriting each to the nearest surviving module would falsify the build record the
-    tickets exist to be.
+    Their mismatches name files later decisions deleted; rewriting them to the nearest surviving
+    module would falsify the build record they exist to be.
     """
     assert not any("docs/planning/" in origin for origin in prose._operator_sources())
     assert not any("docs/decisions/" in origin for origin in prose._operator_sources())
@@ -958,12 +796,9 @@ def test_env_example_is_read_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 def test_the_shipped_documents_cite_only_declared_metric_names() -> None:
-    """Rules 8-9 over the real tree: the regression guard for the defect that motivated them.
+    """Rules 8-9 over the real tree: documents cite only declared metric names.
 
-    `docs/decisions/D-2026-08-08-redaction-must-outlive-the-formatter.md` documented the only
-    alert for the one *security* degradation in this codebase and named
-    `chemclaw_degradations_total`, a counter that has never existed. Nothing failed, because a
-    wrong series name renders as an alert that matches nothing and reads as healthy.
+    A wrong series name renders as an alert that matches nothing and reads as healthy.
     """
     assert check_metric_citations() == []
 
@@ -1015,12 +850,10 @@ def test_a_selector_is_caught_in_a_document_rule_8_does_not_read(
 
 
 def test_rule_9_reads_the_decisions_and_leaves_the_archive_alone() -> None:
-    """The corpus split, pinned: a merged ADR is checked for selectors, an archived document not.
+    """Rule 9 checks merged ADRs for metric selectors and leaves the archive alone.
 
-    Measured on the tree this was written against: five backticked `chemclaw_*` spans in
-    `docs/decisions/` are undeclared and four of them are correct prose — a module name, the
-    Postgres role, a log marker, and an ADR quoting the stale metric name it exists to report.
-    Which is why only the selector spelling gets this reach.
+    Bare backticked `chemclaw_*` spans in decisions are often correct prose (module names, roles,
+    log markers), so only the selector spelling gets this reach.
     """
     origins = prose._selector_sources()
     assert any(origin.startswith("docs/decisions/") for origin in origins)
@@ -1030,18 +863,10 @@ def test_rule_9_reads_the_decisions_and_leaves_the_archive_alone() -> None:
 def test_rule_9s_corpus_cannot_be_widened_by_build_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The corpus is the repository's documents, not whatever the working directory holds.
+    """Rule 9's corpus is the repository's documents, not whatever the working directory holds.
 
-    It used to be `rglob("*.md")` from the root, so `make mutants` — which copies the whole tree
-    into the gitignored `mutants/` — put a second copy of every document into the gate. Proven
-    before the fix by dropping one probe file into `mutants/docs/guides/`:
-
-        mutants/docs/guides/_probe.md: queries chemclaw_bogus_total{…}, which no registry declares
-        1 prose/capability mismatch(es)
-
-    `make ci` red on a path no commit contains, and the same hazard for any vendored checkout or
-    tool cache at the root. The union costs no reach: 424 walked files became 290, and all 9
-    documents that carry a selector are still in it.
+    A walk from the root would include build output such as `make mutants`' gitignored copy and fail
+    on paths no commit contains.
     """
     (tmp_path / "docs" / "guides").mkdir(parents=True)
     (tmp_path / "docs" / "guides" / "real.md").write_text("real", encoding="utf-8")
@@ -1058,19 +883,10 @@ def test_rule_9s_corpus_cannot_be_widened_by_build_output(
 def test_a_retired_metric_a_merged_adr_quotes_has_a_legal_remedy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rule 9 reaches into `docs/decisions/`, where the fix rule 8 assumes is forbidden.
+    """A retired metric quoted by a merged ADR has a legal remedy: `_RETIRED_METRIC_NAMES`.
 
-    Rule 8 stays out of that corpus precisely because "the fix would be editing a merged decision —
-    which CLAUDE.md forbids". Rule 9 reaches in anyway, and six merged ADRs carry selectors today:
-    simulated by dropping `chemclaw_repeated_tool_calls_total` from the declared set, the gate went
-    red on D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice, with no edit anyone is allowed to
-    make. `_RETIRED_METRIC_NAMES` is the remedy, and it was empty until a retirement needed it.
-
-    **It has exactly one entry, and this assertion is what makes adding a second a reviewed act.**
-    `chemclaw_note_proposals_total` is the PR-gate's by-state series, retired with the gate
-    (`D-2026-09-05-the-gate-is-deleted-not-dormant`) and quoted in selector form by
-    `D-2026-07-31-a-proposal-is-a-record-not-a-branch`, which is merged and therefore uneditable.
-    The set is asserted by *value* rather than by size so a future entry has to be argued here.
+    Merged ADRs cannot be edited, so a retired series they quote must be declared retired. Asserted
+    by value so a new entry has to be argued here.
     """
     assert prose._RETIRED_METRIC_NAMES == frozenset({"chemclaw_note_proposals_total"}), (
         "an entry here is a reviewed retirement"
@@ -1089,15 +905,9 @@ def test_the_non_metric_allowlist_is_small_and_deliberate() -> None:
 
 
 def test_the_package_readmes_are_in_the_operator_corpus() -> None:
-    """Every `src/chemclaw/*/README.md` is scanned, because a reader navigates by them.
+    """Every `src/chemclaw/*/README.md` is in the operator corpus, because readers navigate by them.
 
-    They were outside every gate until 2026-08-27. Scanning them for the first time found nine
-    unresolvable pointers, including `agent/README.md`'s `workflows/` — a directory that has never
-    existed under that package — beside a sentence advertising "the QM/DFT job" as a live connector
-    bundle three weeks after `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the tier.
-
-    Asserted as a property of the corpus rather than only through `check_operator_prose() == []`,
-    so narrowing the corpus fails here instead of quietly passing the rule that reads it.
+    Asserted as a corpus property, so narrowing the corpus fails here rather than passing the rule.
     """
     sources = prose._operator_sources()
     readmes = sorted(
@@ -1111,17 +921,11 @@ def test_the_package_readmes_are_in_the_operator_corpus() -> None:
 def test_the_prose_gate_refuses_a_corpus_it_could_not_assemble(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rules 5-9 filter out paths that do not exist, so a wrong `_ROOT` checks nothing and passes.
+    """The prose gate refuses a corpus it could not assemble.
 
-    Every corpus here is built by dropping entries whose file is absent (`if path.is_file()`), so
-    an installed wheel, a vendored copy or a relocated package yields an empty corpus, zero ADR
-    stems, and a green line reading "every named tool, note type, path, ADR id, config key and
-    metric resolves" — over zero documents. The same silence applies one document at a time:
-    renaming `SECURITY.md` simply stops it being checked. This module's own docstring warns against
-    exactly that shape.
-
-    The refusal names the missing documents rather than only the empty set, because losing one of
-    `_OPERATOR_DOCS` is the realistic case and an aggregate count would not show it.
+    Corpora drop absent files, so a wrong `_ROOT` (an installed wheel, a relocated package) would
+    check zero documents and pass. The refusal names each missing document, since losing one is the
+    realistic case.
     """
     import chemclaw.cli.validate_prose_contract as module
 
@@ -1140,14 +944,10 @@ def test_the_shipped_blocks_require_exactly_what_they_name() -> None:
 def test_a_block_that_names_a_tool_it_does_not_require_is_caught(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The defect rule 10 exists for: a block that names a tool and declares nothing never drops.
+    """A prompt block that names a tool it does not require is caught (rule 10).
 
-    This is the original finding with one extra step. `_assemble` drops a block when the graph does
-    not bind everything in `requires`, so a block whose `requires` is empty is sent to every
-    deployment — and reads, in the declaration, exactly like one that would be dropped. Nothing
-    else in this repository can see the difference: rules 1-2 are satisfied (`screen_hazards` is a
-    real tool), `mypy` sees a `frozenset`, and the prompt is assembled at runtime from whatever is
-    written here.
+    `_assemble` drops a block only when the graph lacks something in `requires`, so a block naming a
+    tool with empty `requires` is sent to every deployment.
     """
     monkeypatch.setattr(
         prose,
@@ -1162,11 +962,10 @@ def test_a_block_that_names_a_tool_it_does_not_require_is_caught(
 def test_a_block_requiring_a_tool_it_does_not_name_is_caught(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other direction, which is a defect too — and a silent one.
+    """A block requiring a tool its text never mentions is caught.
 
-    A block requiring a tool its text never mentions vanishes from any deployment lacking that
-    tool, and the prose gives a reader no reason why. Equality, not containment, is what makes both
-    directions visible.
+    It would vanish where the tool is absent for no visible reason; equality makes both directions
+    visible.
     """
     monkeypatch.setattr(
         prose,
@@ -1179,13 +978,10 @@ def test_a_block_requiring_a_tool_it_does_not_name_is_caught(
 
 
 def test_a_block_requiring_a_middleware_tool_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-117's shape from the other side: a name space the prompt is never narrowed against.
+    """A block requiring a middleware-attached tool is caught.
 
-    `build_langgraph_agent` narrows against the tools it *binds* — registry, connectors, template
-    launchers. The filesystem verbs, `write_todos` and `task` are attached by middleware
-    afterwards, so a block requiring one of them passes rules 1-2 (they are real tools, and
-    `available_tool_names` knows all six name spaces) and is then dropped from every deployment
-    that exists. Loud rather than silent.
+    The prompt is narrowed against bound tools only; filesystem verbs, `write_todos` and `task` are
+    attached afterwards, so such a block would be dropped from every deployment.
     """
     monkeypatch.setattr(
         prose,
@@ -1197,24 +993,10 @@ def test_a_block_requiring_a_middleware_tool_is_caught(monkeypatch: pytest.Monke
 
 
 def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> None:
-    """The property the blocks exist for, asserted against two real surfaces.
+    """The prompt a graph is sent names no tool that graph cannot call, on two real surfaces.
 
-    Measured before the blocks: the default prompt named **16** tools a cold deployment binds
-    nothing for — every calculator, the structure searches, `resolve_compound`, and
-    `screen_hazards`, whose paragraph told the model to screen every proposed reagent against a
-    hazard screen that was not there.
-
-    **The bound half only, plus the one name space that cannot be absent.** This asserts what
-    `instructions_for` produces, not the whole system message. The filesystem verbs and `task` come
-    from middleware attached to every agent this deployment builds, so they are never in the set the
-    prompt is narrowed against and naming them is not a promise that can fail — the same exemption
-    `validate_prose_contract.check_instruction_blocks` makes, derived from the same two functions so
-    the rule and this test cannot disagree about it.
-
-    The skills *listing* is no longer the caveat this docstring used to carry. It was narrowed by
-    `skill_access`'s advertised names — the manifests — so a deployment whose bundles were declared
-    and unreachable was still offered `safety-screening`; `skills_backend` now takes the bound set
-    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`).
+    Asserts what `instructions_for` produces. Middleware-attached names (filesystem verbs, `task`)
+    are always present and exempt, derived as `check_instruction_blocks` derives them.
     """
     profile = get_profile("default")
     always_bound = skill_tool_names() | set(subagent_tool_names())
@@ -1225,11 +1007,9 @@ def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> No
 
 
 def test_the_maximal_prompt_is_what_a_validator_and_a_caller_still_get() -> None:
-    """`available=None` is every block, so nothing that reads the prose sees a narrowed one.
-
-    The validators, `tests/surface.py` and `AgentProfile`'s default all ask "what does this profile
-    say" without a graph to ask about. A narrowed answer there would make the gate check less prose
-    than a deployment is sent, which is this file's own failure mode.
+    """`available=None` yields every block, so validators and callers without a graph see the
+    maximal
+    prose.
     """
     profile = get_profile("default")
     maximal = instructions_for(profile)
@@ -1240,12 +1020,10 @@ def test_the_maximal_prompt_is_what_a_validator_and_a_caller_still_get() -> None
 
 
 def test_a_deployment_with_no_durable_trail_is_not_told_it_has_one() -> None:
-    """F1's prompt half: the traceability paragraph follows the sink, not the wish.
+    """A deployment with no durable audit trail is not told it has one.
 
-    `default_audit_sink()` returns `NullAuditSink` on every deployment that has not set
-    `session_store="postgres"` — the shipped `.env.example` — and the prompt asserted an
-    append-only trail in the present tense regardless. The two texts are a pair rather than one
-    text and its absence, because "how is this number defended" deserves an answer either way.
+    `default_audit_sink()` is `NullAuditSink` unless `session_store="postgres"`, so the traceability
+    paragraph has two variants and follows the sink.
     """
     profile = get_profile("default")
     durable = instructions_for(profile, durable_trail=True)
@@ -1258,18 +1036,11 @@ def test_a_deployment_with_no_durable_trail_is_not_told_it_has_one() -> None:
 
 
 def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all() -> None:
-    """A block carrying a floor sentence requires nothing — measured, not intended.
+    """The safety floor survives narrowing to a surface with no tools at all.
 
-    **This caught a regression the blocks themselves introduced.** The envelope rule — half of the
-    two-part prompt-injection defense (`agent/framing.py`) — sat in the same paragraph as the
-    `record_knowledge_note` instruction, so the block required two side-effecting tools, and
-    `agent/subagents.py` subtracts exactly those from the one helper this deployment builds.
-    Measured on the compiled helper graph: 24 tools bound and **no envelope rule in its prompt**,
-    while `tests/test_framing.py` stayed green because it reads the maximal text.
-
-    The empty surface is the right probe: no real profile is that narrow, and a floor that survives
-    it survives every narrowing that can occur. `_SAFETY_BLOCKS` covers the profiles that replace
-    the prose entirely; this covers the ones that keep it and lose tools.
+    A floor sentence sharing a block with a side-effecting tool instruction would be dropped from
+    helpers, which lose those tools. The empty surface is the narrowest possible, so a floor that
+    survives it survives every real narrowing.
     """
     profile = get_profile("default")
     floor = instructions_for(profile, frozenset())
@@ -1280,33 +1051,18 @@ def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all()
 
 
 def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> None:
-    """F1: the floor appended to a *replacing* profile was never narrowed, so it over-promised.
+    """The safety floor appended to a replacing profile names no tool that profile cannot call.
 
-    `PromptBlock` narrows the default prose against the graph's own surface. A profile that supplies
-    its own `instructions:` never reaches that code — `instructions_for` appends the safety floor as
-    one string — so the floor's `record_knowledge_note` sentence was sent verbatim to every
-    specialist, including the five that cannot call it. Measured against the shipped profiles:
-    `property-lookup` (5 advertised tools), `design` (8), `safety` (6), `evidence` (15) and
-    `computation` (41) were each told to record findings through a tool none of them holds. That is
-    the exact defect the blocks were introduced for, surviving on the one path the fix did not
-    reach.
-
-    **The floor only, and minus the name space that cannot be absent.** A profile's own
-    `instructions:` are text this repository did not write and
-    cannot cut into blocks (`instructions_for`), and the shipped ones do name three identifiers
-    outside their surface — two are result fields (`structure_id`, `artifact_refs`) that rule 2
-    cannot tell from a tool, and `evidence.yaml`'s `compute_thermochemistry` is a real over-promise
-    owned by `data/profiles/`. So this asserts the half this module composes, which is the half a
-    site cannot be answerable for.
+    `instructions_for` appends the floor as one string to profiles that supply their own
+    `instructions:`, bypassing block narrowing. Only the floor is asserted, minus always-bound
+    names; a profile's own text is `data/profiles/`'s responsibility.
     """
     from chemclaw.agent.profile_discovery import load_profiles
     from chemclaw.agent.profiles import registered_profile_names
 
     load_profiles()
-    # The filesystem verbs are the exemption `check_instruction_blocks` derives, not an escape
-    # hatch: `FilesystemMiddleware` is composed for every agent this deployment builds, so naming
-    # them is not a promise that can fail — and the floor is where the deny-rule around them has to
-    # reach a profile that replaced the prose.
+    # The filesystem verbs are always bound (`FilesystemMiddleware` is on every agent), and the
+    # floor is where the deny-rule around them must reach a profile that replaced the prose.
     always_bound = skill_tool_names() | set(subagent_tool_names())
     over_promised: dict[str, list[str]] = {}
     for name in sorted(registered_profile_names()):
@@ -1325,15 +1081,10 @@ def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> No
 
 
 def test_the_prompt_does_not_claim_every_launcher_takes_a_rationale() -> None:
-    """F6: nine of the nine `run_*` step-template launchers take no rationale at all.
+    """The prompt does not claim every launcher takes a rationale.
 
-    The durable-jobs paragraph opened "every launcher takes a rationale" and went on to call it "the
-    only record of why the run happened". Measured over the shipped surface: all 14 connector-job
-    launchers take one and every one of the 9 template launchers does not — deliberately, because a
-    template run's `job` names a declared procedure whose purpose the template itself states, which
-    `find_past_jobs`' own docstring says in the same words. So the rule is about the *argument*, not
-    about launchers, and a model told otherwise is being asked to supply a field that does not
-    exist.
+    Connector-job launchers take one; template launchers do not, since the template states its own
+    purpose. The rule is about the argument.
     """
     import inspect
 
@@ -1355,16 +1106,11 @@ def test_the_prompt_does_not_claim_every_launcher_takes_a_rationale() -> None:
 
 
 def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> None:
-    """F6: five refusal families carry the mark and exactly one is about the caller's account.
+    """The prompt does not call every marked refusal an account decision.
 
-    The `Refused:` paragraph said a marked refusal "is an access-control decision this system made
-    about the asking chemist's account" and told the model, unconditionally, to "point them at
-    whoever grants access in their organization". `DryRunRefusal`, `PlanNotApprovedError`,
-    `UndeclaredWriteRefusal` and `SkillsReadOnlyRefusal` are all `AuthorizationError` subclasses
-    reaching the model through the same `_refusal_message(marked=True)`, and none of them is about
-    entitlements: three are modes this deployment is running in and the fourth is a tool this agent
-    was not given. Sending a chemist to request access for a dry-run turn is the same category of
-    wrong answer as calling a refusal a service outage, which the very next sentence forbids.
+    `DryRunRefusal`, `PlanNotApprovedError`, `UndeclaredWriteRefusal` and `SkillsReadOnlyRefusal`
+    are marked `AuthorizationError`s about the deployment's mode or the agent's surface, not
+    entitlements; sending a chemist to request access for them is wrong.
     """
     from chemclaw.agent.authz import AuthorizationError
     from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
@@ -1386,41 +1132,23 @@ def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> 
 
 
 def test_the_prompt_does_not_call_recall_preferences_the_only_memory_there_is() -> None:
-    """F6: `/memories/**` is a durable per-actor store, so it was never the only one.
-
-    `agent/scratchpad.py` routes `/memories/…` to a `StoreBackend` over Postgres, namespaced by the
-    actor, and that is the one route that outlives the session. The sentence "it is the only memory
-    of them you have" was written before it existed and survived it.
+    """The prompt does not call `recall_preferences` the only memory there is: `/memories/**` is a
+    durable per-actor store.
     """
     assert "the only memory of them you have" not in _INSTRUCTIONS
 
 
 def test_the_trail_paragraph_says_the_arguments_it_records_are_truncated() -> None:
-    """F6: `bounded_repr` truncates, and only the module docstring said so.
-
-    The traceability paragraph listed "arguments" among what the trail records. `audit.bounded_repr`
-    bounds every recorded argument to `audit_detail_max_chars`, and the module's own docstring
-    already says "truncated arguments" — so the prompt was the one reader making the stronger claim,
-    which is the claim a chemist would rely on when asking what the record proves.
-    """
+    """The trail paragraph says recorded arguments are truncated (`audit.bounded_repr`)."""
     durable = instructions_for(get_profile("default"), durable_trail=True)
     assert "truncated arguments" in durable
 
 
 def test_a_capability_this_fleet_serves_is_not_denied_in_the_message_that_offers_it() -> None:
-    """F4: "what this system does not hold" denied two capabilities the full fleet binds.
+    """A capability the fleet serves is not denied in the message that offers it.
 
-    `requires` drops a block when a tool is *absent*, which is the right shape for a promise and
-    the wrong one for a denial: a "we do not hold X" clause has to drop when X's tool is **bound**.
-    Two of them did not. At full fleet `screen_genotoxic_alerts` and `ich_impurity_limit` are bound
-    and the paragraph went on saying "no mutagenicity, genotoxicity (ICH M7) or nitrosamine rule
-    set; no elemental-impurity or residual-solvent limits" — while the *same system message* carried
-    the `safety-screening` skill's own description saying "three of those now have a table". A model
-    reading both has been told, in one prompt, that a table it can call does not exist.
-
-    So the assertion runs both ways: bound and the clause is gone, absent and the clause stands,
-    because over-stating a limit is the safe direction and dropping one on the wrong side of the
-    test would be the same defect inverted.
+    A "we do not hold X" clause must drop when X's tool is bound, the inverse of `requires`.
+    Asserted both ways: bound and the clause is gone, absent and it stands.
     """
     profile = get_profile("default")
     served = {"screen_genotoxic_alerts", "ich_impurity_limit"}

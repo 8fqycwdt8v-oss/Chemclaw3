@@ -1,11 +1,9 @@
 """The tool-audit middleware records every call, once, without altering behavior.
 
-Proves the tool-audit trail: a successful tool call is logged at INFO with its name and
-arguments, a failing one is logged at WARNING and the exception propagates unchanged, and
-oversized arguments are truncated to the configured budget. It also proves the durable seam:
-the per-conversation factory stamps a correlation id and actor and hands each event to an
-injected sink, and a sink failure never breaks the tool call. A light stand-in context is
-enough — no live agent run or model call is needed.
+A successful call is logged at INFO with name and arguments, a failing one at WARNING with the
+exception propagated unchanged, and oversized arguments are truncated. The per-conversation
+factory stamps correlation id and actor and hands each event to an injected sink, and a sink
+failure never breaks the call.
 """
 
 import asyncio
@@ -33,10 +31,8 @@ from tests.middleware import run_middleware, tool_request
 def _ctx(name: str, arguments: object, result: object = None) -> Any:
     """The call as the audit middleware reads it: a name and its arguments.
 
-    `result` is accepted and ignored. A `wrap_tool_call` middleware records what the *handler*
-    returns rather than what the caller pre-set on a context, so the tests that care pass it back
-    from their `call_next` instead — which is the more honest arrangement, since the trail is
-    supposed to record what the tool produced.
+    `result` is accepted and ignored: the middleware records what the handler returns, so tests pass
+    it back from `call_next`.
     """
     return tool_request(name, dict(arguments) if isinstance(arguments, dict) else {})
 
@@ -44,9 +40,8 @@ def _ctx(name: str, arguments: object, result: object = None) -> Any:
 def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
     """Run the middleware with no explicit sink over a stand-in context.
 
-    Log-only in practice because the test config leaves `session_store="memory"`, which is what
-    `default_audit_sink` resolves to — not because omitting `sink` means log-only (it no longer
-    does; see `test_an_omitted_sink_no_longer_silently_means_log_only`).
+    Log-only because the test config's `session_store="memory"` makes `default_audit_sink` resolve
+    to the null sink.
     """
     mw = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
 
@@ -151,18 +146,9 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
 def test_the_audit_row_leaves_agent_empty_for_the_agent_the_chemist_talks_to() -> None:
     """`agent` is empty on a caller's row, and every other audited field is untouched.
 
-    Empty is the *convention*, not the whole truth about the column any more: the trail names an
-    agent only when the call was not made by the one the chemist is talking to, which is what makes
-    a non-empty value mean something (the helper half is driven in
-    `test_the_trail_names_the_helper_that_made_a_call_and_leaves_the_caller_unnamed`). This test
-    pins the other side of it — a chain built with no `agent=` argument records none — because the
-    default is what every non-helper caller relies on, `agent/tool_invocation.py`'s template step
-    included.
-
-    The second half is the one that matters for the trail already in the database: the row a call
-    produces is field-for-field what it was, so neither the deletion of the old plumbing
-    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`) nor the arrival of the
-    new producer perturbs a stored shape.
+    The trail names an agent only when the call was made by a helper (driven in
+    `test_the_trail_names_the_helper_that_made_a_call_and_leaves_the_caller_unnamed`); a chain built
+    with no `agent=` records none. The row is otherwise field-for-field the stored shape.
     """
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
@@ -178,10 +164,8 @@ def test_the_audit_row_leaves_agent_empty_for_the_agent_the_chemist_talks_to() -
         "session_id": "",
         "purpose": "",
         "actor": "alice@corp",
-        # Written in rather than excluded, for the same reason `tool_revision` is: an exclude set
-        # that grows with each new field is a guard that checks less every time it is updated.
-        # Empty because `make_audit_middleware` was given no `agent=`, which is every caller but
-        # the helper branch of `build_langgraph_agent`.
+        # Written in rather than excluded, as `tool_revision` is: a growing exclude set checks less
+        # each time. Empty because no `agent=` was given, as for every caller but a helper.
         "agent": "",
         # Empty because this request carries no todo list — the plan step is read from
         # `request.state["todos"]`, and a request built outside the harness has none
@@ -206,10 +190,8 @@ def test_the_audit_row_leaves_agent_empty_for_the_agent_the_chemist_talks_to() -
 class _TaskScript(GenericFakeChatModel):
     """A model that spawns one helper and has it call one tool — the two graphs of a real turn.
 
-    The two are told apart by the prompt each is sent: only the helper's system message carries
-    `HELPER_BRIEF`. That is the discriminator rather than a call counter because the point of the
-    test below is *which graph wrote the row*, and reading the graph's own prompt is the one signal
-    that stays right however many model calls either side makes.
+    The graphs are told apart by their prompt (only the helper's carries `HELPER_BRIEF`), which
+    stays right however many model calls either side makes.
     """
 
     parent_calls: int = 0
@@ -260,26 +242,11 @@ class _TaskScript(GenericFakeChatModel):
 def test_the_trail_names_the_helper_that_made_a_call_and_leaves_the_caller_unnamed() -> None:
     """A helper's calls are marked as its own, the caller's are not, and both name the chemist.
 
-    **This replaces an absence test, and the replacement is the point.**
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted a contextvar whose
-    setter had no caller and pinned `test_nothing_in_the_tree_writes_the_agent_column` in its place,
-    so that "the trail names the agent" could not be claimed again without a producer arriving in
-    the same change. Three days later
-    `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` established that there is one
-    subagent and it is spawned on *every* turn — so the column
-    went on being empty while something could fill it, and a helper's calls, made on a brief the
-    chemist never saw, landed in the trail as the chemist's own with nothing marking them.
-
-    The producer arrived with the claim, which is what that ADR asked for, so the absence is now the
-    wrong assertion: keeping it would forbid exactly the fix it was written to demand. What stands
-    in its place is stronger than a source scan — a real `task` spawn, driven through the compiled
-    graph, with the rows read back off the sink. A scan can only see that a keyword is written; this
-    sees the value reach a row, and it fails if the argument is dropped anywhere between
-    `build_langgraph_agent` and the sink.
-
-    The third assertion is `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` invariant 3
-    in its enforceable form: the agent is named **beside** the human, never instead of one. A helper
-    row that lost the actor would be the D-040 failure — an agent's act recorded as nobody's.
+    A helper is spawned on every turn on a brief the chemist never sees, so its calls must not land
+    as the chemist's own. Driven through a real `task` spawn in the compiled graph, with rows read
+    back off the sink, so a dropped argument anywhere between `build_langgraph_agent` and the sink
+    fails. The agent is named beside the human, never instead
+    (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` invariant 3).
     """
     sink = _RecordingSink()
     graph = build_langgraph_agent(
@@ -366,15 +333,8 @@ def test_a_postgres_deployment_gets_the_durable_trail_without_asking(
 ) -> None:
     """The trail is durable wherever a database is configured — opting in is not required.
 
-    The regression test for the pass's highest-ranked finding. `PostgresAuditSink` and its table
-    were built and tested, and the sink was constructed in exactly one place — `cli/chat.py`,
-    behind a flag. The deployed service passed no sink, so the middleware installed
-    `NullAuditSink()` and `audit_events` was empty in production while every document called it
-    the durable record.
-
-    Asserted at `default_audit_sink` rather than at a call site on purpose: fixing the service's
-    factory alone would have left the identical trap set for the Temporal template activities
-    (which had it independently) and for every entry point added later.
+    Asserted at `default_audit_sink` rather than at a call site, so every entry point (front door,
+    Temporal template activities, future ones) gets the Postgres sink.
     """
     from chemclaw.agent.audit_store import PostgresAuditSink
 
@@ -419,9 +379,7 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
 class _SlowSink:
     """A sink whose write suspends before it records, and signals when it has.
 
-    The suspension is the point: it is the moment a plain `await _emit(...)` inside the
-    cancellation handler would be cancelled and write nothing, so a sink that records
-    synchronously could not tell the shielded writer from the broken one.
+    The suspension is where an unshielded write in the cancellation handler would be cancelled.
     """
 
     def __init__(self) -> None:
@@ -447,11 +405,8 @@ def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[Any]]:
 async def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     """A disconnect or turn deadline mid-tool leaves a `cancelled` row, not silence (D-130).
 
-    `CancelledError` is a `BaseException`, so the `except Exception` that records a failure never
-    saw it: every tool call interrupted by a client disconnect or the front door's turn deadline
-    left no row at all, and the trail under-reported *attempted* calls exactly when a turn went
-    wrong. The attempt is what the trail is for, so it is recorded under its own outcome — a
-    cancellation is neither a success nor a tool failure.
+    `CancelledError` is a `BaseException`, so `except Exception` misses it; the attempt is recorded
+    under its own outcome.
     """
     sink = _RecordingSink()
     middleware = make_audit_middleware(correlation_id="conv-cancel", actor="carol", sink=sink)
@@ -483,11 +438,8 @@ async def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
 async def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     """The write is shielded, so the teardown that caused it cannot also erase it.
 
-    A structured-concurrency teardown does not cancel once: sse-starlette's task group and
-    `asyncio.timeout` both re-deliver the cancellation into any `await` the cleanup makes. A plain
-    `await` on the audit write would therefore be cancelled at the sink's first suspension point
-    and record nothing — the same missing row, moved one frame later. `asyncio.shield` puts the
-    write on its own task, the pattern `chemclaw.api.runner` already uses for the history rollback.
+    Structured-concurrency teardowns re-deliver cancellation into cleanup awaits, so the write runs
+    under `asyncio.shield`, as the runner's history rollback does.
     """
     sink = _SlowSink()
     middleware = make_audit_middleware(correlation_id="conv-torn", actor="dave", sink=sink)
@@ -514,16 +466,11 @@ async def test_the_cancelled_row_survives_a_second_cancellation() -> None:
 def test_the_row_names_the_server_build_beside_the_orchestrator_s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two revisions, two columns — the fix for what the capability migration broke.
+    """The row names the server build beside the orchestrator's.
 
-    `revision` used to reproduce a result on its own, because the prompt, the routing and the
-    chemistry were one image. They are not: `predict_pka` now runs in a `Chemclaw3-mcp` server on
-    another repository's release cadence, so a row carrying only this process's SHA cannot say
-    whether a changed number came from a changed prompt or a changed solver.
-
-    Both are asserted in one test deliberately. The failure worth catching is not that either field
-    is absent — it is one being written into the other, which is the shape of the mistake migration
-    044 was written against, and which a test checking one field at a time passes straight over.
+    Connector tools run on another repository's release cadence, so `revision` alone cannot say
+    whether a prompt or a solver changed. Both are asserted together because the likely mistake is
+    one written into the other.
     """
     monkeypatch.setattr(settings, "deployment_revision", "orchestrator-abc123")
     sink = _RecordingSink()
@@ -540,10 +487,8 @@ def test_the_row_names_the_server_build_beside_the_orchestrator_s(
 def test_an_in_process_tool_records_no_server_build_rather_than_a_fabricated_one() -> None:
     """Empty is the complete answer here, and `"unknown"` would be a false alarm.
 
-    An in-process tool's build *is* `revision`, so a stamp would be a second copy of one fact. The
-    distinction is load-bearing rather than tidy: `<connector>@unknown` means an image shipped
-    without its revision build argument, which someone should fix, and filling that same value in
-    for every `write_todos` call would bury the real cases under noise.
+    An in-process tool's build is `revision`; `<connector>@unknown` is reserved for an image shipped
+    without its revision, which someone should fix.
     """
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-ip", actor="a", sink=sink)
@@ -556,9 +501,7 @@ def test_an_in_process_tool_records_no_server_build_rather_than_a_fabricated_one
 def _served_tool(name: str, *, connector: str, revision: str) -> Any:
     """A tool stamped the way `connectors/transport.py::_stamped` stamps a connector's tools.
 
-    Built through `_stamped` rather than by writing the metadata dict here, so this test cannot
-    keep passing against a key the transport has stopped writing — which is the whole failure mode
-    a provenance field has, and the reason the key is one shared constant.
+    Built through `_stamped`, so the test fails if the transport stops writing the key.
     """
     from langchain_core.tools import tool as make_tool
 
@@ -579,16 +522,8 @@ def test_a_connector_failure_is_recorded_as_an_error_however_it_is_streamed(
 ) -> None:
     """An MCP tool never raises, and on a streaming run its result is not a `ToolMessage`.
 
-    `returned_failure` is what stops a failed connector call from being audited as a success —
-    `langchain_mcp_adapters` converts `isError=True` inside `StructuredTool.ainvoke`, so the
-    failure arrives as an ordinary *return* and every reader that decides by control flow calls it
-    `ok`. The test is `isinstance` rather than a class-name comparison because `ToolMessageChunk`
-    is a real subclass, and narrowing it to `type(result) is ToolMessage` passed 80 tests across
-    five files: `ToolMessageChunk` appeared nowhere in this suite except in the two source comments
-    arguing for the `isinstance`.
-
-    Parametrised over both classes rather than asserted on the chunk alone, so the case that
-    currently works cannot quietly stop working either.
+    `returned_failure` keeps a returned `isError=True` result from being audited as success. It uses
+    `isinstance` because `ToolMessageChunk` is a subclass; parametrised over both classes.
     """
     from langchain_core.messages import ToolMessage, ToolMessageChunk
 
@@ -612,17 +547,8 @@ def test_a_log_only_trail_is_announced_at_startup(
 ) -> None:
     """The front door says out loud that it is keeping no durable record.
 
-    **The defect: nothing anywhere said it.** `default_audit_sink()` resolves to `NullAuditSink`
-    whenever `session_store != "postgres"`, which is what `.env.example` ships beside a
-    `postgres_dsn` default pointing at the `make up` database — so on the configuration
-    `CLAUDE.md` tells a developer to stand up, the database exists, `audit_events` exists, and
-    every row is discarded. Measured there: one completed turn that called a tool left
-    `audit_events` at 0, `session_messages` at 0 and `chemclaw_audit_sink_failures_total` at 0,
-    with the same process happily warning about `CHEMCLAW_FRAMING_ENVELOPE_SECRET` — so the idiom
-    existed and this condition simply had no line.
-
-    The warning names the setting that fixes it, because a warning an operator cannot act on is a
-    line they learn to skip.
+    `default_audit_sink()` is the null sink whenever `session_store != "postgres"`, even with a
+    database present, so startup warns and names the setting that fixes it.
     """
     from chemclaw.api.app import _report_inventory
 
@@ -653,12 +579,10 @@ def test_a_durable_trail_is_not_warned_about(
 def test_the_startup_inventory_names_every_subsystem_that_can_be_silently_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cold front door logged one line about its own emptiness; this is the rest of it.
+    """The startup inventory names every subsystem that can be silently empty.
 
-    `connectors: none enabled` was the whole of it — nothing about a log-only trail, an unwritten
-    session store, no skills, no ingest source and no result sink. Each term is one an operator can
-    compare against what they believe they configured, which is the entire point: `make ci` is the
-    honest inventory and cannot be pointed at a running pod.
+    Connectors, the audit trail, the session store, skills, ingest sources and result sinks, each a
+    term an operator can compare against what they configured.
     """
     from chemclaw.api.app import startup_inventory
 
