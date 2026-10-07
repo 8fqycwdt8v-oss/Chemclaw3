@@ -1,475 +1,642 @@
-# Deep documentation pass (2026-10-04)
+# Platform architecture programme (2026-10-07)
 
-Goal: every operator-facing document true today, nothing stale, nothing undocumented, and a reader
-who has never seen the system can **deploy** it, **operate** it routinely and **troubleshoot** it
-from the docs alone. Scope: Chemclaw3, Chemclaw3-mcp, Chemclaw3_ui (each its own PR).
+Source: the read-only architecture review of 2026-10-07 across Chemclaw3, Chemclaw3-mcp and
+Chemclaw3_ui. This file is the plan for implementing **every** finding of that review, in waves.
+The previous task (deep documentation pass, 2026-10-04) shipped and its record is in git history.
 
-Method: each document is checked claim by claim against the code it describes (settings, chart
-values/templates, Make targets, CLI entry points, alert rules, metrics). A claim the code refutes is
-fixed or deleted; a user-facing knob/command/alert with no doc gets one. ADRs and `docs/archive/`
-are append-only/historical and are **not** edited.
+Scope: all three repos (`Chemclaw3_mock` only where a contract it serves changes). Each repo's change
+is its own branch and PR, as the repo's rules require.
 
-- [x] A. Root docs: `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `infra/README.md`, `docs/README.md`, `.env.example`
-- [x] B. Delivery docs: `deploy/README.md`, `deploy/kind/README.md`, `deploy/jenkins/README.md`, chart `NOTES.txt`/`values.yaml` comments
-- [x] C. Runbook first half (prereqs → workers/monitoring) verified
-- [x] D. Runbook second half (alerts ↔ `prometheusrule.yaml`, migrations, rollback, restore, release, people, sinks, artefacts)
-- [x] E. Package READMEs under `src/chemclaw/**`, `infra/sql/README.md`, `tests/README.md`
-- [x] F. `docs/guides/*` (non-runbook) + `docs/planning/BACKLOG.md`/`DEFERRED.md` rows already closed by the code
-- [x] G. New `docs/guides/deployment.md`: end-to-end install of the whole family (images, Postgres, Temporal, secrets, chart, MCP fleet, UI, wiring, verification)
-- [x] H. New `docs/guides/troubleshooting.md`: symptom → cause → fix index over the runbook + routine-operations checklist
-- [x] I. Chemclaw3-mcp: README, `docs/integration.md`, `docs/adding-a-server.md`, `MODULES.md`, server READMEs, deploy notes
-- [x] J. Chemclaw3_ui: README, `docs/*`, `deploy/openshift/README.md`, stale tracker docs
-- [x] Verify: `make lint type`, doc-guard tests + full `make test` (Postgres up), mcp `make check`, ui lint/test
-- [x] Ship: one PR per repo, merged when green
+## How to read this plan
 
-## Review
+- **Waves** are sequenced by dependency and by risk: the cheap, low-risk ones first, and the ones
+  that change data or the turn path last. **Tracks** inside a wave can run in parallel sessions,
+  because each track owns a disjoint set of files.
+- Every wave has **entry criteria**, **work items** (checkable, each item = one PR unless stated),
+  **exit criteria that are measurements**, and a **rollback** story.
+- An item marked **ADR** is a genuine choice between options. Under the repo's own rule
+  (`D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision`) nothing else gets one.
+- Large swaps (knowledge store, agent builder, calc RPC) ship **behind a setting** with the old
+  path intact, are flipped in a deployment, and the old path is deleted one wave later. No
+  big-bang cutovers.
+- "Measure, don't argue" applies to every exit criterion. W0 sets up the baselines the later waves
+  are judged against.
 
-Ten parallel audits, each owning disjoint files, checked every operator-facing claim against
-code, chart renders and settings; ADRs and `docs/archive/` untouched.
+## Overview
 
-- **New:** `docs/guides/deployment.md` (end-to-end install; its example values render with helm
-  3.16 and pass kubeconform), `docs/guides/operations.md`, `docs/guides/troubleshooting.md`;
-  Chemclaw3-mcp `docs/operations.md`; Chemclaw3_ui `docs/operations.md`. README and docs index route
-  to them.
-- **Wrong instructions fixed (examples):** README worker commands collided on metrics port 9000;
-  README claimed the harness must be switched on (it is on by default); workload-identity
-  federation still described; `deploy/README` component commands, probe paths, header name, broken
-  workflow-versioning link; runbook `make explain` usage, a `helm upgrade` block broken by inline
-  comments, missing `store_setup` step, wrong profile dir; `workflow-versioning.md` named a
-  workflow that does not exist and said no CI guard exists; UI quick start built an image that
-  refuses every page.
-- **Gaps documented, not fixed (code/chart follow-ups):** fleet Deployments do not wire the bearer
-  Secret and pin UIDs that OpenShift `restricted-v2` rejects; chart has no `optionalKeys` slots for
-  off-by-default fleet bundles and no CA-file mount; same-namespace UI blocked by the front-door
-  NetworkPolicy unless `ingressNamespaces` lists it; in-repo connector servers do not put the
-  correlation id on log lines; uploads held in one backend pod's memory are unreachable through the
-  UI's Service with >1 replica; note pushes from app containers may lack a git credential (reasoned,
-  not run).
-- **Verify:** lint, mypy, `helm-validate` (with promtool), `kind-validate`, `prose-validate` green;
-  full suites below.
+| Wave | Theme | Repos | Risk | Rough size | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| W0 | Baselines, guard rails, programme setup | all | none | S | — |
+| W1 | Docs and process diet | all | low | M | W0 |
+| W2 | One owner per contract (manifests, events, API types) | all | low–med | M | W0 |
+| W3 | Horizontal scale foundations (no per-process truth) | core | med | M | W0 |
+| W4 | Knowledge graph in Postgres | core (+ui read paths) | high | L | W3 (shared locks), W1 |
+| W5 | Agent core: own the builder, one mechanism per concern | core | high | L | W0 baselines, W2 (event schema) |
+| W6 | Backend RPC, fleet Helm, release unit, CI | mcp, core, ui | med | M | W2 |
+| W7 | Missing capabilities: semantic retrieval, tenancy, backup, lineage, BFF auth, config profiles | all | med–high | L | W3, W4, W6 |
+| W8 | Decomposition, dead-code sweep, final measurement | all | low | M | W1–W7 |
+
+Parallelism: W1, W2 and W3 can start together after W0. W4 and W5 can run in parallel; they touch
+disjoint packages (`kg/`, `retrieval/`, `memory/` versus `agent/`, `api/`). W6 can run beside W4
+and W5 once W2 lands.
 
 ---
 
-# Artefacts — hardening + activation
+## W0 — Baselines, guard rails, programme setup
 
-Contract: "Hardening + activation (frozen 2026-10-03…)" of the artefacts wire contract (items 1-2 are
-this repository's). Owner decisions 2026-10-03: html sandbox on, html scripts on by default.
+**Goal.** Make every later claim measurable, and stop the overhead growing while it is being cut.
 
-- [x] **1. Own readouts are not evidence.** The artefact tools' results are excluded from grounding
-      evidence and from bindable links (one name set, both queries), and get no `⟨r:…⟩` handle.
-- [x] **2. Draft parse bound.** `DraftStream` re-parses only on argument growth (geometric) before the
-      first frame; stops past the spec cap + slack or a non-object `spec`. Test counts parses.
-- [x] **3. Byte cap first.** Raw spec bytes checked right after `parse_spec` (REST and tools); target
-      lookups memoised in `_write_plan`; `_SHOWN` → setting.
-- [x] **4. Chemist figures stored.** Migration 119 adds `human_figures` to revisions, written at
-      human write time; revise reads the distinct set. Measure before/after.
-- [x] **5. Calc source capped.** `geometry_xyz` and write-time source check apply
-      `calc_artifact_max_download_bytes` from the recorded size; a source is validated as one frame.
-- [x] **6. Report activity verifies membership** of `requested_by` in `session_id` before writing.
-- [x] **7. Handles only where bindings resolve** (in-memory session store + result store).
-- [x] **8. Geometry `structure_id`** (contract item 1): resolve at read/export, ok:false entry when
-      vanished; advertise in create_exhibit; re-measure the prefix.
-- [x] **9. `ToolFailedEvent.call_id`** (contract item 2): event, OpenAPI, fixture, dev page.
-- [x] **10. Agent-path `log_event` + counters** `chemclaw_exhibit_writes_total`,
-      `chemclaw_exhibit_refusals_total`.
-- [x] **G1** retention predicate derived from every `retention_*_days`; push pruning runs whenever
-      artefacts are on.
-- [x] **G2** runbook rollback row for 115; SQL verified against the schema.
-- [x] **G3-5** runbook artefacts section.
-- [x] **G6** chart gate `retention.exhibitsGrowthAccepted`. **G7** values.yaml block. **G8** kind.
-      **G10** `.env.example` + Jenkins ordering.
-- [x] **ADR** html scripts on by default (supersedes the scripts-off part).
-- [x] **Verify**: lint, type, validators, targeted tests with Postgres up.
+Entry: none.
 
-## Review (hardening)
+- [ ] **W0.1 Baseline script** (`src/chemclaw/cli/bench_baseline.py`, or extend the existing
+      `live_*` harnesses rather than adding a fourth). It records, as JSON committed under
+      `data/evals/baselines/architecture-2026-10.json`:
+  - cold and warm import time of `chemclaw.api.app` (measured: 16.6 s cold, 6.5 s warm);
+  - first-turn and steady-state graph build (measured: 0.56 s, then 0.08–0.12 s);
+  - time-to-first-token and total turn latency on the mock LLM for 3 canned turns;
+  - root middleware count and tool count (`len(tool_call_middleware(...))`);
+  - KG write latency per note and notes/s under 4 concurrent writers; KG RSS per 1k notes;
+  - `make test` serial wall time and the number of Postgres-backed skips;
+  - LOC and prose ratio per package (the AST/tokenize script the review used, saved to
+    `scripts/` so it can be re-run);
+  - Helm render line count; number of settings fields; number of `CHEMCLAW_*` names.
+- [ ] **W0.2 Same baseline for the fleet** (`Chemclaw3-mcp/scripts/bench_baseline.py`): per-server
+      cold start, `/mcp` handshake + `list_tools` latency, `calc` `calculation_key` round trip.
+- [ ] **W0.3 Freeze the overhead while it is cut.** Agree, in this file, that until W1 closes:
+  no new ADR without an Options section; no new meta-test of prose; no docstring longer than
+  ~10 lines in new code. (A rule here rather than a test: W1 decides which tests survive.)
+- [ ] **W0.4 Tracking.** One GitHub issue per wave per repo, linked here, so a session claims a
+      wave atomically (the repo's own claim rule, `D-2026-08-15-a-claim-is-a-mutex-not-a-line-edit`).
+- [ ] **W0.5 Programme ADR** `D-2026-10-xx-the-architecture-programme`: the choices this plan takes
+      (KG system of record, agent builder, backend RPC, tenancy model), each as Options + Decision +
+      `Revisit when:`. This ADR **supersedes** the ones it overturns, listed by id. Written once, not
+      per wave.
 
-- Second review: one evidence rule (`exhibits/evidence.py`) for grounding, bindings and the stamp;
-  `structure_id` session-scoped on write (ADR, 4.5–46 ms measured); turn note shows the address;
-  count-line-first atom cap; every worded tool refusal counted; draft slack a setting.
-
-- Measured: draft parses before the first frame 6,306 → 14 (table, kind last) and 6,341 → 2 (string
-  spec) on ~75 kB of arguments, 27 s / 15 s of loop CPU → 0.3 s / 0.4 s; chemist-figures read
-  1.27 s → 0.37 s for 100 human revisions of a 2,000-row table (0.74 s at the 500-revision cap);
-  prefix 73,122 → 73,121 against the 73,450 ceiling with `structure_id` advertised.
-- Choices recorded: G1 as its own schedule (ADR), html scripts on by default (owner ADR). #4 took the
-  owner's preferred stored form (migration 119); a pre-119 person's row is derived the old way,
-  and a fork records the union (second review).
-- #7 resolved by not stamping where bindings cannot resolve (`handles_resolve`), not by opening
-  resolution under the in-memory session store: grounding/bindings there would need Postgres on a
-  deployment that may have none.
-- 115 rollback: runbook row and `infra/sql/README.md`; not added to `_REVIEWED_SEMANTIC_BREAKS`,
-  which requires an ADR naming the file and none of the merged ones can be edited.
-
-# Artefacts, wave 3 — bindings and the html kind
-
-Contract: "Wave 3 (frozen 2026-10-03)" of the artefacts wire contract, shared with the frontend
-built in parallel — names and shapes exactly as frozen. Owner decision 2026-10-03: build both.
-
-- [x] **0. Baseline** the targeted test files before the first edit.
-- [x] **1. Result handle.** `bound_tool_results` stores every successful result's full text through
-      the turn's sink (one write; a cut keeps its existing ref) and stamps the ref on
-      `response_metadata`; an outermost presentation middleware appends `\n⟨r:<12 hex>⟩` outside
-      the framed/defanged region. `runner_trace.returned()` reuses the stamped ref instead of a second
-      write; the transcript pairs by the stamp. Grounding (`returned_values`, `stated_numerals`,
-      `mentioned_ids`) never reads the handle (test). Measure what the handle costs the thread.
-- [x] **2. `$bind` and `rows_from`** in the spec models; `exhibits/bindings.py` resolves them (RFC
-      6901, session-scoped prefix lookup, ambiguity refusal, type checks, caps, off the loop for
-      large results, a missing blob → null + ok:false). Stored spec keeps bindings with full refs;
-      `ExhibitView` gains `raw_spec` + `bindings[]`, `spec` is resolved. Writes (tool + REST) resolve
-      and validate; bound values are grounded; diff compares raw specs; exports use resolved values;
-      `read_exhibit` shows both.
-- [x] **3. `html` kind**: spec, `exhibit_max_html_bytes`, `agent_html_artefacts_enabled`,
-      `html_enabled` on the list route, export `.html` as `text/plain` attachment, grounding over
-      text content (stdlib `html.parser`), migration 117 widens the kind CHECK, create_exhibit names
-      it. A test that no route answers `text/html` for artefact content.
-- [x] **4. Docstring + skill** teach `$bind` compactly; re-measure the prefix
-      (`tests/test_context_floor.py`) and the warm arm (`tests/test_compaction.py`) — stop and report
-      if the warm arm would fail.
-- [x] **5. Two ADRs** (bindings; html sandbox) with `Revisit when:` on what is declined; ledger rows.
-- [x] **6. Verify**: lint, type, skill-validate, prose-validate, the targeted files with Postgres up.
-
-## Review (wave 3)
-
-- Handle: 17 characters, +4 tokens per result on the approximate counter (12 on cl100k); the
-  compaction warm arm's unreclaimable batch now charges one per parallel call, 13,000 -> 13,034,
-  and the arm reads 14,181 on this tree. No compaction or thread test failed before or after.
-- Prefix: create_exhibit +75, read_exhibit +20; default 73,027 -> 73,122 under the 73,450 ceiling.
-  No ceiling, budget or `PREFIX_BOUND` moved.
-- Deviations from the frozen contract: none in names or shapes. Choices inside it: a handle is
-  written only where the full text was stored (no handle on a failure, an empty or over-cap
-  result, or a sinkless driver); a `rows_from` whose result is gone reads as no rows (`rows` is a
-  list); a `rows_from` column pointer an element lacks is an empty cell; the html export filename is
-  the existing `<title>-<xid>-r<N>.html`; `height` must be an integer >= 1.
-
-# Artefacts, wave 2 — geometry, drafts, report artefacts, fork, push pruning
-
-Contract: "Wave 2 additions (frozen 2026-10-03)" of the artefacts wire contract, shared with the
-frontend built in parallel — names and shapes exactly as frozen.
-
-- [x] **1. `geometry` kind.** `GeometrySpec` (xyz XOR source, label, energy_hartree,
-      highlight_atoms); XYZ validated on write (count line, known elements, finite coordinates,
-      `exhibit_max_atoms`); `source` must exist in the calc `ArtifactStore` at write time; migration
-      116 widens the kind CHECK; export `xyz`; diff `xyz`/`source`/`label`; `create_exhibit`
-      docstring names it; re-measure the prefix (`tests/test_context_floor.py`) and the warm arm
-      (`tests/test_compaction.py`) — stop if the warm arm would fail.
-- [x] **2. `GET /calc-artifacts/content?ref=`** — any authenticated caller; 404 unknown, 413 above
-      `calc_artifact_max_download_bytes`, stored media type, sanitised `Content-Disposition`.
-- [x] **3. `exhibit_draft` event** — derived from `create_exhibit`/`revise_exhibit` tool-call chunks
-      in the graph stream; partial JSON; document only; throttled by
-      `exhibit_draft_min_interval_ms`, growth only, capped by `exhibit_max_spec_bytes`; Event union,
-      OpenAPI, dev page, contract fixture; test through the real graph stream with a chunking model.
-- [x] **4. Report → artefact** — optional session/requester on the workflow input; an activity
-      creates the `document` with id `xb-` + sha256(workflow_id)[:16], idempotent on retry;
-      `job_completed.summary.exhibit_id`; `exhibit` pushed on `/events`; a deleted session skips.
-- [x] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).
-- [x] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
-- [x] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
-- [x] **8. Mock LLM scenario** creating a document artefact — only if the mock's design fits.
-- [x] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
-
-## Review (wave 2)
-
-- Prefix: `create_exhibit` naming the geometry kind costs +15 tokens (default 73,012 -> 73,027
-  under the 73,450 ceiling); no ceiling or budget moved.
-- Two ADRs: the geometry source is a citation checked on write and not pinned (with migration
-  116's rollback reading), and the draft is read off the streamed call arguments for a preview only.
-- The report push is new: a report never pushed `job_completed` before, so the payload is
-  `{job_id, job: "report", summary, note_id, note_ref, exhibit_id?}` — `exhibit_id` omitted when
-  the artefact was skipped. A second session rejoining the same report run gets no artefact.
-- Interpretations to confirm with the frontend: `highlight_atoms` are 0-based; the geometry diff
-  also names `energy_hartree`/`highlight_atoms`/`format`; a `done: true` draft frame closes a call
-  when the text grew after the last throttled frame; FastAPI's own 422 for too many
-  `exhibit_refs` keeps its list-shaped `detail`.
+Exit: the baseline JSON exists for both repos and the issues exist.
+Rollback: n/a.
 
 ---
 
-# Artefacts, phase 0 — measure, then decide
+## W1 — Docs and process diet
 
-Concept: the "Exhibits" concept doc (UI label "Artefacts"; code name `exhibit` because `artifact` is
-the calc by-product store). Decided by the user 2026-10-02: label "Artefacts", on by default with a
-kill switch, session members may revise, `chart` in phase 1.
+**Goal.** Cut the cost every session pays before it writes a line: ~2.9k lines of mandatory
+reading, 59% prose in `src/`, 761 ADRs, 1.9k lines of lessons. Nothing here changes runtime
+behaviour, which is what makes it the right first wave.
 
-- [x] **0.1 Answers.** Over the recorded live transcripts (`tasks/live-test*/transcripts*`): how
-      many answers carry a Markdown table (any / >= 4 data rows), what share of answer tokens the
-      tables are, what share of table figures are verbatim tool values (`verified_numbers` — a
-      figure absent there is *unchecked*, never "wrong", per `evals/live.py::_verified_numbers`),
-      how many answers list >= 3 structures as SMILES, and how often `render_structure` ran.
-      Instrument: `chemclaw.evals.answer_shape`; raw output in `tasks/artefacts-phase-0/results.md`.
-- [x] **0.2 Prefix.** Draft the three tool signatures (`create_exhibit`, `revise_exhibit`,
-      `read_exhibit`) with real docstrings and a compact spec schema; measure them with the exact
-      basis `tests/test_context_floor.py` uses (`convert_to_openai_tool` +
-      `count_tokens_approximately`); compare to `MAX_SINGLE_TOOL_TOKENS` and the ceiling headroom.
-- [x] **0.3 ADR** `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` + ledger row:
-      server-owned versioned exhibits vs client-only; not plan-gated but subtracted from helpers;
-      bind-don't-retype (with 0.1's numbers); HTML/JS artefacts declined with `Revisit when:`;
-      prefix budget from 0.2.
-- [x] Verify: `make lint type test` (Postgres up; report skips), decision-log tests.
-- [ ] PR, merge on green.
+Entry: W0.3 agreed.
 
-## Review (phase 0)
+### Track A — CLAUDE.md and session reading (all repos)
+- [ ] **W1.1** Rewrite `Chemclaw3/CLAUDE.md` to ≤150 lines of **current rules only**: layers (once),
+      where things go, commands, workflow, quality bar, persistent-knowledge files. Delete every
+      "used to / this sentence / audited" passage, the duplicated layer section, and the reference
+      to the archived G1–G7 checklist. **Resolve the contradiction** between "when unsure, ask" and
+      "fix autonomously / merge yourself": state when to ask (destructive, ambiguous, outside scope)
+      and that everything else is autonomous.
+- [ ] **W1.2** Same for `Chemclaw3-mcp/CLAUDE.md` (671 lines → ≤150). The egress, auth, health and
+      manifest rules stay **as rules**; their history moves to the ADRs that already hold it.
+- [ ] **W1.3** `Chemclaw3_ui`: check its CLAUDE.md/README for the same pattern and trim.
+- [ ] **W1.4** `ARCHITECTURE.md`: one table row per directory, ≤2 sentences each. The paragraphs
+      inside cells move to the package READMEs (which already exist).
 
-- 0.1 refuted the concept's token argument for bindings (tables are 2.7% of answer tokens), so
-  bindings and result handles are deferred with a trigger; documents (15.3% of answers) are the
-  core kind.
-- 0.2 chose the untyped server-validated spec: 961 prefix tokens vs 1,989 typed (whose create tool
-  alone breaks `MAX_SINGLE_TOOL_TOKENS`). Headroom at base is 404, so phase 1 raises the ceiling.
-- Full serial suite with Postgres/Temporal up: 11,415 passed, one failure (evals importing RDKit
-  directly) fixed by going through `core.chem`; skips were helm (92) and the sibling fleet (8).
+### Track B — Decision record
+- [ ] **W1.5** Write `docs/decisions/CURRENT.md`: one page of the decisions in force, grouped by
+      area, each one line plus its ADR id. This is what CLAUDE.md links to.
+- [ ] **W1.6** Mark superseded ADRs. Today 72 mention supersession and 6 say "superseded by". Add a
+      `Superseded-by:` header line (a one-time mechanical exception to "never edit a merged ADR",
+      stated in W0.5's ADR). `test_decision_log.py` is reduced to: unique ids, filename matches
+      heading, ledger row exists, superseded-by target exists.
+- [ ] **W1.7** Add an ADR template with a mandatory `## Options` section and `Revisit when:` for
+      declines, and a check that new ADRs (after a cursor) carry both.
+- [ ] **W1.8** Mark the ~60% of ADRs that are defect reports `Kind: defect-record` in the ledger
+      (no file edits), so CURRENT.md and readers can skip them. No new defect ADRs from here on.
 
----
+### Track C — Source prose (core, then mcp)
+- [ ] **W1.9** Write the docstring standard in CLAUDE.md: what, why, invariants, ≤~10 lines; no
+      history, no "measured on date X", no correction of earlier prose; at most one ADR id per
+      module docstring, and none in inline comments.
+- [ ] **W1.10** Mechanical pass, **one package per PR**, largest-prose first: `agent/` (2.06 prose to
+      code), `core/config/` (92% prose), `api/`, `durable/`, `kg/`, `science/`, `connectors/`, the
+      rest. The history goes into the PR description and commit message; the ADR stays the record.
+      Target ≤30% prose per package. Each PR is behaviour-neutral: `make lint type test` green and
+      the W0 benchmark unchanged.
+- [ ] **W1.11** Same pass over `Chemclaw3-mcp` (54.5% prose) and `test_fleet.py`'s docstrings.
+- [ ] **W1.12** Tests: trim docstrings over ~10 lines (27% of test lines are docstrings).
 
-# Queued compute, round 2 — the open points
+### Track D — Planning and memory files
+- [ ] **W1.13** `tasks/lessons.md` → ≤30 rules, no incident narratives. The rule broken 20 times (the
+      destructive git command) becomes a **PreToolUse hook** in `.claude/settings.json` that blocks it
+      (`update-config` skill). Delete `test_lessons_stay_a_digest.py` once the file is short.
+- [ ] **W1.14** Move `tasks/audit-2026-08-16/` (49k lines), the dated `review-*`, `story-audit-*`,
+      `live-test*`, `paperclip-*` and concept files to `docs/archive/tasks/` (or delete; git keeps
+      them). `tasks/` keeps `README.md`, `todo.md`, `lessons.md`.
+- [ ] **W1.15** Merge `docs/planning/DEFERRED.md` into `BACKLOG.md` as a `Deferred` section, **one
+      line per item** (what / why not now / trigger). Collapse the 496-line BACKLOG to ≤2 lines per row.
+      Keep one register test (`test_backlog_register.py`), delete `test_deferred_register.py`.
 
-- [x] **Chemclaw3**: `tool_queued` event (state `queued` with an approximate position from the
-      task queue's backlog, then `running`), emitted by `connectors/queued.py` while the turn waits.
-- [x] **Chemclaw3**: `queued:` for `chem` (the seven admission-gated tools) and `kinetics`
-      (`semibatch_accumulation_profile`); chart `interactive:` for chem/kinetics and the pyexec
-      example; ADR row unchanged (same decision, wider application).
-- [x] **Chemclaw3-mcp**: `queued:` in `manifests/{chem,kinetics,pyexec,rxnpredict}`; the stand-in
-      `HttpEndpoint` learns `queued`; a fleet test holds *queued == admission-gated* per server.
-- [x] **Chemclaw3_ui**: mirror `tool_queued` in `shared/events.ts`; attach it to the open tool-call
-      row; render "queued · N in queue" / "running…"; contract fixtures and tests.
-- [x] Fresh-subagent review of all three diffs; fix findings.
-- [ ] PRs in dependency order — Chemclaw3, then Chemclaw3-mcp (its consumer-agreement lane reads
-      Chemclaw3 `main`), then the UI (its backend-contract test reads Chemclaw3 `main`) — merge on green.
+### Track E — Meta-tests
+- [ ] **W1.16** Delete the tests that police prose: `test_claude_md_figures`, `test_dead_vocabulary`,
+      `test_docstring_symbols`, `test_docstring_paths`, `test_declines_carry_a_trigger` (replaced by
+      W1.7's template check), `test_literature_index_decline`, `test_deferred_register`,
+      `test_lessons_stay_a_digest`. In mcp: the 14 CLAUDE.md-prose tests in `test_fleet.py`.
+- [ ] **W1.17** **Keep** and simplify: `test_layering`, `test_third_party_layering`,
+      `test_upstream_surface` (until W5 shrinks it), `test_sibling_manifest_agreement` (until W2
+      replaces it), `test_repo_map` (directories and READMEs only, no prose), `test_context_floor`,
+      `test_decision_log` (reduced per W1.6).
+- [ ] **W1.18** Split mcp `tests/test_fleet.py` (5.2k lines) by concern: layout, deploy shape,
+      egress, auth, manifests.
 
-## Review (round 2)
+### Track F — Make and CI
+- [ ] **W1.19** Collapse the 79 Make targets: keep the gate (`lint type test check cov`), `ci`,
+      the validators, `up/down/chat/connectors/db-migrate`, and move the live/bench/storm harnesses
+      behind one `make live-<x>` family. `make help` grouped by section.
+- [ ] **W1.20** Fix the parallel-only flaky tests named in
+      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`, then make `PYTEST_WORKERS=4` the gate
+      default (measured 18:13 → 09:30). Give each xdist worker a small Postgres pool instead of
+      declining `-n auto`.
 
-Three fresh reviewers, one per repo; every finding below was fixed unless it says otherwise.
+Exit (measured against W0):
+- CLAUDE.md ≤150 lines in each repo.
+- `src/` prose ratio ≤30% (from 59%).
+- `tasks/` holds 3 files.
+- Markdown outside `docs/decisions` and `docs/archive` down ≥60%.
+- Serial suite time unchanged or faster; gate time ≤10 min.
+- Zero behaviour change: W0 turn benchmark within noise.
 
-- Chemclaw3: the `waiting` count never arrives on Temporal 1.25.2, because the server sends no stats. The process now stops asking after the first stats-less answer, and the test requires a count from a server that reports one.
-- Chemclaw3: a running call could flip back to "queued" just before its result. With no pending activity the tick now reports nothing.
-- Chemclaw3: progress reads are now bounded by the tick (`rpc_timeout`), the result is checked before a timeout, and a failed run on the fallback path is the tool's refusal, not an exception.
-- Chemclaw3: the backlog is read once per connector per tick, and every waiting turn shares that read.
-- Chemclaw3 (not fixed): `call_id` on `tool_queued`. The UI pairs by `job_id`, which already tells apart two calls to one tool with different arguments; identical arguments share one run.
-- Chemclaw3-mcp: the stand-in now refuses a duplicate queued name. The consumer-agreement table has six `queued:` probes. The queued-equals-gated test runs over every agent-facing server, and a separate test fails if the gate reader goes blind.
-- Chemclaw3_ui: annotations pair by `job_id`. The wait has its own activity kind, so a screen reader hears it. A zero count reads "queued…" and the badge says "N in queue". Ended rows drop the annotation.
-
-
-Measured before starting: a queued call costs ~80 ms over a direct one (median 198 ms vs 116 ms for
-a 50 ms tool, 20 sequential calls each, `make up`'s Temporal) — cheap enough to queue every gated
-tool, including chem's depictions.
-
----
-
-# Queued, autoscaled compute — near-real-time for many concurrent chemists
-
-**Goal.** Every compute-heavy tool call waits in a global queue instead of being refused, the chemist
-waits briefly in the turn and gets the answer, and capacity follows the queue. Target to agree:
-seconds-class calls (xTB single point, pKa, properties, reaction prediction) answer **p95 ≤ 30 s at
-50 concurrent chemists** on warm capacity. Hours-class work (CREST, scans) is queued fairly, not
-real-time.
-
-## What exists, and the gap (from the two code maps)
-
-- `connectors/jobs.py::build_job_tool` + `_await_briefly` already do "start a Temporal workflow,
-  wait `inline_wait_seconds`, else return a job id and push the result later". Only the 12 calc
-  `jobs:` use it.
-- The 17 inline calc tools, BO `suggest_next_experiment`/`predict_outcome`, and every remote MCP
-  tool (rxnpredict, pyexec, chem) bypass Temporal. A full pod refuses; inline nothing retries.
-- The durable retry waits 112 → 900 s between asks: polling, idle slots, no FIFO.
-- No HPA on any worker; MCP servers scale on CPU only; no admission-slot gauge exists.
-- rxnpredict/pyexec/rxnlabel/chem refuse with a plain `ValueError` — no at-capacity marker, so a
-  full pod reads as bad input.
-
-## Design
-
-1. **One mechanism: a tool may declare `dispatch: queued` in its manifest** (with
-   `inline_wait_seconds`). The chat service wraps it: authz/audit/plan-gate run as today, then it
-   starts `QueuedToolWorkflow` on the bundle's **interactive lane** `connector-<name>-interactive`
-   and reuses `_await_briefly`. Answer inside the wait → ordinary tool result. Otherwise → job id,
-   result pushed through the existing session mailbox. No new result path.
-2. **The activity calls the connector's own MCP tool** (same session helper, same identity headers),
-   so no tool body moves and the calc cache (`cached_compute`) stays where it is. Works unchanged for
-   Chemclaw3 bundles and for `Chemclaw3-mcp` servers.
-3. **Two lanes per bundle so hours never block seconds**: interactive (queued tools, short
-   `start_to_close`) and the existing batch lane `connector-<name>` (jobs, CREST).
-4. **Pull, don't push**: a worker's `max_concurrent_activities` equals the downstream slots it owns,
-   so excess work waits *in Temporal* (FIFO, visible) instead of being refused. At-capacity becomes a
-   rare race, retried at seconds on the interactive lane (new `interactive_retry`), not minutes.
-5. **One at-capacity marker for the whole fleet**: move `[…-at-capacity]` into
-   `mcp_server_kit.Admission` so every gated server signals it, and Chemclaw3's generic connector path
-   classifies it too.
-6. **Autoscaling on backlog, not CPU** (KEDA = OpenShift "Custom Metrics Autoscaler"):
-   - interactive workers scale on the Temporal task-queue backlog;
-   - MCP servers scale on a new `chemclaw_mcp_admission_in_flight / _ceiling` gauge;
-   - warm floor (`minReplicas`) sized for the expected peak — pod start (~60 s+) is too slow to be
-     the real-time answer, so scaling handles sustained load and the floor handles bursts.
-   - Shipped **optional** (`autoscaling.keda.enabled`), CPU HPA stays the default where KEDA is absent.
-7. **The chemist sees it**: new `ToolQueuedEvent` (position ≈ backlog ahead, then running) over the
-   existing signal stream; UI renders it on the tool call.
-
-## Steps
-
-### Chemclaw3-mcp (PR 1)
-- [x] ADR: admission refusal carries one fleet-wide marker; autoscaling may read admission occupancy.
-- [x] `mcp_server_kit.limits.Admission`: server name, fleet marker, gauges `admission_in_flight`,
-      `admission_ceiling`, counter `admission_refused_total`; all five gated servers inherit.
-- [x] Optional `deploy/keda/scaledobject.yaml` per gated server (Prometheus scaler on occupancy);
-      extend `tests/test_deploy_shape.py` to hold it against the HPA (same bounds, never both applied).
-- [x] `make check` green (deps-audit red on pyjwt/urllib3 advisories, identical on main). Pushed.
-
-### Chemclaw3 (PR 2)
-- [x] ADR superseding the "inline compute is synchronous" half of the calc/connector ADRs; states the
-      two lanes, pull-based concurrency, and what stays refused-at-server (safety net).
-- [x] Manifest: `dispatch: queued` + `inline_wait_seconds` on a tool; `connector-validate` checks the
-      wait against the turn budget (reuse the jobs check).
-- [x] `QueuedToolWorkflow` + generic `call_connector_tool` activity; `interactive_retry` policy.
-- [x] Registry wraps queued tools; generic path classifies the fleet at-capacity marker.
-- [x] Mark heavy tools queued: calc compute tools, BO `suggest_next_experiment`/`predict_outcome`,
-      rxnpredict predictions, pyexec `run_python`. Cheap ones (solubility, developability, lookups)
-      stay direct.
-- [x] Worker per bundle per lane; concurrency derived from the downstream ceiling, validated at startup.
-- [ ] ~~`ToolQueuedEvent`~~ not built: a call that outlasts the wait already announces `job_started` and lands as `job_completed`, which the UI renders. A position indicator is a follow-up.
-- [x] Helm: interactive worker Deployments, optional KEDA ScaledObjects, warm floors; `helm-validate`.
-- [ ] `make lint type test` green with Docker/Postgres/Temporal up (report skips).
-
-### Chemclaw3_ui (PR 3)
-- [ ] Not needed for this change (existing job events cover a deferred call); a queued/position badge is a follow-up.
-
-### Verification (the claim is a number)
-- [x] Load test in the local stack: 50 concurrent sessions each asking a seconds-class calc tool,
-      before vs after. Report p50/p95 time-to-answer and refusal rate. Same for a mixed load with
-      CREST running, to show the lanes isolate.
-
-## Decided with the user (2026-09-30)
-- Target: seconds-class calls **p95 ≤ 30 s at 50 concurrent chemists**.
-- KEDA availability unknown → ScaledObjects ship behind a switch, **default off**; CPU HPA stays default.
-- retro (`chemclaw2_retrosynthesis`) out of scope; `dispatch: queued` makes it a one-line opt-in later.
-
-## Review (2026-09-30)
-
-- Measured, 50 concurrent calls vs a stand-in server (worker concurrency = slots): direct refused
-  68% at 8 slots; queued answered 50/50 in the turn, p95 14.9 s (2-s calls, 8 slots), 8.7 s (16),
-  6.9 s (32); 5-s calls need 16 slots for p95 ≤ 30 s. The warm floor is the sizing decision.
-- Found on the way: `CalcBusyError` reached callers of our own bundles as "internal error" (the
-  sanitizer only passed `ValueError`) — fixed with `AtCapacityError` + the fleet marker.
-- A retry policy with initial > max is rejected by Temporal as "missing task queue name"; clamped.
-- The interactive worker opens no Postgres pool (measured 0 connections); budgeted at zero with a test.
-- Follow-ups: `queued:` for `Chemclaw3-mcp`'s `pyexec`/`chem` manifests once this lands on main (the
-  consumer must accept the key first); a queued/position badge in the UI.
+Rollback: every PR is docs/tests only; revert per PR.
 
 ---
 
-# Wave 11 — what a worker holds between tasks
+## W2 — One owner per contract
+
+**Goal.** End copy-and-test between repos. Each contract has exactly one owner, a version, and
+generated consumers. Today: 8 `connector.yaml` files are duplicated and already 29–126 lines apart,
+the agreement test skips without a sibling checkout, and the UI hand-mirrors 3.4k lines of types.
+
+Entry: W0.
+
+### Track A — Connector contract (mcp owns, core consumes)
+- [ ] **W2.1 ADR** (part of W0.5): the fleet is the single owner of every manifest it serves; the
+      artifact is a versioned package. The options are a Python wheel `chemclaw-contracts`, an OCI
+      artifact beside the image, or a git submodule. **Recommendation:** a wheel built from
+      `Chemclaw3-mcp/manifests/`, because both consumers are Python and a wheel pins by version in
+      `uv.lock`.
+- [ ] **W2.2** Add `contract_version: <semver>` to the `connector.yaml` schema (core's manifest model
+      and mcp's). Bump the minor version on an additive tool change and the major on a
+      removal/rename/argument change. Each server's `/healthz` reports it.
+- [ ] **W2.3** `Chemclaw3-mcp/packages/chemclaw_contracts/`: ships `manifests/<name>/connector.yaml`
+      plus, for backend servers, the pydantic request/response models (used in W6). Published by the
+      fleet CI on tag.
+- [ ] **W2.4** Core: delete the 8 manifest-only bundle copies (`chem kinetics props rxnpredict safety
+      suitability thermalsafety unitops`) and resolve them from the installed contracts package.
+      **Keep** each bundle's `skills/` directory in core (judgment stays layer 3); the bundle dir then
+      holds only `skills/` plus a one-line pointer.
+- [ ] **W2.5** Session open compares the manifest's `contract_version` with the server's
+      `/healthz`. A major mismatch refuses the connector by name (`capability_degraded`), a minor one
+      warns.
+- [ ] **W2.6** Make the name collision on `CHEMCLAW_CONNECTORS_DIR` a startup **error**, not
+      first-wins.
+- [ ] **W2.7** Replace `test_sibling_manifest_agreement.py` (core) and `test_consumer_agreement.py`
+      (mcp) with a **required** CI job in mcp that installs the built contracts wheel into core's
+      test env and runs core's validators (`connector-validate`, `skill-validate`). It never skips.
+
+### Track B — API and event contract (core owns, UI consumes)
+- [ ] **W2.8** Core: model the SSE event union as pydantic models (`api/events.py` is already the
+      source) and publish it in OpenAPI via a schema-only endpoint or `components.schemas`. Add the
+      `/openapi.json` export to `make` and commit the generated `schema/api/openapi.json`, so a diff
+      shows up in review.
+- [ ] **W2.9** UI: generate the TS types (`openapi-typescript`) and the valibot schemas from that file
+      in `shared/generated/`. Replace the hand-written `shared/events.ts` and the request/response
+      types in `src/api/client.ts`. Keep `client.ts` as the thin fetch layer only.
+- [ ] **W2.10** UI CI: regenerate and fail on diff against core's pinned `openapi.json` (pinned by core
+      version, not `main`). Retire `tests/backendContract.test.ts` (which parses a Python file) and
+      `scripts/check-openapi.mjs`'s live-service mode.
+- [ ] **W2.11** Close UI ISSUES.md #14 (the event-union drift: `capability_degraded`, `tool_failed`,
+      `job_failed`) by construction.
+
+### Track C — Calc wire (prepares W6)
+- [ ] **W2.12** Move `servers/calc/tool-surface.json` and the argument dicts hard-coded in core's
+      `connectors/calc/compose.py` and `remote.py` into typed models in `chemclaw_contracts`. Core
+      imports them, and the fake in `tests/calc_server_fake.py` is built from the same models.
+
+Exit:
+- `grep -r "connector.yaml" Chemclaw3/src/chemclaw/connectors` finds only the bundles core serves
+  (`bo calc molfp rxnfp results`).
+- The UI has zero hand-written backend types.
+- A deliberate breaking change in either repo fails the other's CI on the PR, never later.
+
+Rollback: W2.4 is a revert of one PR. The contracts package stays (additive).
 
 ---
 
-# A screen answers per item; a distribution refuses by name
+## W3 — Horizontal scale foundations
 
-Source: arXiv 2609.14840 (El Agente Potente, typed execution graphs for MLIP campaigns). Its one
-pattern this repository does not already have: **every input to a high-throughput run ends as a
-typed outcome** — a result, or a typed failure naming the input — so one bad structure never costs
-the campaign and is never silently dropped. Everything else in the paper is either already here
-(typed dispatch over `XtbJobSpec`, per-primitive caching, provenance) or already decided against
-(MACE: licence; a coding mode reaching validated functions: `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`).
+**Goal.** No correctness or limit depends on a single process or pod. Today the rate limiter, the
+concurrent-turn cap, calc single-flight, `Session.state`, several fire-and-forget writes and the
+background worker are all per-process or singleton.
 
-## The defect, measured before planning
+Entry: W0. Can run in parallel with W1 and W2.
 
-`connectors/calc/compose.py`: the four list-taking composites run their items with no per-item
-boundary, so the **first** item that raises aborts the whole durable job.
+- [ ] **W3.1 ADR** (in W0.5): the shared coordination substrate. Options: Postgres only (advisory
+      locks, `SKIP LOCKED`, a small counters table) or Postgres plus Redis. **Recommendation: Postgres
+      only.** It is already required, already pooled and already backed up, and the rates involved
+      (turns/s, not requests/ms) are well within it. Revisit when the limiter needs more than
+      ~1k decisions/s.
+- [ ] **W3.2 Shared rate limiter and concurrency cap.** Replace the in-memory `BoundedLru` limiter and
+      the per-process turn cap with Postgres-backed token buckets (one row per actor, updated in a
+      single `UPDATE … RETURNING`) and a `turn_leases` table (lease with TTL and heartbeat). Then
+      `maxReplicas` no longer multiplies the limit.
+- [ ] **W3.3 Cross-process calc single-flight.** `calculation_results` gets a `pending` state:
+      claim with `INSERT … ON CONFLICT DO NOTHING` and a lease, and losers wait on
+      `LISTEN/NOTIFY` (or poll with backoff) for the winner's row. Keep the in-process future as the
+      fast path. Close the `DEFERRED.md` row. Test: 2 processes × 8 concurrent misses → 1 compute.
+- [ ] **W3.4 No fire-and-forget writes.** The `_PENDING` task sets in `api/budget.py`,
+      `agent/turn_cost.py` and `agent/plan_gate.py`, and `_PENDING_SETTLES` in `api/runner.py`: write
+      synchronously in the turn's final step, or through a transactional outbox (one `outbox` table
+      drained by the background worker). Test: kill -9 mid-turn, then assert the cost and transcript
+      rows exist.
+- [ ] **W3.5 Scale the background worker.** Remove `workers.background.replicas: 1`. Each job that
+      really must be single-instance (retention, schedule bootstrap) takes a Postgres advisory lock
+      or becomes a Temporal Schedule (Temporal already guarantees one run). Make the reindex
+      idempotent and partitioned. Close the BACKLOG row. Set the PDB to `minAvailable: 1` with 2
+      replicas.
+- [ ] **W3.6 Turns survive their pod.** A turn's execution state is already in the checkpointer. Add
+      a `turn_leases` heartbeat (W3.2). On lease expiry another replica marks the turn
+      `interrupted-resumable`, and the next client attach resumes from the last checkpoint instead of
+      ending it. Then simplify `turn_relay.py` / `detach.py` / `turn_remotes.py` / `session_queue.py`
+      (1.5k LOC): with leases and `LISTEN/NOTIFY` for the event fan-out, the polling relay can go.
+- [ ] **W3.7 `Session.state` out of process memory**: into the checkpointer state, or deleted if it
+      only caches what the checkpointer holds.
+- [ ] **W3.8 Pool budget.** Give every process one pool per role (app, checkpointer) instead of per
+      (event loop, dsn, options, size), and an alert on
+      `sum(chemclaw_pg_pool_max_size) > max_connections * 0.8`. Document PgBouncer (transaction mode)
+      as the deployment default for more than 3 replicas, with the checkpointer's autocommit pool on
+      session mode.
+- [ ] **W3.9 Multi-replica test lane.** A `make live-replicas` (or a kind lane) that runs 3 service
+      replicas plus 2 background workers and asserts: limits hold globally, a killed pod's turn
+      resumes, and one calc miss computes once.
 
-| Composite | Job | Items | Today |
-|---|---|---|---|
-| `bond_dissociation_survey` | `survey_bond_strengths` | bonds (independent) | 1st failure aborts |
-| `solvent_comparison` | `compare_solvents` | media (independent) | 1st failure aborts the `gather` |
-| `species_solvent_comparison` | `rank_species_across_solvents` | media (independent) | same |
-| `species_ranking` | `rank_species` | species (**not** independent) | 1st failure aborts, names only that one |
+Exit:
+- `grep` finds no module-level mutable dict, set or LRU that holds a limit or correctness state,
+  except caches that can be recomputed.
+- The W3.9 lane passes.
+- The background worker runs with 2 replicas.
 
-## Design decisions
+Rollback: each item is behind a setting (`*_backend: memory|postgres`) for one release; the default
+flips once the lane is green.
 
-1. **The per-item boundary catches `ValueError` and nothing wider.** That is exactly the
-   repository's existing "bad data" contract: `ChemclawError` (a `ValueError`) is documented as
-   "catch this at batch boundaries (reject-and-continue)"; `CalcToolError` (a server refusal),
-   `CalculationDomainError`, `InvalidSmilesError` and pydantic's `ValidationError` are all
-   `ValueError`s, and `ValueError` is on `durable/publish.py::_BAD_DATA_TYPES` — i.e. already
-   declared deterministic for that input. **Outages must not become item failures**:
-   `CalcServerError` / `CalcBusyError` are `SubsystemUnavailableError` (not `ValueError`) and must
-   still propagate so Temporal retries the activity; `CancelledError` is a `BaseException` and
-   propagates. A test drives each of those through the boundary.
-2. **Independent items (bonds, media) → typed failure, the rest still answered.** New models in
-   `science/calc/models.py`: `FailedMedium(solvent: str | None, reason: str)` (two callers) and
-   `FailedBond(atoms, bond, fragments, reason)`. New field `failed: list[...] = []` on
-   `SolventComparisonResult`, `SpeciesSolventComparison`, `BondDissociationSurvey` — defaulted, so
-   an in-flight run's payload without it still decodes.
-3. **A distribution is not independent items — it refuses, by name, after trying every species.**
-   Populations normalise over the set, so ranking a subset is "confident about the wrong universe"
-   (the composite's own docstring). Dropping the failed species is therefore wrong, and so is
-   returning partial populations. `species_ranking` attempts *every* species (each success is
-   cached, D-011, so the rerun without the offender pays nothing for them), then raises one
-   `ValueError` naming each failed species and its reason. Today it names only the first.
-4. **Everything failed → one `ValueError` naming every item.** No empty result, no fabricated
-   ranking.
-5. **Honest aggregates over the survivors**, each with a warning:
-   - failed items are listed in `warnings` too (the publish projection turns warnings into
-     `calculation_flag` rows, so a published record carries the gap with no projection change);
-   - bond survey: `is_weakest` is the weakest *of the computed bonds*, and the warning says a
-     failed bond may be weaker; `considered == len(bonds) + len(failed)`; `method` taken from a
-     computed bond;
-   - solvent screens: fewer than two media computed → no spread/"does not distinguish" claim;
-     say there is nothing to compare instead. A lost gas-phase reference is named as such.
-6. **Activity summaries carry the gap** (`connectors/calc/activities.py`): a completion push-back
-   must not read "weakest of 5 bonds" when 2 were not computed.
-7. **The job descriptions say it** (`connectors/calc/connector.yaml`, which is the prompt): the three
-   screens report per-item failures under `failed`; `rank_species` refuses naming every failed form.
-8. **One small helper, four callers**: `_attempt(awaitable) -> result | ValueError` in `compose.py`.
-9. **Out of scope, argued**: `durable/orchestrator.fan_out` drops a failed child (D-030) — its report
-   caller already reconciles the gap into a visible `retrieval_failed` marker and its memory caller
-   counts it on `chemclaw_fan_out_children_dropped_total`; changing its return type is a separate
-   decision. Template waves abort on a failed step by design (a step's output feeds the next).
-10. **ADR**: `D-2026-09-27-a-screen-answers-per-item-a-distribution-refuses-by-name.md` — a choice
-    between options (drop / partial populations / refuse) and the boundary class, not a defect fix.
+---
 
-## Items
+## W4 — Knowledge graph in Postgres
 
-- [x] `science/calc/models.py`: `FailedMedium`, `FailedBond`, `failed` fields (defaulted).
-- [x] `compose.py`: `_attempt` helper; `bond_dissociation_survey` per bond; `solvent_comparison`
-      and `species_solvent_comparison` per medium (inside `one()`, so `gather` still propagates
-      outages); `species_ranking` try-all-then-refuse-by-name; the all-failed refusals; the
-      fewer-than-two-media wording.
-- [x] `activities.py`: summaries for the three screens name the failed count.
-- [x] `connector.yaml`: four descriptions.
-- [x] Tests (`tests/test_calc_ensembles.py`, `tests/test_calc_compose.py`, `tests/test_calc_jobs.py`),
-      driven through `FakeCalcServer.overrides` so a refusal arrives on the real wire path as
-      `CalcToolError`:
-  - [x] survey: one bond refused → other bond answered, `failed` names it with the server's reason,
-        `considered == bonds + failed`, warning says a failed bond may be weaker.
-  - [x] survey: every bond refused → `ValueError` naming each.
-  - [x] survey: an outage (`CalcServerError`) on one bond propagates, nothing is returned.
-  - [x] solvent screen: one medium refused → ranked over the rest, `failed == [FailedMedium]`.
-  - [x] solvent screen: only one medium left → no "does not distinguish" claim, says nothing to compare.
-  - [x] solvent screen: every medium refused → `ValueError`.
-  - [x] species screen: a species refused in one medium only → that medium in `failed`, others ranked.
-  - [x] ranking: one species refused → `ValueError` naming it; every other species was still relaxed,
-        and ranking the set without it relaxes nothing new.
-  - [x] ranking: two species refused → both named in one error.
-  - [x] ranking: `CalcBusyError` propagates as itself (stays retryable).
-  - [x] jobs: a survey job with a refused bond has a summary naming the failure.
-  - [x] wire: a payload without `failed` still validates.
-  - [x] mutation check: remove the boundary → the per-item tests go red.
-- [x] ADR + ledger row.
-- [x] `make lint type`, targeted tests, then full serial `make test` with Postgres up; report skips.
-- [x] Fresh-context subagent review (correctness; contract/wire/publish; docs-vs-code), fix findings.
-- [ ] PR, CI green, merge, delete branch.
+**Goal.** Postgres becomes the knowledge graph's system of record, and git becomes an export/audit
+mirror. This removes the cluster-wide git lock (~300 ms/note, ≈3 notes/s ceiling), the per-pod
+NetworkX copy (~5 kB/note/pod), the per-pod clone plus `reset --hard` sidecar, and the
+`note_index` second copy.
 
-## Review
+Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smaller files to move).
 
-Three fresh-context reviews (correctness; contracts and consumers; prose and tests), every finding
-reproduced before acting. What they changed, beyond the plan:
+- [ ] **W4.1 ADR** (in W0.5): Postgres is the system of record for notes, and git is a mirror.
+      Supersedes the git-write half of the layer-4 description, and keeps "Markdown with frontmatter"
+      as the **format**. Options: (a) keep git and batch, (b) Postgres plus a git mirror,
+      (c) a graph database. Recommendation (b): one store, existing backups, transactional writes,
+      and pgvector already sits beside it.
+- [ ] **W4.2 Schema** (`infra/sql/122_kg_notes.sql`):
+  - `kg_notes` (id, type, frontmatter JSONB, body text, created_by, valid_from, valid_to,
+    revision, content_sha, created_at);
+  - `kg_note_revisions` (append-only history, which replaces git log as the audit trail);
+  - `kg_edges` (src, rel, dst, valid_from, valid_to);
+  - indexes for type, rel, dst and the bi-temporal queries.
 
-- **Two CI blockers the local calc tests could not see**: the publish field guard (`failed` read by
-  no projector) and the context-floor ratchet (`rank_species` +77). Fixed by publishing each failed
-  item as its own flag, and by trimming the description sentences to 11-21 tokens before
-  re-recording three figures.
-- **The parent of a bond survey and a screen's equation are input, not items** — as items, a
-  refused parent was asked for once per bond. Computed/checked once, up front.
-- **A published record must not overstate a partial answer**: no spread/winner/swing from one
-  medium, no `weakest_bond` from a survey with a missing bond, and reasons in JSONB `detail`
-  because a flag message is `VARCHAR(2000)` at the sink.
-- **The ADR's own headline example was false** (the jobs' precondition refuses an unparameterised
-  solvent before launch) and its mutation counts were stale twice; both re-measured.
-- **Out of scope, filed**: the calc server's inline time budget refuses as a plain `ValueError`,
-  so a load-dependent stop is one item's failure. A server-side marker is a cross-repository
-  contract change — `BACKLOG.md` row.
-- Lesson: a count or example written into an ADR before its review round is written twice; measure
-  it last.
+  `note_index` (embeddings) gets a foreign key to `kg_notes` instead of being rebuilt from git.
+- [ ] **W4.3 Store interface.** `kg/store.py` with `NoteStore` (`put`, `get`, `related`,
+      `neighborhood`, `current_successor`, `search`) implemented by `PostgresNoteStore`, plus a
+      `GitNoteStore` adapter over today's `graph.py`/`git_writer.py` for the transition. Every reader
+      in the grep list (`agent/graph_tools`, `protocol_tools`, `retrieval/retrievers`,
+      `vector_index`, `durable/digest`, `hypothesis_tournament`, `memory/*`, `evals/retrieval`,
+      `cli/validate_kg`, …) moves to the interface first, with no behaviour change.
+- [ ] **W4.4 `kg/record.py` stays the one write path** and keeps its order (dependencies → subject
+      → retirements), now in **one transaction**. That gives the order a stronger guarantee than git
+      gave it.
+- [ ] **W4.5 Graph queries in SQL.** `related` and `current_successor` are indexed lookups;
+      `neighborhood(hops)` is a recursive CTE with a hop limit. Keep NetworkX only for the analytics
+      that need a whole-graph algorithm (`kg/analytics.py`, `hypotheses/`), loaded on demand in the
+      background worker and never per request.
+- [ ] **W4.6 Backfill and dual-write.** A `cli/kg_import` command loads the git corpus (42 notes
+      today) into Postgres. Under setting `kg_store=dual`, writes go to both, reads come from git,
+      and a nightly `kg-validate --compare` diffs the two.
+- [ ] **W4.7 Flip reads** (`kg_store=postgres`), then make **git the mirror**: a background job
+      exports changed notes as Markdown and pushes in batches (using the existing
+      `BatchingNoteWriter`, already measured at 8.5–31.6 ms/note). A push failure delays the mirror
+      and never a write.
+- [ ] **W4.8 Human edits.** A reviewed commit to the knowledge repo is imported by the same job
+      (git → Postgres on a fast-forward), so "corrected, not pre-approved" still works from git.
+      A conflict (both sides changed) is resolved by revision number and raises a `kg/conflicts`
+      entry.
+- [ ] **W4.9 Delete** the per-pod clone, `deploy/knowledge-sync.sh`, the init container and sidecar,
+      the advisory lock held across the push, the stat-fingerprint cache in `graph.py`,
+      `knowledge_sync_age_seconds` and its alert. Update the chart values (`knowledge.*`).
+- [ ] **W4.10 Validators.** `kg-validate` runs against the Postgres store (citation existence in one
+      query). The pure checks in `kg/validate.py` stay pure.
+- [ ] **W4.11 UI**: confirm that the read paths (note view, provenance links) go through the API
+      only, and adjust if anything reads a git URL.
+
+Exit (measured against W0):
+- Write throughput ≥50 notes/s with 4 concurrent writers.
+- Per-pod RSS independent of corpus size (±10 MB at 20k synthetic notes).
+- No git process on the request path.
+- `kg-validate --compare` is clean for 7 days before W4.9.
+
+Rollback: until W4.9, flip `kg_store` back to `git`; dual-write keeps git current.
+
+---
+
+## W5 — Agent core: own the builder, one mechanism per concern
+
+**Goal.** Stop fighting `create_deep_agent` (32 middlewares, 64 pinned private upstream shapes),
+then merge the parallel mechanisms that successive redesigns left (spend 3.1k LOC, context 4.5k,
+persistence 5.5k, authz 2.5k, skills 3.2k, plan 2.1k).
+
+Entry: W0 baselines (turn latency, middleware count). W1.10 `agent/` prose pass done. W2.8 event
+schema (so the UI cannot drift during the refactor).
+
+### Track A — The builder
+- [ ] **W5.1 Spike (time-boxed, one session): `create_agent` plus an explicit middleware list.** The
+      docstring in `langgraph_agent.py` names the two reasons for `create_deep_agent`:
+  - **filesystem `permissions=`**, reachable only through upstream's private `_permissions=`;
+  - **`subagents=`**, which controls the `task` roster.
+
+  The spike proves both without deepagents:
+  - **(a)** Own the filesystem tools through a first-party backend that enforces the permission
+    rules itself. `agent/skill_backend.py` already does this for skills, and `agent/scratchpad.py`
+    already withholds verbs.
+  - **(b)** Own the `task` tool: a ~150-line first-party delegation tool that compiles each helper
+    with `build_langgraph_agent`, so helpers *always* carry audit, authz and the plan gate. This
+    also removes the silent no-audit trap CLAUDE.md warns about.
+  - **(c)** Skills via `SkillsMiddleware` alone, or a first-party loader over the same three
+    predicates.
+
+  Go/no-go: all of `test_middleware_order`, `test_subagents`, `test_skill_*` and `test_handoff`
+  pass, and the W0 benchmark is equal or better.
+- [ ] **W5.2 ADR** (record the spike's result): own builder or stay on deepagents. If go:
+- [ ] **W5.3** Implement `agent/builder.py` behind `agent_builder=native|deepagents`. Delete
+      `disabled_summarizer`, the `_permissions=` re-pass, the `ReloadingSkillsState` channel
+      redeclaration and the `.name` splicing. Shrink `test_upstream_surface.py` to the public
+      LangChain/LangGraph surface still used. Target ≤15 root middlewares.
+- [ ] **W5.4 Build once per process, bind per turn.** Compile the graph once per (profile,
+      bundle-set) and inject the turn's connector sessions through `runtime.context` (LangGraph
+      `context_schema`) instead of closing over them, so a turn does not recompile. Keep the per-turn
+      build only for the narrowed helper surfaces if needed. Target: steady-state build cost
+      ≈0, TTFT −100 ms.
+- [ ] **W5.5 Import time.** Lazy-import heavy stacks (bofire/torch, rdkit) out of the API's import
+      path. Target: cold import of `chemclaw.api.app` ≤5 s (from 16.6 s), which also speeds up
+      every test process and pod start.
+
+### Track B — One mechanism per concern
+- [ ] **W5.6 Spend.** One `spend/` module holding:
+  - one ledger: the `TurnTotal` channel inside the turn, persisted at turn end (W3.4);
+  - one policy object with per-request, per-turn and per-actor/day limits;
+  - one middleware.
+
+  Merge `spend_cap`, `loop_cap`, `turn_cost`, `turn_cost_store`, `turn_usage`, `runner_usage` and
+  `api/budget` plus `budget_store` (9 files → ≤3). `context_budget.py` stays a context concern
+  (below), not a spend one.
+- [ ] **W5.7 Context.** One `context/` module and one middleware with ordered strategies: cap a tool
+      result at ingest (`tool_result_size`), clear old tool results, window the conversation, condense
+      as the last resort. Merge `compaction`, `condense`, `tool_result_size`, `context_budget`; keep
+      `tool_result_shape` as the shared result-rewriter. 4.5k → ≤2k LOC. The budget **derivation**
+      stops reading test constants: `PREFIX_BOUND` becomes a measured value written to
+      `data/` by a `make measure-prefix` target, and the test asserts the file is current.
+- [ ] **W5.8 Persistence.** The checkpointer is the **only** conversation store. `session_messages`
+      becomes a read projection rebuilt from checkpoints (or a SQL view if the shape allows).
+      Migrate the remaining MAF-shaped rows once (`cli/migrate_transcripts`), then delete
+      `message_migration.py` and the MAF compatibility in `session.py`. Merge `session_*` modules
+      (members, fork, events, queue, store) behind one `sessions/` package.
+- [ ] **W5.9 Authorization.** One `authz` decision function `decide(actor, tool, args, plan,
+      dry_run) -> Allow | Refuse(reason)` and one middleware, replacing the four gates
+      (`refuse_undeclared_writes`, `refuse_writes_on_dry_run`, `enforce_plan_approval`,
+      `enforce_tool_authz`). The audit row records the single decision. `api/auth.py` keeps
+      authentication only. Test: one table-driven test over the decision matrix.
+- [ ] **W5.10 Skills.** One `skills/` package: a single `SkillStore` with three tiers (repo, org,
+      mine) behind one interface, one access predicate, one manifest. 11 files → ≤4.
+- [ ] **W5.11 Plan.** One `plan/` package (state, scope, approval store, gate). 6 files → ≤3.
+- [ ] **W5.12 Rename leftovers.** `chemclaw_agent.py` → `profiles/surface.py` (it now only answers
+      "what tools and instructions does a profile have"). Remove the "ported from MAF" ordering
+      comments. `session.py` stops imitating MAF's `AgentSession`.
+- [ ] **W5.13 Split `api/runner.py`** (3k LOC, `run_turn` ≈570 lines) into stages: `open_surface`,
+      `stream`, `resume_on_jobs`, `verify`, `settle`. Each stage is a function with its own test,
+      and `run_turn` is the 30-line pipeline.
+- [ ] **W5.14 Delegation re-check.** With the native builder, re-run `make live-delegation`
+      (`D-2026-09-27`). If it still does not pay, ship `agent_helper_roster` **off** by default (its
+      surface stays available).
+
+Exit (against W0):
+- Root middlewares ≤15.
+- `agent/` LOC −35% (prose excluded).
+- `test_upstream_surface.py` ≤500 lines.
+- TTFT and turn latency equal or better.
+- Cold import ≤5 s.
+- No test removed without its behaviour being covered by a new one.
+
+Rollback: `agent_builder=deepagents` for one release; each Track B item is an internal refactor
+behind unchanged public tools and events (the W2.8 schema pins the events).
+
+---
+
+## W6 — Backend RPC, fleet delivery, release unit, CI
+
+**Goal.** Use plain RPC where MCP buys nothing, deploy the fleet the way core deploys, and give the
+three repos one release unit.
+
+Entry: W2 (contracts package holds the calc and rxnlabel models).
+
+### Track A — Backend RPC (mcp + core)
+- [ ] **W6.1 ADR** (in W0.5): backends (`mount: backend`: `calc`, `rxnlabel`) speak typed HTTP/JSON,
+      not MCP. Options: HTTP/JSON (pydantic), gRPC, keep MCP. Recommendation: HTTP/JSON. It needs
+      no new toolchain, and `connector_app` already owns auth, headers, metrics and egress.
+- [ ] **W6.2 mcp:** `mcp_server_kit` gains `rpc_routes(models)`: `POST /rpc/<op>` with bearer auth,
+      `X-Chemclaw-*` read per request (no session-context trick), the same metrics, body cap and
+      error sanitising. `calc` and `rxnlabel` serve both MCP and RPC for one release.
+- [ ] **W6.3 core:** `connectors/calc/remote.py` and the rxnlabel client move to a pooled `httpx`
+      client against `/rpc/*` behind `calc_transport=rpc|mcp`. Delete the per-call MCP session, the
+      `cancel_on_timeout` monkeypatch, and the `open_session` path for backends. Measure the
+      `calculation_key` round trip against W0.2.
+- [ ] **W6.4** Next release: remove MCP from `calc` and `rxnlabel` and drop
+      `manifests-internal/` (a backend no longer needs a manifest, because the contracts package
+      describes it).
+- [ ] **W6.5 Agent-facing MCP session cost.** Reuse a connector's MCP session across the turns of
+      one **session** where identity allows (an identity-scoped pool keyed by actor and connector,
+      with a TTL), instead of `initialize + list_tools` per connector per turn. Cache `list_tools` per
+      `contract_version`. Measure TTFT with 8 bound bundles.
+
+### Track B — Fleet delivery
+- [ ] **W6.6** `Chemclaw3-mcp/deploy/helm/chemclaw-fleet`: one library chart (Deployment, Service,
+      HPA, PDB, NetworkPolicy, ServiceMonitor, optional KEDA) and a `values.yaml` table of
+      ~15 lines per server. It replaces 83 files and 4.2k lines. The rationale comments live once,
+      in the templates.
+- [ ] **W6.7** Move `tests/test_deploy_shape.py` to run against `helm template` output (the same
+      assertions: egress deny + selector, liveness ≠ readiness, ports, ingress peers).
+- [ ] **W6.8** Core chart depends on the fleet chart as a subchart. `connectors.<name>.url`, port and
+      token secret are derived from one value per server, so they are declared once.
+- [ ] **W6.9** UI: replace `deploy/openshift/*.yaml` with a small chart (or a subchart of the
+      umbrella).
+- [ ] **W6.10 Umbrella release.** A `chemclaw-platform` chart (or a `releases/<env>.yaml` of image
+      digests plus chart versions) pins core, fleet and UI together. Semver applies to the API
+      (`openapi.json`), the event schema and `chemclaw-contracts`.
+
+### Track C — CI
+- [ ] **W6.11** One CI system for gating (GitHub Actions) and one for delivery (Jenkins:
+      build/publish/deploy only), stated in each repo. Remove the opt-in `RUN_GATE` duplication, and
+      make Jenkins' `Preflight` read the GitHub check status for the commit it builds.
+- [ ] **W6.12** Pin the shared Jenkins library (core's `build_and_push`) by tag in the fleet and UI.
+      Pin the UI's core checkout by release tag, never `main`.
+- [ ] **W6.13 Release gate.** The four-repo e2e (`infra/live/e2e-full-stack`) runs against the
+      **pinned digests** of a release file, from published images (a compose profile), with no
+      sibling checkouts.
+
+Exit:
+- `calc` cache-hit round trip ≤10 ms in-cluster (W0.2 baseline for comparison).
+- Fleet YAML ≤600 lines total.
+- One file says what is deployed in an environment.
+- The e2e runs from images alone.
+
+Rollback: `calc_transport=mcp` until W6.4; the chart migration is per environment.
+
+---
+
+## W7 — Missing capabilities
+
+**Goal.** Close the gaps the review found, now that the foundations (W3, W4, W6) exist.
+
+Entry: W3, W4 (lineage and tenancy touch KG tables), W6 (chart for backup jobs).
+
+### Track A — Retrieval quality
+- [ ] **W7.1** Make a semantic embedding provider the shipped default (`openai_compatible` through
+      the gateway, or a local model baked into an image for the air-gapped case). `hash` becomes an
+      explicit dev/test choice, and the chart **refuses to render** a release with `hash` unless
+      `allowNonSemanticEmbeddings: true`.
+- [ ] **W7.2** Make the vector width configurable: a migration that creates the column from a setting
+      (`embedding_dimensions`), and a re-embed job (Temporal, resumable, batched) for a model change.
+      Record the model and dimensions per row so mixed corpora are detected.
+- [ ] **W7.3** Retrieval eval in CI: the existing `evals/retrieval` harness on the committed corpus
+      with a recall@k floor, run with the real provider in the live lane.
+
+### Track B — Multi-tenancy
+- [ ] **W7.4 ADR**: the tenancy model. Options: (a) deployment-per-tenant (today, documented and
+      chart-guarded), (b) a `tenant_id` column plus Postgres RLS within one deployment,
+      (c) schema-per-tenant. Recommendation: (b) for data plus (a) as the option for regulated
+      separation. Revisit if a tenant needs separate encryption keys.
+- [ ] **W7.5** If (b): `tenant_id` on every table (migration with a default tenant), RLS policies,
+      the tenant set per connection from the authenticated principal (`SET app.tenant`), the KG
+      (`kg_notes`) and the vector stores included, and a cross-tenant leak test over every API route.
+- [ ] **W7.6** Whatever the option: a chart guard that two releases do not share a database without
+      tenancy (the gap CLAUDE.md says "no chart guard can check" — a startup check of a `deployment_id`
+      row in the database can).
+
+### Track C — Operability
+- [ ] **W7.7 Backup and PITR.** Document and template it: a CloudNativePG `Cluster` (or the site's
+      operator) with WAL archiving and scheduled base backups, and a **restore drill** Make target that
+      restores to a scratch namespace and runs `kg-validate` plus row counts. Include Temporal's own DB
+      and the git mirror.
+- [ ] **W7.8 Lineage.** One `lineage` table, or a `provenance` JSONB on each record, joining
+      KG note ↔ `calculation_results.key` ↔ published sink record id ↔ turn/session id. Written by
+      `kg/record.py`, `cached_compute` and `publish/`; one API route answers "where did this number
+      come from".
+- [ ] **W7.9 Config profiles.** Group the 540 settings into documented profiles (`dev`, `pilot`,
+      `production`, `airgapped`) selected by one `CHEMCLAW_PROFILE`, so a deployment overrides tens
+      of values, not hundreds. Delete settings that no deployment has ever changed (grep chart values,
+      `.env.example` and the docs). Target ≤200 fields. Split Helm `values.yaml` (2.2k lines) the
+      same way.
+- [ ] **W7.10 Retry policy.** An explicit `RetryPolicy` per activity class (calc, I/O, publish) in
+      one module, instead of SDK defaults at 68 of 76 activities.
+
+### Track D — UI auth
+- [ ] **W7.11 Token handler in the BFF.** The `server/` BFF does the auth-code + PKCE exchange, holds
+      tokens server-side, and gives the browser an `HttpOnly; Secure; SameSite=Strict` session cookie.
+      Requests to the backend get the bearer injected by the BFF. This closes UI ISSUES.md #8
+      (tokens in the browser; silent refresh relies on third-party cookies). Needs a small session
+      store (Postgres or the BFF's own). MSAL stays only for the login redirect, or goes.
+- [ ] **W7.12** Close the remaining UI issues that are architectural: #12 (a job's ending dies with
+      the tab; use server-side job subscription, which the W3.6 fan-out provides) and #22
+      (shared-session turn queueing; use W3.2 leases).
+
+Exit:
+- The retrieval eval passes on the semantic provider.
+- A tenancy decision is implemented and leak-tested.
+- A restore drill has run green.
+- One query answers lineage.
+- No token in browser storage.
+
+Rollback: per item. W7.5 ships with a single default tenant, so it is inert until a second tenant
+exists.
+
+---
+
+## W8 — Decomposition, dead-code sweep, final measurement
+
+**Goal.** Clean up what the earlier waves leave, and prove the programme paid.
+
+- [ ] **W8.1 Large files.** Split anything still over ~800 LOC (code, not prose) along
+      responsibilities: `connectors/calc/compose.py` (3.4k), `durable/hypothesis_tournament.py`
+      (2.5k), `publish/project.py` (2.3k), `durable/retention.py` (2.1k), `core/metrics.py` (2k,
+      split per subsystem with one registry), `core/logging.py` (1.8k; redaction becomes its own
+      module).
+- [ ] **W8.2 CLI.** Move the live/storm/bench harnesses (`cli/live_storm.py` etc., much of `cli/`'s
+      15k LOC) out of the product package into `tools/` or `infra/live/`, outside the image.
+- [ ] **W8.3 Vestiges.** Delete the remaining prose references to removed systems (PR-gate 57,
+      MAF 79, HPC 13, `reject_widening`, challenge panel, GxP) where they describe absence. Keep
+      `publish/project.py::_dft` only if `calculation_results` still holds `dft` rows (query
+      production; if none, delete).
+- [ ] **W8.4 Dead code.** `vulture` plus coverage over the suite and the live lane. Delete what
+      neither reaches, one package per PR.
+- [ ] **W8.5 Final measurement.** Re-run W0.1/W0.2, commit
+      `data/evals/baselines/architecture-<date>.json` and a short review section below: every exit
+      criterion with before and after.
+- [ ] **W8.6** Update `docs/decisions/CURRENT.md`, the three CLAUDE.md files and `ARCHITECTURE.md`
+      to the end state. Close the programme issues.
+
+Exit: the review table below is filled in, with every row measured.
+
+---
+
+## Cross-cutting rules for every wave
+
+- **One repo, one PR, one concern.** No PR mixes a refactor with a behaviour change.
+- **Gate:** `make lint type test` green **with Docker/Postgres/Temporal up**, and the skip count
+  reported. In mcp, `make check`; in the UI, lint, vitest and Playwright.
+- **Behaviour-neutral refactors prove it**: the W0 turn benchmark within noise, and the event
+  stream for the 3 canned turns byte-identical (modulo ids and timestamps).
+- **Feature flags have an owner and a removal item**, in the next wave at the latest.
+- **Data migrations are forward-only and two-phase** (expand, migrate, contract over two releases),
+  per the repo's existing no-down-path rule.
+- **No new prose debt**: a docstring states what and why; the history goes in the commit.
+
+## Risks
+
+| Risk | Wave | Mitigation |
+| --- | --- | --- |
+| Knowledge-store cutover loses or diverges notes | W4 | Dual-write, nightly compare, 7 clean days before deleting git reads, git mirror kept forever. |
+| The native builder loses a security property deepagents gave | W5 | Spike with go/no-go on the existing authz, subagent, skill and handoff tests. Helpers compiled by our builder always carry audit and authz, which is stricter than today. |
+| The prose cut removes knowledge someone needed | W1 | History moves to commit messages and ADRs, never just deleted. `CURRENT.md` is reviewed by a human. |
+| Contract versioning blocks releases | W2/W6 | Minor mismatch warns, only major refuses. The umbrella release pins all three. |
+| Tenancy retrofit misses a table | W7 | Migration test that every table except an allowlist has `tenant_id` and an RLS policy. Leak test over all routes. |
+| Parallel sessions collide | all | One issue per wave track as the claim. Tracks own disjoint files. |
+
+## Review (filled in at W8.5)
+
+| Metric | Baseline (W0) | Target | Result |
+| --- | --- | --- | --- |
+| CLAUDE.md lines (core / mcp) | 532 / 671 | ≤150 / ≤150 | |
+| `src/` prose ratio | 59% | ≤30% | |
+| Gate wall time | 18:13 | ≤10 min | |
+| Cold import `chemclaw.api.app` | 16.6 s | ≤5 s | |
+| Per-turn graph build (steady) | 0.08–0.12 s | ≈0 | |
+| Root middlewares | 32 | ≤15 | |
+| KG write throughput | ≈3 notes/s | ≥50 notes/s | |
+| KG RSS per pod at 20k notes | ≈100 MB | ≈0 (corpus-independent) | |
+| Duplicated manifests | 8 | 0 | |
+| Hand-written UI API types (lines) | ≈3.4k | 0 | |
+| Fleet k8s YAML lines | 4.2k | ≤600 | |
+| `calc` cache-hit round trip | W0.2 | ≤10 ms | |
+| Settings fields | 540 | ≤200 | |
+| Background worker replicas | 1 (pinned) | ≥2 | |
+| Per-process limits/correctness state | 6+ | 0 | |
