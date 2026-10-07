@@ -39,7 +39,7 @@ derives two halves of it from the live tree rather than asserting either:
   way production crosses it") with the crossing *found* instead of assumed.
 
 Flagged sites are argued in `_ARGUED`, held in both directions so an entry that stops being flagged
-fails too — the same shape as `tests/test_claude_md_figures.py`. A flag is not a verdict: most of
+fails too — the same shape as a figure check. A flag is not a verdict: most of
 these are fine, and the entry says why.
 
 **The scope is `tests/` only, and that is a decision rather than an oversight.** `src/` holds dozens

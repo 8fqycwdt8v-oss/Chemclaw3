@@ -8,7 +8,7 @@
 This is a soundness filter, not a check that a reaction is real: any fabrication built from the
 inputs' elements passes (`aniline + methanol >> paracetamol`). A transcription is trusted because a
 source system recorded it. Stronger checks need data the exports lack; see
-`docs/planning/DEFERRED.md`.
+`docs/planning/BACKLOG.md`.
 
 Returns a list of human-readable problems (empty = valid).
 """

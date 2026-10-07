@@ -12,7 +12,7 @@ graph on disk, where any existing note id would pass. Two backends behind one co
 `ungrounded_parameter_shapes` and `promised_uncalled_tools` are deterministic scans of the finished
 text for failures prompting does not prevent. `score_answer` combines the checks. Nothing here acts
 on a verdict: a low-confidence answer is delivered marked, not withheld (withholding is a
-`DEFERRED.md` row).
+`BACKLOG.md` row).
 """
 
 import asyncio

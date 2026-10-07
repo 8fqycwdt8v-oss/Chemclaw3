@@ -464,7 +464,7 @@ _OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str] | None] = {
     # same set as `_SESSION_SCOPED_ROWS`.
     "session_messages": ("session_messages", "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS"),
     # `None`: what blocks here is the *unconsumed* events, which no window prunes, so there is no
-    # knob to name. `docs/planning/DEFERRED.md` tracks it.
+    # knob to name. `docs/planning/BACKLOG.md` tracks it.
     "session_events": None,
     "tool_result_links": ("tool_result_blobs", "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS"),
     "session_exhibits": ("session_exhibits", "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS"),

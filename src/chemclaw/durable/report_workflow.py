@@ -135,7 +135,7 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
 
     A registered activity name is a wire name: an in-flight history that scheduled `propose_report`
     fails forever on a worker that no longer offers it. Delete once `background-jobs` has drained
-    (trigger in `docs/planning/DEFERRED.md`). The signature, including `correlation_id`, matches so
+    (trigger in `docs/planning/BACKLOG.md`). The signature, including `correlation_id`, matches so
     the interceptor binds ids the same way.
     """
     return await record_report_note(report, requested_by, correlation_id)

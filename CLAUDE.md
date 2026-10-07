@@ -68,8 +68,8 @@ when a decision turns on a difference inside xTB's error bar, say so and propose
 - The gate: `make lint` · `make type` (`mypy --strict`) · `make test` · `make check` (all three)
   · `make cov` (with the coverage floor) · `make ci` (everything CI runs, incl. the validators).
   A step is done only when its acceptance check passes and `make lint type test` is green.
-- `make test` is serial; `PYTEST_WORKERS=4` is a faster local opt-in, and a failure under it is
-  re-run serially before it is believed.
+- `make test` runs on 4 xdist workers (`PYTEST_WORKERS`, `0` for serial); a failure seen only in
+  parallel is re-run serially before it is believed.
 - Single test: `uv run pytest path/to/test_file.py::test_name` or `-k "substring"`.
 - Running things: `make up` (Postgres/pgvector + Temporal) · `make db-migrate` · `make connectors`
   · `make chat`.

@@ -5,7 +5,7 @@ baseline, and pushes any metric outside the relative noise band to a system chan
 
 The committed case-set is deterministic, so this is a deployment-consistency tripwire: it fires
 only when baseline, code and cases were committed inconsistently. Runtime quality drift needs a
-live-graph eval, which is deferred (docs/planning/DEFERRED.md). Scoring is pure and lives in
+live-graph eval, which is deferred (docs/planning/BACKLOG.md). Scoring is pure and lives in
 `chemclaw.evals.baseline`; this file is only the Temporal shell.
 """
 

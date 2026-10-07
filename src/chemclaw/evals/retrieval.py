@@ -7,7 +7,7 @@ pinned number. The gold set includes a query the literal substring filter cannot
 that limitation rather than hiding it.
 
 Only `GraphRetriever` is scored: the vector and lexical legs and RRF fusion need a derived index
-over this fixture in Postgres (a `DEFERRED.md` row). When a deployment enables those paths, the
+over this fixture in Postgres (a `BACKLOG.md` row). When a deployment enables those paths, the
 metrics refuse to report rather than mislabel a graph-only number, and every provenance string names
 the retriever.
 """
@@ -127,7 +127,7 @@ def _require_scoreable_retrieval() -> None:
     raise MetricError(
         f"this metric scores {_SCORED_RETRIEVER} only, but {reason} means the deployment retrieves "
         "differently — scoring the fused/derived path needs the note index built over the eval "
-        "corpus (see DEFERRED.md, live-retriever drift). Refusing rather than reporting a "
+        "corpus (see BACKLOG.md, live-retriever drift). Refusing rather than reporting a "
         "graph-only figure under this name."
     )
 

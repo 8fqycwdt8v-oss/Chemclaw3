@@ -53,8 +53,8 @@ class StoreSettings(BaseSettings):
     pg_migration_lock_wait_seconds: float = Field(default=300.0, gt=0)
     # Per-process connection pool (`chemclaw.core.db.pooling`). `min_size` is the warm floor;
     # `max_size` bounds one pool, and a process holds one pool per distinct `(dsn, libpq options,
-    # max_size)` key. A call site may narrow its pool with `db.connection(pool_max_size=...)`. The
-    # deployment total is `Settings.fleet_connections_per_server`.
+    # max_size)` key. A call site may narrow its pool through `db.connection`'s pool-size argument.
+    # The deployment total is `Settings.fleet_connections_per_server`.
     pg_pool_min_size: int = Field(default=2, ge=0)
     pg_pool_max_size: int = Field(default=16, gt=0)
     # The fleet connection budget. `pg_fleet_pools` is the number of pools the fleet opens (the

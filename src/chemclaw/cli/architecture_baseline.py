@@ -84,6 +84,8 @@ def _agent_build() -> dict[str, Any]:
     )
 
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.turn_ambient import turn_caps
+    from chemclaw.agent.turn_usage import TurnUsage
 
     class _Model(GenericFakeChatModel):
         def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
@@ -101,7 +103,8 @@ def _agent_build() -> dict[str, Any]:
         timings = []
         for _ in range(4):
             start = time.perf_counter()
-            build_langgraph_agent(_Model(messages=iter([])))
+            with turn_caps(TurnUsage()):
+                build_langgraph_agent(_Model(messages=iter([])))
             timings.append(round(time.perf_counter() - start, 3))
     finally:
         deep_graph.create_agent = original

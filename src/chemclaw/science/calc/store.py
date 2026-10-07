@@ -410,7 +410,7 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
 
 
 #: Computations in flight by key, per event loop (an `asyncio.Future` belongs to one): a second
-#: miss awaits the first. Cross-process dedup is deferred (`docs/planning/DEFERRED.md`).
+#: miss awaits the first. Cross-process dedup is deferred (`docs/planning/BACKLOG.md`).
 _Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
 _IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
 
