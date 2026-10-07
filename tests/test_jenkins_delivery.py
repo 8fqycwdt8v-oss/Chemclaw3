@@ -1,23 +1,15 @@
 """The delivery pipelines describe this repository; these are the halves a file can check.
 
-A Jenkinsfile cannot be run here — there is no controller, no registry and no cluster — so the
-temptation is to check nothing and call the pipeline "prepared". That is exactly the shape this
-repository keeps finding and removing: a control that exists, is described in the present tense,
-and is never exercised (`mcp_servers/calc/` asserted deleted across four ADRs while still
-dispatchable; `audit_events.agent` empty on every row ever written).
+A Jenkinsfile cannot run here, but every claim the pipelines make about this tree can be checked
+offline:
 
-What *is* checkable offline is every claim the pipelines make about **this tree**:
+- each `make` target they invoke exists;
+- each script they call exists and parses;
+- the deploy path passes a digest rather than a tag, the property `values.yaml` builds its release
+  knob around;
+- `DRY_RUN` defaults to true, so a first run mutates nothing.
 
-- a `make` target they invoke exists (the pipeline's own `make ci` was the drift that D-117 found
-  in the GitHub workflows, in the other direction);
-- a script they call exists and parses;
-- the deploy path passes a **digest** rather than a tag, which is the one property
-  `deploy/helm/chemclaw/values.yaml` builds its release knob around;
-- `DRY_RUN` defaults to true, because a delivery pipeline whose first run mutates a namespace is
-  one nobody can safely try.
-
-Deliberately not checked: whether any of it works against a cluster. Nothing here can know that, and
-`deploy/jenkins/README.md` says so in the file rather than implying otherwise by testing around it.
+Whether any of it works against a cluster is not checked, and `deploy/jenkins/README.md` says so.
 """
 
 import re
@@ -83,11 +75,8 @@ def test_the_shell_halves_parse() -> None:
 def _shell_as_the_shell_receives_it(block: str) -> str:
     r"""Resolve a Groovy GString to the text bash is actually handed.
 
-    Three substitutions, and each is a real difference rather than a formality. `${...}` is
-    interpolated by Jenkins before the shell sees anything. `\${...}` and `\$(...)` reach the shell
-    verbatim — that escape is how a pipeline writes a *shell* variable inside an interpolated
-    string, and getting it backwards is the most common way one of these files breaks. A `\\` at
-    end of line reaches it as the single backslash that makes a line continuation.
+    `${...}` is interpolated by Jenkins; `\${...}` and `\$(...)` reach the shell verbatim (how a
+    pipeline writes a shell variable); a `\\` at end of line reaches it as a line continuation.
     """
     resolved = re.sub(r"(?<!\\)\$\{[^}]*\}", "PLACEHOLDER", block)
     return resolved.replace("\\$", "$").replace("\\\\", "\\")
@@ -98,12 +87,10 @@ def _parses_as_shell(script: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_every_shell_block_in_the_pipelines_parses() -> None:
-    """The one thing that can be executed about a pipeline nobody here can run.
+    """Every shell block in the pipelines parses.
 
-    A Jenkinsfile is checked by no compiler and no linter in this repository, and its shell bodies
-    are strings — so an unbalanced quote, or a `||` left on its own line by a lost continuation, is
-    invisible until a run, against a registry, on the way to a namespace. `bash -n` costs
-    milliseconds and speaks about the text the shell is handed rather than the text in the file.
+    The shell bodies are strings no linter here checks, so `bash -n` over the text the shell
+    receives catches an unbalanced quote or a lost continuation before a run.
     """
     checked = 0
     for pipeline in _PIPELINES:
@@ -124,12 +111,10 @@ def test_every_shell_block_in_the_pipelines_parses() -> None:
 
 
 def test_the_cluster_target_deploys_bytes_rather_than_a_pointer() -> None:
-    """`image.digest` is the chart's release knob; a tag would reintroduce the hole it closed.
+    """The cluster target deploys a digest rather than a tag.
 
-    `values.yaml` ignores `image.tag` entirely when a digest is set, because `helm rollback` to a
-    release naming a re-pushed tag fetches bytes nobody reviewed, and every audit record stamps a
-    build revision that stops being answerable at the same moment
-    (D-2026-08-01-a-tag-is-a-pointer-not-a-build).
+    `values.yaml` ignores `image.tag` when a digest is set, because a rollback to a re-pushed tag
+    fetches unreviewed bytes and breaks the build revision audit records stamp.
     """
     target = (_JENKINS_DIR / "targets" / "openshift.sh").read_text(encoding="utf-8")
     assert "image.digest" in target, "the helm path no longer sets image.digest"
@@ -140,11 +125,10 @@ def test_the_cluster_target_deploys_bytes_rather_than_a_pointer() -> None:
 
 
 def test_a_release_states_its_egress_posture() -> None:
-    """An unstated posture renders `to: []`, which a NetworkPolicy reads as every destination.
+    """A release states its egress posture.
 
-    The chart refuses to render without one
-    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
-    The target must refuse too rather than quietly supplying the permissive answer to get past it.
+    An unstated posture renders `to: []`, which a NetworkPolicy reads as every destination; the
+    chart refuses to render, and the target must not supply the permissive answer to get past it.
     """
     target = (_JENKINS_DIR / "targets" / "openshift.sh").read_text(encoding="utf-8")
     assert "ALLOW_ANY_EGRESS_DESTINATION" in target, (
@@ -177,14 +161,11 @@ def test_the_release_job_refuses_a_tag_where_a_digest_belongs() -> None:
 
 
 def test_every_free_text_release_parameter_is_allowlist_validated() -> None:
-    """Free-text parameters are interpolated into `sh`, so each must be allowlisted before use.
+    """Every free-text release parameter is allowlist-validated before any `sh` sees it.
 
-    A `string(...)` parameter can hold any text, and both pipelines interpolate several of them
-    (`${params.IMAGE_REGISTRY}`, `${params.NAMESPACE}`, ...) into `sh` blocks and image refs, where
-    a shell metacharacter would run on the agent (CWE-78). The choice/boolean parameters cannot —
-    Jenkins fixes their values. So the invariant, for *each* pipeline: every free-text parameter is
-    checked against a conservative allowlist in a `Validate parameters` stage, before any `sh` sees
-    it. A new free-text parameter that skips the stage fails this test, not the next release.
+    `string(...)` parameters are interpolated into `sh` blocks, where a metacharacter would run on
+    the agent (CWE-78); choice and boolean parameters are fixed by Jenkins. A new free-text
+    parameter that skips the `Validate parameters` stage fails here.
     """
     for pipeline in _PIPELINES:
         text = pipeline.read_text(encoding="utf-8")
@@ -205,9 +186,8 @@ def test_every_free_text_release_parameter_is_allowlist_validated() -> None:
 def _fleet_workloads(checkout: Path) -> dict[str, set[str]]:
     """Every Deployment `Chemclaw3-mcp` creates, mapped to the container names inside it.
 
-    Read off the sibling's own manifests rather than restated here, for the reason the whole of
-    this wave's fleet-seam work rests on: a name this repository writes down for an object another
-    repository creates is a claim about that repository, and the only evidence about it is there.
+    Read off the sibling's own manifests, since a name for another repository's object is a claim
+    only that repository can confirm.
     """
     import yaml
 
@@ -223,11 +203,8 @@ def _fleet_workloads(checkout: Path) -> dict[str, set[str]]:
     return workloads
 
 
-#: A component descriptor's `deployment:` value, and the `container:` beside it.
-#:
-#: Both pipelines and the README write the pair within a few tokens of each other, in Groovy
-#: (`deployment: "chemclaw-mcp-${name}", container: 'server'`) and in JSON (`"deployment": "…",
-#: "container": "…"`). One pattern reads both because the question is the same in either syntax.
+#: A component descriptor's `deployment:` value and the `container:` beside it, in either the Groovy
+#: or the JSON spelling the pipelines and README use.
 _COMPONENT_PAIR = re.compile(
     r"""["']?deployment["']?\s*:\s*["']([^"']*mcp-[^"']*)["']\s*,\s*"""
     r"""["']?container["']?\s*:\s*["']?([A-Za-z0-9_${}-]+)["']?""",
@@ -244,21 +221,11 @@ def _declared_fleet_workloads() -> dict[str, tuple[str, str]]:
 
 
 def test_a_release_patches_a_fleet_workload_that_exists() -> None:
-    """The release descriptor names objects in another repository, so measure them there.
+    """A release patches a fleet workload that exists.
 
-    `Jenkinsfile.release` built every MCP component as `deployment: "chemclaw3-mcp-${name}",
-    container: name` — and the fleet's Deployments are `chemclaw-mcp-<name>` with the container
-    called `server` in all seven. So a release patching image digests targeted a Deployment that
-    does not exist and, inside it, a container that does not exist either. The image reference on
-    the next line was already spelled correctly, which is precisely what made the mismatch
-    invisible to a reader: two adjacent lines, one right, one wrong, about the same server.
-
-    This is the third place one repository wrote down a name the other owns — after the chart's
-    five `chemclaw3-mcp-*` addresses and its own prose asserting the rule those five broke — which
-    is why it is checked rather than corrected and left to drift again.
-
-    **A skip is not a pass**: with no fleet checkout this asserts nothing and says which pairs it
-    therefore did not check.
+    The fleet's Deployments are `chemclaw-mcp-<name>` with a container called `server`, and a
+    release naming anything else patches nothing. Checked against the sibling checkout; with none,
+    this asserts nothing and says which pairs it did not check.
     """
     declared = _declared_fleet_workloads()
     assert declared, (
@@ -300,18 +267,11 @@ def test_a_release_patches_a_fleet_workload_that_exists() -> None:
 
 
 def test_a_chartless_component_says_what_a_release_could_not_do(tmp_path: Path) -> None:
-    """`oc set image` failing on a missing Deployment reads as a broken cluster. It is not.
+    """A chartless component says what a release cannot do to it.
 
-    Two of the four repositories this release descriptor deploys — `Chemclaw3_ui` and every
-    `Chemclaw3-mcp` server — describe themselves with an image and a NetworkPolicy and no chart, so
-    the honest maximum a release can do to them is change their bytes. What that means in practice
-    is invisible at the moment it bites: an operator sees `Error from server (NotFound)` and reads
-    it as somebody having deleted the Deployment, rather than as the shape of this kind of
-    component, which cannot be *created* from a release at all.
-
-    Driven rather than grepped, with a `oc` on PATH that refuses exactly the way a real one does,
-    because the property under test is what an operator sees on the failing path — and the shipped
-    function reached that path with nothing of its own to say.
+    `Chemclaw3_ui` and the `Chemclaw3-mcp` servers ship an image and a NetworkPolicy but no chart,
+    so a release can only change their bytes, not create them; a `NotFound` must say so rather than
+    read as a deleted Deployment. Driven with a fake `oc` on PATH that refuses as a real one does.
     """
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

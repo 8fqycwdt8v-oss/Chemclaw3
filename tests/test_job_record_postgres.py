@@ -1,9 +1,7 @@
-"""Integration tests for the durable job-record store (D-157, `infra/sql/023_job_records.sql`).
+"""Integration tests for the durable job-record store (`infra/sql/023_job_records.sql`).
 
-Runs against a real database (CI provides Postgres; the offline sandbox has none, so these skip).
-What is proven here is what only a database can prove: the round-trip keeps the nested result JSON
-intact, a re-run of the same job id updates its row rather than forking it, and the search finds a
-past run by the words a chemist would actually remember — the *reason* it was run.
+Against a real database (skips without one): the nested result JSON round-trips, a re-run of the
+same job id updates its row rather than forking it, and search finds a past run by its reason.
 """
 
 import asyncio
@@ -130,24 +128,14 @@ async def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
 
 
 def test_the_search_is_a_substring_search_and_the_index_serves_that_predicate() -> None:
-    """What `081` accelerated, and the semantics it must not have changed.
+    """The search is a substring search, and the trigram indexes serve that predicate.
 
-    `_SEARCH` is a leading-wildcard `ILIKE` over `rationale`, `summary` and `job`, and the agent
-    calls it. A leading wildcard is unindexable by a btree, so a term that matches *nothing* reads
-    the whole table while holding one of `pg_pool_max_size` connections: measured at 500 000 rows
-    through psycopg with the shipped statement, 1 036 ms and 19 920 buffers, against 1.09 ms once
-    `gin_trgm_ops` indexes are present — and 0.89 ms either way for a term that hits, because the
-    `completed_at` index lets a hit stop early. That asymmetry is why nothing ever saw this: an
-    agent inventing a phrase produces the miss, and every test and demo produces the hit.
-
-    **Trigrams accelerate the same predicate; a `tsvector` would answer a different question.** The
-    docstring of `search_job_records` promises words looked for *in* the reason, the summary or the
-    job name, and the four cases below are what that means and what a stemmed, `websearch`-widened
-    rewrite would break: a match inside a word, a phrase that must be contiguous, case
-    insensitivity, and a two-word query that is not two independent terms. They are asserted
-    against the live statement rather than against a plan, because a plan at fixture scale is a
-    sequential scan whatever indexes exist — so the index itself is checked in the catalog, where
-    the fact is scale-free.
+    `_SEARCH` is a leading-wildcard `ILIKE` over `rationale`, `summary` and `job`, which a btree
+    cannot serve, so a miss would scan the table holding a pool connection; `gin_trgm_ops`
+    accelerates the same predicate. The four cases pin the semantics a `tsvector` rewrite would
+    break: a match inside a word, a contiguous phrase, case insensitivity, and a two-word query that
+    is not two terms. The index is checked in the catalog, since a fixture-scale plan is a
+    sequential scan regardless.
     """
 
     async def _run() -> tuple[list[list[str]], set[str]]:
@@ -209,13 +197,10 @@ async def test_an_unknown_job_id_reads_as_absent_rather_than_raising() -> None:
 
 
 async def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() -> None:
-    """A row must not carry run 2's reason beside run 1's name (review of D-157).
+    """A second run under one id does not keep the first run's attribution.
 
-    Reachable, and on exactly the horizon this table exists for: once Temporal has expired an
-    execution, the identical payload derives the same workflow id, runs again, and upserts. The
-    first version of the upsert refreshed `rationale`, `summary` and `result` but not
-    `requested_by`/`session_id`/`correlation_id`, so the row said Bob's question was asked by
-    Alice — the worst possible answer for the field an audit joins on.
+    After Temporal expires an execution, the identical payload re-derives the same id and upserts,
+    so `requested_by`, `session_id` and `correlation_id` must be refreshed with the rest.
     """
     sink = await _sink_or_skip()
     first = _CAMPAIGN.model_copy(
@@ -252,19 +237,11 @@ async def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attributio
 
 
 async def test_a_second_failed_template_run_states_its_own_steps_and_not_the_first_runs() -> None:
-    """The same splice again, through the columns the *failure* upsert refused to refresh.
+    """A second failed template run states its own steps, not the first run's.
 
-    `_MUTABLE` closed this for `requested_by`; the result-column exclusion reopened it for the one
-    kind of failure record that carries a result. `connector_job.failed_job_record` fills none of
-    the five, which is what the exclusion protects — but `template_job.failed_template_record`
-    fills `result` and `payload_kind` on purpose, because "a five-step procedure that died at step
-    four ran four real steps, and discarding them would lose the work". `TemplateWorkflow` launches
-    under `ALLOW_DUPLICATE_FAILED_ONLY`, so re-running a failed template is the ordinary case, and
-    the surviving row said run 2's actor and run 2's failing step beside run 1's step results —
-    read back by `find_past_jobs`, `operations.job_activity` and the evidence pack alike.
-
-    Both halves are asserted, because either alone is satisfiable by the wrong statement: the
-    second run's steps must land, and the first run's must be gone.
+    `template_job.failed_template_record` deliberately fills `result` with the steps that ran, and
+    failed templates are re-run under `ALLOW_DUPLICATE_FAILED_ONLY`, so the failure upsert must
+    refresh them. Both halves asserted: the second run's steps land and the first run's are gone.
     """
     sink = await _sink_or_skip()
     first = JobRecord(
@@ -301,13 +278,11 @@ async def test_a_second_failed_template_run_states_its_own_steps_and_not_the_fir
 
 
 async def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() -> None:
-    """And the protection the exclusion was built for, which the record-shaped test must keep.
+    """A failure that produced nothing never erases a landed result.
 
-    `connector_job._record_run` can commit and then overrun its own timeout, leaving a completed
-    row behind while the workflow believes there is none — so the failure record it then writes
-    lands on top of the science. `failed_job_record` fills none of the five result columns, so it
-    must refresh none of them. Asserted beside the test above because the two are the same
-    decision read from opposite ends, and a fix for one that broke the other would look green.
+    `_record_run` can commit and then overrun its timeout; `failed_job_record` fills none of the
+    five result columns, so it must refresh none. The same decision as the test above, from the
+    other end.
     """
     sink = await _sink_or_skip()
     await sink.record(_CAMPAIGN.model_copy(update={"job_id": "pg-failure-over-result-1"}))
@@ -332,17 +307,10 @@ async def test_a_failure_that_produced_nothing_still_never_erases_a_landed_resul
 
 
 async def test_a_capped_search_says_it_was_capped_and_can_be_paged_past() -> None:
-    """The retrospective view answered "have we run this before?" over the newest page, silently.
+    """A capped search says it was capped and can be paged past.
 
-    `job_record_search_limit` bounds the answer and nothing said so: measured against this table
-    with 25 matching rows and the shipped cap of 20, `search_job_records` returned 20 with no
-    total, no flag and no cursor, so the 21st-oldest matching campaign was invisible — against a
-    tool whose stated purpose is not paying twice for a run that already happened.
-
-    Two claims here, and both are the fix: a full page says the count is a **floor**, and `after`
-    reaches what the page cut off. The keyset is the last row's own `job_id`, so the page boundary
-    is a *row* rather than an offset — rows are only ever appended to this table, but a listing
-    counted in rows would still repeat and skip if two runs land in one `now()`.
+    A full page says its count is a floor, and `after` reaches what it cut off. The keyset is the
+    last row's `job_id`, so two runs landing in one `now()` are neither repeated nor skipped.
     """
     sink = await _sink_or_skip()
     for i in range(25):
@@ -398,14 +366,10 @@ async def test_a_search_that_fits_is_not_reported_as_truncated() -> None:
 async def test_the_record_is_built_from_the_columns_by_name_and_not_by_their_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reversing the SELECT list must change nothing about the record it returns.
+    """The record is built from the columns by name, not by their order.
 
-    This was nineteen `row[n]` subscripts restating `_SELECT_ONE`'s order a second time in Python,
-    over a projection whose first five columns and whose `note_id`/`payload_kind`/`state`/
-    `failure_reason` are all `TEXT` — so an edit to the column list moved every value one field
-    along, type-checked, and returned a record that reads as a record. `class_row` passes each
-    column as a keyword argument, which is what this test drives: the same row, read through a
-    deliberately hostile column order, must be the same `JobRecord`.
+    Many projected columns are `TEXT`, so positional reads would shift values silently. `class_row`
+    passes each column as a keyword; a hostile column order must yield the same `JobRecord`.
     """
     from chemclaw.durable import job_record_store
 
@@ -430,11 +394,10 @@ async def test_the_record_is_built_from_the_columns_by_name_and_not_by_their_ord
 async def test_a_column_the_record_has_no_field_for_is_an_error_at_the_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`JobRecord` is `extra="forbid"`, so the SELECT and the model cannot drift apart quietly.
+    """A column the record has no field for is an error at the read.
 
-    The failure this converts: a migration adds a column, somebody adds it to `_COLUMNS` and not to
-    the model. Ignored, that value is simply absent from every record anybody reads; forbidden, the
-    read raises naming the column, which is the only version a caller can act on.
+    `JobRecord` is `extra="forbid"`, so a column added to `_COLUMNS` and not the model raises naming
+    it instead of vanishing.
     """
     import pydantic
 

@@ -1,8 +1,7 @@
-"""`core.db.IsoStamp` spells a `TIMESTAMPTZ` column the way every seam reading it always has.
+"""`core.db.IsoStamp` spells a `TIMESTAMPTZ` column the way every seam reading it expects.
 
-Three models (`durable/pending_store`, `durable/effect_ledger`, `operations/evidence_pack`) each
-carried an identical private copy of this validator, each saying the spelling is a wire contract.
-One definition now, so the contract is held here once rather than trusted three times.
+One definition shared by `durable/pending_store`, `durable/effect_ledger` and
+`operations/evidence_pack`, so the wire contract is held here once.
 """
 
 from datetime import UTC, datetime

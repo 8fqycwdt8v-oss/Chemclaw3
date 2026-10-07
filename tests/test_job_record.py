@@ -1,13 +1,9 @@
-"""The durable record of a finished connector job (D-157) — the offline half.
+"""The durable record of a finished connector job, the offline half.
 
-What is under test here is everything about the record that does *not* need a Temporal server or a
-database: the mapping from a run to its record, the provenance footer core stamps onto a
-connector's note, and the sink selection that decides whether any of it is kept. The end-to-end
-path (core's wrapper actually writing the record and publishing the stamped note) is in
-`test_connector_job_workflow.py`, which needs a live server and skips offline — which is precisely
-why the pure pieces are pulled out and pinned here instead.
-
-`test_job_record_postgres.py` covers the store itself against a real database.
+Covers what needs no Temporal server or database: the mapping from a run to its record, the
+provenance footer core stamps onto a connector's note, and the sink selection.
+`test_connector_job_workflow.py` covers the end-to-end path and `test_job_record_postgres.py` the
+store.
 """
 
 import asyncio
@@ -76,11 +72,10 @@ def test_a_run_that_produced_no_note_records_an_empty_note_id() -> None:
 
 
 def test_a_launch_with_no_reason_cannot_be_expressed() -> None:
-    """The reject-if-absent rule holds at the type, not only at the tool that fills it in.
+    """A launch with no reason cannot be expressed.
 
-    The launcher refuses a blank rationale (`test_connector_jobs.py`), but the input model is the
-    other construction site — `TemplateWorkflow` builds one directly — so the guarantee has to
-    live here too, or a second caller could reintroduce the gap without touching the first.
+    The input model is constructed directly by `TemplateWorkflow` too, so the reject-if-absent rule
+    lives on the type, not only on the launcher.
     """
     with pytest.raises(ValueError, match="rationale"):
         ConnectorJobInput(
@@ -117,11 +112,10 @@ def test_the_note_gains_the_reason_and_the_run_that_produced_it() -> None:
 
 
 def test_the_footer_adds_no_wikilink() -> None:
-    """A link to a note that does not exist fails `kg-validate` on the PR this note opens.
+    """The footer adds no wikilink.
 
-    The job id names a database row, not a graph node, so it is rendered as code. This is the trap
-    `note_from_campaign_result` documented for the connector — inherited by the footer that is now
-    applied to *every* connector's note, where getting it wrong would break all of them at once.
+    The job id names a database row, not a graph node, so it renders as code; a link to a
+    nonexistent note would fail `kg-validate`, and the footer goes on every connector's note.
     """
     stamped = note_with_run_provenance(
         Note(id="n-1", type="job-result", created_by="agent", body="Body."),
@@ -140,11 +134,10 @@ def test_stamping_does_not_mutate_the_connectors_note() -> None:
 def test_the_sink_is_durable_wherever_a_database_is_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Opting *in* to a record per call site is the polarity that failed for the audit trail.
+    """The sink is durable wherever a database is configured.
 
-    So the default follows `default_audit_sink`: a deployment that has stated it keeps durable
-    records (`session_store="postgres"`) gets them for job runs too, without a second switch to
-    forget.
+    Like `default_audit_sink`: `session_store="postgres"` keeps job records too, without a second
+    switch to forget.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     assert isinstance(default_job_record_sink(), NullJobRecordSink)
@@ -158,12 +151,10 @@ def test_the_sink_is_durable_wherever_a_database_is_configured(
 def test_searching_without_a_store_answers_honestly_rather_than_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`find_past_jobs` on a memory-store deployment reports no history, not an error.
+    """Searching without a store reports no history, not an error, and says which empty it is.
 
-    **And says which of the two empties it is.** "No run matches" and "this deployment keeps no
-    record of any run" are the same empty list, and the second is not evidence about the first —
-    the same distinction `FingerprintSearch.index_empty` exists for, on the other tool whose whole
-    job is "have we seen this before".
+    "No run matches" and "this deployment keeps no record of runs" must be distinguishable, as with
+    `FingerprintSearch.index_empty`.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     found = asyncio.run(search_job_records("suzuki"))
@@ -173,11 +164,10 @@ def test_searching_without_a_store_answers_honestly_rather_than_raising(
 
 
 def test_the_verdict_is_serialized_rather_than_only_readable_in_python() -> None:
-    """A plain `property` would never leave this process — the hazard-screen lesson, again.
+    """The verdict is serialized, not only readable in Python.
 
-    `FingerprintSearch.verdict` is a `computed_field` for exactly this reason: a bare property is
-    not in `model_dump()`, so the sentence explaining what an empty (or truncated) result means
-    would be absent from the tool output the model actually reads.
+    It is a `computed_field`, so it appears in `model_dump()` and in the tool output the model
+    reads.
     """
     payload = JobRecordSearch(hits=[], hits_truncated=False).model_dump()
     assert "verdict" in payload
@@ -203,14 +193,10 @@ def test_a_full_page_says_the_count_is_a_floor() -> None:
 def test_a_worker_that_keeps_no_job_records_says_so_at_boot(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """One switch answers two questions, so the worker has to announce which one it got.
+    """A worker that keeps no job records says so at boot.
 
-    `record_session_event_activity` reads no such switch, so a deployment left at the shipped
-    default (`CHEMCLAW_SESSION_STORE=memory`) writes the `job_completed` push-back to Postgres and
-    drops the durable record beside it — measured against a live database, one session event and
-    zero `job_records` rows for the same completed run, with `record_job` reporting success in
-    0.000 s and `chemclaw_jobs_finished_total` incremented anyway. The drop is at debug on the null
-    sink, so nothing at any level said it. This is the line that does.
+    Under `CHEMCLAW_SESSION_STORE=memory` the push-back still reaches Postgres while the durable
+    record is dropped on the null sink at debug level, so this boot line is the only signal.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     with caplog.at_level(logging.WARNING, logger="chemclaw.durable.job_record"):
@@ -226,11 +212,10 @@ def test_a_worker_that_keeps_no_job_records_says_so_at_boot(
 
 
 def test_every_worker_announces_it_on_the_way_up() -> None:
-    """The announcement is worth nothing if an entrypoint can skip it.
+    """Every worker announces its record sink on the way up.
 
-    `serve_worker` is the one tail every worker's `main()` runs through — the same argument
-    `bind_job_gauges` is called there under — so the check is that this call sits beside it rather
-    than at any individual entrypoint that could be added without it.
+    The call sits in `serve_worker`, the tail every worker's `main()` runs through, beside
+    `bind_job_gauges`.
     """
     source = inspect.getsource(serve_worker)
     assert "log_record_durability(component)" in source
@@ -244,12 +229,10 @@ def test_the_null_sink_keeps_nothing_and_says_so() -> None:
 
 
 def _counted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float, dict[str, str]]]:
-    """Capture what `record_job` books on the consumption counter instead of a live registry.
+    """Capture what `record_job` books on the consumption counters instead of a live registry.
 
-    Patched at the bridge rather than at `chemclaw.core.metrics.METRICS`, because the bridge
-    swallows every exception — a stub that raised, or a registry that rejected the name, would be
-    silently indistinguishable from an increment that never happened, which is the exact property
-    these two tests are trying to tell apart.
+    Patched at the bridge, which swallows exceptions, so a failed increment cannot look like a
+    successful one.
     """
     booked: list[tuple[str, float, dict[str, str]]] = []
 
@@ -262,10 +245,7 @@ def _counted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float, dict[str
         def observe(self, name: str, seconds: float, labels: dict[str, str] | None = None) -> None:
             """The duration histogram is booked beside the counters and lands in the same list.
 
-            Recorded here rather than ignored: it is subject to the identical rule the two tests
-            below assert — a run's *cost* must be booked once the record is durable, never once
-            per attempt — so a stub that silently dropped it would leave that rule unchecked for
-            the one series an operator reads a p95 off.
+            It follows the same rule: booked once the record is durable, never once per attempt.
             """
             booked.append((name, seconds, dict(labels or {})))
 
@@ -301,11 +281,8 @@ def test_the_runtime_counter_is_booked_only_once_the_record_is_durable(
 
     asyncio.run(record_job(record))
 
-    # All three, in booking order: the outcome counter (the counterpart
-    # `chemclaw_jobs_started_total` never had), the accumulating cluster-time total, and the
-    # distribution behind it. They share this test rather than getting one each because they share
-    # the property under test — every one of them is booked *after* the awaited write, so a run
-    # with no durable record is a run nothing counts.
+    # All three, in booking order: the outcome counter, the cluster-time total and its distribution,
+    # each booked after the awaited write, so a run with no durable record is counted nowhere.
     assert booked == [
         ("chemclaw_jobs_finished_total", 1.0, {"connector": "bo", "outcome": "completed"}),
         ("chemclaw_job_runtime_seconds_total", 21600.0, {"connector": "bo"}),
@@ -316,17 +293,11 @@ def test_the_runtime_counter_is_booked_only_once_the_record_is_durable(
 def test_a_run_with_no_durable_record_is_not_counted_as_compute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The defect: the counter was incremented at the top of an activity that then retried.
+    """A run with no durable record is not counted as compute.
 
-    `record_job` runs under `BAD_DATA_RETRY` (`activity_max_attempts`), so an increment before the
-    awaited write is booked once per *attempt*, not once per run. Two consequences, and the second
-    is the one that misleads: an upsert that commits and then overruns
-    `job_record_timeout_seconds` counts one run twice, and a sustained outage counts a run five
-    times while `ConnectorJobWorkflow._record_run` swallows the `ActivityError` — so the counter
-    reports five runs' worth of cluster time for a run with no row anywhere.
-
-    Simulated by driving the activity directly, once per attempt, exactly as Temporal would: the
-    retry policy is Temporal's to apply, and what is under test is what one attempt books.
+    `record_job` retries under `BAD_DATA_RETRY`, so an increment before the awaited write would book
+    once per attempt, counting cluster time for runs with no row. Driven once per attempt, as
+    Temporal would.
     """
     booked = _counted(monkeypatch)
     _sink(monkeypatch, fails=True)
@@ -343,13 +314,10 @@ def test_a_run_with_no_durable_record_is_not_counted_as_compute(
 
 
 def test_the_background_worker_actually_serves_the_record_activity() -> None:
-    """A written-but-unregistered activity is the failure `durable/registry.py` exists to prevent.
+    """The background worker actually serves the record activity.
 
-    Sandbox-safe on purpose, like `test_the_wrapper_is_served_by_the_background_worker`: if nothing
-    polls for `record_job`, every finished job retries the write to its bound and then logs — the
-    result stays in Temporal, the record is never written, and the loss is invisible until an id
-    expires months later. That is the worst possible time to discover it, so it is pinned by a test
-    that runs everywhere rather than only where a Temporal server exists.
+    If nothing polls `record_job`, every record write times out and is lost invisibly; this runs
+    everywhere rather than only where a Temporal server exists.
     """
     import chemclaw.durable.background_worker  # noqa: F401  (registers by import)
     from chemclaw.durable.job_record import record_job
@@ -361,13 +329,10 @@ def test_the_background_worker_actually_serves_the_record_activity() -> None:
 def test_the_jobs_listing_is_a_page_that_says_there_is_more(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`GET /jobs` was bounded by `job_record_search_limit` and nothing on the wire said so.
+    """The jobs listing is a page that says there is more.
 
-    The same cap the agent tool hit, reaching a browser: a chemist with more finished runs than the
-    page could not get at the older ones from any client, and the listing looked complete. The body
-    stays a bare JSON array — the companion UI parses it as one — so the cursor goes in a header,
-    exactly as `GET /sessions` does it, and a client that ignores the header sees what it saw
-    before.
+    The body stays a bare JSON array, which the UI parses, so the cursor travels in a header as on
+    `GET /sessions`.
     """
     from fastapi.testclient import TestClient
 

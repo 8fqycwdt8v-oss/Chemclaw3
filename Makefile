@@ -51,10 +51,11 @@ SHELL := bash
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
   kind-smoke synthesize reindex reindex-full share-estimate share-sync rekey-compounds user-erase \
-  sink-schema trajectory-census distill live-infra live-infra-down live-up live-down live-status \
+  sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up live-down live-status \
   live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status live-jobs live-probes \
   live-ab live-delegation live-plan-gate live-degradation live-turn-cost live-benchmark \
   live-template-args live-verifier-margin live-data live-storm live-soak live-soak-report \
+  live-leak-probe \
   retrieval-arms hypothesis-recovery phoenix-publish explain
 
 help:  ## List every target, grouped by section.
@@ -326,6 +327,9 @@ trajectory-census:  ## Count recurring tool-call trajectories over the stored se
 distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
 	uv run python -m chemclaw.cli.distill $(ARGS)
 
+propose-profile:  ## Propose an agent profile from observed tool co-occurrence (dry; ARGS="--propose").
+	uv run python -m chemclaw.cli.propose_profile $(ARGS)
+
 ##@ Live lane
 
 # Run against a running stack, never in `ci`: they need a front door, a broker or a model gateway.
@@ -395,6 +399,9 @@ live-soak:  ## Repeat the storm for hours and fit what drifts; checkpointed, so 
 
 live-soak-report:  ## Fit every series in the soak record so far.
 	bash infra/live/soak.sh report
+
+live-leak-probe:  ## Drive real turns in one process and report what each one retains (needs `make live-up`).
+	uv run python -m chemclaw.cli.leak_probe $(ARGS)
 
 retrieval-arms:  ## Score retrieval configurations against the labelled gold set (needs `make up`).
 	uv run python -m chemclaw.cli.retrieval_arms $(ARGS)

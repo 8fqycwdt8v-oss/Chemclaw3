@@ -1,16 +1,14 @@
-"""Step templates: the contract, the substitution, and the run — Stage E.
+"""Step templates: the contract, the substitution, and the run.
 
-A template's whole promise is that the order does not vary and the run is reproducible, so the tests
-that matter are the ones that would let that promise quietly break:
+A template promises a fixed order and a reproducible run, so the tests guard what could break it:
 
-- a reference that does not resolve must stop the template from *starting*, not produce `None`
-  halfway through a durable run that has already spent compute;
-- substitution must preserve types, or a tool wanting a list silently receives its `repr`;
-- the definition must be pinned into the run, or editing a file changes what is already executing —
-  which is both a correctness bug and a Temporal replay violation.
+- a reference that does not resolve stops the template from starting, rather than producing
+  `None` halfway through a durable run;
+- substitution preserves types, so a tool wanting a list does not receive its `repr`;
+- the definition is pinned into the run, so editing a file cannot change what is executing (a
+  correctness bug and a Temporal replay violation).
 
-The end-to-end run needs a Temporal server and is skipped offline like every other workflow test
-here; everything above it is sandbox-safe and always runs.
+The end-to-end run needs a Temporal server and skips offline; the rest always runs.
 """
 
 import asyncio
@@ -121,13 +119,10 @@ def test_a_reference_nested_inside_arguments_is_still_checked() -> None:
     ],
 )
 def test_a_malformed_reference_is_refused_rather_than_passed_through(bad: str) -> None:
-    """A typo is not a literal string, and being strict about the *form* did not make it fail.
+    """A malformed reference is refused rather than passed through as literal text.
 
-    `_REFERENCE` finds references; a span it cannot match is therefore not a bad reference but no
-    reference at all, so every rule built on `references()` saw nothing to check. All six of these
-    validated clean and `resolve` handed the tool the literal text — the same confident wrong
-    answer as a null, with a stranger cause. `make template-validate` cannot catch it either: it
-    checks argument *keys*, never values.
+    A span `_REFERENCE` cannot match is invisible to every rule built on `references()`, and
+    `make template-validate` checks argument keys, not values.
     """
     with pytest.raises(ValidationError, match="malformed reference"):
         _template(
@@ -211,28 +206,19 @@ def test_an_embedded_reference_interpolates_readable_text() -> None:
 
 
 def test_a_reference_with_trailing_text_is_not_a_whole_string_match() -> None:
-    """`${inputs.smiles} plus buffer` must interpolate, not silently drop " plus buffer".
+    """`${inputs.smiles} plus buffer` interpolates rather than dropping " plus buffer".
 
-    `_WHOLE` anchors `_REFERENCE` with `^...$` precisely so a reference embedded in a longer string
-    falls through to `_REFERENCE.sub` instead of matching as a whole-string reference. Without the
-    trailing `$` anchor, `re.match` still succeeds at position 0 and stops there, so `resolve` would
-    return the referenced *value* alone (`"CCO"`) and drop everything typed after it — a step
-    argument silently losing the text around its reference.
+    `_WHOLE`'s trailing `$` keeps an embedded reference from matching as a whole-string one.
     """
     scope = {"inputs.smiles": "CCO"}
     assert resolve("${inputs.smiles} plus buffer", scope) == "CCO plus buffer"
 
 
 def test_a_reference_with_leading_text_is_not_a_whole_string_match() -> None:
-    """The mirror case: text before the reference must survive too.
+    """Text before a reference survives too.
 
-    **It does not pin `_WHOLE`'s leading `^`, and reading it as if it does is the trap.** `_WHOLE`
-    is used once, as `_WHOLE.match(value)`, and `re.match` anchors at position 0 whatever the
-    pattern says — with no `re.MULTILINE`, `^` can never mean anything else. So deleting that `^`
-    is an *equivalent* mutant: no input distinguishes the two, this test passes either way, and
-    mutmut reporting it as a survivor would be a true statement about dead notation rather than
-    about this suite. The trailing `$` is the anchor that does work, and
-    `test_a_reference_with_trailing_text_is_not_a_whole_string_match` is what kills its mutant.
+    This does not pin `_WHOLE`'s leading `^`: `re.match` anchors at position 0 anyway, so removing
+    it is an equivalent mutant. The trailing `$` is pinned by the test above.
     """
     scope = {"inputs.smiles": "CCO"}
     assert resolve("solvent: ${inputs.smiles}", scope) == "solvent: CCO"
@@ -302,14 +288,9 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def test_launching_accepts_the_raw_json_object_the_framework_hands_it(client: _FakeClient) -> None:
-    """The params model's schema is published, but the body is passed a decoded `dict`.
+    """Launching accepts the raw JSON object the framework hands the tool body.
 
-    Every test above this one checked the generated tool's *name*, *docstring* and *schema*; none
-    ever called it. So `launch` carried `cast(BaseModel, params).model_dump(...)` — a `cast` is a
-    static no-op — and raised `AttributeError: 'dict' object has no attribute 'model_dump'` on
-    every call. The shipped `hazard-briefing` template had never once run from a conversation, and
-    `make template-validate` could not see it because it validates declarations, not invocation.
-    Same defect as D-138, which fixed only the connector-job sibling.
+    The body receives a decoded `dict`, not the params model, and only calling the tool shows that.
     """
     tool = build_template_tool(
         _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
@@ -321,15 +302,10 @@ def test_launching_accepts_the_raw_json_object_the_framework_hands_it(client: _F
 
 
 def test_launching_validates_rather_than_passing_the_object_through(client: _FakeClient) -> None:
-    """The dict is *validated*, not merely accepted — the declared types are the contract.
+    """Launching validates the dict rather than passing it through.
 
-    Without this the fix could be a `dict(params)`, which would forward whatever arrived and let a
-    wrong-typed input reach a durable run that has already spent compute.
-
-    **Framed rather than raw**, since the validation moved into `start_template_run` so both
-    launchers share it: a raw `ValidationError` reaching a model is an unexpected-error result, and
-    what a caller needs is the declared inputs by name. The refusal is asserted by what it says, so
-    the message cannot quietly become useless while the test stays green.
+    The declared types are the contract. Validation lives in `start_template_run`, shared by both
+    launchers, and the refusal names the declared inputs; its text is asserted.
     """
     tool = build_template_tool(
         _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
@@ -342,13 +318,7 @@ def test_launching_validates_rather_than_passing_the_object_through(client: _Fak
 
 
 def test_launching_survives_the_frameworks_own_invocation_path(client: _FakeClient) -> None:
-    """Driven through the framework's own dispatcher rather than through our idea of it.
-
-    The test above pins today's observed behaviour; this one pins the property that survives the
-    framework changing its mind — whatever the dispatcher hands the body, a launch through it
-    starts the run. MAF's `tool(...).invoke()` before the rebuild, LangChain's
-    `StructuredTool.ainvoke` now.
-    """
+    """Launching survives the framework's own invocation path, `StructuredTool.ainvoke`."""
     from langchain_core.tools import StructuredTool
 
     fn = build_template_tool(
@@ -419,12 +389,10 @@ def test_the_name_lives_in_the_filename_only(
 def test_two_templates_generating_one_tool_name_fail_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`tool_name` folds a hyphen to an underscore, so distinct files can claim one tool.
+    """Two templates generating one tool name fail discovery.
 
-    Neither the name check nor the validator saw it, and the consequence is not a mis-run
-    template: `register_tool` raises the first time the agent is built, so every turn fails with a
-    message naming neither file. Driven here through `discovered`, which is where both files are
-    still in hand.
+    `tool_name` folds a hyphen to an underscore; otherwise `register_tool` would raise on every turn
+    with a message naming neither file.
     """
     body = "summary: x\nsteps:\n  - {id: one, kind: agent, prompt: hi}\n"
     (tmp_path / "probe-x.yaml").write_text(body, encoding="utf-8")
@@ -468,18 +436,11 @@ def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(
 def test_the_validator_catches_arguments_the_named_tool_does_not_take(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checking the tool's *name* is half a reference; the arguments are the other half.
+    """The validator catches arguments the named tool does not take.
 
-    Measured on the unfixed validator, this file — with `smiles` misspelt and a stray key beside
-    it — printed "template validation passed." A pinned procedure that validates and then fails at
-    the first live step, inside an activity after the launch, is the failure the gate exists to
-    prevent, and the gate had it.
-
-    It used to be written on `screen_hazards`, which is exactly the tool that can no longer be
-    argument-checked at all — its bundle is declared here and served by `Chemclaw3-mcp`, so there
-    is no local signature to read. Rewriting it onto `predict_pka`, a tool whose implementation is
-    still in this tree, keeps this test about the check rather than about the gap; the gap has its
-    own test below, because swapping the tool and saying nothing is how a gate quietly shrinks.
+    A template that validates and fails at its first live step is what the gate exists to prevent.
+    Written on `predict_pka`, whose implementation is in this tree; the unresolvable case has its
+    own test below.
     """
     from chemclaw.cli.validate_templates import validate_templates
 
@@ -501,31 +462,11 @@ def test_the_validator_catches_arguments_the_named_tool_does_not_take(
 
 
 def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
-    """The argument check's blind spot is reported by name, not left to be inferred from silence.
+    """A shipped template whose arguments cannot be checked says so by name.
 
-    A bundle this release declares but does not run has no `connectors/<name>/server/tools.py`
-    here, so its signatures are unresolvable and `step_problems` skips them — silently, by
-    design, because an unresolvable tool must not produce invented failures. `hazard-briefing`
-    calls `screen_hazards`, which made it the first shipped template that is name-checked and
-    *not* argument-checked.
-
-    The assertion is deliberately on the real shipped templates rather than a fixture: what would
-    go wrong is not the reporting mechanism, it is somebody moving another bundle out and not
-    noticing that a pinned procedure lost its argument check. This fails the moment that happens
-    and the note stops matching what ships.
-
-    **The blind spot grew from one template to five**, and pinning the whole set rather than a
-    count is what makes that legible. Every addition is a `chem` enumeration — the bundle whose
-    capability is `Chemclaw3-mcp`'s — so the multi-step protocols of
-    `D-2026-08-25-the-loop-is-a-composite-not-a-template` are name-checked here and
-    argument-checked only by `make live-template-args` against a running server. That is the known
-    cost of enumerating on a bundle we declare and do not run, stated rather than discovered.
-
-    That sentence used to name `make connector-validate`, which never dials a server: its rule
-    imports the bundle's *in-tree* `server/` module and returns `[]` for exactly the bundles that
-    ship none, so the gate named as the control here was the one structurally incapable of seeing
-    this blind spot (`D-2026-08-29-connector-validate-never-dials-a-server`). `live-template-args`
-    is the check that does open the session.
+    Bundles declared here but served by `Chemclaw3-mcp` have no local signatures, so their steps are
+    name-checked only; `make live-template-args` checks them against a running server. Asserted on
+    the real shipped set, so moving another bundle out changes the reported set visibly.
     """
     from chemclaw.cli.validate_templates import unchecked_arguments
 
@@ -548,12 +489,10 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
 def test_the_validator_accepts_a_correct_tool_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The argument check must not invent failures — the counterpart to the test above.
+    """The validator accepts a correct tool step.
 
-    A gate that rejects correct input is worse than one that misses bad input, because the first
-    thing anyone does about it is switch it off. `top_k` is optional and deliberately omitted here,
-    so this also pins that "required" is read off the signature's defaults rather than from the
-    whole parameter list.
+    A gate that rejects correct input gets switched off. `top_k` is optional and omitted, so
+    "required" must come from the signature's defaults.
     """
     from chemclaw.cli.validate_templates import validate_templates
 
@@ -571,20 +510,11 @@ def test_the_validator_accepts_a_correct_tool_step(
 
 
 def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> None:
-    """The argument check's coverage must not depend on which function ran first.
+    """The argument check covers the same tools whatever the call order.
 
-    `resolvable_signatures()` reads `registered_tools()`, which is populated only as an import
-    side effect of the agent package — and that import was supplied by `step_problems` happening
-    to call `available_tools()` two lines earlier. Measured in a fresh interpreter before the fix:
-
-        resolvable_signatures() alone    -> 30 signatures, 31 advertised tools uncovered
-        available_tools() first, then it -> 50 signatures, 11 uncovered
-
-    So reordering those two lines, or calling the function from anywhere else, silently dropped 20
-    in-process tools from the check and the validator still printed "template validation passed" —
-    a gate that quietly checks less is the exact failure mode `make template-validate` exists to
-    close for templates. Run in a subprocess because the registry cannot be un-populated once this
-    test session has imported the agent for something else.
+    `resolvable_signatures()` reads `registered_tools()`, which is populated by importing the agent
+    package, so it must not rely on another function having imported it first. Run in a subprocess,
+    since this session's registry cannot be emptied.
     """
     probe = (
         "from chemclaw.agent.template_surface import available_tools, resolvable_signatures\n"
@@ -603,15 +533,10 @@ def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> N
 def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other way into the coverage loss the test above measures — and it was still open.
+    """A bundle that cannot be imported stops the template gate.
 
-    `resolvable_signatures` caught every `ImportError`, so a bundle whose dependency stack is
-    missing or renamed was indistinguishable from `qm`, which legitimately has no server module.
-    Measured on this tree with one missing import injected into a connector's server tools module:
-    50 signatures became 46 and `make template-validate` printed "template validation passed" and
-    exited 0, while `make connector-validate` named the same bundle as broken. Two gates, one
-    situation, opposite answers — so the import is now one shared function that raises, and this
-    pins the raising half.
+    A broken import must not look like a bundle without a server module; the import is one shared
+    raising function, so this gate and `make connector-validate` agree.
     """
     from chemclaw.agent.template_surface import resolvable_signatures
 
@@ -630,11 +555,10 @@ def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
 
 
 def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The whole point, end to end against a real Temporal server: fixed order, results accumulated.
+    """A template run executes its steps in order, end to end against a real Temporal server.
 
-    The two activities are replaced by recording stand-ins registered under the same names, so this
-    tests the *sequencer* — substitution, ordering, the scope each step sees, the accumulated result
-    — rather than re-testing tool invocation, which `test_connector_safety_rubric.py` covers.
+    The activities are recording stand-ins under the same names, so this tests the sequencer:
+    substitution, ordering, each step's scope and the accumulated result.
     """
     from temporalio import activity
     from temporalio.worker import Worker
@@ -680,9 +604,7 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     async def fake_completed_steps(request: Any) -> dict[str, Any]:
         """Stand in for the resume read, which wants a record store this test does not configure.
 
-        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
-        which is what a first run of any id gets. Without it the run stalls on an activity nothing
-        serves, exactly as the record write below does.
+        Answers `{}`, as a first run gets; without it the run stalls on an unserved activity.
         """
         return {}
 
@@ -705,14 +627,8 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
                     workflows=[TemplateWorkflow],
                     activities=[fake_tool, fake_agent],
                 ),
-                # **The record write needs a worker, or this test measures a timeout.**
-                # `TemplateWorkflow` ends by dispatching `record_job` to the background queue, and
-                # nothing here served it — so the run only finished when that activity's bound
-                # expired, and the assertions below ran 60 s later than they read. That was
-                # invisible while the bound was a 60 s `schedule_to_close`; splitting it into a
-                # 900 s `schedule_to_start` turned the same 63-second test into a fifteen-minute
-                # one and stalled the suite. A test whose duration is somebody else's timeout is
-                # measuring the timeout.
+                # The record write needs a worker, or the run only finishes when `record_job`'s
+                # `schedule_to_start` expires and the test measures that timeout.
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
@@ -750,22 +666,12 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
 async def test_only_the_agent_step_carries_the_narrowed_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The dispatch, not the policy object — which branch actually got which bound.
+    """Only the `agent` step carries the narrowed retry.
 
-    `tests/test_publish.py` proves `agent_step_retry()` is narrower than `BAD_DATA_RETRY`. That is
-    worth nothing on its own: a policy nobody passes is a policy nobody has, and the defect this
-    guards is a whole turn being replayed on a provider blip, re-running every tool the failed
-    attempt already ran (measured: one 503 → two PR-gate branches and two audit rows for one
-    logical note). So this asserts what `_run_step` hands to Temporal, per branch.
-
-    Both directions matter and the tool branch is the one at risk. A future edit that narrowed
-    *every* step to one attempt would fix nothing and cost the transient-retry budget every other
-    activity is deliberately given — a tool step recomputes on a retry, which is the cheap and
-    correct thing to do.
-
-    Substituting the module's `workflow` handle rather than driving a server, the same way
-    `tests/test_publish.py` does: the real workflow API refuses to run outside a workflow event
-    loop, and the function under test is the real, unmodified `_run_step`.
+    Replaying a whole agent turn on a provider blip would re-run every tool it already ran, so the
+    agent step gets `agent_step_retry()`; a tool step keeps the normal transient-retry budget.
+    Asserts what `_run_step` hands Temporal per branch, with the module's `workflow` handle
+    substituted.
     """
     import types
 
@@ -823,13 +729,9 @@ class _Recorder:
 
 
 def _fake_connector_tool(name: str, calls: list[dict[str, Any]]) -> Any:
-    """A connector tool as `open_connector_specs` now produces one: an ordinary LangChain tool.
+    """A connector tool as `open_connector_specs` produces one: an ordinary LangChain tool.
 
-    That it is *ordinary* is the structural half of D-168's fix. There used to be two shapes on the
-    assembled surface — in-process `FunctionTool`s and MAF's MCP wrappers — searched by two loops
-    and called two ways, and the second way (`connector.call_tool`) reached the connector directly,
-    skipping the audit trail and the authorization gate. With one shape there is no second path to
-    tempt anyone, so the test can no longer plant a `call_tool` trap: there is nothing to trap.
+    With one tool shape there is no second call path that could bypass audit and authorization.
     """
 
     @tool_decorator(name_or_callable=name, description="screen a molecule for hazards")
@@ -853,12 +755,7 @@ def _tool_step(tool: str, **arguments: Any) -> Any:
 def test_a_connector_tool_step_is_audited_under_the_requester(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both tool steps of the shipped `hazard-briefing` used to leave no audit row at all.
-
-    The in-process branch hand-applied audit + authz; the connector branch two lines below called
-    `connector.call_tool` and reached the connector directly. The module's own docstring said
-    applying them was the point of the module.
-    """
+    """A connector tool step is audited under the requester."""
     from chemclaw.durable.template_activities import _invoke
 
     sink = _Recorder()
@@ -893,14 +790,9 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
     calls: list[dict[str, Any]] = []
     tool = _fake_connector_tool("screen_hazards", calls)
 
-    # **It raises**, and that is the difference between this caller and a chat turn. The chain's
-    # two outermost middlewares convert a denial into prose a *model* can act on; a template step
-    # has no model, and its result is interpolated into later steps — so a converted refusal would
-    # become the step's `${steps.<id>.result}` and a later step would read "you are not authorized"
-    # as though it were a hazard screening. `invoke_governed` therefore folds the governance half
-    # only. The first version of this test asserted the converted text and passed; the job-step
-    # tests are what caught it, because there the same conversion made a *refused* launch return a
-    # payload and start the workflow.
+    # It raises: a template step has no model, and a converted refusal would become the step's
+    # `${steps.<id>.result}`. `invoke_governed` therefore folds only the governance half of the
+    # chain.
     with pytest.raises(AuthorizationError):
         asyncio.run(_invoke([tool], _tool_step("screen_hazards", smiles=["CCO"]), []))
 
@@ -910,16 +802,10 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
 
 
 def test_a_step_result_is_something_temporal_can_carry() -> None:
-    """MCP content blocks are not, and a step result crosses an activity boundary (D-168).
+    """A step result is something Temporal can carry.
 
-    Live, the shipped `hazard-briefing` template failed with "Unable to serialize unknown type" —
-    after the missing worker registration was fixed and before this was — so no template with a
-    `tool` step had ever completed a run. The offline tests could not see it: they call the
-    activity in-process, where nothing serializes anything.
-
-    Half of that failure was MAF's own envelope (`skip_parsing` and most of `_serializable` existed
-    for it) and went with the framework. This is the half that did not: an MCP tool answers as
-    content blocks on the wire whatever calls it.
+    MCP content blocks are not serializable, and a step result crosses an activity boundary; the
+    in-process tests never serialize anything.
     """
     from chemclaw.durable.template_activities import _mcp_text
 
@@ -931,13 +817,10 @@ def test_a_step_result_is_something_temporal_can_carry() -> None:
 
 
 def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
-    """`NoteRef` has a `type` field, and duck-typing on that flattened it to a repr string.
+    """A structured tool result is not mistaken for MCP content.
 
-    The first version of this asked `hasattr(item, "type")`. `find_notes` returns `list[NoteRef]`,
-    whose `type` is the note's *kind* — so the check matched, found no `.text`, and replaced a
-    perfectly serializable structured result with `str(...)`. Silently, for every template step
-    naming such a tool. The check is now "a list of dicts carrying a `type` key", which a list of
-    pydantic models cannot satisfy however its fields are named.
+    `NoteRef` has a `type` field, so the check is "a list of dicts carrying a `type` key", which a
+    list of pydantic models cannot satisfy.
     """
     from chemclaw.agent.graph_tools import NoteRef
     from chemclaw.durable.template_activities import _mcp_text
@@ -947,19 +830,11 @@ def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
 
 
 def test_a_tool_steps_structured_content_reaches_the_next_step_as_a_model() -> None:
-    """The defect that made four shipped templates die on their second step, pinned end to end.
+    """A tool step's structured content reaches the next step as a model.
 
-    `run_tautomer-resolution` and three siblings hand one tool's field to the next step
-    (`species: "${steps.forms.result.smiles}"`). That reference raised `UnresolvedReference` at
-    *run* time — after the launch, inside the workflow — because `_mcp_text` had already joined the
-    content blocks into a string, so `smiles` was being asked of a `str`. CI was green throughout:
-    `make template-validate` checks that the step ids resolve backwards and that the tool exists,
-    never that the result has the shape the reference walks.
-
-    This asserts the whole path rather than `_structured` alone, because the bug lived in the seam
-    between two correct functions: `_mcp_text` flattens content, which is right for text, and
-    `ainvoke(args)` returns content only, which is right for a chat turn. Only the composition was
-    wrong, so only a test over the composition can hold it.
+    Templates pass one tool's field to the next (`${steps.forms.result.smiles}`), which needs the
+    structured result rather than joined text. Asserted over the whole path, since each piece alone
+    is correct and only the composition was wrong.
     """
     from langchain_core.tools import StructuredTool
 
@@ -1001,14 +876,10 @@ def test_a_tool_steps_structured_content_reaches_the_next_step_as_a_model() -> N
 def test_the_validator_refuses_an_empty_or_absent_templates_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A green line over zero templates is a gate that reported on nothing.
+    """The validator refuses an empty or absent templates directory.
 
-    `discovered()` returning `{}` yielded no problems, `enabled()` over an empty list yielded none
-    either, and the green line printed — for an empty directory and for one that does not exist at
-    all. The nine shipped templates are what back the `run_*` launcher tools the agent advertises,
-    so an image that failed to ship `data/templates/`, or a mis-set `CHEMCLAW_TEMPLATES_DIR` in a
-    container, is precisely the condition this gate would be expected to catch and the one it could
-    not see. Both sibling seams already refuse an empty discovery in these words.
+    The templates back the `run_*` launchers, so a missing `data/templates/` or a mis-set
+    `CHEMCLAW_TEMPLATES_DIR` must not print a green line.
     """
     from chemclaw.cli.validate_templates import validate_templates
 
@@ -1024,13 +895,9 @@ def test_the_validator_refuses_an_empty_or_absent_templates_directory(
 
 # --- the live argument check ----------------------------------------------------------
 #
-# `make template-validate` cannot answer for a bundle this repository declares and does not run —
-# there is no local signature to read, and seven shipped steps are in that state. The live gate
-# (`make live-template-args`) answers from a running server's advertised schema instead. What is
-# testable offline is its *judgment*: given the tools a session did and did not produce, does it
-# check what it can, refuse to invent what it cannot, and say which is which. The reaching itself
-# is the live lane's job, and the run is recorded in
-# `docs/decisions/D-2026-08-27-an-argument-check-needs-a-live-session.md`.
+# For bundles this repository declares but does not run, `make live-template-args` checks
+# arguments against a running server's advertised schema. Testable offline is its judgment: check
+# what it can, refuse to invent what it cannot, and say which is which.
 
 
 def _live_tool(name: str) -> Any:
@@ -1086,12 +953,10 @@ def test_the_live_check_reads_the_arguments_off_a_running_tool() -> None:
 
 
 def test_the_live_check_reports_an_unreached_connector_instead_of_counting_it() -> None:
-    """A harness that reached two of five servers checked two — D-2026-08-17, as a return value.
+    """The live check reports an unreached connector instead of counting it.
 
-    A connector that did not come up contributes no tools, so every check against it would pass
-    vacuously. It is recorded as *unreached* instead: not a problem (nothing is known to be wrong)
-    and not a pass (nothing was looked at). This is the assertion that keeps the green line honest,
-    and `main` turns the same distinction into a distinct exit code.
+    An unreached connector contributes no tools, so checks against it would pass vacuously; it is
+    "unreached", neither a problem nor a pass, and `main` gives it a distinct exit code.
     """
     from chemclaw.cli.validate_template_args_live import check_live_arguments
 
@@ -1104,12 +969,9 @@ def test_the_live_check_reports_an_unreached_connector_instead_of_counting_it() 
 
 
 def test_the_live_check_flags_a_tool_a_reachable_server_does_not_serve() -> None:
-    """A manifest declaring what its server does not answer is a template that fails at the call.
+    """The live check flags a tool a reachable server does not serve.
 
-    Both `connector.yaml` files for these bundles say in prose that the two copies of the tool list
-    can drift and that only a running server settles it. Offline nothing can: the local check has
-    no module to read. Here the connector came up, so its silence about the tool is evidence rather
-    than absence, and it is reported as a problem rather than skipped.
+    Once the connector is up, its silence about a tool is evidence, so it is a problem.
     """
     from chemclaw.cli.validate_template_args_live import check_live_arguments
 
@@ -1133,12 +995,10 @@ def test_an_in_process_tool_is_left_to_the_offline_gate() -> None:
 
 
 def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
-    """The two authorities must agree wherever both can answer, or the lanes are two rules.
+    """Both lanes derive the same arguments from the same tool.
 
-    `ToolArguments` exists to make that structural rather than hoped for: the offline gate builds
-    one from an `inspect.Signature` and the live gate from the schema a session advertised, and
-    `argument_problems` is the single reader. This pins the two constructors against one function
-    and its served form — the case where a disagreement would be a real defect and silent.
+    `ToolArguments` is built from an `inspect.Signature` offline and from an advertised schema live,
+    with `argument_problems` the single reader; the constructors must agree.
     """
     import inspect
 
@@ -1165,14 +1025,10 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
 def test_the_validator_reports_an_invalid_manifest_as_a_problem_not_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A manifest the registry cannot load must still be *reported*, not raised through `main`.
+    """An invalid manifest is reported as a problem, not a traceback.
 
-    `main` resolves the tool surface before anything else, and `available_tools` asks the agent for
-    its tool names, which asks this registry for the `run_*` launchers — so a template whose own
-    manifest is invalid (an unknown `${inputs.x}`, a forward `${steps.y.result}`) fails inside the
-    registry load rather than inside the step checker, and the operator got a pydantic traceback.
-    The exit code was already 1, so CI was never misled; `validate_kg.main` states the rest of the
-    rule — "it must still fail; it must not fail *looking like a crash*".
+    `main` resolves the tool surface first, which loads the template registry, so the error must be
+    caught there. It must still fail, but not look like a crash.
     """
     from chemclaw.cli.validate_templates import main
 
@@ -1228,13 +1084,10 @@ def _refusing(monkeypatch: pytest.MonkeyPatch, client: _RefusingClient) -> None:
 def test_relaunching_a_running_template_announces_the_run_it_rejoined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A duplicate launch is the idempotency contract succeeding, and it has to be *said*.
+    """Relaunching a running template announces the run it rejoined.
 
-    This branch returned the id and told nobody: no `JobSignal` reached the turn, `started_jobs`
-    stayed empty, `agent/job_results.py` had nothing to wait on, and the second chemist to ask for
-    a running template — or the same one re-asking — was told "in progress" with no row that a
-    later `job_completed` could clear. `connectors/jobs.py` documents having fixed exactly this for
-    jobs; the template launcher is that launcher minus the fix.
+    A duplicate launch is idempotency succeeding, so a `JobSignal` must still reach the turn and
+    `started_jobs` must record it, or no later `job_completed` can clear it.
     """
     _refusing(
         monkeypatch,
@@ -1253,11 +1106,10 @@ def test_relaunching_a_running_template_announces_the_run_it_rejoined(
 def test_a_rejoined_template_that_is_no_longer_running_is_not_announced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`RUNNING`, not "not completed" — the distinction the announcement rests on.
+    """A rejoined template that is no longer `RUNNING` is not announced.
 
-    A finished, failed or cancelled run will never emit the `job_completed` that clears an
-    announced row, so announcing one would draw a row nothing takes away. The id still comes back:
-    the rejoin succeeded either way.
+    A finished run will never emit the `job_completed` that clears an announced row; the id still
+    comes back.
     """
     _refusing(
         monkeypatch,
@@ -1277,13 +1129,10 @@ def test_a_rejoined_template_that_is_no_longer_running_is_not_announced(
 def test_a_broker_fault_at_launch_reaches_the_model_as_a_written_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`connect()` frames an unreachable broker; this is the call *after* it, which did not.
+    """A broker fault at launch reaches the model as a written refusal.
 
-    A queue with no worker, a transient RPC timeout or a serialization error escaped raw, and
-    `agent/tool_authz.surface_domain_errors` classifies an `RPCError` as neither a `ChemclawError`
-    nor a transport failure — so the model was handed `unexpected_error_result()` about a template
-    that may or may not have started. The sibling launcher frames it as a `ConnectorJobError` with
-    the check to run before relaunching, and that is what a template must say too.
+    An `RPCError` is neither a `ChemclawError` nor a transport failure, so it is framed like the
+    connector-job launcher's `ConnectorJobError`, with the check to run before relaunching.
     """
     _refusing(monkeypatch, _RefusingClient(RPCError("no worker", RPCStatusCode.UNAVAILABLE, b"")))
     tool = build_template_tool(_template())
@@ -1303,18 +1152,10 @@ def test_a_broker_fault_at_launch_reaches_the_model_as_a_written_refusal(
 def test_a_template_whose_steps_do_not_resolve_is_refused_before_anything_is_queued(
     client: _FakeClient,
 ) -> None:
-    """A launcher must not start a procedure into a fleet that cannot run it.
+    """A template whose steps do not resolve is refused before anything is queued.
 
-    `make template-validate` has always known this — at a deployment with no `calc` bundle it
-    reports "runs unknown job 'survey_bond_strengths'; declared jobs: []" and exits 1 — and
-    nothing at run time consulted it. So `run_bond_strength_survey` started `TemplateWorkflow`,
-    returned an id, and the system prompt told the model to report that id as work in progress and
-    poll it; `find_past_jobs` then found nothing, because a run that never reaches a step writes no
-    record.
-
-    The refusal reuses the gate's own `step_problems` rather than restating the rule — two copies
-    of "what resolves" is the defect class this repository keeps finding — and it happens **before**
-    the client is dialled, so the promise that nothing was queued is one the launcher can keep.
+    The launcher reuses the gate's `step_problems` rather than restating the rule, and refuses
+    before dialling the client, so "nothing was queued" is true.
     """
     template = _template(
         steps=[{"id": "survey", "kind": "job", "job": "no_such_job", "arguments": {}}]
@@ -1373,11 +1214,8 @@ def test_the_gate_and_the_launcher_share_one_definition_of_resolving(
 def _job_steps(count: int, *, chained: bool = True) -> list[dict[str, Any]]:
     """`count` `job` steps plus the `agent` step every shipped template ends with.
 
-    `chained` decides whether each step reads the one before it, which is the whole difference the
-    ceiling turns on now that the sequencer schedules waves: chained steps are N waves and cost N
-    ceilings, independent ones share a wave and cost one. Defaulting to chained keeps these
-    fixtures expressing the case the bound was written for — a procedure that genuinely runs its
-    jobs one after another.
+    `chained` makes each step read the one before it: chained steps are N waves and cost N
+    ceilings, independent ones share a wave. The default is the sequential case the bound targets.
     """
     steps: list[dict[str, Any]] = [
         {
@@ -1392,17 +1230,11 @@ def _job_steps(count: int, *, chained: bool = True) -> list[dict[str, Any]]:
 
 
 def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> None:
-    """The bound `core/config` cannot state, because it cannot see `data/templates/`.
+    """A template that cannot finish inside the run ceiling is refused.
 
-    `_the_template_run_ceiling_covers_one_step` checks the run ceiling against the longest *single*
-    step — the honest machine-checkable floor for an object holding no YAML. Measured on the
-    shipped defaults, one `job` step is 39,330 s against a run ceiling of 45,330 s, so that
-    validator passes and **two** of them in one file miss by 33,330 s.
-
-    What the gap costs is why this is a gate and not a note: a workflow *execution* timeout is not
-    delivered to workflow code, so `TemplateWorkflow`'s `except BaseException -> _notify_failure`
-    never runs. No failure row, no push-back, nothing on the session stream — the run simply stops.
-    Every other way a template can fail says so somewhere.
+    `core/config` can only check one step against the ceiling, since it cannot see templates. An
+    execution timeout is not delivered to workflow code, so a run outliving it stops with no failure
+    row and no notice.
     """
     problems = run_ceiling_problems(_template(steps=_job_steps(2)))
 
@@ -1415,13 +1247,10 @@ def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> No
 
 
 def test_the_refusals_printed_terms_add_up_to_the_printed_total() -> None:
-    """A message explaining a ceiling must not invite arithmetic that contradicts its own total.
+    """The refusal's printed terms add up to its printed total.
 
-    A wave's members were joined with `" + "`, which reads as addition and is wrong for steps that
-    run together: a two-`job` wave printed `survey=39,330s + survey2=39,330s` beside a total that
-    counted one of them, so a reader adding the printed numbers got 80,460 where the message said
-    79,560. Concurrent members are `" | "` inside brackets carrying the wave's own cost; a wave of
-    one prints as the bare step it is. Driven by adding up what the message actually prints.
+    Concurrent wave members print as `" | "` inside brackets carrying the wave's cost, since `" + "`
+    reads as addition; a wave of one prints as the bare step.
     """
     # Two independent `job` steps (one wave) and a third reading the first (a second wave): wide
     # enough to bracket, long enough to overflow. `_job_steps` gives one shape or the other.
@@ -1462,15 +1291,10 @@ def test_the_refusals_printed_terms_add_up_to_the_printed_total() -> None:
 
 
 def test_a_wave_wider_than_the_deployment_runs_at_once_costs_more_than_one_step() -> None:
-    """A wave's ceiling is its slowest member *per batch*, not once however wide it is.
+    """A wave wider than the deployment runs at once costs more than one step.
 
-    The old arithmetic sized any wave at one slow step, which is only true if every member is
-    really in flight together — and no worker promises that. Measured before this: 501 independent
-    `tool` steps passed the run ceiling as if the whole procedure cost 900s. A reviewed file's bound
-    is its reviewer; an agent-authored one reaches this arithmetic with nobody having looked.
-
-    The number that bounds it is the number that sizes it: `TemplateWorkflow._run_wave` runs a wave
-    in batches of `TemplateRunInput.max_parallel_steps`, pinned at launch from this same setting.
+    `_run_wave` dispatches in batches of `TemplateRunInput.max_parallel_steps`, pinned at launch
+    from the same setting, so the cost is per batch.
     """
     limit = settings.orchestrator_max_parallel_children
     fits = [
@@ -1494,17 +1318,10 @@ def test_a_wave_wider_than_the_deployment_runs_at_once_costs_more_than_one_step(
 
 
 def test_a_wave_is_charged_what_its_batches_cost_and_not_its_slowest_step_per_batch() -> None:
-    """The cost model, which is the half a shared `limit` does not make shared.
+    """A wave is charged what its batches cost, not its slowest step per batch.
 
-    Sizing a wave as `ceil(width / limit) x the whole wave's slowest member` charges the slow step
-    to every batch, including batches holding nothing slow — and that form passed every test here,
-    because the ones that existed used waves narrow enough to fit in one batch. Driven with a
-    document where the two disagree: one `job` step (39,330 s) beside eight `tool` steps (900 s)
-    is one wave of nine, two batches, so it costs 39,330 + 900 and not 2 x 39,330.
-
-    An over-stating bound is not the conservative choice it looks like: it refuses a procedure that
-    would have finished. This one fits its run ceiling with 4,200 s to spare and was refused by
-    34,230 s.
+    One `job` step beside eight `tool` steps is one wave in two batches, costing 39,330 + 900, not
+    2 × 39,330. Over-stating refuses procedures that would have finished.
     """
     limit = settings.orchestrator_max_parallel_children
     one_job = settings.template_step_ceilings()["job"][0]
@@ -1553,16 +1370,10 @@ def test_a_wave_is_split_into_batches_of_the_bound_it_was_sized_with() -> None:
 
 
 def test_the_run_dispatches_a_wave_in_batches_rather_than_all_at_once() -> None:
-    """**The enforcing half**, which was asserted nowhere while the checking half was.
+    """The run dispatches a wave in batches rather than all at once.
 
-    `run_ceiling_problems` sizes a wave by the batches `_run_wave` will dispatch, so a `_run_wave`
-    that ignored the bound would make the whole arithmetic a wish. Driven: mutating the dispatch
-    loop to `for batch in (wave,)` — restoring the unbounded gather this exists to stop — left every
-    template, workflow-replay and composed-workflow test green, which is this repository's own
-    definition of a claim that a control exists.
-
-    Driven against `_run_wave` directly with an injected `_run_step`, because the alternative is a
-    Temporal environment per case and what is under test is the dispatch shape, not the broker.
+    The enforcing half of the ceiling arithmetic. Driven against `_run_wave` with an injected
+    `_run_step`, since the subject is the dispatch shape, not the broker.
     """
     from chemclaw.durable.template_activities import StepIdentity
     from chemclaw.durable.template_job import TemplateWorkflow
@@ -1604,12 +1415,10 @@ def test_the_run_dispatches_a_wave_in_batches_rather_than_all_at_once() -> None:
 
 
 def test_a_launch_pins_the_bound_the_ceiling_checked_it_against(client: _FakeClient) -> None:
-    """**The other enforcing half**: the run carries the number, it does not read it later.
+    """A launch pins the parallelism bound the ceiling was checked against.
 
-    Driven, because mutating `max_parallel_steps=settings.orchestrator_max_parallel_children` to
-    `0` — every run unbounded — left the template, composed-workflow and API suites green. A live
-    settings read inside workflow code would be nondeterministic on replay *and* would not be the
-    value `run_ceiling_problems` sized the launch with; pinning it is what makes them one number.
+    A settings read inside workflow code would be nondeterministic on replay and could differ from
+    what `run_ceiling_problems` used.
     """
     from chemclaw.templates.registry import build_template_tool
 
@@ -1636,12 +1445,9 @@ def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() 
 
 
 def test_two_job_steps_that_do_not_read_each_other_fit_because_they_share_a_wave() -> None:
-    """The bound follows the schedule, and this is the case where that is the whole difference.
+    """Two `job` steps that do not read each other fit, because they share a wave.
 
-    Two `job` steps cost two ceilings when one reads the other and **one** when neither does,
-    because `templates/schedule.py` puts independent steps in the same wave. A flat sum would
-    refuse the second template below — a procedure that would have finished well inside its run
-    ceiling — which is why an over-stating bound is not the conservative choice it looks like.
+    The bound follows the schedule; a flat sum would refuse a procedure that would have finished.
     """
     assert run_ceiling_problems(_template(steps=_job_steps(2, chained=False))) == []
     assert run_ceiling_problems(_template(steps=_job_steps(2, chained=True))) != []
@@ -1649,21 +1455,17 @@ def test_two_job_steps_that_do_not_read_each_other_fit_because_they_share_a_wave
 
 @pytest.mark.parametrize("name", sorted(registry.discovered()))
 def test_every_shipped_template_fits_this_deployments_run_ceiling(name: str) -> None:
-    """Latent rather than live, which is exactly when a bound is worth adding.
+    """Every shipped template fits this deployment's run ceiling.
 
-    No shipped template has two `job` steps — the catalogue measures 2,700 s to 41,130 s against
-    45,330 s — so this passes today and is here for the first template that deepens one. Per
-    template rather than over the set, so a failure names the file.
+    Per template, so a failure names the file.
     """
     assert run_ceiling_problems(registry.discovered()[name]) == []
 
 
 def test_the_launcher_refuses_a_run_the_ceiling_cannot_hold_before_anything_is_queued() -> None:
-    """The gate's answer and the launcher's are one function, so they cannot drift apart.
+    """The launcher refuses a run the ceiling cannot hold before anything is queued.
 
-    `unrunnable_reason` already refused a template whose steps do not *resolve* at this deployment.
-    Timing is the same kind of fact — a deployment property that makes the launch pointless — and
-    it fails more quietly, so it is the better of the two to catch before a workflow id exists.
+    The gate and the launcher share `unrunnable_reason`, so they cannot drift apart.
     """
     blocked = registry.unrunnable_reason(_template(steps=_job_steps(2)))
 
@@ -1673,14 +1475,10 @@ def test_the_launcher_refuses_a_run_the_ceiling_cannot_hold_before_anything_is_q
 def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two readers, one definition — the property that keeps the two bounds from disagreeing.
-
-    `core/config` asks this for the *maximum* (does one step fit?) and `run_ceiling_problems` for
-    the *sum over a file's steps* (does the procedure fit?). Both questions, one arithmetic.
+    """The config floor and the template gate read one step-ceiling definition.
 
     Checked by moving the setting the `job` ceiling is built from and watching the gate's answer
-    move with it, rather than by asserting a transcribed number — the count of post-child steps in
-    that sum was six, then it was not, and a test quoting the total would have gone stale with it.
+    move, rather than by asserting a transcribed total.
     """
     ceilings = settings.template_step_ceilings()
     assert set(ceilings) == {"tool", "agent", "job"}, "a step kind sized nowhere counts as free"
@@ -1706,10 +1504,8 @@ def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
 def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float, list[str], Any]:
     """Run `steps` end to end against a real Temporal server and measure the overlap.
 
-    Each `tool` step sleeps `_STEP_SECONDS` and records when it entered and left. **Wall clock, not
-    a call count**: whether two activities were dispatched together is exactly the thing a count
-    cannot see, and the defect this guards — concurrency silently lost to a future edit of the
-    sequencer — would leave every count unchanged.
+    Each `tool` step sleeps `_STEP_SECONDS` and records entry and exit times; whether activities ran
+    together is invisible to a call count.
     """
     from temporalio import activity
     from temporalio.worker import Worker
@@ -1740,9 +1536,7 @@ def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float,
     async def fake_completed_steps(request: Any) -> dict[str, Any]:
         """Stand in for the resume read, which wants a record store this test does not configure.
 
-        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
-        which is what a first run of any id gets. Without it the run stalls on an activity nothing
-        serves, exactly as the record write below does.
+        Answers `{}`, as a first run gets; without it the run stalls on an unserved activity.
         """
         return {}
 
@@ -1783,10 +1577,8 @@ def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float,
                     TemplateRunInput(
                         template=template, inputs={"smiles": "CCO"}, requested_by="tester"
                     ),
-                    # Unique per probe: a Temporal id is an idempotency key, so two probes
-                    # sharing one would have the second rejoin the first's finished run and
-                    # measure nothing. Which is exactly what happened when this derived the id
-                    # from the step shape — both probes have three steps starting at "a".
+                    # Unique per probe: a Temporal id is an idempotency key, so a shared one would
+                    # rejoin the first probe's finished run and measure nothing.
                     id=f"template-parallel-{run_id}",
                     task_queue="test-parallel",
                 )
@@ -1802,13 +1594,10 @@ _STEP_SECONDS = 1.0
 
 
 def test_two_steps_that_do_not_read_each_other_run_at_the_same_time() -> None:
-    """The headline. Two independent `tool` steps, measured overlapping rather than counted.
+    """Two steps that do not read each other run at the same time.
 
-    **Nothing in the file asked for this**, which is the design: concurrency is derived from the
-    `${steps.<id>.result}` edges the template already declares, so a procedure gets it by not
-    stating a dependency it never had. Measured over the shipped catalogue, two of the nine —
-    `degradant-triage` and `hazard-briefing` — were already shaped this way and were being run one
-    after the other for no reason anybody had written down.
+    Concurrency is derived from the declared `${steps.<id>.result}` edges, so a procedure gets it by
+    not stating a dependency it does not have.
     """
     elapsed, _order, (peak, result) = _concurrency_probe(
         "independent",
@@ -1827,11 +1616,9 @@ def test_two_steps_that_do_not_read_each_other_run_at_the_same_time() -> None:
 
 
 def test_a_step_that_reads_another_still_waits_for_it() -> None:
-    """The control arm, and the one that matters most: a chain must not gain concurrency.
+    """A step that reads another still waits for it.
 
-    Seven of the nine shipped templates chain, and a scheduler that ran their steps together would
-    hand a calculation a `${steps.<id>.result}` that does not exist yet — the failure mode the
-    forward-reference validator exists to make impossible at load time.
+    Running a chain together would hand a step a `${steps.<id>.result}` that does not exist yet.
     """
     elapsed, order, (peak, _result) = _concurrency_probe(
         "chained",
@@ -1878,9 +1665,8 @@ def _resumable_run(
 ) -> tuple[list[str], Any]:
     """Run a three-step chain end to end, failing the named steps, and report which steps ran.
 
-    `resume_from` is what the resume read answers with — the shape a real `job_records` row holds,
-    `{"steps": ..., "template_fingerprint": ...}` — so this drives the sequencer's own decision
-    about what to skip rather than re-testing the store.
+    `resume_from` is the resume read's answer in the shape a real `job_records` row holds, so this
+    drives the sequencer's own skip decision.
     """
     from temporalio import activity
     from temporalio.worker import Worker
@@ -1986,12 +1772,7 @@ def _resumable_run(
 
 
 def test_a_resumed_run_does_not_redo_the_steps_that_already_finished() -> None:
-    """The headline: the work `failed_template_record` kept is the work the next attempt skips.
-
-    Before this, `scope` and `results` were rebuilt empty on every execution, so a procedure that
-    died at step four redid all four — while its own `job_records` row held their results under a
-    docstring explaining why discarding them would be wrong.
-    """
+    """A resumed run does not redo the steps that already finished."""
     ran, run = _resumable_run(fail_on=set(), resume_from={"one": {"ok": "two"}})
 
     result = asyncio.run(run())
@@ -2004,12 +1785,10 @@ def test_a_resumed_run_does_not_redo_the_steps_that_already_finished() -> None:
 
 
 def test_a_resume_is_refused_when_the_template_has_changed_under_the_same_id() -> None:
-    """The guard, and it is the reason this is not simply a cache.
+    """A resume is refused when the template has changed under the same id.
 
-    A run's id is `hash([name, inputs])` and says nothing about the steps, so editing the file and
-    relaunching lands on the same id carrying a different procedure. Folding the old run's step
-    results into it would mix two definitions silently — the failure mode that makes a wrong answer
-    rather than a slow one.
+    A run id hashes the name and inputs only, so an edited file relaunches under the same id; mixing
+    two definitions' results would give a wrong answer.
     """
     ran, run = _resumable_run(
         fail_on=set(), resume_from={"one": {"ok": "two"}}, fingerprint="a-different-template"
@@ -2035,18 +1814,11 @@ def test_a_first_run_with_nothing_to_resume_is_what_it_always_was() -> None:
 
 
 def test_two_documents_sharing_a_name_do_not_share_a_run() -> None:
-    """The collision that returned somebody else's finished work, driven.
+    """Two documents sharing a name do not share a run.
 
-    A run id is an idempotency key and the launcher *rejoins* an id already started. For a
-    `data/templates/` file that is right: the name is the procedure, reviewed and the same for
-    everybody, so two people asking the same question share one run
-    (`D-2026-08-01-a-running-job-has-no-owner`). A composed workflow breaks both halves — the name
-    is one chemist's, and its steps change when they re-compose.
-
-    Measured before `scope` existed: two documents with nothing in common but the name `triage`
-    both produced `template-triage-65f5e26304a2c36c`, so running the second returned the first's
-    completed result and its step outputs, under a summary that reads correct. A second chemist was
-    denied their own workflow for as long as the first's run was retained.
+    The launcher rejoins an existing id. For a reviewed file template, sharing is right; a composed
+    workflow's name is one chemist's and its steps change, so `scope` keeps two such documents from
+    colliding on one run id and returning each other's results.
     """
     first = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "one"}])
     second = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "different"}])
@@ -2062,11 +1834,9 @@ def test_two_documents_sharing_a_name_do_not_share_a_run() -> None:
 
 
 def test_a_file_templates_run_id_is_exactly_what_it_was() -> None:
-    """The control arm, and it is why `scope` defaults to empty rather than to something.
+    """A file template's run id is exactly what it was.
 
-    A file template's id appears in archived histories, in Temporal's own retention and in tests.
-    Changing it would orphan every in-flight run and every fixture, to fix a collision that cannot
-    happen for a document whose name *is* its identity.
+    `scope` defaults to empty, so existing ids in histories, retention and fixtures are unchanged.
     """
     template = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "one"}])
 

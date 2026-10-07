@@ -1,15 +1,9 @@
 """A job this deployment cannot run is withheld, and refused on the paths that reach it anyway.
 
-Found live on 2026-09-27: `republish_calculations` was bound with `CHEMCLAW_RESULT_SINKS` empty, the
-model called it, and the run failed `ResultSinkError` three times out of three — the guard in its
-own body firing exactly as written, on a tool whose only possible outcome was that failure. The
-manifest now says so (`unavailable_reason`), and these are the edges: withheld at the shipped
-default, bound the moment a sink is named, still *declared* either way, refused at launch for a
-caller that names it by string, and withheld even when an earlier build in the process registered
-it.
-
-The shipped `results` bundle is the subject rather than a fixture manifest, because a test over a
-synthetic job would stay green if the real one went back to being bound with nowhere to publish.
+`republish_calculations` with `CHEMCLAW_RESULT_SINKS` empty can only fail, so its manifest declares
+`unavailable_reason`. Edges: withheld at the shipped default, bound once a sink is named, still
+declared either way, refused at launch for a caller naming it by string, and withheld even when an
+earlier build in the process registered it. Uses the shipped `results` bundle, not a fixture.
 """
 
 import pytest
@@ -81,12 +75,10 @@ def test_a_launch_that_names_the_job_by_string_is_refused_before_it_starts(
 def test_a_launcher_registered_under_another_configuration_is_still_withheld(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The registry only grows; the surface is the rule, not the history.
+    """A launcher registered under another configuration is still withheld.
 
-    The failure `D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`
-    found in CI for template launchers, one name space over: a build with a sink registers the
-    launcher, a later build in the same process has none, and the launcher must not survive into
-    it.
+    The registry only grows, so the surface is decided by the rule, not by what an earlier build in
+    the process registered.
     """
     monkeypatch.setattr(settings, "result_sinks", "postgres")
     (launcher,) = [tool for tool in job_tools() if tool.__name__ == _JOB]
