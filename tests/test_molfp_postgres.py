@@ -1,9 +1,8 @@
-"""Integration tests for the Postgres fingerprint store (plan steps 3.2/3.3).
+"""Integration tests for the Postgres fingerprint store.
 
-Runs against a real pgvector database (CI provides one; the offline sandbox skips).
-Proves the durable backend honors the same `FingerprintStore` contract as the in-memory
-one: Tanimoto ranking in SQL returns most-similar-first, the threshold filters, and
-substructure search works over it via the shared, backend-agnostic search functions.
+Runs against a real pgvector database (skipped without one). The durable backend honours the
+in-memory backend's `FingerprintStore` contract: Tanimoto ranking in SQL, threshold filtering,
+substructure search through the shared functions, and definition-keyed generations.
 """
 
 import asyncio
@@ -60,14 +59,9 @@ async def test_similarity_ranking_in_sql() -> None:
 async def test_tie_break_order_matches_the_in_memory_backend() -> None:
     """Equal-similarity hits come back in the same id order from both backends.
 
-    The in-memory reference tie-breaks by Python's code-point sort; the SQL side must
-    order identically (`id COLLATE "C"`), or the database's locale collation (e.g.
-    en_US.UTF-8 puts 'a1' before 'B1') silently breaks the documented cross-backend
-    determinism for mixed-case ids.
-
-    Asserted at the *store* level (`find_matches`), which is where the collation lives and the
-    only level that can see it: two records sharing one structure differ solely by id, and the
-    molecule search presents a hit by its structure and the note it cites, not by its row id.
+    The SQL side orders by `id COLLATE "C"` to match Python's code-point sort; a locale collation
+    would reorder mixed-case ids. Asserted at the store level (`find_matches`), where the collation
+    lives.
     """
     pg_store = await _store_or_skip()
     mem_store = InMemoryFingerprintStore(definition=molecule_definition())
@@ -85,37 +79,19 @@ async def test_tie_break_order_matches_the_in_memory_backend() -> None:
 
 
 async def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
-    """The durable search returns the *exact* page, ties included — the property an ANN loses.
+    """The durable search returns the exact page, ties included, which an ANN cannot.
 
-    `PostgresFingerprintStore`'s docstring used to say this search was "accelerated by the table's
-    HNSW `bit_jaccard_ops` index … approximate by design". Measured on 200 000 `bit(2048)` rows,
-    the planner never takes that plan: the `definition` equality and the threshold predicate cost
-    it the ordered index scan, so what ships is an exact sequential scan — 17.6 ms there, ~0.088
-    µs/row, i.e. ~880 ms at the 10^7 rows Pistachio implies. Ordering by the index first and
-    filtering afterwards is 14x faster (1.25 ms, roughly flat in N) and is **not** the same answer:
-    over 60 queries at `hnsw.ef_search=200` with a 10x over-fetch it returned a different result
-    set for 22 of them.
-
-    The mechanism is ties rather than recall, which is why this test is written the way it is.
-    Tanimoto over sparse bit vectors puts many rows at *identical* similarity, and `ORDER BY
-    distance, id COLLATE "C"` breaks those ties across the whole table — something no truncated
-    candidate set can reproduce. So: 200 rows of one structure, a page of 50. Exactly the 50
-    lowest ids must come back, in order. An ANN would return 50 equally-similar rows in graph
-    order, pass every similarity assertion in this file, and quietly answer a different question.
-
-    That is a decision (a structural search that may silently miss a precedent) rather than a
-    refactor, so it belongs in an ADR — and this test is what makes taking it deliberate. It pins
-    the *contract*, not the plan: at 200 rows the planner would not choose an index anyway, so the
-    assertion bites wherever a restructure makes an index-ordered candidate set the answer, which
-    is every corpus large enough for the change to be worth making.
+    Tanimoto over sparse bits puts many rows at identical similarity, and `ORDER BY distance,
+    id COLLATE "C"` breaks ties across the whole table, which no truncated candidate set reproduces.
+    200 rows of one structure, a page of 50: exactly the 50 lowest ids, in order. This pins the
+    contract rather than the plan, so switching to an index-ordered candidate set is a deliberate
+    decision.
     """
     store = await _store_or_skip()
     mem_store = InMemoryFingerprintStore(definition=molecule_definition())
-    # A structure with no near neighbour among this suite's fixtures, so a 0.99 threshold
-    # isolates these rows from every other row in the shared table and the whole page is one
-    # tie. A long alkanol is *not* usable here even though it looks unique: ECFP4 over a chain
-    # of identical CH2 environments makes C8-ol and C13-ol tie at 1.0, and the sibling test's
-    # octanol rows then take two slots in this page.
+    # A structure with no near neighbour among this suite's fixtures, so a 0.99 threshold isolates
+    # these rows in the shared table. A long alkanol would not do: ECFP4 over repeated CH2
+    # environments ties C8-ol and C13-ol at 1.0.
     structure = "Clc1ccc(cc1)C(=O)Nc1ccc(cc1)S(=O)(=O)N"
     ids = [f"pg-exact-{index:03d}" for index in range(200)]
     records = [record_for(cid, structure) for cid in ids]
@@ -138,28 +114,13 @@ async def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> Non
 
 
 def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
-    """`all_records(limit=…)` must not sort the whole corpus to return `limit` rows.
+    """`all_records(limit=...)` does not sort the whole table to return `limit` rows.
 
-    The slice is ordered by `id COLLATE "C"` — load-bearing, because it is what makes this backend
-    order identically to the in-memory one (a database's default collation puts `a1` before `B1`).
-    The primary key is a btree in the *database's* collation and therefore cannot satisfy that
-    ordering, so before `082` the planner sorted every row in the table and then took the first
-    `substructure_scan_max_records + 1`. Measured on 200 000 rows at the shipped cap of 5 000:
-    `Sort (external merge, 136 MB to disk)`, 2 228 ms and 103 466 temp blocks written, against
-    10.7 ms and no temp through the index. The cost grows with the corpus the cap exists to protect
-    the process from, on a path the agent calls (`molfp.find_substructure_matches`).
-
-    Asserted as the **absence of a whole-table Sort** rather than as a duration: at fixture scale
-    sorting a handful of rows is both correct and instant, so a timing assertion would see nothing.
-    The sequential scan is disabled for the same reason as in `tests/test_reaction_records.py` — on
-    one page the planner is right to scan, and the question here is what the schema offers it.
-
-    **`Incremental Sort` is permitted and a plain `Sort` is not, and the difference is the whole
-    property.** Since `094` the scan de-duplicates a shelved generation (`DISTINCT ON`, preferring
-    this store's definition), so the second sort key is `(definition = …)` *within* one id — groups
-    of one or two rows, ordered by the same `082` index and still streaming under the `LIMIT`. A
-    plain `Sort` is the node that means the server ordered the whole table first, which is the
-    defect `082` measured at 2 228 ms and 136 MB of temp.
+    The slice is ordered by `id COLLATE "C"`, which the collation-specific primary key cannot
+    provide, so an index (`082`) supplies it. Asserted as the absence of a plain `Sort` node rather
+    than a duration (sorting a fixture is instant); sequential scans are disabled to ask what the
+    schema offers. `Incremental Sort` is permitted: `DISTINCT ON` de-duplicating shelved generations
+    sorts groups of one or two rows within an id while streaming under the `LIMIT`.
     """
 
     async def _run() -> list[str]:
@@ -200,12 +161,10 @@ async def test_upsert_and_substructure_over_postgres() -> None:
 
 
 async def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
-    """The durable backend must answer "is anything searchable here?" as honestly as memory does.
+    """Emptiness and count are scoped to the store's definition.
 
-    Asserted through a store pinned to a definition nothing was ever indexed under, which is both
-    the robust way to test emptiness against a shared database (other tests' rows are invisible to
-    it) and a real deployment state: after a fingerprint-definition change every existing row falls
-    out of search (runbook (vi)), so a table full of stale rows is an index that answers nothing.
+    Asserted through a store pinned to a definition nothing was indexed under, which is robust
+    against the shared database and a real state after a definition change.
     """
     await migrated_db_or_skip()
     orphaned = PostgresFingerprintStore(
@@ -231,24 +190,18 @@ _ANN_TABLE = "molfp_approximate_probe"
 _ANN_ROWS = 10_000
 _ANN_QUERIES = 40
 _ANN_DEFINITION = "ecfp:r2:b2048"
-# The floor this test ratchets: the mean fraction of the exact page the approximate arm returns,
-# over `_ANN_QUERIES` queries on the corpus built below. Measured at 1.000 on the shipped
-# `fingerprint_approximate_overfetch = 10`; pinned below that so ordinary index/planner drift is
-# not a failure while a real recall regression is. What it is NOT is a claim that the two arms
-# agree on the *ordered page* — they do not, and the assertion below says so in the other
-# direction, because that disagreement is ties rather than misses.
+# The floor this test ratchets: the mean fraction of the exact page the approximate arm returns over
+# `_ANN_QUERIES` queries, pinned below the measured value so index/planner drift is not a failure.
+# It does not claim the arms agree on the ordered page; that difference is ties, not misses.
 _ANN_RECALL_FLOOR = 0.95
 
 
 def _probe_bits(index: int) -> str:
     """A sparse fingerprint with the layered structure a real ECFP corpus has.
 
-    Not a uniform random bitstring, which would make every pair equidistant and the recall
-    measurement meaningless: a real corpus is scaffolds inside series inside analogs, so the
-    similarity distribution is a continuum with a dense head — which is exactly what an HNSW graph
-    is good and bad at in interesting ways. Three layers (scaffold, series, own substitution) plus
-    a deliberate exact duplicate every fiftieth record, so the page a query gets back contains real
-    ties and the tie-break the exact arm applies across the whole table has something to bite on.
+    Uniform random bits would make every pair equidistant. Three layers (scaffold, series, own
+    substitution) give a continuum with a dense head, and an exact duplicate every fiftieth record
+    gives the tie-break real ties.
     """
     if index % 50 == 0:  # an exact duplicate of its predecessor: a guaranteed tie at 1.0
         index -= 1
@@ -267,13 +220,9 @@ def _probe_bits(index: int) -> str:
 async def _approximate_probe_store() -> PostgresFingerprintStore:
     """Build (once) a corpus with an HNSW index and return a store bound to it.
 
-    A table of its own rather than the shipped `molecule_fingerprints`, for two reasons that both
-    decide the number this test reports. The candidate set the index proposes is filtered by
-    `definition` *afterwards* — that is what keeps the ordered index scan — so rows other tests
-    left in the shared table would consume candidate slots and make the measured recall depend on
-    which tests ran first. And 10 000 rows is what makes the planner choose the HNSW index at all;
-    pushing that into the shared table would slow every other test in this file for the life of
-    the database.
+    A table of its own: the index's candidates are filtered by `definition` afterwards, so other
+    tests' rows would consume candidate slots and skew recall; and the corpus is large enough for
+    the planner to choose the HNSW index, which would slow the shared table.
     """
     await migrated_db_or_skip()
     async with db.connection(settings.postgres_dsn) as conn:
@@ -306,14 +255,10 @@ async def _approximate_probe_store() -> PostgresFingerprintStore:
 
 
 def test_the_approximate_arm_actually_rides_the_index_it_trades_exactness_for() -> None:
-    """The approximate statement must take an HNSW Index Scan, or its recall number is a fiction.
+    """The approximate statement takes an HNSW Index Scan.
 
-    This is the assertion that makes the next test mean something. Both arms return the same
-    columns and honour the same threshold and tie-break, so an approximate arm the planner quietly
-    served with a sequential scan would return the *exact* answer, measure 100% agreement, and
-    prove nothing at all — while a deployment that turned the setting on for the speed got neither
-    the speed nor a signal that it did not. So: the plan, on a corpus large enough for the planner
-    to have a choice, must name the table's `bit_jaccard_ops` index.
+    Otherwise the planner could serve it with a sequential scan, return the exact answer, and make
+    the recall measurement meaningless. The plan must name the table's `bit_jaccard_ops` index.
     """
 
     async def _run() -> list[str]:
@@ -348,23 +293,10 @@ def test_the_approximate_arm_actually_rides_the_index_it_trades_exactness_for() 
 def test_how_far_from_exact_the_approximate_arm_is(monkeypatch: pytest.MonkeyPatch) -> None:
     """Measure the approximate arm against the exact one and pin a floor under its recall.
 
-    The interesting question about an ANN is not whether it is fast — it is how much of the true
-    answer it gives back, and nothing in this repository was measuring that. So: the same 40
-    queries through the same store, once per arm, comparing the pages.
-
-    Two numbers come out and they say different things. **Recall** — how much of the exact page the
-    approximate page contains — is what a chemist loses: a precedent that exists and was not
-    returned. **Ordered-page agreement** is not, and conflating them is what made this look like a
-    recall problem when it is a tie problem: Tanimoto over sparse bits puts many rows at identical
-    similarity, the exact arm breaks those ties by id across the *whole* table, and a candidate set
-    that holds only part of a tie group cannot reproduce that however good its recall is. The two
-    pages are then equally good answers to a chemist's question and different answers to a
-    byte-comparison, so only the first is ratcheted.
-
-    The floor is deliberately a mean over queries rather than a per-query minimum: HNSW recall is a
-    distribution, one unlucky graph traversal is not a regression, and a per-query assertion would
-    be a flake generator. The measured value is printed so a run that passes still says what it
-    measured.
+    Recall (how much of the exact page the approximate page contains) is what a chemist loses;
+    ordered-page agreement is not, because ties broken by id across the whole table cannot be
+    reproduced from a partial candidate set. Only recall is ratcheted, as a mean over queries, since
+    HNSW recall is a distribution. The measured value is printed.
     """
 
     async def _run() -> tuple[float, float, int, int]:
@@ -410,13 +342,10 @@ def test_how_far_from_exact_the_approximate_arm_is(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_answer_says_which_arm_answered_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A search carries the arm that ran all the way out to the sentence the model reads.
+    """The answer says which arm answered it, end to end.
 
-    The point of the whole split: an empty page from the approximate arm is not the same claim as
-    an empty page from the exact one, and a payload that does not say which is a "we have no
-    precedent for this structure" waiting to happen. Driven end to end through the real entry
-    point, on a query with no neighbour on file, so what is asserted is the sentence a chemist's
-    answer is written from rather than a flag on a store.
+    An empty approximate page is a weaker claim than an empty exact page, so the sentence a
+    chemist's answer is written from must say which arm ran.
     """
 
     async def _run() -> tuple[str, str]:
@@ -442,18 +371,11 @@ def test_the_answer_says_which_arm_answered_it(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_the_arm_survives_a_truncated_page(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The path that actually happens: hits *and* truncation *and* the approximate arm.
+    """The approximate-arm notice survives a truncated page.
 
-    **The test above drives only the empty page, and that is why it could not see the defect.**
-    `find_matches` asks for `top_k + 1`, so `hits_truncated` is the ordinary outcome of any query
-    with neighbours — measured over 60 queries at the shipped defaults, the truncation branch fired
-    60 times and the approximate branch **zero**, because the two were written as exclusive `if`s
-    and truncation returned first. Both arms produced byte-identical text on every non-empty page.
-
-    The two facts are independent and a chemist needs both: truncation is about *count* ("there may
-    be more"), approximation is about *ranking* ("these may not be the closest"). Being told only
-    the first, on the page where both are true, is the ranking risk arriving silently — which is
-    the failure the exactness setting exists to prevent.
+    `find_matches` asks for `top_k + 1`, so truncation is the ordinary outcome of any query with
+    neighbours. Truncation (there may be more) and approximation (these may not be the closest) are
+    independent, and both must be said.
     """
 
     async def _run() -> tuple[str, str]:
@@ -487,21 +409,12 @@ def test_the_arm_survives_a_truncated_page(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 async def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan() -> None:
-    """The durable half of the partial-index probe, both of the properties it has to hold.
+    """The superseded-row probe agrees with the reference and costs no scan.
 
-    `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`.
-
-    **Agreement**, because the in-memory backend is where every partial-index assertion in
-    `tests/test_molfp.py` is made and it is only evidence about the deployment if the SQL matches
-    it: a filtered Python list against `min(definition)`/`max(definition)`.
-
-    **Cost**, because `has_superseded_records` runs on *every* similarity search, and the obvious
-    spelling — `SELECT 1 … WHERE definition <> … LIMIT 1` — has to read every row before it can
-    answer "none", which is exactly the healthy case. Measured on a live PostgreSQL 16.15 at
-    200 000 rows all under the current definition: 26.32 ms for that form against 0.55 ms for the
-    extremes, and the first grows with the corpus. What makes the difference is
-    `molecule_fingerprints_definition_idx` (046), so the plan is what is asserted here rather than
-    a timing that would depend on how much this test inserted.
+    Agreement: the in-memory backend is where partial-index assertions are made. Cost:
+    `has_superseded_records` runs on every similarity search, and `WHERE definition <> ... LIMIT 1`
+    reads every row in the healthy case; the min/max form uses
+    `molecule_fingerprints_definition_idx`, so the plan is asserted.
     """
     store = await _store_or_skip()
     reference = InMemoryFingerprintStore(molecule_definition())
@@ -529,11 +442,10 @@ async def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan(
 
 
 async def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
-    """The counterfactual, on a table of this store's own rows only.
+    """A fully rebuilt durable index reports no superseded rows.
 
-    Run against a scratch table rather than the shared one, because "no superseded rows anywhere"
-    is not assertable in a schema every other test writes into — and it is the half that would
-    otherwise pass on a build whose probe always answered True.
+    Run on a scratch table, since "none anywhere" cannot be asserted in the shared table; this
+    catches a probe that always answers True.
     """
     await migrated_db_or_skip()
     async with await db.connect(settings.postgres_dsn) as conn:
@@ -567,29 +479,12 @@ _NEW_DEFINITION = "ecfp:r3:b2048"
 
 
 async def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -> None:
-    """A definition change must *shelve* the rows it supersedes, not destroy them.
+    """A second definition's write shelves the first generation instead of deleting it.
 
-    `004_fingerprint_definition.sql` states the safety property as "a mismatched backfill only
-    makes stale rows fall out of similarity search (safe), never returns a wrong score", and the
-    constructor above repeats it: "the stale rows simply fall out of search until they are
-    re-indexed". Both sentences describe rows that still exist.
-
-    Measured before the fix, with the primary key on `id` alone and `definition` an ordinary column
-    the upsert overwrote:
-
-        after writer A (ecfp:r2:b2048):  rows=1   A.count=1   B.count=0
-        after writer B (ecfp:r3:b2048):  rows=1   A.count=0   B.count=1
-        table now: [('CCO', 'ethanol@B', 'ecfp:r3:b2048')]
-        A superseded_count: 1   B superseded_count: 0
-
-    Within one deployment mid-reindex that is invisible — the re-index is walking those rows
-    anyway. The moment two writers with different definitions run at once (a rolling upgrade that
-    changes `ecfp_radius`, two pods on different images, a second site) each write destroys the
-    other's row, and each side's `superseded_count` then reports the *other's* population as
-    "stale, re-index me" while neither index converges.
-
-    So the key is `(id, definition)` — the shape `document_chunks` took in `041` and `note_index`
-    in `039`, one directory over. The two generations coexist; each store answers over its own.
+    `004_fingerprint_definition.sql` promises stale rows fall out of search, i.e. still exist. With
+    the key on `id` alone, two writers with different definitions (rolling upgrade, two images)
+    destroy each other's rows and neither index converges. The key is `(id, definition)`; the
+    generations coexist and each store answers over its own.
     """
     await migrated_db_or_skip()
     old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
@@ -638,23 +533,12 @@ async def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_
 
 
 async def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -> None:
-    """`all_records` is unfiltered by definition, so a shelf must not double the corpus.
+    """A shelved generation is one molecule to the substructure scan.
 
-    Two things break if it does, and both are chemist-visible. The scan's hits are built one per
-    row, so a molecule held under two generations is reported twice; and
-    `substructure_scan_max_records` bounds *rows*, so a corpus with a superseded generation on the
-    shelf reaches the cap at half the molecules — `scan_truncated` on a corpus that fits.
-
-    One row per key, then, with the searchable generation preferred: the scan re-matches the stored
-    SMILES with RDKit and never touches the bits, so either generation's label is a correct
-    substructure hit, and the current one is the structure this deployment standardized.
-
-    **This one cannot fail against the pre-`094` source and that is not a defect in it**: before the
-    key change a second definition *deleted* the first, so one molecule was one row by destroying
-    the other. It is a guard on the consequence of the fix rather than a reproduction of the bug,
-    and it does bite: driven against the widened key with the pre-`094` `_all` statement restored,
-    five molecules held under two generations came back as **10 rows**, against 5 through the
-    shipped `DISTINCT ON`.
+    `all_records` is unfiltered by definition, so without de-duplication a molecule would be
+    reported twice and `substructure_scan_max_records` would be reached at half the molecules. One
+    row per key, preferring the searchable generation; either label is a correct hit since the scan
+    re-matches SMILES.
     """
     await migrated_db_or_skip()
     old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
@@ -676,15 +560,10 @@ async def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -
 
 
 async def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
-    """Binding this store to a table whose key omits `definition` fails loudly, not quietly.
+    """Binding the store to a table whose key omits `definition` fails loudly.
 
-    The constructor says so about `source_keyed` and `094` says it about the definition half:
-    "naming a key the table does not have is a write that fails to plan rather than one that
-    silently mis-keys". Worth a test rather than a sentence, because the failure it replaces was
-    silent — the pre-`094` key accepted every write and evicted a generation per definition.
-
-    A scratch table with the *old* key, so what is asserted is the store's conflict target against
-    a schema, not a statement against itself.
+    The conflict target names a key the table lacks, so the write fails to plan rather than silently
+    mis-keying. A scratch table with the old key is used.
     """
     await migrated_db_or_skip()
     async with await db.connect(settings.postgres_dsn) as conn:

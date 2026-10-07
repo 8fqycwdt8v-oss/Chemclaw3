@@ -1,9 +1,9 @@
-"""Behavioral tests for the mcp-molfp capability (plan steps 3.1-3.3).
+"""Behavioral tests for the mcp-molfp capability, without a database.
 
-Proves the acceptance core of CHECKMATE 3 without a database: ECFP4 is deterministic
-and config-sized, Tanimoto ranking returns most-similar-first neighbors honoring the
-threshold and top_k, and substructure search filters by exact fragment containment.
-The Postgres backend reproduces the same ranking in SQL (tested in CI).
+ECFP4 is deterministic and config-sized; Tanimoto ranking returns most-similar-first neighbours
+honouring threshold and top_k; substructure search filters by exact fragment containment; and the
+result says when it is partial, approximate or from an empty index. The Postgres backend is
+tested against the same contract in `test_molfp_postgres.py`.
 """
 
 import asyncio
@@ -109,11 +109,10 @@ async def test_threshold_excludes_weak_matches() -> None:
 
 
 async def test_similarity_excludes_other_fingerprint_definitions() -> None:
-    """A store bound to a definition ranks only records built under that same definition.
+    """A store bound to a definition ranks only records built under that definition.
 
-    This is the durable store's cross-definition guard (a changed Morgan radius yields
-    equal-width but incomparable bits): a store pinned to the current definition must not
-    return a record indexed under a different one, even if its raw bits look similar.
+    A changed Morgan radius yields equal-width but incomparable bits, so such records must not be
+    returned even if their bits look similar.
     """
     store = InMemoryFingerprintStore(definition=molecule_definition())
     await store.add(record_for("current", "CCO"))  # stamped with the current definition
@@ -181,11 +180,10 @@ async def test_substructure_oversized_query_raises(monkeypatch: pytest.MonkeyPat
 async def test_substructure_hits_are_lean_and_capped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Substructure hits carry only id + label, and a broad query is capped, not unbounded.
+    """Substructure hits carry only id and label, and a broad query is capped with a warning.
 
-    The fingerprint bits are an internal storage detail (~2KB of '0'/'1' per record); the
-    MCP tool ships hits into the model context, so the result shape must stay lean and the
-    hit count bounded by `fingerprint_max_top_k` — with a warning, never silently.
+    The tool ships hits into the model context, so the shape stays lean (no fingerprint bits) and
+    the count is bounded by `fingerprint_max_top_k`.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
 
@@ -202,12 +200,10 @@ async def test_substructure_hits_are_lean_and_capped(
 async def test_a_truncated_scan_does_not_render_as_a_genuine_negative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scan the record cap cut short must not answer "we have no precedent for this".
+    """A scan the record cap cut short does not answer "we have no precedent for this".
 
-    The regression: with the sole azide sorted last by id and the cap set below the corpus
-    size, the scan never reached it and the payload read `hits: []`, `index_empty: false`,
-    verdict "this is a genuine negative result". The truncation went to the log only, which
-    the model never sees — the same failure `index_empty` exists to prevent, one cap over.
+    With the only match beyond the cap, the payload must flag the truncation to the model rather
+    than reporting a genuine negative.
     """
     monkeypatch.setattr(settings, "substructure_scan_max_records", 20)
 
@@ -244,17 +240,10 @@ async def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.M
 async def test_a_similarity_hit_list_cut_at_top_k_says_so_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The sibling entry point had the same silence, and a comment declaring it correct.
+    """A similarity hit list cut at top_k says so too.
 
-    `find_similar_molecules` returns at most `fingerprint_top_k` (default 10) of however many
-    clear the threshold, and set neither flag — so 18 qualifying molecules rendered as
-    `"10 indexed molecule(s) matched this query."`, which reads as a total. That is exactly what
-    `hits_truncated` was added to say on the substructure entry point next door, in the same
-    commit, and `store.py`'s comment asserted the omission ("every other entry point leaves them
-    so") rather than noticing it.
-
-    A page that holds everything qualifying is still not partial — pinned below, because a flag
-    that fires on every full page is the `len == cap` inference again.
+    More qualifying molecules than `fingerprint_top_k` must set `hits_truncated`, or the count reads
+    as a total. A page holding everything qualifying is not partial, pinned below.
     """
     monkeypatch.setattr(settings, "fingerprint_top_k", 10)
 
@@ -277,17 +266,10 @@ async def test_a_similarity_hit_list_cut_at_top_k_says_so_too(
 async def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exactly `fingerprint_max_top_k` matches is a *complete* answer, not a lower bound.
+    """Exactly `fingerprint_max_top_k` matches is a complete answer, not a lower bound.
 
-    The boundary the first version of this flag could not see: it returned `True` the instant
-    the cap-th match was appended, so `hits_truncated` was identical to `len(hits) == cap` for
-    every input — the very inference `_scan_for_matches`'s docstring says it exists to replace.
-    A corpus of exactly `cap` matches (default 100) rendered as `PARTIAL RESULT: … Do not report
-    it as the complete set`, which is the lane's own defect pointing the other way.
-
-    Both spellings are pinned: cap matches and nothing else, and cap matches followed by
-    non-matching records (the flag must not fire merely because records remained unexamined —
-    they were examined and did not match).
+    `hits_truncated` must not equal `len(hits) == cap`. Both spellings are pinned: exactly cap
+    matches, and cap matches followed by non-matching records, which were examined.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 3)
 
@@ -316,13 +298,10 @@ async def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partia
 async def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A corpus of exactly `substructure_scan_max_records` was fully examined.
+    """A corpus of exactly `substructure_scan_max_records` is a complete scan.
 
-    `scan_truncated` was `len(records) == cap`, so a store sitting exactly on the cap (default
-    5000) turned a true "no azide on file" into `SEARCH INCOMPLETE: … Report the search as
-    inconclusive`. A clean negative reported as inconclusive is the same untruth as an
-    incomplete scan reported as a negative — the flag has to distinguish "read cap records and
-    there were more" from "read cap records and that was all of them".
+    The flag must distinguish "read cap records and there were more" from "that was all of them", or
+    a clean negative is reported as inconclusive.
     """
     monkeypatch.setattr(settings, "substructure_scan_max_records", 5)
 
@@ -342,13 +321,10 @@ async def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
 
 
 async def test_a_row_that_no_longer_parses_makes_the_scan_incomplete() -> None:
-    """A record the scan could not read is a record it did not examine, and that is the flag.
+    """A row that no longer parses makes the scan incomplete.
 
-    `_scan_for_matches` skips an unparseable stored SMILES so one bad row cannot hide every real
-    hit — but it recorded nothing, so a corpus whose only azide carried a malformed label answered
-    `hits: []` under "this is a genuine negative result". That is precisely what `scan_truncated`
-    is documented to rule out ("not every stored record was examined"), reached by the other of
-    the two ways it can happen.
+    An unparseable SMILES is skipped so one bad row cannot hide every hit, but it was not examined,
+    so `scan_truncated` must be set rather than reporting a genuine negative.
     """
     store = InMemoryFingerprintStore()
     await store.add(record_for("ok", "CCO"))
@@ -435,16 +411,9 @@ async def test_substructure_match_does_not_block_the_event_loop(
 
 
 # A hyperbranched C121 dendrimer and a 48-character SMARTS ending in an atom no organic record
-# carries. The pattern can be matched almost to the end and never completes, which is the shape
-# that makes subgraph isomorphism expensive: measured at ~116 ms *per molecule* on this pair,
-# against ~6 microseconds for the same pattern on caffeine. It is the trigger the wave-2 review
-# looked for and could not find, and it is what makes an orphaned scan thread cost minutes rather
-# than milliseconds. Not a stand-in: this is RDKit doing real work on a real molecule.
-#
-# Nothing below asserts that cost. The tests measure one record's match first and derive their
-# deadline from it, so a faster machine or a cheaper RDKit changes the numbers and not the
-# property — the reason `_sleeping_scan` above exists is that a *fixed* pathological cost is what
-# does not reproduce across versions.
+# carries: the pattern matches almost to the end and never completes, making subgraph isomorphism
+# expensive (RDKit doing real work). The tests measure one record's match first and derive their
+# deadline from it, so machine or RDKit speed does not change the property.
 def _hyperbranched(depth: int) -> str:
     """A tri-branched all-carbon dendrimer: 121 atoms at depth 4."""
     if depth == 0:
@@ -478,44 +447,14 @@ def _one_match_seconds() -> float:
 
 
 def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus() -> None:
-    """The wall-clock bound has to reach the worker thread, not only the caller.
+    """A scan past its deadline stops instead of matching the rest of the corpus.
 
-    `asyncio.wait_for` releases the caller and cannot stop a thread, so before this the scan went
-    on matching every remaining record in the background — at the shipped 5 000-record cap and the
-    per-molecule cost measured above, ~10 minutes of one CPU per timed-out request, taken from the
-    loop's default executor, which is also where `chemclaw.api.auth` validates every bearer token.
-
-    **This is a record count now, and everything the ratio version needed nine paragraphs to defend
-    is gone with it.** The property was always a claim about records — "went on matching every
-    remaining record" — and it was held by `bounded < unbounded / 2` over two live wall clocks. That
-    proxy failed `main` twice in one morning (runs 2838 and 2851, at 0.271 and 0.270) against a bar
-    of a quarter while measuring 0.186-0.206 on an idle developer machine, and the bar it was raised
-    to sat 2-13% from the nearest real failure mode on an instrument with a ~46% machine-to-machine
-    spread. None of that was the deadline leaking; it was fixed setup the bounded run carries and
-    the unbounded run amortises.
-
-    What made the honest version look impossible was true and was not the whole picture: this corpus
-    takes the *indexed* path, which chunks by time slice rather than per record, so there is no
-    counting point in the test. But both scan paths were already computing the number and formatting
-    it into an exception message — `start` in `labels_matching`, `examined` in
-    `_match_record_by_record` — so the count existed and the message was the only place it could be
-    read from. `ScanDeadlineExceeded` carries it as `reached`, and `ScanOutcome` carries the
-    unbounded run's as `records_reached`.
-
-    **The bar is derived from the chunking rather than chosen, and a quarter of the corpus was
-    wrong in the direction that reassures.** `reached` is not machine-invariant: the first chunk is
-    `_FIRST_CHUNK` (1) and the next is sized from what that one cost, capped at `_CHUNK_GROWTH`
-    times it — so a *faster* machine reaches **more** records before the deadline, and the honest
-    ceiling is `_FIRST_CHUNK + _CHUNK_GROWTH`. Measured here at 139-142 ms per record it is 2;
-    emulating faster boxes it is 3 at ~90 ms, 4 at ~73 ms and 5 at ~14 ms, so a bar of
-    `len(records) // 4` (4) fails on a machine roughly 1.7x this one. The bar is that ceiling, which
-    cannot move, and the leak shapes the old ratio version tabulated — 8 of 16 and 14 of 16 — are
-    both far above it.
-
-    The unbounded arm needs no count: on an *unmatchable* pattern a scan can only return no hits by
-    examining every record, so `hits == []` is the whole-corpus control. A `records_reached` field
-    was added to `ScanOutcome` for this and removed again — see its docstring for the two paths that
-    disagreed about what it meant.
+    `asyncio.wait_for` releases the caller but cannot stop the worker thread, which runs in the
+    loop's default executor shared with bearer validation, so the deadline must reach the thread.
+    Asserted as a record count: `ScanDeadlineExceeded.reached`. Chunks start at `_FIRST_CHUNK` and
+    grow by at most `_CHUNK_GROWTH`, so the most records reachable before the deadline is
+    `_FIRST_CHUNK + _CHUNK_GROWTH` on any machine, which is the bar. On an unmatchable pattern the
+    unbounded arm can only return no hits by examining every record, so `hits == []` is its control.
     """
     pattern = substructure_pattern(_UNMATCHABLE)
     per_record = _one_match_seconds()
@@ -547,11 +486,10 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
 def test_a_timed_out_substructure_search_leaves_no_thread_matching_behind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same property end to end, observed where an orphaned thread is impossible to miss.
+    """A timed-out substructure search leaves no thread matching behind.
 
-    `asyncio.run` shuts the default executor down before returning, so it *waits* for whatever the
-    abandoned scan is still doing. That wait is the orphan: on the unbounded scan it was the rest
-    of the corpus, long after the caller's own `FingerprintError` had arrived.
+    `asyncio.run` waits for the default executor on shutdown, so an orphaned scan would show up as
+    that wait, long after the caller's `FingerprintError`.
     """
     per_record = _one_match_seconds()
     monkeypatch.setattr(settings, "substructure_match_timeout_seconds", per_record * 2)
@@ -598,12 +536,10 @@ async def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) 
 
 
 async def test_agent_supplied_threshold_is_clamped() -> None:
-    """A model-supplied `threshold` is clamped to Tanimoto's [0, 1] range (SEC-4).
+    """A model-supplied `threshold` is clamped to Tanimoto's [0, 1] range.
 
-    `threshold` lands in the SQL similarity comparison exactly like `top_k` lands in
-    `LIMIT`, so the config-side `[0, 1]` bound must also hold for the per-call override:
-    a negative value would bless disjoint structures as neighbors, and >1 would silently
-    report "no precedent" instead of returning an exact match.
+    A negative value would accept disjoint structures as neighbours, and >1 would report "no
+    precedent" instead of an exact match.
     """
 
     class _RecordingStore:
@@ -614,11 +550,9 @@ async def test_agent_supplied_threshold_is_clamped() -> None:
 
         @property
         def approximate(self) -> bool:
-            """Never — this double scores nothing, so it can never miss a true neighbour.
+            """Never: this double scores nothing, so it can never miss a true neighbour.
 
-            Present because `FingerprintStore` gained the member when exactness became a
-            deployment's choice, and a double that answers "may I miss a neighbour?" with silence
-            would let `find_matches` read an unset attribute rather than a stated one.
+            Stated explicitly so `find_matches` reads a declared answer, not an unset attribute.
             """
             return False
 
@@ -660,20 +594,12 @@ async def test_agent_supplied_threshold_is_clamped() -> None:
 
 
 async def test_agent_supplied_nan_threshold_is_refused_rather_than_emptying_the_search() -> None:
-    """A NaN `threshold` is refused, because clamping it silently returned "no precedent".
+    """A NaN `threshold` is refused rather than silently emptying the search.
 
-    The clamp above is total only over *ordered* values. Every comparison with NaN is False, so
-    `min(max(nan, 0.0), 1.0)` keeps the NaN, and it reached the similarity comparison where each
-    candidate compares False. Measured before this guard, the search below — whose query is an
-    exact match for a molecule sitting in the index — returned `hits: []` with
-    `index_empty: false`, so `verdict` called it "a genuine negative result". That is precisely
-    the conflation `FingerprintSearch` exists to prevent, produced by the guard meant to prevent
-    it, and a wrong answer that looks like an answer is worse than an error.
-
-    Pins the *behaviour*, not the clamp expression: that the search refuses instead of coming
-    back empty, that the refusal is not a `FingerprintError` (`retrieval.retrievers` catches that
-    family to mean "a bad query is an empty answer", which would restore the silence), and that
-    nothing but NaN was narrowed — a merely out-of-range threshold still answers.
+    `min(max(nan, 0.0), 1.0)` keeps NaN, and every comparison with it is False, so an exact match
+    would come back as a "genuine negative". Pinned: the search refuses; the refusal is not a
+    `FingerprintError` (which `retrieval.retrievers` treats as an empty answer); and an out-of-range
+    threshold still answers.
     """
     store = InMemoryFingerprintStore()
     await store.add(record_for("ethanol", "CCO"))
@@ -730,14 +656,10 @@ class _NullConnection:
 async def test_postgres_store_applies_the_configured_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Postgres backend must bound its (slow HNSW) queries like every other store (COR-5/CON-2).
+    """The Postgres store's queries are bounded by the configured statement timeout.
 
-    A regression pin for the fpstore-only omission. It asserts on the libpq `options` the connect
-    actually receives rather than on the keyword `_connection` passes: since
-    D-2026-08-08-a-borrowed-connection-is-bounded-by-default the store passes no keyword at all and
-    `db.connection` supplies the bound, so the old assertion would have proven only that this
-    store still repeats itself — not that a long similarity scan is cancelled rather than pinning
-    its worker. Verified offline by capturing the psycopg connect.
+    Asserted on the libpq `options` the connect receives, since `db.connection` supplies the bound
+    and the store passes no keyword. Verified offline by capturing the psycopg connect.
     """
     captured: dict[str, object] = {}
 
@@ -759,10 +681,8 @@ async def test_postgres_store_applies_the_configured_statement_timeout(
 
 # --- An empty index must not answer "nothing similar" --------------------------------------------
 #
-# The live-run defect (docs/archive/live-grounded-2026-08-03.md, finding 6): the fingerprint tables
-# were never backfilled, so the one tool whose job is "have we seen this before" answered `[]` —
-# indistinguishable from a genuinely novel structure. These tests pin the distinction *and* that it
-# survives serialization, which is where the same fix failed before (`ScreenResult.verdict`).
+# An unpopulated fingerprint table answering `[]` is indistinguishable from a novel structure. These
+# tests pin the distinction and that it survives serialization.
 
 
 async def test_an_empty_index_reports_that_the_search_was_not_run() -> None:
@@ -775,11 +695,10 @@ async def test_an_empty_index_reports_that_the_search_was_not_run() -> None:
 
 
 async def test_the_empty_index_signal_survives_model_dump() -> None:
-    """The verdict must be *serialized*, or the model that writes the answer never sees it.
+    """The empty-index verdict survives `model_dump`, so the model writing the answer sees it.
 
-    This is the whole reason `verdict` is a `computed_field` and not a bare `property`: MCP ships
-    `model_dump()`, and a plain property is dropped there — exactly how `ScreenResult.verdict`
-    ended up with zero production callers while a chemist was told "no hazards detected".
+    MCP ships `model_dump()`, which drops a plain property; `verdict` is a `computed_field` for that
+    reason.
     """
     payload = (await find_similar_molecules(InMemoryFingerprintStore(), "CCO")).model_dump()
     assert payload["index_empty"] is True
@@ -799,18 +718,12 @@ async def test_a_populated_index_with_no_match_is_a_genuine_negative() -> None:
 
 
 def test_an_approximate_search_never_reports_a_genuine_negative() -> None:
-    """A deployment that trades exactness must not be able to say "we have no precedent".
+    """An approximate search never reports a genuine negative.
 
-    The exactness setting decides what an empty page *means*, and that meaning has to reach the
-    model: an approximate search compared the query against a candidate set the index proposed,
-    not against the corpus, so "no indexed molecule matched" is the answer to a weaker question.
-    The failure this guards is the one the whole module is arranged against — a chemist told there
-    is no precedent for the structure in their hand — arriving through a performance knob rather
-    than through an unpopulated index, which is the version nothing about the payload would show.
-
-    Driven on the model rather than on a store, because the setting selects a *durable* arm and
-    this assertion is about the sentence the model reads: the two verdicts must differ, and the
-    approximate one must not carry the word the exact one is trusted for.
+    It compared against a candidate set the index proposed, not the corpus, so "no indexed molecule
+    matched" answers a weaker question. Driven on the model, since the assertion is about the
+    sentence the model reads: the two verdicts differ, and the approximate one lacks the exact one's
+    wording.
     """
     exact = FingerprintSearch[Match](subject="molecule", hits=[])
     approximate = FingerprintSearch[Match](subject="molecule", hits=[], approximate=True)
@@ -824,12 +737,10 @@ def test_an_approximate_search_never_reports_a_genuine_negative() -> None:
 
 
 def test_an_approximate_page_is_not_presented_as_the_definitive_set() -> None:
-    """A *full* page is where an approximate search is most quietly wrong, so it is flagged too.
+    """A full approximate page is not presented as the definitive set.
 
-    An empty approximate result at least looks unusual. A page of ten neighbours looks exactly
-    like an exact page of ten neighbours and is not one: a closer precedent may sit outside the
-    candidate set the index proposed. `hits_truncated` already covers "more matched than fit";
-    this covers "we cannot prove these are the best", which is a different sentence.
+    A closer precedent may sit outside the proposed candidates. Distinct from `hits_truncated`
+    ("more matched than fit"): this says the hits may not be the best.
     """
     hit = Match(id="m1", label="CCO", similarity=0.9)
     exact = FingerprintSearch[Match](subject="molecule", hits=[hit])
@@ -841,12 +752,10 @@ def test_an_approximate_page_is_not_presented_as_the_definitive_set() -> None:
 
 
 async def test_the_in_memory_backend_is_exact_and_says_so() -> None:
-    """The reference backend answers the store contract's `approximate` question with "never".
+    """The in-memory backend is exact and says so.
 
-    It scores every searchable record, which is exactly what makes it the reference the durable
-    backend's exact arm is asserted against — and the search it feeds must therefore never be
-    labelled approximate, whatever the deployment sets, because the setting selects between two
-    *SQL* statements and this backend has neither.
+    It scores every searchable record, which is what makes it the reference for the durable exact
+    arm; the exactness setting selects between SQL statements this backend does not have.
     """
     store = InMemoryFingerprintStore()
     await store.add(record_for("ethanol", "CCO"))
@@ -862,12 +771,10 @@ async def test_the_in_memory_backend_is_exact_and_says_so() -> None:
 
 
 def test_the_durable_store_reports_the_configured_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`PostgresFingerprintStore.approximate` reads the setting per call, and needs no database.
+    """`PostgresFingerprintStore.approximate` reads the setting per call; no database needed.
 
-    Per call rather than at construction so this property and `find_similar` cannot disagree about
-    which arm ran — the store is built once per process (`default_molecule_store`) and the setting
-    is what a deployment turns, so a value frozen in `__init__` would keep claiming the arm the
-    process started with.
+    The store is built once per process, so a value frozen at construction could disagree with the
+    arm `find_similar` actually ran.
     """
     store = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, "ecfp:r2:b2048")
     assert store.approximate is False
@@ -886,11 +793,10 @@ async def test_a_hit_is_unaffected_by_the_emptiness_signal() -> None:
 
 
 async def test_an_index_of_only_stale_definitions_counts_as_empty() -> None:
-    """Rows the store cannot rank are not "records we searched" — they are nothing, honestly.
+    """An index holding only stale definitions counts as empty.
 
-    A definition change orphans every row until it is re-indexed (runbook (vi)). Search returns
-    none of them, so reporting the index as populated would produce exactly the defect this
-    distinction exists to prevent, one config change further along.
+    Search returns none of those rows, so reporting the index as populated would turn an unanswered
+    question into a negative.
     """
     store = InMemoryFingerprintStore(definition=molecule_definition())
     await store.add(
@@ -981,10 +887,8 @@ def test_the_startup_report_never_takes_the_connector_down() -> None:
 def _superseded(record: FingerprintRecord) -> FingerprintRecord:
     """The same record as the previous fingerprint definition stored it.
 
-    The version is substituted out by *name* rather than by its literal: written
-    `replace("std7", "std6")`, this became a no-op the moment the constant moved to `std8`, and the
-    fixture only still differed from a current row because of the `-old` suffix beside it — so what
-    it exercised was a definition with a suffix, not a definition at an older standardization.
+    The version is substituted by name rather than by literal, so the fixture stays an older
+    standardization when the constant moves.
     """
     return record.model_copy(
         update={"definition": record.definition.replace(STANDARDIZATION_VERSION, "std-superseded")}
@@ -992,19 +896,11 @@ def _superseded(record: FingerprintRecord) -> FingerprintRecord:
 
 
 async def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None:
-    """The state a definition bump walks every deployment through, and what it used to answer.
+    """One rebuilt row does not make a stale corpus answerable.
 
-    `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which retires
-    every fingerprint row at once. The instant of the bump is honest — nothing is searchable, so
-    `index_empty` is True and the verdict says the question was not answered. The *next* moment is
-    not: one row re-indexed by a resumed ELN sync flips `index_empty` to False, and measured
-    against 50 superseded rows the search answered
-
-        hits 1  index_empty False  verdict "1 indexed molecule(s) matched this query."
-
-    which is a confident, complete-looking answer to "have we made this before?" drawn from 2% of
-    the corpus. Nothing counted rows under a superseded definition — `count`, `is_empty` and
-    `log_index_size` all filter to the current one — so no reader anywhere could see the other 98%.
+    After a definition bump, one re-indexed row flips `index_empty` to False; without counting
+    superseded rows the search would answer confidently from a small fraction of the corpus. The
+    result must report the index as partial.
     """
     store = InMemoryFingerprintStore(molecule_definition())
     for i, smiles in enumerate(["CCO", "CCCO", "CCCCO", "c1ccccc1", "CC(=O)O"]):
@@ -1020,11 +916,10 @@ async def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None
 
 
 async def test_the_instant_of_a_definition_bump_is_still_reported_as_a_search_not_run() -> None:
-    """The state *before* the one above, which was already honest and had to stay so.
+    """At the instant of a definition bump, the search is still reported as not run.
 
-    Every row superseded and none rebuilt is an index with nothing searchable, and "SEARCH NOT
-    RUN" is the right sentence for it — a partial-index notice must not displace it, because the
-    reader's action differs: nothing here can be answered at all.
+    With nothing searchable, "SEARCH NOT RUN" is the right sentence; a partial-index notice must not
+    displace it.
     """
     store = InMemoryFingerprintStore(molecule_definition())
     for i, smiles in enumerate(["CCO", "CCCO", "CCCCO"]):
@@ -1049,12 +944,9 @@ async def test_a_fully_rebuilt_index_is_not_flagged_partial() -> None:
 
 
 async def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -> None:
-    """The half that asserts absence, which is the sentence a chemist acts on.
+    """No hits over a partly rebuilt index is not a genuine negative.
 
-    A populated index with no match says "every stored record was compared — so this is a genuine
-    negative result". Over a corpus 90% of which is waiting to be re-indexed that claim is simply
-    false, and it is the exact failure `FingerprintSearch` exists to prevent, reached through a
-    definition change rather than through an unpopulated table.
+    "Every stored record was compared" is false while much of the corpus awaits re-indexing.
     """
     store = InMemoryFingerprintStore(molecule_definition())
     await store.add(_superseded(record_for("old-azide", "CCCCN=[N+]=[N-]")))
@@ -1068,14 +960,10 @@ async def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -
 
 
 async def test_a_substructure_scan_is_not_partial_because_it_reads_every_definition() -> None:
-    """A substructure scan reads every definition, so it is never partial and must not say it is.
+    """A substructure scan reads every definition, so it is never partial and does not say it is.
 
-    `all_records` is unfiltered by definition on purpose, so this entry point searches the whole
-    table even mid-rebuild.
-
-    Worth pinning rather than leaving implicit: a stale-definition row's stored SMILES is still a
-    correct substructure hit, so flagging this search partial would tell a chemist to distrust an
-    answer that is complete.
+    `all_records` is deliberately unfiltered by definition, and a stale row's SMILES is still a
+    correct substructure hit.
     """
     store = InMemoryFingerprintStore(molecule_definition())
     await store.add(_superseded(record_for("old-ethanol", "CCO")))
@@ -1087,12 +975,9 @@ async def test_a_substructure_scan_is_not_partial_because_it_reads_every_definit
 
 
 def test_the_two_notices_compose_instead_of_shadowing_each_other() -> None:
-    """A partial index and an approximate arm are independent facts, so both must be said.
+    """A partial index and an approximate arm are independent facts, so both notices are said.
 
-    The hits arm already carried this rule in a comment ("two independent facts, so two
-    independent clauses — not two branches"); the no-hits arm below it was still an `if`/`return`
-    chain, which no test could see because the two facts it could shadow cannot co-occur today. A
-    third one that co-occurs with both is what makes the shape matter.
+    The no-hits arm must compose clauses rather than branch, like the hits arm.
     """
     both = FingerprintSearch[Match](
         subject="molecule", hits=[], index_partial=True, approximate=True
@@ -1113,20 +998,12 @@ def test_the_two_notices_compose_instead_of_shadowing_each_other() -> None:
 async def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The number is the operator's, and it is the half a boolean cannot give.
+    """The operator log names the rows waiting to be rebuilt.
 
-    "1 of 50 rebuilt" is what says a re-index is unfinished and how far it got; the search surface
-    carries only the boolean, because the count is a `count(*)` and that one is read on every
-    query. Four states, because the message differs in what an operator must *do*: rebuild what is
-    there, finish rebuilding it, dispose of what the finished rebuild superseded, or nothing.
-
-    **The third is new and it is `094`'s bill.** A definition change now shelves the generation it
-    retires instead of overwriting it, so a *finished* rebuild still reports PARTIAL — the rows are
-    there, no search can compare against them, and the runtime role holds no DELETE. Two states
-    therefore render as PARTIAL and only the counts tell them apart, which is why this log line
-    reports both numbers and no longer derives a share from them: `records/(records+superseded)`
-    read as "the searchable fraction of the corpus", and after a rebuild it is 50% of a corpus that
-    is wholly searchable.
+    The search surface carries only a boolean; the log carries both counts, because the operator's
+    action differs: rebuild, finish rebuilding, dispose of the shelved superseded generation, or
+    nothing. A finished rebuild still reports PARTIAL because the superseded generation is shelved,
+    so no share is derived from the counts.
     """
     store = InMemoryFingerprintStore(molecule_definition())
     for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
@@ -1144,12 +1021,9 @@ async def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
         assert "1 record(s) indexed under the current definition and 3 under a" in caplog.text
         assert caplog.records[-1].levelname == "WARNING"
 
-        # The rebuild finishes — and since `094` the generation it superseded is *shelved*
-        # rather than overwritten, so the index still holds rows this deployment cannot
-        # compare and still says PARTIAL. What changed is what an operator must do about it,
-        # and the log is the only place that distinction is available: the searchable count is
-        # now the whole corpus, and what is left is a disposal under the owning principal
-        # rather than a rebuild to finish.
+        # The rebuild finishes, but the superseded generation is shelved, so the index still says
+        # PARTIAL. The log is where the difference shows: the searchable count is the whole corpus,
+        # and what remains is a disposal under the owning principal rather than a rebuild.
         caplog.clear()
         for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
             await store.add(record_for(f"log-old-{i}", smiles))
@@ -1170,16 +1044,11 @@ async def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
 
 
 async def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it() -> None:
-    """The in-memory oracle keys by definition too, because it is what the SQL is asserted against.
+    """The in-memory reference shelves a superseded generation rather than evicting it.
 
-    Every partial-index assertion in this file is made here and is only evidence about the
-    deployment while the two backends hold the same rows. Keyed by `(source, id)` alone, this store
-    reproduced the durable defect exactly: the second definition's write evicted the first, so a
-    rolling upgrade running two `ecfp_radius` values had each pod destroy the other's row and
-    neither index ever converged. `tests/test_molfp_postgres.py` measures the SQL half.
-
-    The shelf is scoped, not a second copy: a store pinned to one definition ranks only its own
-    generation, which is the guard `D-031` added and this must not weaken.
+    It is what the SQL is asserted against, so it must key by definition too; keyed by `(source,
+    id)` alone, two pods with different `ecfp_radius` would evict each other's rows and never
+    converge. A store pinned to one definition still ranks only its own generation.
     """
     old_definition = molecule_definition() + "-previous"
     old = InMemoryFingerprintStore(old_definition)
@@ -1204,22 +1073,17 @@ async def test_the_reference_shelves_a_superseded_generation_rather_than_evictin
 
 
 # --------------------------------------------------------------------------------------------
-# The `rdSubstructLibrary` index behind `_scan_for_matches`, and the cache that makes it a win.
-# Everything below is about `chemclaw.science.fingerprints.molfp.substructure_index`.
+# The `rdSubstructLibrary` index behind `_scan_for_matches`, and its cache:
+# `chemclaw.science.fingerprints.molfp.substructure_index`.
 # --------------------------------------------------------------------------------------------
 
 
 def _nci_corpus(limit: int) -> list[str]:
     """`limit` SMILES from the NCI sample RDKit ships, as a realistic drug-like corpus.
 
-    Realistic rather than hand-written on purpose: the pattern-fingerprint screen this index adds
-    is a *filter in front of the matcher*, and a screen is only interesting over molecules diverse
-    enough for it to reject some of them. Four hand-picked alcohols would agree with any screen,
-    sound or not.
-
-    It is RDKit's own package data (`rdkit/Data/NCI/first_5K.smi`), so it is not a corpus under
-    `data/` and carries no licence/checksum contract of this repository's — it is read from the
-    installed dependency the same way `science/bo/benchmarks` reads its own package data.
+    A pattern-fingerprint screen is only exercised over molecules diverse enough for it to reject
+    some. It is RDKit's package data (`rdkit/Data/NCI/first_5K.smi`), read from the installed
+    dependency, not a corpus under `data/`.
     """
     path = Path(RDConfig.RDDataDir) / "NCI" / "first_5K.smi"
     if not path.exists():  # pragma: no cover - only on an RDKit build that drops its sample data
@@ -1228,11 +1092,9 @@ def _nci_corpus(limit: int) -> list[str]:
 
 
 def _loop_matches(labels: list[str], pattern: Chem.Mol) -> tuple[list[str], int]:
-    """The scan exactly as it was before the index: parse every label, ask each molecule.
+    """The per-record scan: parse every label and ask each molecule.
 
-    Written out here rather than imported, because the point of the test below is that the
-    *replaced* algorithm and the replacement agree — an import would make it one algorithm
-    compared with itself.
+    Written out rather than imported, so the replaced algorithm and its replacement are compared.
     """
     matches: list[str] = []
     unreadable = 0
@@ -1268,18 +1130,11 @@ _DIFFERENTIAL_QUERIES = [
 def test_the_index_returns_exactly_what_the_per_record_loop_returned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The replacement's whole licence to exist: same hits, same order, over a real corpus.
+    """The index returns exactly the hits, in the same order, as the per-record loop.
 
-    `find_substructure_matches` used to parse every stored SMILES on every query and call
-    `HasSubstructMatch`; it now matches through `rdSubstructLibrary`, which screens each molecule
-    with a pattern fingerprint in C++ first. A screen that is unsound for some SMARTS class would
-    drop real hits *silently*, and this tool's silent drop is a chemist told a precedent does not
-    exist — so the agreement is asserted rather than assumed, over the twelve query classes above
-    and as a list, since hit order is what the model cites.
-
-    The corpus carries a deliberately malformed row, because the holder skips sanitisation and so
-    would never have noticed one: the `unreadable` count has to come from somewhere, and this is
-    the arm that says it still does.
+    `rdSubstructLibrary` screens with a pattern fingerprint first; a screen unsound for some SMARTS
+    class would silently drop real hits. Asserted over twelve query classes, as a list since order
+    is what the model cites. A malformed row keeps the `unreadable` count honest.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)  # compare whole hit lists
     labels = [*_nci_corpus(1200), "not-a-molecule((("]
@@ -1300,16 +1155,11 @@ def test_the_index_returns_exactly_what_the_per_record_loop_returned(
 def test_a_chiral_query_is_matched_the_way_the_loop_matched_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`GetMatches` defaults `useChirality` to True and `HasSubstructMatch` defaults it to False.
+    """A chiral query is matched as `HasSubstructMatch` matched it, with chirality off.
 
-    Taking the default would have been a silent, total change of answer for every stereochemical
-    query: measured over the 4,991-molecule NCI corpus, `[C@H](O)(C)C` matches **514** molecules
-    through `HasSubstructMatch` and **0** through `GetMatches` at its default — a clean "no
-    precedent exists" for 514 molecules that are on file. The scan therefore passes it explicitly.
-
-    The second assertion is about *upstream*, not about this repository: it pins that the two
-    defaults still disagree, so that a future RDKit aligning them turns this into a red test with
-    the reason attached rather than leaving an explicit argument nobody can justify any more.
+    `GetMatches` defaults `useChirality` to True and `HasSubstructMatch` to False, so the scan
+    passes it explicitly. The second assertion pins that the upstream defaults still differ, so an
+    RDKit change turns red with the reason attached.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)
     labels = [*_nci_corpus(1200)]
@@ -1354,12 +1204,9 @@ def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 @pytest.fixture(autouse=True)
 def _clear_the_substructure_index_cache() -> Iterator[None]:
-    """Give every test its own cache, so a build counted here is a build this test caused.
+    """Give every test its own index cache, so a counted build is one this test caused.
 
-    The cache is process-global by design (it is keyed on the corpus, and two searches over one
-    corpus must share one index), which makes it exactly the kind of state that leaks between
-    tests: a corpus another test already indexed would make a build counter read zero and the
-    assertion pass for the wrong reason.
+    The cache is process-global by design (keyed on the corpus), so it would leak between tests.
     """
     substructure_index._INDEXES = BoundedLru(
         lambda: settings.substructure_index_cache_entries,
@@ -1371,12 +1218,10 @@ def _clear_the_substructure_index_cache() -> Iterator[None]:
 async def test_the_index_is_built_once_and_reused_by_every_later_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The adoption is a *loss* without this, which is why it is asserted and not assumed.
+    """The index is built once and reused by every later query.
 
-    Measured on the 4,991-molecule NCI corpus: building the index costs 1,155 ms against 13-41 ms
-    to search it and 326 ms for the per-record loop it replaces. A per-query rebuild would
-    therefore be about three times slower than doing nothing at all, so "one build serves every
-    later query" is the change, not a refinement of it.
+    A build costs far more than one per-record scan, so a per-query rebuild would be slower than no
+    index at all.
     """
     built = _count_builds(monkeypatch)
 
@@ -1396,16 +1241,11 @@ async def test_the_index_is_built_once_and_reused_by_every_later_query(
 async def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reason the cache key is a digest of the labels and not a count, a max id or a timestamp.
+    """A rewritten label invalidates the index although the row count is unchanged.
 
-    `molecule_fingerprints` has no revision column, and its upsert rewrites `label` and `bits` **in
-    place** — so a corpus whose azide row is corrected to a different structure has the same row
-    count, the same maximum id and the same `created_at`. A cache keyed on any of those would keep
-    answering from the structure that is no longer stored, which is the one failure mode worse than
-    being slow: a chemist told a precedent does not exist when it does.
-
-    Driven end to end rather than by inspecting the key: the same store, the same number of rows,
-    one label rewritten, and the answer has to follow the corpus.
+    The upsert rewrites `label` in place with no revision column, so the cache key is a digest of
+    the labels; a count, max id or timestamp would keep answering from a structure no longer stored.
+    Driven end to end.
     """
     built = _count_builds(monkeypatch)
 
@@ -1425,13 +1265,9 @@ async def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is
 def test_the_index_cache_holds_no_more_than_the_configured_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The memory bound, as a fact rather than as a comment about `BoundedLru`.
+    """The index cache holds no more than `substructure_index_cache_entries` indexes.
 
-    An index is ~863 bytes per molecule (binary molecules plus pattern fingerprints, measured), so
-    the ceiling this map is holding is `substructure_index_cache_entries` times
-    `substructure_scan_max_records` — about 8.4 MB at the shipped defaults. Unbounded, it would be
-    one index per corpus generation an ingest ever produced, which is the unbounded-growth shape
-    `core/bounded.py` exists for.
+    Unbounded, it would keep one index per corpus generation ingest ever produced.
     """
     monkeypatch.setattr(settings, "substructure_index_cache_entries", 2)
     pattern = substructure_pattern("CCO")
@@ -1444,12 +1280,10 @@ def test_the_index_cache_holds_no_more_than_the_configured_number(
 def test_concurrent_misses_on_one_corpus_build_one_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two threads that miss together must not each pay the build.
+    """Concurrent misses on one corpus build one index.
 
-    The scan runs in the loop's default executor (`asyncio.to_thread`), so "two coroutines miss at
-    once" is really two worker threads inside `index_for` at once — and two builds of a 5,000-row
-    corpus is ~2.3 s of CPU taken from the pool that also validates every bearer token. The second
-    caller waits on the build lock and then finds the entry.
+    The scan runs in the default executor, so concurrent misses are concurrent threads in
+    `index_for`; the second waits on the build lock and finds the entry.
     """
     built = _count_builds(monkeypatch)
     records = [record_for(f"{index:03d}", "CCO") for index in range(50)]
@@ -1475,17 +1309,11 @@ def test_concurrent_misses_on_one_corpus_build_one_index(
 async def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deliberate, argued change of behaviour, in the conservative direction.
+    """An unreadable row is counted even when the result cap stops the scan.
 
-    The per-record loop stopped counting where it stopped scanning, so a query that filled
-    `fingerprint_max_top_k` early never reached a malformed row further down the corpus and the
-    answer said nothing about it. The parse now happens once when the index is built, over the
-    whole slice — so `unreadable`, and the `scan_truncated` it folds into, describe the **corpus**
-    rather than one query's hit distribution, and two different queries over one corpus can no
-    longer disagree about whether every stored record was examined.
-
-    It can only move the flag from False to True, which is the direction this module errs in
-    everywhere else: the model is told not to read a miss as a negative.
+    Parsing happens once at index build over the whole slice, so `unreadable` and `scan_truncated`
+    describe the corpus, not one query. This can only move the flag towards "not every record was
+    examined", the conservative direction.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
 
@@ -1505,18 +1333,11 @@ async def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_s
 
 
 def test_a_caller_with_no_time_left_builds_nothing_and_is_told_what_ran_out() -> None:
-    """A bound that has already passed must not start a build, and must not cache half of one.
+    """A caller with no time left builds nothing, caches nothing, and is told which scan ran out.
 
-    Building is the most expensive thing on this path — 1,560 ms for 5,000 molecules — and it runs
-    in the same worker thread the scan does, which is the loop's default executor. A caller whose
-    bound has passed must not leave that thread parsing thousands of molecules behind it, for
-    exactly the reason `find_substructure_matches` gives about the matching half.
-
-    Two assertions, and both were defects. An abandoned build is not cached, because a library
-    holding a fraction of the corpus would answer every later query over that fraction with no flag
-    saying so. And the refusal names **the scan that actually ran** — this used to say "indexing",
-    correctly, while the message the chemist was handed one frame up said the *match* had exceeded
-    its bound over a pattern that had never been matched once.
+    A build is the most expensive step and runs in the shared executor. An abandoned partial index
+    is not cached, since it would answer later queries over a fraction of the corpus unflagged; and
+    the refusal names the indexing, not a match that never ran.
     """
     records = [record_for(f"{index:04d}", "CCO") for index in range(400)]
     pattern = substructure_pattern("CO")
@@ -1537,21 +1358,11 @@ def test_a_caller_with_no_time_left_builds_nothing_and_is_told_what_ran_out() ->
 def test_a_corpus_too_large_to_index_is_searched_record_by_record_instead_of_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The regression this pair of budgets exists for: a big corpus must ANSWER, not fail forever.
+    """A corpus too large to index in its budget is searched record by record instead of refused.
 
-    The build used to be charged against `substructure_match_timeout_seconds` — the bound on
-    *matching* — and nothing is cached when a build is abandoned, so a corpus whose build outran
-    that bound could never produce an index and therefore never produce an answer. Measured on
-    19,996 NCI records at the shipped 5.0 s: the build gave up at 11,776, 13,440 and 14,976
-    molecules on three successive attempts, three failures out of three, over a corpus the
-    per-record loop answers in 2.01 s with 2,684 hits. It was reachable by following this module's
-    own advice, which is to raise `substructure_scan_max_records` when the cap truncates.
-
-    So the build has its own budget and a build that does not fit it is *skipped*: `index_for`
-    returns None and the scan matches record by record. Driven here with a budget no corpus can
-    meet, over the twelve query classes the index itself is held to, because a fallback that
-    answered differently from the thing it falls back from would be a worse defect than the one it
-    fixes.
+    The build has its own budget, and a build that does not fit is skipped: `index_for` returns None
+    and the scan matches per record, so a large corpus still answers. Driven with an impossible
+    budget over the twelve query classes, since the fallback must answer exactly as the index would.
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)
     monkeypatch.setattr(settings, "substructure_index_build_timeout_seconds", 0.001)
@@ -1577,47 +1388,13 @@ def test_a_corpus_too_large_to_index_is_searched_record_by_record_instead_of_ref
 def test_a_build_that_cannot_meet_its_budget_costs_the_query_a_fraction_of_that_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The budget is a projection, not a stopwatch run to exhaustion.
+    """A build that cannot meet its budget gives up after a small fraction of the corpus.
 
-    A refusal taken by running the clock out would spend the whole build budget before the scan it
-    falls back to had even started — at the shipped numbers, 3.0 s of a 5.0 s bound, which turns
-    "answers slowly" back into "does not answer" for a corpus only a little larger. Extrapolating
-    the build's own measured rate every `_BUILD_CHECK_STRIDE` records instead, the refusal lands
-    after a few tens of records.
-
-    **This asserted records and it used to assert a wall clock, and the wall clock was measuring a
-    third thing.** It timed `_scan_for_matches` whole against `_loop_matches`, at a ratio of 2 —
-    and `_scan_for_matches` ends by building a `MoleculeHit` per hit, which derives a compound note
-    id through `core.chem`'s canonicalisation, while `_loop_matches` derives none. Those caches are
-    process state: driven, the *same* call was 0.764 s cold and 0.109 s warm on the next two
-    repetitions, over a refusal costing 0.020 s and a fallback scan costing 0.080 s. So the run
-    reported on whether something earlier in the process had canonicalised these molecules, not on
-    how the refusal was taken — `tests/test_molfp.py` was `63 passed` as a file and `1 failed`
-    running this test alone, on the same tree, which is the signature of exactly that.
-
-    The clock could not have failed for the stated reason in any case. At a build budget of 0.001 s
-    a refusal taken by *exhaustion* also costs 0.001 s, so the two mechanisms this test exists to
-    distinguish were indistinguishable by time at its own fixture.
-
-    What separates them is **how much of the corpus the refused build parsed**, which is the
-    mechanism rather than a proxy for it. The budget is calibrated from a full build measured on
-    this machine in this run, so nothing here is a figure about one box: at half of what the whole
-    build costs, a projecting build gives up at the first check that can see past the budget —
-    `_BUILD_CHECK_STRIDE` records — while a build that merely watches its deadline runs until the
-    budget is half spent, which is half the corpus. Measured on the 1,200-record slice: **64**
-    records against **576**, a ninefold gap that no machine's speed moves, because both sides are
-    fractions of the same corpus.
-
-    The bar is a fraction of the **corpus**, not a multiple of `_BUILD_CHECK_STRIDE`, and that is
-    a deliberate second choice. Written against the stride, widening the stride would raise the bar
-    with it — driven at 512 it does, and a stride of 1,200 would let the refused build parse the
-    whole corpus with this still green, which is the defect back by another route. Against an
-    eighth of the corpus, the shipped stride leaves a 2.3x margin and a widened one reds, because
-    the property is that the refusal reads a small fraction of what it declined to index.
-
-    The cost half of the claim follows from the records half and is not separately asserted: 64
-    parses of 1,200 is the fraction, and a fraction of a scan is what "costs the query a fraction
-    of that budget" means.
+    The budget is a projection from the build's measured rate every `_BUILD_CHECK_STRIDE` records,
+    not a stopwatch run to exhaustion, which would spend the build budget before the fallback scan
+    starts. Asserted as records parsed, the mechanism itself, with the budget calibrated from a full
+    build in this run. The bar is a fraction of the corpus rather than a multiple of the stride, so
+    widening the stride cannot let the refused build parse everything.
     """
     labels = _nci_corpus(1200)
     records = [
@@ -1659,17 +1436,11 @@ def test_a_build_that_cannot_meet_its_budget_costs_the_query_a_fraction_of_that_
 def test_a_query_whose_index_is_cached_is_not_blocked_by_an_unrelated_corpus_building(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One lock for the whole module made a *cache hit* wait for somebody else's build.
+    """A query whose index is cached is not blocked by an unrelated corpus building.
 
-    `index_for` took a single process-global lock on every call, hit or miss, and held it across
-    the build. Driven at a 1.0 s bound while an unrelated corpus was being indexed, a query whose
-    own index was already in the map refused at 1.0014 s — where before this module existed the
-    two ran concurrently in separate `to_thread` workers. It is worse under ingest than that
-    sounds: the key is a digest of the labels, so one new molecule mints a new corpus and every
-    concurrent query serializes behind one build.
-
-    The build is blocked here rather than merely slow, so the assertion is about *whether* the
-    cached query waits at all and not about how fast this box is.
+    Each new molecule mints a new corpus key, so under ingest a single global lock held across
+    builds would serialize every query. The build is blocked here, so the assertion is whether the
+    cached query waits at all.
     """
     cached = [record_for(f"c{index:03d}", "CCO") for index in range(50)]
     other = [record_for(f"o{index:03d}", "c1ccccc1" + "C" * (index + 1)) for index in range(50)]
@@ -1712,16 +1483,11 @@ def test_a_query_whose_index_is_cached_is_not_blocked_by_an_unrelated_corpus_bui
 async def test_the_refusal_names_the_scan_that_ran_out_of_time_and_a_remedy_that_works(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What the chemist is handed, for both ways a scan can run out of time.
+    """The refusal names the scan that ran out of time and a remedy that works.
 
-    The message used to read "substructure match for 'C(=O)N' exceeded 5.0s over 19996 molecules;
-    narrow the pattern" over a corpus whose *indexing* had run out of that budget with the pattern
-    never matched once — so the one remedy it named could not have helped. It now carries whatever
-    the scan that gave up said about itself, and `asyncio.wait_for`'s own `TimeoutError`, which
-    carries no message at all, is the case where nobody can say and the text says that instead.
-
-    Driven through the seam rather than by racing the two bounds, because which of them wins is a
-    scheduling accident and the subject here is the sentence, not the race.
+    It carries what the scan that gave up said about itself; `asyncio.wait_for`'s message-less
+    `TimeoutError` gets text saying so. Driven through the seam, since which bound wins is a
+    scheduling accident.
     """
     store = InMemoryFingerprintStore()
     for record in (record_for("a", "CCO"), record_for("b", "CC(=O)O")):
@@ -1751,17 +1517,10 @@ async def test_the_refusal_names_the_scan_that_ran_out_of_time_and_a_remedy_that
 
 
 def test_the_scan_stops_within_a_time_slice_of_its_deadline_not_a_record_count() -> None:
-    """Deadline granularity is one *chunk*, and a chunk is a slice of time, not a count of records.
+    """The scan stops within a time slice of its deadline, not within a record count.
 
-    The per-record loop checked the clock before each molecule. A C++ `GetMatches` call cannot be
-    interrupted, so the check can now only happen between calls — and if a chunk were a fixed
-    number of records, the overrun would be that count times a per-molecule cost which spans five
-    orders of magnitude here (microseconds for a functional-group SMARTS on caffeine, ~117 ms for
-    the pattern below on the dendrimer above). A chunk of 500 would be milliseconds on one corpus
-    and a minute on another.
-
-    Sized in time instead, the scan converges on the cost it is actually paying: this asserts the
-    property in the unit the bound is written in, so the fixture's own speed is not the subject.
+    `GetMatches` cannot be interrupted, so the deadline is checked between chunks; per-molecule cost
+    spans orders of magnitude, so chunks are sized in time. Asserted in the bound's own unit.
     """
     pattern = substructure_pattern(_UNMATCHABLE)
     per_record = _one_match_seconds()

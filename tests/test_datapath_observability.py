@@ -399,8 +399,7 @@ def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
 
 @pytest.mark.anyio
 async def test_gathering_evidence_records_the_surviving_count_without_being_asked_to() -> None:
-    """Driven through `gather_evidence`, because a unit test of the helper cannot see a missing
-    caller.
+    """Driven through `gather_evidence`: a helper's unit test cannot see a missing caller.
 
     A helper that is declared, covered and named in the source can still have no production caller;
     only driving the real path and reading the registry can fail for that reason.

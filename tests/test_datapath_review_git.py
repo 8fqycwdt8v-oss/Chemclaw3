@@ -128,9 +128,9 @@ def test_git_stderr_reaches_the_log_bounded_and_the_exception_whole(
 def test_a_long_branch_is_bounded_in_the_log_line_too(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A long branch is bounded in the log line too: the format string interpolates `"
-    ".join(args)`,
-    which carries `refs/heads/<branch>`.
+    """A long branch is bounded in the log line too.
+
+    The format string interpolates `" ".join(args)`, which carries `refs/heads/<branch>`.
     """
     submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
 
