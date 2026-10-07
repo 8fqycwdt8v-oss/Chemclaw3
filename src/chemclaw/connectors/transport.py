@@ -88,16 +88,8 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     """Treat `exc` as "this connector is absent this turn", unless the caller cancelled us.
 
     Broad in what it absorbs (refused connection, DNS, TLS, timeout, MCP `ToolException`, anyio
-    cancel-scope errors) because enumerating the family would let the next unlisted member fail the
-    turn.
-
-    Args:
-        connector: The bundle's name, for the log line an operator reads.
-        exc: What the connector's open raised.
-
-    Raises:
-        BaseException: `exc` itself, when it is the caller's own cancellation; see
-            `_is_really_cancelled`.
+    cancel-scope errors), because enumerating the family would let the next unlisted member fail the
+    turn. Re-raises `exc` when it is the caller's own cancellation (`_is_really_cancelled`).
     """
     if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
         raise exc

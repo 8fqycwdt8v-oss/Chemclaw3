@@ -1,0 +1,2998 @@
+"""Retention windows bound the durable stores (gap SCH-1).
+
+Before this, nothing in the system deleted anything: every Postgres table grew for the life of the
+deployment. That is a records gap, not just a disk one — "keep for N years, then
+dispose, provably" needs a disposal step.
+
+The Postgres round-trip skips offline (like every other PG test), so these pin the *policy* the job
+encodes, which is where the real risk lives: what it prunes, what it refuses to prune and why, and
+that a deployment must opt in before anything is deleted.
+"""
+
+import asyncio
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, cast
+from uuid import uuid4
+
+import psycopg
+import pytest
+import yaml
+from langchain_core.messages import HumanMessage, message_to_dict
+from psycopg.types.json import Jsonb
+
+from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.leaver import _ERASE as leaver_erase
+from chemclaw.agent.leaver import _RETAINED as leaver_retained
+from chemclaw.agent.message_migration import to_langchain
+from chemclaw.agent.message_pairing import droppable_rows, unmatched_result_ids
+from chemclaw.agent.scratchpad import STORE_TABLES
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
+from chemclaw.durable import retention
+from chemclaw.durable.retention import (
+    _ANALYZE_THREADS,
+    _EXPIRED_THREADS,
+    _NOT_PRUNED,
+    _OWNERSHIP_DEPENDENCIES,
+    _PRUNABLE,
+    _SESSION_SCOPED_ROWS,
+    RetentionOutcome,
+    _Budget,
+    _prune_checkpoints,
+    _sweep_once,
+    _window_days,
+    prune_exhibit_pushes,
+    prune_expired_rows,
+    unwindowed_ownership_dependencies,
+)
+from tests.legacy_rows import legacy_call, legacy_result, legacy_text
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
+
+# The same reader `tests/test_schema_inventory.py` pins `infra/sql/README.md` with. Imported rather
+# than re-implemented: a second regex over the migrations would be a second answer to "what tables
+# exist", and the two would drift in exactly the direction that makes an exhaustiveness check pass
+# while going blind.
+from tests.test_schema_inventory import tables_on_disk
+
+
+def test_only_spent_operational_rows_are_prunable() -> None:
+    """The prunable set is closed and small — a new table is a deliberate addition, not a sweep.
+
+    `tool_result_blobs` is the third and is the one member that holds no *record*: it is the full
+    text of what a tool returned, kept so a surface can render it, and the answers it describes
+    live in `calculation_results` and `job_records`. That is what makes a plain age cutoff the
+    right instrument for it and the wrong one for the three tables refused below.
+
+    `checkpoints` is the fourth, and it was missing for a reason worth naming: the LangGraph
+    checkpoint tables are created by `AsyncPostgresSaver.setup()` rather than by a migration in
+    `infra/sql`, so they are absent from the schema anybody reviews. Erasure already reached them
+    (`agent/leaver.py`); nothing disposed of them, so a deployment that erased no one kept every
+    turn's state forever.
+
+    `result_publications` is the fifth and joins on the same test as `tool_result_blobs`: it holds
+    no record of its own. A *delivered* row is a receipt for a result that now lives both in
+    `calculation_results` and in an external results store, so pruning it loses nothing. Its
+    predicate is what keeps that true — a `pending` or `failed` row is the only record that
+    something has **not** been published, and sweeping it on a clock would turn a results-store
+    outage into a silent gap.
+
+    `session_owners` is the sixth and the only member whose disposal is not about the row's own age
+    at all: it is the row that makes a session reopenable, so it is pruned behind everything it
+    keys and only when nothing holds a row for the session
+    (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). It is in this set because it does
+    have a window — the floor under "how long may an empty session live" — and not in `_NOT_PRUNED`
+    because something now bounds it.
+    """
+    assert set(_PRUNABLE) == {
+        "session_events",
+        "session_messages",
+        "tool_result_blobs",
+        "result_publications",
+        "checkpoints",
+        # An artefact beside the chat is conversation, dated by its last revision
+        # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`).
+        "session_exhibits",
+        # A chemist's uploads, on the conversation's window
+        # (`D-2026-10-04-an-upload-is-session-state-not-pod-state`).
+        "session_attachments",
+        "session_owners",
+    }
+
+
+def test_the_ownership_row_is_the_last_table_the_sweep_touches() -> None:
+    """Order in `_PRUNABLE` is load-bearing, so it is asserted rather than commented.
+
+    Every session-scoped sweep in this system starts from `session_owners` — `leaver.erase_actor`
+    selects session ids out of it and `session_store.delete_session` deletes one session by it — so
+    an ownership row disposed of *before* the tables it keys puts their rows beyond both. The sweep
+    iterates `_PRUNABLE` in insertion order, which makes the position of this entry the whole
+    protection: moving it up would strand rows silently, and a comment cannot fail.
+    """
+    assert list(_PRUNABLE)[-1] == "session_owners"
+
+
+def test_the_reachability_guard_names_every_session_scoped_erasure_table() -> None:
+    """What must be gone before an ownership row may go is derived from erasure, not transcribed.
+
+    `_SESSION_SCOPED_ROWS` is the set of tables whose rows are reachable *only* through the
+    ownership row. The authoritative answer to "which tables hold one session's rows" already
+    exists — `session_store._session_delete_statements()`, itself derived from `leaver._ERASE` — so
+    this asserts the two agree instead of letting a table added to the erasure sweep be silently
+    outlived by the row that finds it.
+
+    Two entries differ by name for a stated reason, and both are checked here rather than trusted:
+    the guard reads `tool_result_links` where the erasure deletes `tool_result_blobs` (the link is
+    the session-scoped row; a blob is content-addressed and may belong to another session too), and
+    `session_turns` is not a guard at all — it is swept *with* the ownership row, so it appears in
+    the delete rather than in the anti-joins.
+    """
+    from chemclaw.agent.session_store import _session_delete_statements
+
+    erasable = {table for table, _statement in _session_delete_statements()}
+    # `tool_result_blobs` and `tool_result_links` are the same fact seen from either side: the
+    # erasure deletes the blob and the link cascades behind it, because the app role has no DELETE
+    # on the link table at all (`infra/sql/grants/app_privileges.sql`).
+    seen_from_the_guard = {"tool_result_blobs": "tool_result_links"}
+    expected = {seen_from_the_guard.get(table, table) for table in erasable} - {
+        # Swept *with* the ownership row rather than guarding it — they are what is deleted.
+        "session_turns",
+        "session_owners",
+        # Cascade from the ownership row (`infra/sql/110_shared_sessions.sql`), so they cannot
+        # outlive it and have nothing to guard.
+        "session_members",
+        "plan_authors",
+        # Cascades the same way (`infra/sql/113_session_turn_queue.sql`).
+        "session_turn_queue",
+        # And so does a request to the session's running turn (`121_session_turn_remotes.sql`).
+        "session_turn_remotes",
+    }
+    assert set(_SESSION_SCOPED_ROWS) == expected, (
+        "the reachability guard and the erasure sweep disagree about which tables hold one "
+        f"session's rows: guard-only {sorted(set(_SESSION_SCOPED_ROWS) - expected)}, "
+        f"erasure-only {sorted(expected - set(_SESSION_SCOPED_ROWS))}"
+    )
+
+
+def test_the_audit_trail_is_never_pruned() -> None:
+    """The trail is the record of who ran what, and a cleanup job may not decide to dispose of it.
+
+    Disposal is a policy decision — which rows, how old, exported where first — and it belongs to
+    whoever owns the record rather than to an age cutoff. The table must therefore be absent from
+    the prunable set entirely. This guard predates the removal of the audit hash chain and outlives
+    it deliberately: the chain used to be the stated reason, and without a test the removal would
+    read as permission to start pruning.
+    """
+    assert "audit_events" not in _PRUNABLE
+
+
+def test_the_calculation_cache_is_never_pruned_by_age() -> None:
+    """Evicting a cached result silently converts a cache hit into a recomputation (D-011).
+
+    That is a cost policy question (LRU by access, or by compute cost), not a retention clock —
+    an age cutoff could quietly re-run an expensive conformer search.
+    """
+    assert "calculation_results" not in _PRUNABLE
+
+
+def test_a_campaign_is_a_record_and_is_never_pruned() -> None:
+    """`bo_campaigns`/`bo_suggestions` are refused, and erasure is what settles it.
+
+    A suggestion row snapshots the candidates, the observations they were drawn from and the
+    decision space they were drawn in, and migration 031 states the invariant plainly: "the
+    sequence *is* the campaign's history". Both tables are append-only, so they grow on every
+    campaign ask — which is what makes the *silence* the defect and not the absence of pruning.
+
+    The argument that decides it is already merged one module over. `agent/leaver.py`'s `_RETAINED`
+    tier keeps both through a data-subject erasure request, beside `audit_events` and `job_records`
+    — the two tables the guards above refuse. A retention clock may not dispose of what an erasure
+    request does not, so this asserts the two facts together: a change that started pruning these
+    would have to take them out of `_RETAINED` first, and that is a decision with an owner.
+    """
+    assert "bo_campaigns" not in _PRUNABLE
+    assert "bo_suggestions" not in _PRUNABLE
+    retained = {table for table, _columns, _why in leaver_retained}
+    assert {"bo_campaigns", "bo_suggestions"} <= retained
+    assert {"audit_events", "job_records"} <= retained
+
+
+def test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock() -> None:
+    """The rule the test above states, over every table it governs instead of four of them.
+
+    *A retention clock may not dispose of what a person asking to be forgotten does not.* That
+    sentence was written for `bo_campaigns` and is a property of the whole retained tier, so
+    asserting it against four names left the other three unchecked — and unchecked is exactly where
+    they were: `note_proposals`, `plan_approvals` and `turn_costs` sat in `_NOT_PRUNED` reading
+    *nothing bounds it* — two of the three adding *no decision is on record* — while
+    `agent/leaver.py` had been keeping all
+    three through an erasure request for the same reason the four "refused" entries give. One
+    argument, two registers, and nothing joining them. This is the join.
+
+    Derived from `_RETAINED`, so the next table added there arrives with its disposal decision
+    already made rather than with a blank somebody has to notice.
+
+    **The payload tier is deliberately not covered**, and the difference is real rather than an
+    exemption: `result_publications` is retained against an *erasure request* — a receipt saying who
+    asked for a result and why — and is still disposable on a clock once `delivered`, because by
+    then the record it receipts lives in a store this system does not own. "Not deletable on
+    request" and "not disposable on a policy" are different claims, and only the first one is what
+    the retained tier makes.
+    """
+    for table, _columns, why in leaver_retained:
+        assert table not in _PRUNABLE, (
+            f"{table} is kept through a data-subject erasure ({why!r}) and pruned on a clock; "
+            "one of the two registers has to change, and which one is a decision with an owner"
+        )
+        assert table in _NOT_PRUNED, (
+            f"{table} is in the erasure register's retained tier and in no disposal register at "
+            "all — `_NOT_PRUNED` is where that decision is recorded"
+        )
+        # The register has exactly two ways to say "a decision was taken, and it was not a clock":
+        # `refused:` for the table itself, and `cascades from` for one whose parent is refused
+        # (`bo_suggestions`). Asserting the vocabulary rather than the absence of one English
+        # phrase is the point — the earlier form checked that the reason did not contain "no
+        # decision is on record", which any rewording escapes while recording just as little.
+        stated = _NOT_PRUNED[table]
+        assert stated.startswith(("refused:", "cascades from")), (
+            f"{table} is retained through erasure, so its disposal entry has to state a decision "
+            f"rather than a blank; `_NOT_PRUNED` says {stated!r}"
+        )
+
+
+def test_a_session_owner_row_names_the_windows_that_hold_it_back() -> None:
+    """A zero can mean nothing was disposable or nothing is left; the sweep now says which.
+
+    An ownership row goes only once every session-scoped table has let go of that session, and each
+    of those empties on a window of its own. `tool_result_links` is the one with no window and no
+    DELETE grant: a link row disappears only behind its blob, on
+    `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS`. Both default to 0, so a deployment that states a
+    conversation policy and stops there can forget **no session that ever called a tool** — while
+    the sweep logs a clean pass every night.
+
+    Nothing about that is visible at the point it bites, which is what this makes checkable: the
+    unset windows are derived from the same map the SQL arms are built from, so the answer to "why
+    is `session_owners` not shrinking" is a list of ENV names rather than a query plan.
+    """
+    tables = set(_SESSION_SCOPED_ROWS)
+
+    with_none_set = unwindowed_ownership_dependencies(tables)
+    assert "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" in with_none_set, (
+        "the tool-result window is what empties `tool_result_links`, and it is unset by default"
+    )
+
+    # An absent table blocks nothing — the arms skip it, so the advice must skip it too.
+    assert unwindowed_ownership_dependencies(set()) == []
+
+    original = settings.retention_tool_results_days
+    try:
+        settings.retention_tool_results_days = 30
+        assert "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" not in unwindowed_ownership_dependencies(
+            tables
+        ), "a window that is set is not a window holding the ownership row back"
+    finally:
+        settings.retention_tool_results_days = original
+
+
+def test_every_session_scoped_blocker_says_what_would_unblock_it() -> None:
+    """The two maps name one set of tables, and nothing derived them from each other.
+
+    `_untouched_arms` builds a `NOT EXISTS` arm per `_SESSION_SCOPED_ROWS` entry, and
+    `_OWNERSHIP_DEPENDENCIES` says what would empty each of them. The advice function's docstring
+    claimed to be *derived* from the first map "so it cannot drift"; it is not, and a review found
+    that claim inside the change whose own ADR is about two registers describing one set of tables
+    with nothing joining them.
+
+    This is the join. A table added to `_SESSION_SCOPED_ROWS` blocks ownership rows immediately and
+    would drop silently out of the operator advice; now it fails here, and the author has to say
+    which window empties it — or `None`, which is the honest answer for `session_events`, whose
+    unconsumed rows no window prunes at all.
+    """
+    assert set(_OWNERSHIP_DEPENDENCIES) == set(_SESSION_SCOPED_ROWS), (
+        "these two maps must name the same tables: "
+        f"{sorted(set(_OWNERSHIP_DEPENDENCIES) ^ set(_SESSION_SCOPED_ROWS))}"
+    )
+    for table, dependency in _OWNERSHIP_DEPENDENCIES.items():
+        if dependency is None:
+            continue
+        windowed_table, env = dependency
+        assert windowed_table in _PRUNABLE, (
+            f"{table} is said to be unblocked by pruning {windowed_table}, which nothing prunes"
+        )
+        # The ENV name is what an operator types, so it has to be the one `Settings` reads.
+        field = env.removeprefix("CHEMCLAW_").lower()
+        assert field in type(settings).model_fields, f"{env} is not a setting"
+
+
+def test_every_table_in_the_schema_has_a_disposal_decision() -> None:
+    """The register is exhaustive over the schema — the check the docstring's claim never had.
+
+    **This is the actual defect `bo_campaigns` exposed.** The module docstring enumerates what the
+    sweep prunes and what it refuses and reads as though that were the whole schema; measured, it
+    named three refusals against thirty-three tables it does not prune, so thirty had no disposal
+    decision anywhere a reader or a test could reach one. Nothing checked the list because nothing
+    could: it was prose. `_NOT_PRUNED` makes it data, and this makes it true.
+
+    Both directions, for the reason `tests/test_schema_inventory.py` gives about the same schema: a
+    table with no entry is a table whose growth nobody decided, and an entry with no table is a
+    decision outliving what it describes — the direction the archived storage inventory decayed in.
+
+    The expected set is **derived, never transcribed**. `tables_on_disk` is the same reader
+    `test_schema_inventory` pins the `infra/sql/README.md` inventory with, so a new migration lands
+    here automatically; `CHECKPOINT_TABLES` and `STORE_TABLES` are the first-party constants naming
+    what upstream's `setup()` creates outside `infra/sql`, which is exactly the set that "appears in
+    no schema review" (`infra/sql/README.md`) and went undisposed for as long as it existed.
+
+    Only the **keys** are asserted. The reason strings are judgements, and a test over them would be
+    a second copy of the answer — the split `infra/sql/README.md` already draws over its own
+    Disposal column.
+    """
+    schema = tables_on_disk() | set(CHECKPOINT_TABLES) | set(STORE_TABLES)
+    accounted = set(_PRUNABLE) | set(_NOT_PRUNED)
+    assert schema - accounted == set(), (
+        f"tables with no disposal decision in durable/retention.py: {sorted(schema - accounted)}. "
+        "Add each to _PRUNABLE (with its window) or to _NOT_PRUNED (with what bounds it instead, "
+        "or that nothing does) in the same commit as the migration"
+    )
+    assert accounted - schema == set(), (
+        "durable/retention.py records a disposal decision for tables that do not exist: "
+        f"{sorted(accounted - schema)}"
+    )
+
+
+def test_no_table_is_both_pruned_and_refused() -> None:
+    """Guard the guard: the two registers must partition, not merely cover.
+
+    Without this, the exhaustiveness check above passes for a table listed in both — and the
+    contradiction it would be papering over is the dangerous direction. `_NOT_PRUNED`'s entry is
+    what a reviewer reads to conclude a table is safe from the sweep, while `_PRUNABLE` is what the
+    sweep actually executes, so a table in both reads as refused and is deleted.
+    """
+    overlap = set(_PRUNABLE) & set(_NOT_PRUNED)
+    assert not overlap, f"tables in both _PRUNABLE and _NOT_PRUNED: {sorted(overlap)}"
+
+
+def test_there_are_tables_to_account_for() -> None:
+    """Guard the guard: an empty schema read would make the exhaustiveness check vacuous.
+
+    The same shape `test_schema_inventory.test_there_are_tables_to_inventory` uses, and for the
+    same reason — this repository has hit the vacuous-pass failure repeatedly, most recently a
+    migration reader that globbed the wrong directory and applied zero files without failing.
+    """
+    assert len(tables_on_disk()) > 20
+
+
+def test_every_disposal_decision_states_a_reason() -> None:
+    """An entry with an empty reason is the blank this register exists to replace.
+
+    `_NOT_PRUNED` is only worth more than a set of names because each entry says *why*; a caller
+    could satisfy the exhaustiveness check above with `""` and reintroduce the silence while the
+    test stayed green.
+    """
+    blank = [table for table, why in _NOT_PRUNED.items() if not why.strip()]
+    assert not blank, f"_NOT_PRUNED entries with no stated reason: {sorted(blank)}"
+
+
+def test_retention_is_off_until_a_policy_is_stated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment must choose its window; inheriting a deletion default from code is wrong."""
+    assert settings.retention_session_events_days == 0
+    assert settings.retention_session_messages_days == 0
+    assert settings.retention_enabled is False
+    for table in _PRUNABLE:
+        assert _window_days(table) == 0, f"{table} would be pruned on an unstated policy"
+
+
+def test_a_stated_window_is_read_per_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each table carries its own window — a mailbox row and a conversation age differently."""
+    monkeypatch.setattr(settings, "retention_session_events_days", 7)
+    monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+    monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+    assert _window_days("session_events") == 7
+    assert _window_days("session_messages") == 365
+    # Turn state is not the conversation and does not age with it: the transcript is a durable
+    # record kept for years, while a checkpoint is what a suspended turn resumes from and is dead
+    # weight long before that.
+    assert _window_days("checkpoints") == 30
+    # The ownership row takes the conversation's window deliberately, as a floor rather than as the
+    # thing that decides disposal: a session may not be forgotten sooner than the conversation in
+    # it would have been, and the guards — not the clock — are what hold a row that still has rows.
+    assert _window_days("session_owners") == 365
+
+
+# --- D-145: an age cutoff alone cannot dispose of a conversation row ---------------------------
+
+
+def _call(call_id: str) -> dict[str, Any]:
+    """A stored assistant row with one tool call — MAF-shaped, because a real table holds those.
+
+    Seeded as a *legacy* row on purpose: the pairing rule's whole job here is to protect pairs, and
+    only rows written before M6's conversion contain any. A row the projection writes today is
+    plain user text and an answer, with no call to strand.
+    """
+    return legacy_call(call_id, "predict_pka")
+
+
+def _result(call_id: str) -> dict[str, Any]:
+    """The stored tool row answering `call_id`, MAF-shaped for the same reason."""
+    return legacy_result(call_id)
+
+
+def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
+    """The defect, against a real database: an expiring call whose result is not expiring stays.
+
+    This is what the old single `DELETE ... WHERE created_at < cutoff` got wrong. It deleted the
+    call and left the result — and a stranded `tool_result` is the one failure the read-repair
+    cannot heal (`unmatched_result_ids`), so the session was bricked permanently by a cleanup job.
+
+    Rows are dated explicitly rather than by waiting, because the whole point is a pair whose two
+    halves fall on opposite sides of the window.
+    """
+
+    async def _run() -> tuple[list[int], set[str]]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "d145-straddle"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for age_days, message in (
+                        (400, _call("c1")),
+                        # The answer arrived inside the window — the pair straddles the cutoff.
+                        (1, _result("c1")),
+                    ):
+                        await cur.execute(
+                            "INSERT INTO session_messages (session_id, message, created_at) "
+                            "VALUES (%s, %s, now() - make_interval(days => %s))",
+                            (session_id, Jsonb(message), age_days),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, message FROM session_messages "
+                        "WHERE session_id = %s ORDER BY id",
+                        (session_id,),
+                    )
+                    rows = await cur.fetchall()
+            # Converted rather than read as MAF objects: the assertion is about pairing, which is
+            # a LangChain-message question now, and `to_langchain` is the same conversion the read
+            # path applies to a legacy row.
+            surviving = [to_langchain(row[1]) for row in rows]
+            return [int(row[0]) for row in rows], unmatched_result_ids(surviving)
+        finally:
+            monkeypatch.undo()
+
+    ids, stranded = asyncio.run(_run())
+    assert len(ids) == 2, (
+        "retention split a tool-call pairing across the cutoff; the surviving half is unusable"
+    )
+    assert stranded == set(), f"retention stranded {stranded} — the session is now bricked"
+
+
+def test_a_session_holding_both_stored_shapes_is_pruned_rather_than_crashing() -> None:
+    """The sweep reads a table mid-migration, which a rollout is in for as long as it takes.
+
+    M6's conversion pass is resumable and a rollout is not atomic, so one session's rows can be
+    part MAF and part LangChain. The reader was MAF's `Message.from_dict`, which does not merely
+    mis-read a LangChain payload — it raises `TypeError: unexpected keyword argument 'data'`. So
+    the activity failed, Temporal retried it to exhaustion, and retention stopped entirely for
+    every session that had taken a turn since the conversion: the sessions still in use, which are
+    exactly the ones a retention window is for.
+
+    Loud in the logs and invisible in effect, which is the combination that makes it survive — the
+    job reports failure, the table quietly stops shrinking.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "m13-mixed-shapes"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for shape, message, age_days in (
+                        ("maf", legacy_text("user", "an old question"), 400),
+                        ("langchain", message_to_dict(HumanMessage(content="a new one")), 1),
+                    ):
+                        await cur.execute(
+                            "INSERT INTO session_messages "
+                            "(session_id, message, message_shape, created_at) "
+                            "VALUES (%s, %s, %s, now() - make_interval(days => %s))",
+                            (session_id, Jsonb(message), shape, age_days),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT message_shape FROM session_messages "
+                        "WHERE session_id = %s ORDER BY id",
+                        (session_id,),
+                    )
+                    return [str(row[0]) for row in await cur.fetchall()]
+        finally:
+            monkeypatch.undo()
+
+    # The expired legacy row went; the recent converted one stayed. Neither held a tool call, so
+    # the pairing rule had nothing to protect and the age cutoff decided alone — which is the
+    # ordinary case, and the one that used to raise before reaching any of that.
+    assert asyncio.run(_run()) == ["langchain"]
+
+
+def test_an_expired_pair_is_removed_whole() -> None:
+    """The closure must not become a refusal to prune anything: both halves expired, both go."""
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "d145-both-expired"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for message in (_call("c9"), _result("c9")):
+                        await cur.execute(
+                            "INSERT INTO session_messages (session_id, message, created_at) "
+                            "VALUES (%s, %s, now() - make_interval(days => 400))",
+                            (session_id, Jsonb(message)),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT count(*) FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    row = await cur.fetchone()
+            return int(row[0]) if row is not None else -1
+        finally:
+            monkeypatch.undo()
+
+    assert asyncio.run(_run()) == 0
+
+
+def test_an_undelivered_push_back_event_survives_the_window() -> None:
+    """Age alone does not make a mailbox row disposable — only *delivery* does.
+
+    The module docstring justifies pruning `session_events` with "a **consumed** push-back mailbox
+    row is spent", and the sweep was a bare age cutoff with no `consumed_at` predicate. So a
+    `job_completed` that outlived the window was destroyed before anyone read it: a long search
+    longer than the retention window — exactly the jobs this channel exists for — lost its
+    completion, the session waited on it forever, and the harness "awaiting job" todo never
+    flipped. It also deleted the `system-audit-integrity` and `system-eval-drift` alerts, which are
+    never consumed by construction, so retention quietly removed the integrity alerts.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        try:
+            unread, read = "retention-unread", "retention-read"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_events WHERE session_id = ANY(%s)", ([unread, read],)
+                    )
+                    # Both far older than the window; one was delivered, the other never was.
+                    await cur.execute(
+                        "INSERT INTO session_events (session_id, kind, payload, created_at) "
+                        "VALUES (%s, 'job_completed', %s, now() - make_interval(days => 90))",
+                        (unread, Jsonb({"job_id": "qm-long-run"})),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (read, Jsonb({"job_id": "already-delivered"})),
+                    )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM session_events WHERE session_id = %s", (unread,)
+                )
+                kept = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) FROM session_events WHERE session_id = %s", (read,)
+                )
+                gone = await cur.fetchone()
+            return (int(kept[0]) if kept else -1, int(gone[0]) if gone else -1)
+        finally:
+            monkeypatch.undo()
+
+    surviving_unread, surviving_read = asyncio.run(_run())
+    assert surviving_unread == 1, "an undelivered push-back event was deleted by age alone"
+    assert surviving_read == 0, "a delivered event past the window should still be pruned"
+
+
+def test_an_artefact_push_goes_on_age_alone_and_nothing_else_does() -> None:
+    """`exhibit` rows past `exhibit_push_retention_hours` go, consumed or not; nothing else does.
+
+    An artefact push is a notification — the list route is the source of truth — so an unconsumed
+    one is not owed to anybody the way a `job_completed` is. Driven with the conversation's own
+    `session_events` window **off**, which is the shipped default: the push window must not depend
+    on it, and an unconsumed `job_completed` of the same age must still survive. Driven through
+    `prune_exhibit_pushes`, the job of its own that runs whether or not a policy is stated.
+    """
+
+    async def _run() -> dict[tuple[str, str], int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "exhibit_push_retention_hours", 24)
+        session = f"retention-pushes-{uuid4().hex}"
+        rows = [
+            # (label, kind, hours old, consumed)
+            ("old-unread", "exhibit", 30, False),
+            ("old-read", "exhibit", 30, True),
+            ("young-unread", "exhibit", 2, False),
+            ("old-job", "job_completed", 30, False),
+        ]
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    for label, kind, hours, consumed in rows:
+                        await cur.execute(
+                            "INSERT INTO session_events "
+                            "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                            "(%s, %s, %s, now() - make_interval(hours => %s), "
+                            "CASE WHEN %s THEN now() END)",
+                            (session, kind, Jsonb({"label": label}), hours, consumed),
+                        )
+                await conn.commit()
+
+            assert await prune_exhibit_pushes() == 2
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT kind, payload->>'label' FROM session_events WHERE session_id = %s",
+                    (session,),
+                )
+                left = await cur.fetchall()
+            return {(str(kind), str(label)): 1 for kind, label in left}
+        finally:
+            monkeypatch.undo()
+
+    assert asyncio.run(_run()) == {("exhibit", "young-unread"): 1, ("job_completed", "old-job"): 1}
+
+
+async def _seed_expired_sessions(count: int, prefix: str) -> str:
+    """Insert `count` fully-expired single-message sessions; return the SQL LIKE prefix to match.
+
+    One self-contained message per session (no tool pairing), so every row is disposable and the
+    only thing under test is how the sweep commits and how much of the backlog it takes.
+
+    Clears the **whole** table first, not just this prefix. Both callers assert on a count the
+    sweep produces from a global `SELECT DISTINCT ... LIMIT`, so a row another test left behind
+    lands inside the batch and shifts the number — the suite isolates one schema per run rather
+    than per test (`tests/pg.py`; BACKLOG LIVE-6). Safe because every test in this file seeds
+    immediately before it prunes.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM session_messages")
+            message = legacy_text("user", "old")
+            for index in range(count):
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message, created_at) "
+                    "VALUES (%s, %s, now() - make_interval(days => 400))",
+                    (f"{prefix}{index:03d}", Jsonb(message)),
+                )
+        await conn.commit()
+    return f"{prefix}%"
+
+
+async def _remaining(like: str) -> int:
+    """How many seeded conversation rows are still stored."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM session_messages WHERE session_id LIKE %s", (like,))
+        row = await cur.fetchone()
+    return int(row[0]) if row else -1
+
+
+def test_a_failure_part_way_through_keeps_what_the_sweep_already_removed() -> None:
+    """The per-table commit's own argument, one level down, where it had not been made.
+
+    `prune_expired_rows` commits each table separately so one table's failure cannot roll back
+    another's — and then handed `session_messages` to a loop over every expired session whose
+    single `commit()` came after the loop. A failure on the last session discarded every deletion
+    before it, and the pass reported nothing removed while the table went on growing. That is the
+    same "a sweep that says it removed rows it then rolled back" failure the table-level fix was
+    written against (D-2026-08-05-a-sweep-that-commits-once).
+
+    Injected at the pairing closure rather than at the database, so the failure lands mid-loop
+    exactly where a statement timeout or a dropped connection would.
+    """
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(6, "sweep-commit-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        calls = {"n": 0}
+        real = droppable_rows
+
+        def _fail_on_the_fourth(rows: object, expired: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 4:
+                raise RuntimeError("statement timeout part way through the sweep")
+            return real(rows, expired)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(retention, "droppable_rows", _fail_on_the_fourth)
+        try:
+            with pytest.raises(RuntimeError):
+                await prune_expired_rows()
+            return await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    remaining = asyncio.run(_run())
+    assert remaining == 3, (
+        f"{remaining} of 6 seeded rows survive; the three sessions pruned before the failure "
+        "should have been committed, not rolled back with it"
+    )
+
+
+def test_a_failed_table_does_not_starve_the_tables_after_it() -> None:
+    """The outer per-table loop's own version of the fix above.
+
+    `_PRUNABLE` iterates `session_events`, `session_messages`, `tool_result_blobs`, `checkpoints`
+    and `session_owners` in that order, and a `session_messages` failure used to propagate straight
+    out of `prune_expired_rows` before `tool_result_blobs` was ever reached — so a persistent
+    problem confined to one table stopped every table after it from being pruned, on every retry.
+    Injected the same way as the test above (`droppable_rows` failing on the fourth call), but this
+    one asserts on the table that comes *after* the one that fails.
+    """
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        await _seed_expired_sessions(6, "sweep-order-")
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM tool_result_blobs WHERE content_hash = %s", ("sweep-order-test",)
+            )
+            await cur.execute(
+                "INSERT INTO tool_result_blobs (content_hash, byte_size, data, created_at) "
+                "VALUES (%s, %s, %s, now() - make_interval(days => 400))",
+                ("sweep-order-test", 1, b"x"),
+            )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 365)
+        calls = {"n": 0}
+        real = droppable_rows
+
+        def _fail_on_the_fourth(rows: object, expired: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == 4:
+                raise RuntimeError("statement timeout part way through the sweep")
+            return real(rows, expired)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(retention, "droppable_rows", _fail_on_the_fourth)
+        try:
+            with pytest.raises(RuntimeError):
+                await prune_expired_rows()
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s",
+                ("sweep-order-test",),
+            )
+            row = await cur.fetchone()
+        return int(row[0]) if row else -1
+
+    remaining = asyncio.run(_run())
+    assert remaining == 0, (
+        "tool_result_blobs comes after session_messages in _PRUNABLE; a failure in the earlier "
+        "table must not stop the later one from being pruned in the same pass"
+    )
+
+
+def test_one_sweep_works_a_bounded_batch_and_reports_the_rest() -> None:
+    """An unbounded sweep spends an attempt and commits only what it reached.
+
+    The conversation prune costs three round trips per session and cannot be one `DELETE` (D-145),
+    so a deployment enabling retention over a long backlog faces every session it has ever had
+    inside one activity's `retention_timeout_seconds`. Capped, each sweep makes bounded progress —
+    and says *that* it left something, because a cap that is not reported reads as "there was
+    nothing more" and a growing table would look bounded in every result this job returns. The
+    figure is a probe rather than a remainder — one row is selected over the cap and no more, so it
+    is 0 or 1 — because a true count is a second whole-table aggregate (`RetentionOutcome`).
+
+    Driven on `_sweep_once` rather than on the activity, because the cap bounds a **sweep** and the
+    activity now runs as many of them as its budget affords: what is under test here is the batch,
+    and `test_the_pass_keeps_sweeping_until_the_backlog_is_drained` is what tests the pass.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(5, "sweep-batch-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            first, _ = await _sweep_once(_Budget())
+            return first, await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    outcome, remaining = asyncio.run(_run())
+    assert outcome.deleted["session_messages"] == 2
+    assert remaining == 3, "the sweep worked more sessions than its cap allowed"
+    assert outcome.sessions_deferred > 0, (
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
+    )
+
+
+def test_an_age_cutoff_delete_is_batched_until_the_table_is_drained() -> None:
+    """The age-cutoff branch removes rows in committed batches, not in one unbounded `DELETE`.
+
+    The argument is the one `_prune_session_messages` makes, applied only to the session branches:
+    an activity must not attempt unbounded work, because a pass that exceeds its `statement_timeout`
+    is retried, times out again, and exhausts `activity_max_attempts` **having deleted nothing**.
+    Measured on 300 000 `tool_result_blobs`-shaped rows (2.4 GB, `STORAGE EXTERNAL`): the unbounded
+    form takes 11.5 s and, under a 5 s `statement_timeout`, is cancelled having removed 0; the
+    batched form removes all 300 000 in 11.0 s across 31 committed batches, worst batch 1 385 ms.
+
+    This is the drain half — five expired rows against a batch of two, so a single-statement
+    rewrite and a loop that stopped after one batch both fail here. The batch *size* and its commit
+    are the sibling test's, and the two together are what a final row count alone cannot show.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM session_events WHERE session_id LIKE 'batched-%'")
+            async with conn.cursor() as cur:
+                for index in range(5):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"batched-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        for name in (
+            "retention_session_messages_days",
+            "retention_tool_results_days",
+            "retention_result_publications_days",
+            "retention_checkpoints_days",
+        ):
+            monkeypatch.setattr(settings, name, 0)
+        try:
+            outcome, _ = await _sweep_once(_Budget())
+        finally:
+            monkeypatch.undo()
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_events WHERE session_id LIKE 'batched-%'"
+            )
+            row = await cur.fetchone()
+        return outcome.deleted["session_events"], int(row[0]) if row else -1, outcome.rows_deferred
+
+    deleted, left, deferred = asyncio.run(_run())
+    assert deleted >= 5, f"the branch deleted {deleted} of the 5 seeded rows"
+    assert left == 0, "a batched delete left rows behind, so the loop stopped before the tail"
+    assert deferred == 0, "the branch reported a tail it had drained"
+
+
+def test_a_batched_delete_stops_at_the_pass_budget_and_reports_the_tail() -> None:
+    """A batch loop with no clock is the unbounded `DELETE` again, one round trip at a time.
+
+    With the budget already spent, exactly one batch runs — the one every unit of work is always
+    allowed — and the branch says a tail remains, which is what makes the next scheduled pass pick
+    the rest up instead of an operator reading a drained table.
+    """
+
+    async def _run() -> tuple[int, bool, int]:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM session_events WHERE session_id LIKE 'budgeted-%'")
+            async with conn.cursor() as cur:
+                for index in range(6):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"budgeted-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            budget = _Budget()
+            async with db.connection(settings.postgres_dsn) as conn:
+                deleted, more = await retention._prune_by_age(
+                    conn, "session_events", "created_at", "consumed_at IS NOT NULL", 7, budget
+                )
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_events WHERE session_id LIKE 'budgeted-%'"
+            )
+            row = await cur.fetchone()
+        return deleted, more, int(row[0]) if row else -1
+
+    deleted, more, left = asyncio.run(_run())
+    assert deleted == 2, f"a spent budget ran {deleted // 2} batches, not the one always allowed"
+    assert more, "the branch stopped on its budget and reported nothing left"
+    assert left == 4, "the batch that ran was not committed, or more than one ran"
+
+
+def test_the_delete_batch_size_is_the_setting_and_is_read_on_every_call() -> None:
+    """`retention_delete_batch_rows` reaches the `LIMIT`, and a module constant would not.
+
+    Promoting a constant to a setting fails in one specific way: the field ships, `.env.example`
+    documents it, an operator sets it, and the reader still holds the old literal — a knob that
+    renders nothing. This drives the same seeded table twice in one process with two different
+    values and asserts the batch the pass actually committed, so the value has to travel from the
+    settings object into the emitted SQL for both to pass.
+
+    The budget is spent on purpose. `_prune_by_age` always runs one batch, so with no clock left
+    the rows removed *are* the batch size, which no drained-table count could show.
+
+    Reading it once per call rather than once per batch is what the second half checks: two calls,
+    two sizes. A value captured at import gives one number twice.
+    """
+
+    async def _run(batch_size: int, tag: str) -> int:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            async with conn.cursor() as cur:
+                for index in range(6):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"{tag}-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", batch_size)
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                deleted, _more = await retention._prune_by_age(
+                    conn, "session_events", "created_at", "consumed_at IS NOT NULL", 7, _Budget()
+                )
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            await conn.commit()
+        return deleted
+
+    async def _both() -> tuple[int, int]:
+        return await _run(2, "sized-a"), await _run(5, "sized-b")
+
+    two, five = asyncio.run(_both())
+    assert (two, five) == (2, 5), (
+        f"one batch removed {two} rows at a batch size of 2 and {five} at 5; the setting does not "
+        "reach the LIMIT, or it is read once at import rather than on every call"
+    )
+
+
+def test_the_pass_keeps_sweeping_until_the_backlog_is_drained() -> None:
+    """A cap below the arrival rate never converges, so the cap must bound a batch, not the pass.
+
+    `retention_max_sessions_per_pass` defaults to 500 against a **daily** schedule, and 200 chemists
+    create on the order of 400-1 000 sessions a day: a pass that stops at its cap therefore removes
+    less than arrives, reports success, and the backlog grows forever with nothing in the job's
+    result saying so. The fix is not a bigger number — any fixed number is below *some* arrival
+    rate — it is that the pass sweeps again while a tail remains and the budget can hold another
+    sweep.
+
+    Five expired sessions against a cap of two: three sweeps, one pass, nothing left over.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(5, "sweep-converge-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            return await prune_expired_rows(), await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    outcome, remaining = asyncio.run(_run())
+    assert remaining == 0, "the pass stopped at its cap instead of draining the backlog"
+    assert outcome.deleted["session_messages"] == 5, (
+        f"the pass reported {outcome.deleted} rather than the whole backlog it removed"
+    )
+    assert outcome.sessions_deferred == 0, "the pass reported a tail it had actually drained"
+
+
+def test_the_pass_stops_when_its_budget_is_spent_and_says_so() -> None:
+    """Convergence is bounded by the clock, and a pass that stops early still reports its tail.
+
+    The opposite failure to the one above: a pass that sweeps "while work remains" with no budget
+    runs past `retention_timeout_seconds`, is killed by Temporal at the moment it finishes, and the
+    attempt is lost. With the budget spent, the pass returns what it removed *and* the tail probe,
+    so the next scheduled fire picks the backlog up rather than an operator reading a bounded table.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(5, "sweep-budget-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        # Small enough that the first sweep's own duration exhausts it: the first sweep always
+        # runs (`_Budget` starts with no measurement), and the second is refused.
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            return await prune_expired_rows(), await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    outcome, remaining = asyncio.run(_run())
+    assert outcome.deleted["session_messages"] == 2, (
+        "a pass out of budget did not commit the one sweep it is always allowed"
+    )
+    assert remaining == 3, "the pass swept past a budget it could no longer afford"
+    assert outcome.sessions_deferred == 1, "the pass stopped early and reported a drained backlog"
+
+
+def test_one_unreadable_row_does_not_stop_the_pass_for_every_other_session() -> None:
+    """The per-session skip only works if the row reaches it, and one shape did not.
+
+    `session_messages.message` is a bare `jsonb` column, so a scalar is storable, and
+    `stored_call_ids` raised `AttributeError` on it two lines *before* the `unreadable_rows` branch
+    written for exactly this — inside a list comprehension outside any `try`. Measured, that took
+    the whole `session_messages` pass down: every session stopped being pruned, the activity failed,
+    and Temporal retried it to exhaustion. Which is verbatim the failure the comment above that
+    call site records as already fixed once, through a different door.
+
+    The second session is the assertion, not the first: refusing the bad row is only half of it, and
+    a sweep that refused the bad row by *stopping* would pass a test that looked only at the row.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    for session_id in ("retention-unreadable", "retention-beside-it"):
+                        await cur.execute(
+                            "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                        )
+                    await cur.execute(
+                        "INSERT INTO session_messages "
+                        "(session_id, message, message_shape, created_at) "
+                        "VALUES ('retention-unreadable', %s, 'langchain', "
+                        "now() - make_interval(days => 400))",
+                        (Jsonb("contents of a corrupted row"),),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_messages "
+                        "(session_id, message, message_shape, created_at) "
+                        "VALUES ('retention-beside-it', %s, 'langchain', "
+                        "now() - make_interval(days => 400))",
+                        (Jsonb(message_to_dict(HumanMessage(content="an old question"))),),
+                    )
+                await conn.commit()
+            async with db.connection(settings.postgres_dsn) as conn:
+                await retention._prune_session_messages(conn, 365)
+                async with conn.cursor() as cur:
+                    counts = []
+                    for session_id in ("retention-unreadable", "retention-beside-it"):
+                        await cur.execute(
+                            "SELECT count(*) FROM session_messages WHERE session_id = %s",
+                            (session_id,),
+                        )
+                        row = await cur.fetchone()
+                        counts.append(int(row[0]) if row else 0)
+            return counts[0], counts[1]
+        finally:
+            monkeypatch.undo()
+
+    unreadable, beside_it = asyncio.run(_run())
+    assert unreadable == 1, "the unreadable row was pruned instead of being refused"
+    assert beside_it == 0, (
+        "an expired row in a different session survived, so one bad row still stops the pass"
+    )
+
+
+# --- The LangGraph checkpoint tables: pruned by thread, skipped when absent --------------------
+
+
+async def _seed_thread(thread_id: str, *, age_days: int, checkpoint_id: str = "ckpt-1") -> None:
+    """One thread with a single checkpoint of the given age, plus its blob and write rows.
+
+    `checkpoint_id` so a second call can play the part of a turn landing on a thread that already
+    has rows, which is what `_TurnDuringSweep` needs; it commits on its own connection, as a turn
+    on the checkpointer's `autocommit=True` pool does.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO checkpoints "
+                "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                "VALUES (%s, '', %s, %s, '{}'::jsonb)",
+                (
+                    thread_id,
+                    checkpoint_id,
+                    Jsonb({"v": 1, "id": checkpoint_id, "ts": f"__ts_{age_days}__"}),
+                ),
+            )
+            # The payload's `ts` is what dates a checkpoint, and it has to be a real timestamp
+            # rather than a literal — computed in SQL so the app clock and the database clock
+            # cannot disagree, exactly as the sweep's own cutoff is.
+            await cur.execute(
+                "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
+                "to_jsonb((now() - make_interval(days => %s))::text)) "
+                "WHERE thread_id = %s AND checkpoint_id = %s",
+                (age_days, thread_id, checkpoint_id),
+            )
+            await cur.execute(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                "VALUES (%s, '', 'messages', %s, 'msgpack', %s)",
+                (thread_id, checkpoint_id, b"payload"),
+            )
+            await cur.execute(
+                "INSERT INTO checkpoint_writes "
+                "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                "VALUES (%s, '', %s, 'task-1', 0, 'messages', 'msgpack', %s)",
+                (thread_id, checkpoint_id, b"payload"),
+            )
+        await conn.commit()
+
+
+async def _thread_row_counts(thread_id: str) -> dict[str, int]:
+    """How many rows each checkpoint table still holds for `thread_id`."""
+    counts: dict[str, int] = {}
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+            await cur.execute(
+                f"SELECT count(*) FROM {table} WHERE thread_id = %s",
+                (thread_id,),
+            )
+            row = await cur.fetchone()
+            counts[table] = int(row[0]) if row else 0
+    return counts
+
+
+def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
+    """A thread past its window goes whole; a live one is untouched.
+
+    All three tables, because they are one thread's state split across three keys with no foreign
+    key to enforce it: a sweep that removed `checkpoints` and left the blobs behind would report
+    success while the rows it was built to bound kept growing, and nothing downstream would notice —
+    `checkpoint_blobs` is the one that actually holds the payload.
+
+    The live thread is in the assertion for the reason every retention test here carries its
+    counter-example: a cutoff that deletes everything is not a retention policy, and a `HAVING
+    max(...)` that was wrong in the other direction would pass a test that only looked at the
+    expired thread.
+    """
+
+    async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            await _seed_thread("retention-old-thread", age_days=90)
+            await _seed_thread("retention-live-thread", age_days=1)
+
+            outcome = await prune_expired_rows()
+
+            return (
+                await _thread_row_counts("retention-old-thread"),
+                await _thread_row_counts("retention-live-thread"),
+                outcome,
+            )
+        finally:
+            monkeypatch.undo()
+
+    expired, live, outcome = asyncio.run(_run())
+
+    assert expired == {"checkpoints": 0, "checkpoint_blobs": 0, "checkpoint_writes": 0}, (
+        f"the expired thread left rows behind: {expired}"
+    )
+    assert live == {"checkpoints": 1, "checkpoint_blobs": 1, "checkpoint_writes": 1}, (
+        f"a thread inside its window was pruned: {live}"
+    )
+    assert outcome.deleted["checkpoint_blobs"] == 1, (
+        f"the pass did not report what it removed per table: {outcome.deleted}"
+    )
+
+
+class _TurnDuringSweep:
+    """A connection whose cursor lands a committed checkpoint write after the sweep's first DELETE.
+
+    This is the race as it actually happens rather than a simulation of it: the checkpointer's pool
+    is `autocommit=True` on purpose, so a live turn's rows are committed the instant it writes them,
+    on a connection the sweep's transaction knows nothing about. Interleaving here rather than with
+    real concurrency because the window is one statement wide and a sleep-based test of it would be
+    flaky in the direction that passes.
+    """
+
+    def __init__(self, conn: Any, thread_id: str) -> None:
+        self._conn = conn
+        self._thread_id = thread_id
+        self._landed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        inner = self._conn.cursor(*args, **kwargs)
+        outer = self
+
+        class _Wrapped:
+            async def __aenter__(self) -> Any:
+                return _Interleaving(await inner.__aenter__(), outer)
+
+            async def __aexit__(self, *exc: Any) -> Any:
+                return await inner.__aexit__(*exc)
+
+        return _Wrapped()
+
+
+class _Interleaving:
+    """The cursor wrapper that commits the racing turn's rows after the first DELETE."""
+
+    def __init__(self, cur: Any, owner: _TurnDuringSweep) -> None:
+        self._cur = cur
+        self._owner = owner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cur, name)
+
+    async def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        result = await self._cur.execute(query, params, **kwargs)
+        if str(query).lstrip().upper().startswith("DELETE") and not self._owner._landed:
+            self._owner._landed = True
+            await _seed_thread(self._owner._thread_id, age_days=0, checkpoint_id="ckpt-2")
+        return result
+
+
+def test_a_thread_that_takes_a_turn_mid_sweep_keeps_the_blobs_that_turn_wrote() -> None:
+    """The measured data-loss race: a live turn landing between two of the sweep's DELETEs.
+
+    Driven against the real `_prune_checkpoints`, this used to leave the thread's new `checkpoints`
+    row standing with **none** of its blobs — `agent/checkpointer.py`'s own worst case, a turn that
+    "resumes with the conversation dropped and answers normally". Reversing the delete order was
+    measured and does not fix it; what does is that both statements re-ask their question inside
+    the sweep's own transaction.
+
+    The assertion is on the *blobs*, not on the checkpoint row: the row surviving is what the old
+    behaviour did too, and it is the payload table that decides whether the thread reads back as
+    itself or as empty.
+    """
+
+    async def _run() -> dict[str, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        thread = "retention-raced-thread"
+        await _seed_thread(thread, age_days=90)
+        async with db.connection(settings.postgres_dsn) as conn:
+            # `_TurnDuringSweep` proxies a real connection and cannot subclass one: it exists to
+            # land a *committed* turn between two of the sweep's statements, which needs a hook on
+            # `execute`, and psycopg's `AsyncConnection` is not written to be subclassed for that.
+            # Cast rather than widen `_prune_checkpoints`' signature — the production seam takes a
+            # real connection and should keep saying so.
+            await _prune_checkpoints(
+                cast("psycopg.AsyncConnection[tuple[Any, ...]]", _TurnDuringSweep(conn, thread)), 30
+            )
+        return await _thread_row_counts(thread)
+
+    counts = asyncio.run(_run())
+    assert counts["checkpoint_blobs"] > 0, (
+        "the turn that landed mid-sweep lost its blobs: the thread now resumes as an empty "
+        f"conversation ({counts})"
+    )
+    assert counts["checkpoints"] > 0, f"the racing turn's checkpoint row was taken too ({counts})"
+
+
+def test_the_checkpoint_sweep_covers_exactly_the_checkpointer_s_tables() -> None:
+    """The sweep names its tables in two statements now, so nothing may fall between them.
+
+    `_prune_checkpoints` no longer runs one loop over `CHECKPOINT_TABLES`: `checkpoints` carries
+    the expiry re-check and the other two carry the orphan guard. That split is what a fourth
+    checkpointer table would land in the middle of, so the tuple and what the sweep reports are
+    pinned against each other.
+    """
+
+    async def _run() -> dict[str, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed_thread("retention-covered-thread", age_days=90)
+        async with db.connection(settings.postgres_dsn) as conn:
+            deleted, _, _, _ = await _prune_checkpoints(conn, 30)
+        return deleted
+
+    assert set(asyncio.run(_run())) == set(CHECKPOINT_TABLES), (
+        "the sweep reported a different set of tables than the checkpointer declares"
+    )
+
+
+def test_the_checkpoint_sweep_says_that_it_left_threads_behind() -> None:
+    """A capped checkpoint sweep reports its tail, for the reason the conversation sweep does.
+
+    Without it, a first pass against a deployment with a large backlog returns exactly the cap as
+    its deleted count and an empty `skipped` — indistinguishable from a pass that drained the table,
+    while the growth this sweep exists to bound continues.
+
+    *That* a tail exists, not how long it is: `_EXPIRED_THREADS` is asked for exactly one row over
+    the cap, so `threads_deferred` is 0 or 1 by construction and the assertion below is written as
+    the boolean it really is.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            for index in range(5):
+                await _seed_thread(f"retention-capped-{index}", age_days=90)
+            # One sweep, not the whole pass: the cap bounds a batch and the pass now runs as many
+            # batches as its budget affords (`test_the_pass_keeps_sweeping_until_the_backlog_is
+            # _drained`), so driving the activity here would assert the convergence instead.
+            outcome, _ = await _sweep_once(_Budget())
+            surviving = 0
+            for index in range(5):
+                surviving += (await _thread_row_counts(f"retention-capped-{index}"))["checkpoints"]
+            return outcome, surviving
+        finally:
+            monkeypatch.undo()
+
+    outcome, surviving = asyncio.run(_run())
+
+    assert outcome.deleted["checkpoints"] == 2, (
+        f"the sweep worked more threads than its cap allowed: {outcome.deleted}"
+    )
+    assert surviving == 3, f"{surviving} of 5 seeded threads survive, expected 3"
+    assert outcome.threads_deferred > 0, (
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
+    )
+
+
+def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
+    """The absent-tables case is every deployment that has never run the graph engine.
+
+    Raising there would be worse than not pruning: `prune_expired_rows` would fail the whole
+    activity, Temporal would retry it to exhaustion, and the three tables the sweep *can* handle
+    would stop being pruned too — a missing checkpointer silently disabling retention for
+    everything else.
+
+    **The drop is schema-qualified, and an unqualified one destroyed the application's tables.**
+    `tests/pg.py` isolates every test table behind `search_path={isolation},public`, so a bare
+    `DROP TABLE IF EXISTS checkpoints` resolves to the *first* match — and this test does not create
+    the tables it drops. Run after `test_an_expired_thread_leaves_none_of_its_three_tables_behind`
+    there is an isolation-schema copy to hit; run alone there is not, and the statement reaches
+    **`public.checkpoints`**: the running deployment's turn state, dropped by a unit test.
+
+    That is not hypothetical. It wedged this repository's own dev stack twice on 2026-08-11–12 —
+    the second time irrecoverably, because `AsyncPostgresSaver.setup()` is idempotent against
+    `checkpoint_migrations` and that table survived, so every later turn died with
+    `UndefinedTable: relation "checkpoints" does not exist` and nothing could repair it. A live
+    concurrency sweep read 0 accepted turns at every admission cap before the cause was found.
+
+    So the drop names `current_schema()` explicitly and can no longer reach `public`. The cost is
+    that on a database where the application *has* run, `public` still shadows the now-absent
+    isolation copies and the sweep correctly reports a checkpointer it can see — which is not this
+    test's subject, so it skips saying so rather than failing.
+    """
+
+    async def _run() -> RetentionOutcome | None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_schema()")
+                row = await cur.fetchone()
+            schema = str(row[0]) if row else "public"
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await conn.execute(f'DROP TABLE IF EXISTS "{schema}".{table}')
+            await conn.commit()
+            # Still visible means `public` holds a real checkpointer this test must not touch.
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass('checkpoints')")
+                shadowed = await cur.fetchone()
+            if shadowed is not None and shadowed[0] is not None:
+                return None
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        try:
+            return await prune_expired_rows()
+        finally:
+            monkeypatch.undo()
+
+    outcome = asyncio.run(_run())
+    if outcome is None:
+        pytest.skip(
+            "a checkpointer exists in `public` (this database has run the application), so the "
+            "absent-schema case cannot be produced without dropping tables this test does not own"
+        )
+
+    assert any("no checkpointer" in reason for reason in outcome.skipped), (
+        f"the missing tables were not reported: {outcome.skipped}"
+    )
+    assert "session_events" in outcome.deleted, (
+        "a missing checkpointer stopped the sweep reaching the tables it can prune"
+    )
+
+
+# --- The thread query has to stream `checkpoints_pkey`, in both backlog shapes ------------------
+
+# The shape the plan assertions are measured against. Enough threads that a `HashAggregate` over
+# every group is what the planner reaches for on a table with no statistics — which is the state
+# `checkpoints` is in until autovacuum first analyzes it, because `AsyncPostgresSaver.setup()`
+# creates it outside `infra/sql` and a first retention pass can easily arrive before that. Below
+# roughly this size Postgres happens to pick a streaming plan even unanalyzed, and the defect hides.
+_SCAN_THREADS = 2000
+_SCAN_CHECKPOINTS_PER_THREAD = 5
+# Far below the seeded thread count, so "the scan stopped early" is a difference of two orders of
+# magnitude rather than a rounding one.
+_SCAN_CAP = 20
+
+# The thread count the *no-statistics* plan test seeds, and it is thirty times the one above for a
+# reason worth writing down. `_EXPIRED_THREADS`' resume predicate (`thread_id > %s`) makes the
+# index path look cheaper to a planner with no statistics, so the pathological plan the sweep's
+# `ANALYZE` exists to prevent no longer appears at 2 000 threads — measured this session, 2 000,
+# 8 000, 16 000, 32 000 and 40 000 x 5 all plan as `Limit → GroupAggregate → Index Scan` unanalyzed,
+# and 60 000 x 5 (300 000 rows) is where `Gather Merge → Sort → HashAggregate → Seq Scan` comes
+# back: 328 ms unanalyzed against 0 ms once analyzed, on the identical statement.
+#
+# **The alternative was to ask at a larger cap, and it is wrong.** A cap of 500 against 2 000
+# threads reproduces the hazard at the small fixture — and it also makes the *analyzed* plan a seq
+# scan, correctly, because 500 of 2 000 groups is a quarter of the table. What the deployment has
+# is 500 of hundreds of thousands, so a cap-to-threads ratio that far off measures a different
+# question and would have made this test assert that `ANALYZE` does nothing.
+_SCAN_STATS_THREADS = 60000
+
+# The two backlog shapes the sweep actually meets, as `live_every` values for the bulk fixture: one
+# thread in `live_every` is *still in use* (its oldest checkpoints are past the cutoff, its newest
+# is not), so `10` is a first pass against a table nobody has ever pruned and `1` is every pass
+# after it.
+#
+# `_SCAN_SPARSE` is the one that matters and the one the previous version of this file did not
+# have. Retention runs daily, so after the first pass the expired threads are a *minority* scattered
+# anywhere in `thread_id` order — and a `LIMIT` cannot bound the scan there, because finding a
+# minority means visiting everyone. Asserting a cap-shaped bound on the dense fixture alone was a
+# test of one shape claiming a general property: it passed a `WITH RECURSIVE` walk that, on this
+# same fixture made sparse, enumerated all 2 001 threads to answer for 21 and read 26 003 rows of a
+# 10 000-row table.
+_SCAN_DENSE_LIVE_EVERY = 10
+_SCAN_SPARSE_LIVE_EVERY = 1
+
+
+async def _seed_checkpoint_threads(threads: int, per_thread: int, live_every: int) -> None:
+    """Bulk-seed `threads` threads of `per_thread` checkpoints each, in one statement.
+
+    Every checkpoint is 400 days old except the last one of every `live_every`-th thread, which is a
+    day old — so that thread holds expired checkpoints and is not itself expired. One
+    `INSERT … SELECT` rather than a Python loop because the plan under test only becomes the
+    pathological one at a few thousand threads, and ten thousand round trips would dominate the
+    suite's runtime.
+
+    The `ts` is written in the ISO-8601 form `create_checkpoint` actually produces
+    (`2026-08-17T09:00:00.000000+00:00`), not Postgres's own `::text` rendering, so what the sweep
+    parses here is what it parses in production.
+
+    Clears all three tables first: the assertions below are about a *global* scan bound, so a thread
+    another test left behind changes the number.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await cur.execute(f"DELETE FROM {table}")
+            await cur.execute(
+                "INSERT INTO checkpoints "
+                "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                "SELECT 'retention-scan-' || to_char(t, 'FM000000'), '', 'ckpt-' || c, "
+                "       jsonb_build_object('v', 1, 'id', 'ckpt-' || c, 'ts', "
+                "           to_char((now() - make_interval(days => "
+                "               CASE WHEN t %% %s = 0 AND c = %s THEN 1 ELSE 400 END)) "
+                "               AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), "
+                "       '{}'::jsonb "
+                "FROM generate_series(1, %s) t, generate_series(1, %s) c",
+                (live_every, per_thread, threads, per_thread),
+            )
+        await conn.commit()
+
+
+async def _clear_checkpoint_tables() -> None:
+    """Empty all three checkpoint tables, so a bulk fixture cannot leak into another test."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await cur.execute(f"DELETE FROM {table}")
+        await conn.commit()
+
+
+async def _plan_of(sql: str, params: tuple[object, ...]) -> dict[str, Any]:
+    """The executed plan tree of `sql`, as `EXPLAIN (ANALYZE, FORMAT JSON)` reports it.
+
+    `ANALYZE` rather than a cost-only explain because the claim under test is about what the
+    statement *did* — how many rows the scan actually touched — and an estimate is exactly the thing
+    that was wrong about the old query.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF) " + sql, params)
+        row = await cur.fetchone()
+    assert row is not None
+    plan: dict[str, Any] = row[0][0]["Plan"]
+    return plan
+
+
+def _plan_nodes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node of a plan tree, parents before children."""
+    nodes = [plan]
+    for child in plan.get("Plans", []):
+        nodes.extend(_plan_nodes(child))
+    return nodes
+
+
+def _rows_examined(plan: dict[str, Any]) -> int:
+    """How many rows the plan's scan nodes actually read, filtered-out rows included.
+
+    `Actual Rows` alone would undercount: a `Seq Scan` that discards everything reports zero rows
+    out while having read the whole table, which is precisely the cost this fix is about.
+    """
+    return sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in _plan_nodes(plan)
+        if node["Node Type"].endswith("Scan")
+    )
+
+
+# The plan nodes that mean "this statement materialised the whole table before answering". Their
+# absence is the property under test: with statistics, `GROUP BY thread_id ORDER BY thread_id`
+# matches `checkpoints_pkey`'s leading column, so the answer is produced by streaming the index and
+# the `LIMIT` terminates it — no hash table over every group, no sort of every group, no seq scan.
+_MATERIALISING_NODES = ("Seq Scan", "HashAggregate", "Sort")
+
+
+@pytest.mark.parametrize(
+    ("live_every", "expected_threads"),
+    [
+        pytest.param(_SCAN_DENSE_LIVE_EVERY, _SCAN_CAP + 1, id="dense-first-pass"),
+        pytest.param(_SCAN_SPARSE_LIVE_EVERY, 0, id="sparse-steady-state"),
+    ],
+)
+def test_the_thread_query_streams_the_primary_key_in_both_backlog_shapes(
+    live_every: int, expected_threads: int
+) -> None:
+    """One streaming pass over `checkpoints_pkey`, whether the backlog is dense or drained.
+
+    **The property, and why it is this one.** A retention pass has to find the threads whose
+    *newest* checkpoint has expired. When they are a scattered minority — every pass after the
+    first, since this job runs daily — no statement can be bounded by the cap, because finding a
+    minority means visiting everyone. So the honest bound is not "read few rows" but **"read no row
+    twice"**: one ordered walk of the primary key, `max()` accumulated as it goes, the `LIMIT`
+    stopping it as soon as the cap is full. That is what `Limit → GroupAggregate → Index Scan using
+    checkpoints_pkey` does, and it is the plan `_EXPIRED_THREADS` gets once `_ANALYZE_THREADS` has
+    run.
+
+    Three assertions, and each of them is a measured failure of the `WITH RECURSIVE` loose index
+    scan this statement was briefly replaced by:
+
+    * **nothing materialises the table** — no `Seq Scan`, no `HashAggregate`, no `Sort`. This is the
+      claim the rewrite was built on ("an aggregate must build every group before the `LIMIT` can
+      discard one") and it is true only of a table with no statistics.
+    * **no row is read more than once** — the walk read 26 003 rows of this 10 000-row fixture made
+      sparse, because it pays a fresh index probe *plus* a correlated `max()` per thread. Measured
+      at 200 000 threads that is 8 147 ms against this statement's 593 ms, and it is *cancelled*
+      under a 2 s statement timeout where this completes in 618 ms.
+    * **on a dense backlog the `LIMIT` still stops the scan early** — a first pass reads a small
+      fraction of the table, which is the case the rewrite existed to serve and which this statement
+      serves better (2.5 ms against 21.3 ms at 200 000 threads).
+
+    The sparse arm is the one the previous version of this test lacked, and its absence is why a
+    regression passed: the fixture pinned `live_every = 10`, making 90% of threads expired, so a
+    statement that visits every thread still looked cap-bounded.
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        try:
+            await _seed_checkpoint_threads(_SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, live_every)
+            async with db.connection(settings.postgres_dsn) as conn:
+                # The statement the sweep itself runs one statement earlier, for the same reason:
+                # this plan is only available to a planner that has statistics for `checkpoints`.
+                await conn.execute(_ANALYZE_THREADS)
+                await conn.commit()
+            plan = await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1))
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1))
+                threads = [str(row[0]) for row in await cur.fetchall()]
+            return plan, threads
+        finally:
+            await _clear_checkpoint_tables()
+
+    plan, threads = asyncio.run(_run())
+    seeded_rows = _SCAN_THREADS * _SCAN_CHECKPOINTS_PER_THREAD
+    nodes = _plan_nodes(plan)
+
+    assert len(threads) == expected_threads, (
+        f"the thread query returned {len(threads)} threads, expected {expected_threads}; the cap "
+        "probe is how the pass tells a drained backlog from a capped one"
+    )
+
+    materialising = [
+        node["Node Type"] for node in nodes if node["Node Type"] in _MATERIALISING_NODES
+    ]
+    assert materialising == [], (
+        f"the thread query materialises `checkpoints` ({materialising}); its cost is then the "
+        "table's size however small the cap, which is what makes a pass on a large one time out"
+    )
+
+    examined = _rows_examined(plan)
+    assert examined <= seeded_rows, (
+        f"the query read {examined} of {seeded_rows} seeded rows — more than one read per row "
+        "means a probe per thread rather than one ordered pass, which is what times out when the "
+        "expired threads are a scattered minority"
+    )
+
+    if expected_threads:
+        assert examined < seeded_rows // 10, (
+            f"the query read {examined} of {seeded_rows} rows to fill a cap of {_SCAN_CAP + 1} — "
+            "on a dense backlog the LIMIT must still stop the scan early"
+        )
+
+
+def test_the_sweep_gives_the_planner_the_statistics_no_migration_can() -> None:
+    """The one shape where `_EXPIRED_THREADS` plans badly, and the one statement that fixes it.
+
+    `checkpoints` is created by `AsyncPostgresSaver.setup()`, outside `infra/sql`, so no migration
+    ever analyzes it and a first retention pass can easily arrive before autovacuum does. With no
+    statistics the planner has no idea `thread_id` holds thousands of distinct values, so it reaches
+    for `Parallel Seq Scan → Partial HashAggregate → Sort → Finalize GroupAggregate` — measured at
+    200 000 threads, that is 1 526 ms with 5.8 MB spilled to disk, against 2.5 ms for the identical
+    statement once analyzed. Past the size where it exceeds `pg_statement_timeout_seconds` the
+    activity is cancelled, retried by Temporal, cancelled again, and the table it exists to bound
+    grows forever with a timeout as the only symptom.
+
+    So this asserts both halves: that the hazard is real on a table nobody has analyzed, and that
+    running the sweep removes it. The table is **dropped and recreated** rather than emptied,
+    because `DELETE` leaves `pg_statistic` behind — an earlier test in this file would otherwise
+    hand this one the very statistics it is meant to be missing.
+    """
+
+    async def _run() -> tuple[list[str], list[str]] | None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_schema()")
+                row = await cur.fetchone()
+            schema = str(row[0]) if row else "public"
+            # Schema-qualified for the reason
+            # `test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed` spells out at
+            # length: an unqualified drop resolves to `public` and takes the running deployment's
+            # turn state with it.
+            await conn.execute(f'DROP TABLE IF EXISTS "{schema}".checkpoints')
+            await conn.commit()
+        await create_checkpoint_tables()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT to_regclass(%s)", (f"{schema}.checkpoints",))
+            recreated = await cur.fetchone()
+        if recreated is None or recreated[0] is None:
+            return None
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        # A tiny cap so the sweep's own deletions barely change the table between the two plans.
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            await _seed_checkpoint_threads(
+                _SCAN_STATS_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_DENSE_LIVE_EVERY
+            )
+            before = _plan_nodes(await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1)))
+            # One sweep: `ANALYZE` runs once per sweep, and driving the whole activity here would
+            # drain a deliberately large seeded backlog two threads at a time.
+            await _sweep_once(_Budget())
+            after = _plan_nodes(await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1)))
+            return (
+                [node["Node Type"] for node in before],
+                [node["Node Type"] for node in after],
+            )
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    plans = asyncio.run(_run())
+    if plans is None:
+        pytest.skip(
+            "the isolation schema's `checkpoints` could not be recreated, so the no-statistics "
+            "state cannot be produced without touching tables this test does not own"
+        )
+    before, after = plans
+
+    assert "Seq Scan" in before, (
+        "this fixture no longer reproduces the unanalyzed plan, so the assertion below proves "
+        f"nothing; nodes were {before}"
+    )
+    assert not set(after) & set(_MATERIALISING_NODES), (
+        "the sweep ran and the thread query still materialises the whole table: `ANALYZE` is not "
+        f"reaching `checkpoints`, nodes were {after}"
+    )
+
+
+async def _seed_thread_with_ages(thread_id: str, ages: tuple[int, ...]) -> None:
+    """One thread holding a checkpoint at each of `ages` (in days), plus its blob and write rows.
+
+    The multi-checkpoint counterpart of `_seed_thread`: a thread whose *oldest* checkpoints have
+    expired while its newest has not cannot be expressed with one row, and it is the only shape that
+    separates "has an expired checkpoint" from "is finished with".
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for index, age_days in enumerate(ages):
+                await cur.execute(
+                    "INSERT INTO checkpoints "
+                    "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                    "VALUES (%s, '', %s, jsonb_build_object('v', 1, 'id', %s::text, 'ts', "
+                    "    to_char((now() - make_interval(days => %s::int)) AT TIME ZONE 'UTC', "
+                    "            'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), '{}'::jsonb)",
+                    (thread_id, f"ckpt-{index}", f"ckpt-{index}", age_days),
+                )
+            await cur.execute(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                "VALUES (%s, '', 'messages', '1', 'msgpack', %s)",
+                (thread_id, b"payload"),
+            )
+            await cur.execute(
+                "INSERT INTO checkpoint_writes "
+                "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
+                "VALUES (%s, '', 'ckpt-0', 'task-1', 0, 'messages', 'msgpack', %s)",
+                (thread_id, b"payload"),
+            )
+        await conn.commit()
+
+
+def test_a_thread_whose_oldest_checkpoints_expired_but_is_still_in_use_is_not_deleted() -> None:
+    """The bound had to be bought without changing what "expired" means.
+
+    The cheap way to bound the scan is to ask a per-row question — "which threads hold a checkpoint
+    older than the cutoff" — and take the first `n` answers. That set includes every conversation
+    resumed across the window, old checkpoints plus recent ones, and deleting on it would destroy
+    the turn state of exactly the threads still in daily use, silently, because nothing reads a
+    checkpoint until someone resumes the conversation and finds no state.
+
+    So the query asks `max(ts) < cutoff` per thread rather than "does this thread hold an expired
+    checkpoint", and this is the test that it still does. The straddling thread deliberately gets a
+    lower-sorting id than the fully expired one, so an ordered scan reaches it first.
+    """
+
+    async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            # Sorts first, so a pass that trusted the candidate query would delete it first.
+            await _seed_thread_with_ages("retention-a-resumed", (400, 380, 1))
+            await _seed_thread_with_ages("retention-b-finished", (400, 380))
+
+            outcome = await prune_expired_rows()
+
+            return (
+                await _thread_row_counts("retention-a-resumed"),
+                await _thread_row_counts("retention-b-finished"),
+                outcome,
+            )
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    resumed, finished, outcome = asyncio.run(_run())
+
+    assert resumed == {"checkpoints": 3, "checkpoint_blobs": 1, "checkpoint_writes": 1}, (
+        "a conversation resumed inside the window was pruned because its *older* checkpoints had "
+        f"expired; its turn state is now gone: {resumed}"
+    )
+    assert finished == {"checkpoints": 0, "checkpoint_blobs": 0, "checkpoint_writes": 0}, (
+        f"the finished thread was not disposed of: {finished}"
+    )
+    assert outcome.deleted["checkpoints"] == 2, (
+        f"exactly the finished thread's two checkpoints should have gone: {outcome.deleted}"
+    )
+
+
+# --- The disposal rule, shape by shape ----------------------------------------------------------
+
+# How far inside the window "newer than the cutoff" has to be for the assertion to be deterministic.
+# The cutoff is `now()` at *query* time, so a checkpoint seeded at exactly `now() - window` is
+# already fractionally older than it by the time the query runs and is correctly expired. A minute
+# is far enough inside that no plausible scheduling delay between the seed and the query can flip
+# it, and still small enough — against a 30-day window — to be a boundary rather than a margin.
+_BOUNDARY_SECONDS = 60
+
+
+async def _seed_checkpoint_at(
+    thread_id: str, checkpoint_ns: str, checkpoint_id: str, *, days: int, seconds: int = 0
+) -> None:
+    """One checkpoint row dated `days`+`seconds` before the database's own `now()`.
+
+    Sub-day precision, which `_seed_thread_with_ages` has no way to express, because the boundary
+    case is a checkpoint a minute either side of the cutoff rather than a day.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+            "VALUES (%s, %s, %s, jsonb_build_object('v', 1, 'id', %s::text, 'ts', "
+            "    to_char((now() - make_interval(days => %s::int, secs => %s::int)) "
+            "            AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), '{}'::jsonb)",
+            (thread_id, checkpoint_ns, checkpoint_id, checkpoint_id, days, seconds),
+        )
+        await conn.commit()
+
+
+async def _seed_raw_checkpoint(thread_id: str, payload: dict[str, Any]) -> None:
+    """One checkpoint row whose payload is written verbatim — including a `ts` Postgres cannot cast.
+
+    The seeding helpers above all build a well-formed timestamp, which is exactly what the two
+    malformed shapes need to avoid.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+            "VALUES (%s, '', %s, %s, '{}'::jsonb)",
+            (thread_id, str(payload["id"]), Jsonb(payload)),
+        )
+        await conn.commit()
+
+
+async def _expired_threads(days: int, cap: int) -> list[str]:
+    """The threads `_EXPIRED_THREADS` names as disposable: the sweep's question, asked alone."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(_EXPIRED_THREADS, ("", days, cap))
+        return [str(row[0]) for row in await cur.fetchall()]
+
+
+def test_the_thread_query_is_the_disposal_rule_on_every_shape() -> None:
+    """A thread is expired **iff its newest checkpoint is older than the cutoff** — on every shape.
+
+    The rule is the one thing about this statement that may never change, and it has now been
+    written three ways (a grouped `HAVING`, a recursive walk, and back), so it is pinned against the
+    shapes a real `checkpoints` table holds rather than against whichever statement is current:
+
+    * **an empty table** — no threads, not an error and not everything;
+    * **no `ts` key at all** — `checkpoint->>'ts'` is SQL `NULL`, `max()` ignores it, and a thread
+      whose timestamps are all missing is therefore never disposable. Worth pinning because the
+      alternative reading, "unknown age means old", would delete live turn state;
+    * **more than one `checkpoint_ns` per thread** — the unit of disposal is the *thread*, so the
+      newest checkpoint in *any* namespace keeps the whole thread alive. Grouping by `thread_id`
+      alone is what makes that true, and grouping by the primary key's first two columns instead
+      would silently delete the default namespace of a thread whose subgraph is still running;
+    * **a timestamp at the boundary** — the comparison is strict `<`, so the edge belongs to the
+      expired side only once the clock has moved past it;
+    * **a thread resumed inside the window** — old checkpoints, newest one recent, must survive.
+
+    A malformed `ts` is the sixth shape and is asserted separately below, because its correct
+    answer is an exception rather than a set.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        try:
+            empty = await _expired_threads(30, 100)
+
+            # Every timestamp missing: never expired, however old the row is.
+            await _seed_raw_checkpoint("shape-a-no-ts", {"v": 1, "id": "ckpt-0"})
+            # Two namespaces, and only the non-default one is still live: the thread survives whole.
+            await _seed_checkpoint_at("shape-b-two-ns", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-b-two-ns", "sub", "ckpt-0", days=1)
+            # Two namespaces, both finished: the thread goes.
+            await _seed_checkpoint_at("shape-c-two-ns-dead", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-c-two-ns-dead", "sub", "ckpt-0", days=380)
+            # Exactly at the cutoff when it was written, so fractionally past it when asked.
+            await _seed_checkpoint_at("shape-d-on-the-edge", "", "ckpt-0", days=30)
+            # A minute inside the window: not expired.
+            await _seed_checkpoint_at(
+                "shape-e-inside-the-edge", "", "ckpt-0", days=30, seconds=-_BOUNDARY_SECONDS
+            )
+            # Resumed across the window: old checkpoints, recent newest.
+            await _seed_checkpoint_at("shape-f-resumed", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-f-resumed", "", "ckpt-1", days=1)
+
+            return empty, await _expired_threads(30, 100)
+        finally:
+            await _clear_checkpoint_tables()
+
+    empty, expired = asyncio.run(_run())
+
+    assert empty == [], f"an empty table named threads as expired: {empty}"
+    assert expired == ["shape-c-two-ns-dead", "shape-d-on-the-edge"], (
+        "the thread query no longer states the disposal rule: a thread is expired exactly when its "
+        f"newest checkpoint, in any namespace, is older than the cutoff. Got {expired}"
+    )
+
+
+def test_an_uncastable_timestamp_fails_the_pass_rather_than_disposing_of_anything() -> None:
+    """A `ts` Postgres cannot parse must raise, not be treated as old and not be skipped.
+
+    Postgres has no `TRY_CAST`, so `(checkpoint->>'ts')::timestamptz` on a payload holding
+    `"not-a-timestamp"` raises and the checkpoint pass fails — loudly, which is the right failure
+    for a disposal job: the tables before `checkpoints` in `_PRUNABLE` have already committed their
+    own deletions, and swallowing this would turn a job that *cannot run* into one reporting success
+    while the table it bounds keeps growing.
+
+    This also records where the two statements this rule has been written as differ. The grouping
+    scan casts every row it reaches, so a malformed `ts` anywhere ahead of the cap fails the whole
+    pass; the recursive walk cast only the threads it visited, so the same row failed a later pass
+    instead. Earlier and louder is the direction a retention job wants, and this test pins it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        try:
+            await _seed_raw_checkpoint("shape-g-bad-ts", {"v": 1, "id": "ckpt-0", "ts": "not-a-ts"})
+            await _expired_threads(30, 100)
+        finally:
+            await _clear_checkpoint_tables()
+
+    with pytest.raises(psycopg.DataError):
+        asyncio.run(_run())
+
+
+# --- The ownership row: disposed of behind everything it keys, never in front of it ------------
+# `D-2026-08-27-a-session-nobody-can-reopen-is-disposable`. A `session_owners` row is what makes a
+# session reopenable at all (`api/deps.py::_rehydrate_session` 404s an id this table does not
+# hold), and it is also the row every session-scoped sweep starts from — so these pin both
+# directions: what must be gone before it may go, and that it does go once nothing is left.
+
+
+async def _clear_owner_fixtures() -> None:
+    """Empty the tables the ownership pass reads, so its global cap sees only this test's rows.
+
+    The same argument `_seed_expired_sessions` makes for clearing `session_messages`: the pass
+    selects candidates table-wide under a `LIMIT`, so a row another test left behind lands inside
+    the batch and shifts every count asserted here. The suite isolates one schema per run rather
+    than per test (`tests/pg.py`), and every test below seeds immediately before it prunes.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("session_messages", "session_events", "session_turns", "session_owners"):
+                await cur.execute(f"DELETE FROM {table}")
+        await conn.commit()
+
+
+async def _seed_owner(session_id: str, *, age_days: int) -> None:
+    """One ownership row of the given age — what a client's first keystroke leaves behind."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_owners (session_id, owner, created_at) "
+                "VALUES (%s, 'oid-retention-test', now() - make_interval(days => %s))",
+                (session_id, age_days),
+            )
+        await conn.commit()
+
+
+async def _seed_message(session_id: str, *, age_days: int) -> None:
+    """One self-contained conversation row for that session, of the given age."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message, created_at) "
+                "VALUES (%s, %s, now() - make_interval(days => %s))",
+                (session_id, Jsonb(legacy_text("user", "old")), age_days),
+            )
+        await conn.commit()
+
+
+async def _seed_lease(session_id: str, *, expires_in_seconds: float) -> None:
+    """A turn lease on that session — live when positive, an abandoned crash artifact when not."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_turns (session_id, holder, expires_at) "
+                "VALUES (%s, 'worker-1', now() + make_interval(secs => %s)) "
+                "ON CONFLICT (session_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+                (session_id, expires_in_seconds),
+            )
+        await conn.commit()
+
+
+async def _rows_left(table: str) -> set[str]:
+    """Which session ids that table still holds."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(f"SELECT session_id FROM {table}")
+        return {str(row[0]) for row in await cur.fetchall()}
+
+
+async def _sweep(**windows: int) -> RetentionOutcome:
+    """One retention pass with exactly these windows stated and every other one off."""
+    monkeypatch = pytest.MonkeyPatch()
+    for name in (
+        "retention_session_events_days",
+        "retention_session_messages_days",
+        "retention_tool_results_days",
+        "retention_result_publications_days",
+        "retention_checkpoints_days",
+    ):
+        monkeypatch.setattr(settings, name, windows.get(name, 0))
+    try:
+        return await prune_expired_rows()
+    finally:
+        monkeypatch.undo()
+
+
+def test_a_session_nobody_can_reopen_is_forgotten_and_one_still_in_use_is_not() -> None:
+    """The policy in one pass: age is necessary, emptiness decides, and the lease rides along.
+
+    Four sessions, all four cases the rule has to separate:
+
+    - `gone` — created past the window, never a message. The abandoned draft the companion UI
+      creates on the first keystroke, which nothing has ever deleted: it is invisible in the
+      session list already (`_OWNER_LIST` drops a session with no messages), so the row is a
+      permanent 124 bytes nobody can reach except by an id they still remember.
+    - `stale-lease` — the same, plus the lease a SIGKILLed worker never released. It goes *with*
+      the ownership row, because a lease naming a session nothing can find is an orphan beyond both
+      `delete_session` and erasure.
+    - `history` — past the window, but its conversation is not, so the row that makes that
+      conversation reachable stays.
+    - `draft` — created minutes ago with nothing in it yet, which is what every session looks like
+      between the first keystroke and the first answer.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str], set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        for session_id in ("gone", "stale-lease", "history"):
+            await _seed_owner(session_id, age_days=400)
+        await _seed_owner("draft", age_days=0)
+        await _seed_lease("stale-lease", expires_in_seconds=-172800)
+        await _seed_message("history", age_days=10)
+        outcome = await _sweep(retention_session_messages_days=365)
+        return outcome, await _rows_left("session_owners"), await _rows_left("session_turns")
+
+    outcome, owners, leases = asyncio.run(_run())
+    assert owners == {"history", "draft"}, (
+        "a session with a conversation, or one created inside the window, must stay reopenable"
+    )
+    assert leases == set(), "the lease of a forgotten session is an orphan nothing can reach"
+    assert outcome.deleted["session_owners"] == 2
+    assert outcome.deleted["session_turns"] == 1
+    assert outcome.owners_deferred == 0
+
+
+def test_a_live_turn_lease_protects_a_session_that_is_otherwise_disposable() -> None:
+    """A turn writes its transcript at the end, so mid-turn the lease is the only thing saying so.
+
+    A session resumed from an old, empty ownership row genuinely holds no rows anywhere while its
+    turn is running — the transcript is written by `api/runner._record_transcript` after the answer
+    exists — so without this guard the sweep would delete the ownership row of a conversation in
+    progress and leave a transcript nothing can find. The second half is the other direction and is
+    what keeps the rule narrow: once that same lease has expired it is a crash artifact, which
+    every other reader of the table already treats as dead, and it is collected.
+    """
+
+    async def _run() -> tuple[set[str], set[str], set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        await _seed_owner("mid-turn", age_days=400)
+        await _seed_lease("mid-turn", expires_in_seconds=600)
+        await _sweep(retention_session_messages_days=365)
+        during = await _rows_left("session_owners")
+        await _seed_lease("mid-turn", expires_in_seconds=-1)
+        await _sweep(retention_session_messages_days=365)
+        return during, await _rows_left("session_owners"), await _rows_left("session_turns")
+
+    during, after, leases = asyncio.run(_run())
+    assert during == {"mid-turn"}, "the sweep deleted the ownership row of a running turn"
+    assert after == set(), "an expired lease is a crash artifact and must not hold the row forever"
+    assert leases == set()
+
+
+def test_a_conversation_pruned_this_pass_lets_its_session_be_forgotten_in_the_same_pass() -> None:
+    """The ordering hazard, pinned: `session_owners` is last in `_PRUNABLE` deliberately.
+
+    Retention prunes `session_messages` by age, so a session whose history goes in this pass is
+    empty by the time the ownership pass runs — and is disposed of in the same sweep. That is the
+    intended outcome rather than an accident of ordering: what is left at that point is a shell the
+    session list does not show and a resumed transcript would render blank, and keeping it would be
+    exactly the unbounded growth this policy closes. The direction that would be wrong is the other
+    one — the ownership row going *first*, which would put the conversation beyond erasure.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str], int]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        await _seed_owner("expiring", age_days=400)
+        await _seed_message("expiring", age_days=400)
+        outcome = await _sweep(retention_session_messages_days=365)
+        return outcome, await _rows_left("session_owners"), await _remaining("expiring")
+
+    outcome, owners, messages = asyncio.run(_run())
+    assert messages == 0
+    assert owners == set()
+    assert outcome.deleted["session_messages"] == 1
+    assert outcome.deleted["session_owners"] == 1
+
+
+def test_graph_state_left_behind_keeps_the_ownership_row_that_finds_it() -> None:
+    """The reachability guard against the table that is not in `infra/sql` at all.
+
+    The checkpointer keys a turn's state by `thread_id`, which is the session id, and its window is
+    separate — so a deployment that states a conversation window and no checkpoint window keeps
+    graph state for sessions whose transcripts are gone. Deleting the ownership row there would put
+    that state beyond `leaver.erase_actor`, which reaches it only by selecting session ids out of
+    `session_owners`. With both windows stated the same pass removes the thread first and the
+    ownership row after it, which is the ordering `_PRUNABLE` encodes.
+    """
+
+    async def _run() -> tuple[set[str], set[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        await _clear_owner_fixtures()
+        await _seed_owner("thread-left", age_days=400)
+        await _seed_thread("thread-left", age_days=400)
+        try:
+            await _sweep(retention_session_messages_days=365)
+            with_state = await _rows_left("session_owners")
+            await _sweep(retention_session_messages_days=365, retention_checkpoints_days=30)
+            return with_state, await _rows_left("session_owners")
+        finally:
+            await _clear_checkpoint_tables()
+
+    with_state, after = asyncio.run(_run())
+    assert with_state == {"thread-left"}, (
+        "an ownership row was deleted while the checkpointer still held the session's turn state, "
+        "which is the only way erasure can reach it"
+    )
+    assert after == set(), "once the thread is gone the session is a shell and may be forgotten"
+
+
+def test_the_ownership_sweep_works_a_bounded_batch_and_reports_the_rest() -> None:
+    """The cap and its probe, for the reason the other two sweeps carry them.
+
+    A first pass against a deployment that has never pruned faces every abandoned draft it has ever
+    created. Capped, each sweep commits a bounded amount; reported, an operator can tell a drained
+    backlog from a sweep that stopped at its limit — a cap that is not reported makes a
+    still-growing table look bounded in every result this job returns.
+
+    One sweep rather than the activity, for the reason the conversation and checkpoint batch tests
+    give: the cap bounds a batch, and the pass repeats batches until the backlog or the budget runs
+    out.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        for index in range(3):
+            await _seed_owner(f"capped-{index}", age_days=400)
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        for name in (
+            "retention_session_events_days",
+            "retention_tool_results_days",
+            "retention_result_publications_days",
+            "retention_checkpoints_days",
+        ):
+            monkeypatch.setattr(settings, name, 0)
+        try:
+            outcome, _ = await _sweep_once(_Budget())
+        finally:
+            monkeypatch.undo()
+        return outcome, await _rows_left("session_owners")
+
+    outcome, owners = asyncio.run(_run())
+    assert outcome.deleted["session_owners"] == 2, "the sweep worked more rows than its cap allowed"
+    assert len(owners) == 1
+    assert outcome.owners_deferred == 1, (
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
+    )
+
+
+def test_a_sweep_that_removes_nothing_ends_the_pass() -> None:
+    """A tail is not a reason to sweep again; progress is.
+
+    **The defect this pins was a spin, and it reported success.** `_prune_session_messages` can
+    select a session and delete from it nothing at all — it skips a row it cannot read, and skips
+    one whose tool-call pairing straddles the cutoff — while `sessions_deferred` still reports a
+    tail because a further expired session exists past the cap. The selection is
+    `ORDER BY session_id LIMIT cap`, so the same sessions come back every sweep. Measured before
+    `made_progress` existed: **177 sweeps in three seconds, deleting nothing**, ending only when
+    the clock ran out, and returning a zero in every table with no error.
+
+    Driven on the outcome rather than on a live database because the property is the loop's, not
+    the query's: an outcome carrying a tail and no deletions must not be asked to continue. The
+    live half is covered by `test_one_sweep_works_a_bounded_batch_and_reports_the_rest` above.
+    """
+    spinning = RetentionOutcome(
+        deleted={"session_messages": 0, "session_owners": 0},
+        skipped=[],
+        sessions_deferred=1,
+    )
+    assert spinning.has_tail(), "the fixture must carry a tail, or it proves nothing"
+    assert not spinning.made_progress()
+
+    progressing = RetentionOutcome(
+        deleted={"session_messages": 3, "session_owners": 0},
+        skipped=[],
+        sessions_deferred=1,
+    )
+    assert progressing.has_tail()
+    assert progressing.made_progress(), "a sweep that deleted rows has progressed"
+
+    # And the empty case: no tail, no progress, nothing to continue for.
+    drained = RetentionOutcome(deleted={"session_messages": 0}, skipped=[])
+    assert not drained.has_tail()
+    assert not drained.made_progress()
+
+
+# --- The resume position: a drain reads the table once, not once per capped batch ---------------
+
+
+async def _poison_thread(thread_id: str) -> None:
+    """A checkpoint whose `ts` is not a timestamp, planted below where a sweep resumes.
+
+    This is the tripwire the resume test rests on, and it is a documented behaviour of the sweep
+    rather than an invented one: `_prune_checkpoints`' docstring says a malformed `ts` fails the
+    pass loudly, because `(checkpoint->>'ts')::timestamptz` runs over **every row the grouping scan
+    reaches** and Postgres has no `TRY_CAST`. So a scan that re-walks the prefix it already cleared
+    raises here, and a scan that resumes past it never reads the row at all — which turns "did this
+    drain read the same region twice" from a stopwatch question into a deterministic one.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint, "
+            "metadata) VALUES (%s, '', 'poison', %s, '{}'::jsonb)",
+            (thread_id, Jsonb({"v": 1, "id": "poison", "ts": "not-a-timestamp"})),
+        )
+        await conn.commit()
+
+
+async def _surviving_threads() -> list[str]:
+    """Every thread still in `checkpoints`, asked without the cast a poison row would fail."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT DISTINCT thread_id FROM checkpoints ORDER BY 1")
+        return [str(row[0]) for row in await cur.fetchall()]
+
+
+def test_the_next_sweep_of_a_drain_starts_where_the_last_one_stopped() -> None:
+    """A drain visits every thread once, not once per capped batch.
+
+    **The cost this is about.** A pass sweeps until the backlog is empty, and every sweep used to
+    ask `_EXPIRED_THREADS` from the beginning of `thread_id` order — so sweep *k* walked past the
+    *k-1* batches it had already disposed of before reaching anything new, and the drain paid
+    Sigma-k whole-table scans where it needs one. Measured on 200 000 threads x 3 checkpoints with
+    2 000 expired and the shipped cap of 500, the four scans of one drain grew
+    280 -> 438 -> 666 -> 881 ms (2 265 ms) against a flat 294 / 235 / 231 / 237 (996 ms) resuming
+    from the last thread reached; on a first pass after enabling retention (50 000 threads, 20 000
+    expired, 40 sweeps) it is 2 698 ms against 357 ms, and the ratio is `(sweeps + 1) / 2`, so it
+    grows with the backlog rather than with the table.
+
+    **The assertion is not a stopwatch.** A wall-clock ratio on a shared runner is the kind of
+    evidence that passes in the direction nobody wants, so the observable is *which rows the second
+    scan reads*: a poison thread is planted below the resume position between the two sweeps, and
+    the cast that dates a checkpoint raises on it. A sweep that restarts from the beginning fails on
+    it; one that resumes never sees it. Watched failing with `resume_from` forced to `""`, which is
+    the statement exactly as it shipped: `psycopg.errors.InvalidDatetimeFormat` on the second sweep.
+
+    The table is emptied first because this asserts on *which* threads a capped scan reaches, which
+    is a claim about the whole table rather than about the rows this test seeded.
+    """
+
+    async def _run() -> tuple[str, dict[str, int], str, list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 3)
+        await _clear_checkpoint_tables()
+        try:
+            for index in range(6):
+                await _seed_thread(f"zz-resume-{index:02d}", age_days=90)
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                _, _, deferred, resume_from = await _prune_checkpoints(conn, 30)
+            assert deferred == 1, (
+                "the fixture did not outrun the cap, so there is nothing to resume"
+            )
+
+            # Below the resume position and expired: only a scan that re-walks the cleared prefix
+            # reads it.
+            await _poison_thread("zz-resume-00-poison")
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                second, _, _, drained_at = await _prune_checkpoints(conn, 30, resume_from)
+            return resume_from, second, drained_at, await _surviving_threads()
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    resume_from, second, drained_at, survivors = asyncio.run(_run())
+
+    assert resume_from == "zz-resume-02", (
+        f"the capped sweep reported {resume_from!r} as where it stopped; it should be the last "
+        "thread the scan reached, which is what the next sweep of the pass starts after"
+    )
+    assert second["checkpoints"] == 3, (
+        f"the resumed sweep disposed of {second['checkpoints']} thread(s), not the remaining three"
+    )
+    assert survivors == ["zz-resume-00-poison"], (
+        f"the drain left expired threads behind: {survivors}. Only the poison row, which is not a "
+        "thread the sweep may date, should survive it."
+    )
+    assert drained_at == "", (
+        "a scan that came back under its cap has seen the table to its end, so it must report the "
+        "beginning as the place to resume — a position that only ever moves forward would leave "
+        "every thread beneath it unreachable"
+    )
+
+
+def test_every_pass_starts_at_the_beginning_of_the_table() -> None:
+    """The resume position dies with the pass, so nothing below it is ever stranded.
+
+    This is the property that made a *durable* watermark the wrong answer to
+    `docs/planning/BACKLOG.md`'s question. A position kept between passes would let a pass that ran
+    out of budget park a cursor part-way through `thread_id` order, and every thread beneath it
+    would then wait for a wrap — which is either an extra whole-table scan on every pass (measured
+    worse than the shipped statement at two sweeps) or a window in which a thread that expires
+    below the cursor is not disposed of. Threading the position through one pass has neither
+    problem, and this is the test of it: a thread that sorts *first* and expires *after* a pass has
+    already swept past its position is disposed of by the next pass, not by some later wrap.
+    """
+
+    async def _run() -> tuple[str, list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 1)
+        await _clear_checkpoint_tables()
+        try:
+            await _seed_thread("zz-wrap-b", age_days=90)
+            await _seed_thread("zz-wrap-c", age_days=90)
+            # One pass: two capped sweeps, so it ends having reached the end of `thread_id` order.
+            await prune_expired_rows()
+            reached_the_end = await _surviving_threads()
+            # Now a thread that sorts before everything the pass looked at expires.
+            await _seed_thread("zz-wrap-a", age_days=90)
+            await prune_expired_rows()
+            return ", ".join(reached_the_end), await _surviving_threads()
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    after_first_pass, after_second_pass = asyncio.run(_run())
+
+    assert after_first_pass == "", f"the first pass left threads behind: {after_first_pass}"
+    assert after_second_pass == [], (
+        "a thread that expired below where the previous pass stopped was not disposed of: "
+        f"{after_second_pass}. The next pass must start at the beginning of the table."
+    )
+
+
+async def _analyze_count() -> int:
+    """How many times `checkpoints` has been analyzed, as Postgres itself counts it.
+
+    `pg_stat_force_next_flush()` first, because a backend's statistics are buffered and would
+    otherwise be read a sweep behind — which is the direction that makes this assertion pass.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT pg_stat_force_next_flush()")
+        await cur.execute("SELECT current_schema()")
+        row = await cur.fetchone()
+        await cur.execute(
+            "SELECT analyze_count FROM pg_stat_user_tables "
+            "WHERE relname = 'checkpoints' AND schemaname = %s",
+            (str(row[0]) if row else "public",),
+        )
+        counted = await cur.fetchone()
+    return int(counted[0]) if counted else 0
+
+
+def test_a_drain_analyzes_the_table_once_and_not_once_per_sweep() -> None:
+    """`ANALYZE checkpoints` belongs to the pass, not to each of its sweeps.
+
+    The statistics exist so the *first* scan of a pass plans as a streaming walk of
+    `checkpoints_pkey`; every later sweep resumes inside that same plan. Analyzing again per sweep
+    was a fixed sub-second cost while a pass was one sweep, and stopped being one when
+    `_prune_expired_rows` became a loop — measured on 50 000 threads draining 20 000 expired at the
+    shipped cap of 500, the 40 sweeps of one drain spent **10.8 s of 13.8 s** re-analyzing, and the
+    same drain now costs 1.5 s.
+
+    Counted through `pg_stat_user_tables` rather than by intercepting statements, because what is
+    under test is whether Postgres was asked to do the work, and that is a thing Postgres will say.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 1)
+        await _clear_checkpoint_tables()
+        try:
+            for index in range(3):
+                await _seed_thread(f"zz-analyze-{index:02d}", age_days=90)
+            before = await _analyze_count()
+            resume, sweeps = "", 0
+            while True:
+                async with db.connection(settings.postgres_dsn) as conn:
+                    _, _, deferred, resume = await _prune_checkpoints(conn, 30, resume)
+                sweeps += 1
+                if not deferred:
+                    break
+            return before, await _analyze_count(), sweeps
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    before, after, sweeps = asyncio.run(_run())
+
+    assert sweeps >= 3, f"the fixture drained in {sweeps} sweep(s), so there is nothing to count"
+    assert after - before == 1, (
+        f"the drain analyzed `checkpoints` {after - before} times over {sweeps} sweeps; the "
+        "statistics are what make the pass's first scan plan as an index walk, and every sweep "
+        "after it resumes inside that plan"
+    )
+
+
+async def _table_bytes(table: str) -> int:
+    """`pg_total_relation_size` for one table on the test schema, in bytes."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT pg_total_relation_size(to_regclass(quote_ident(%s)))", (table,))
+        row = await cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def _dead_tuples(table: str) -> int:
+    """Dead tuples the statistics collector currently attributes to `table` on this schema."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(f"ANALYZE {table}")
+        await cur.execute(
+            "SELECT n_dead_tup FROM pg_stat_all_tables "
+            "WHERE relname = %s AND schemaname = current_schema()",
+            (table,),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def _pinned_horizon() -> int:
+    """Other backends holding a transaction snapshot, which is what stops `VACUUM` reclaiming.
+
+    **A control on the environment, not on the code.** `VACUUM` may only remove a tuple no running
+    transaction can still see, so one long-lived transaction anywhere on the server pins the
+    horizon and every vacuum in the database becomes a no-op — measured here on a shared dev
+    database, where a concurrent benchmark's `INSERT INTO bench_live ...` held `backend_xmin` and
+    even a hand-run `VACUUM (VERBOSE)` left all 400 dead tuples in place. CI's database is a
+    throwaway container with nothing else on it, so this reads zero there and the assertion below
+    is a real one; on a shared database it is what lets the test say what it is not evidence about
+    rather than fail for somebody else's transaction.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() AND datname = current_database() "
+            "AND backend_xmin IS NOT NULL"
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def _seed_fat_sessions(count: int, start: int) -> None:
+    """`count` fully-expired single-message sessions with a payload big enough to move the heap."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            message = legacy_text("user", "x" * 2000)
+            for index in range(start, start + count):
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message, created_at) "
+                    "VALUES (%s, %s, now() - make_interval(days => 400))",
+                    (f"reclaim-{index:06d}", Jsonb(message)),
+                )
+        await conn.commit()
+
+
+async def _private_database(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Create an empty database and point every DSN setting at it; returns its name.
+
+    `VACUUM`'s horizon is per database: any backend in the same database holding a snapshot stops
+    dead tuples being removed. Under `pytest -n` every worker shares one database (each in its own
+    schema), so a sibling worker's transaction pinned the horizon mid-test and the reclamation
+    assertions failed only in parallel. A private database has no other backends.
+    """
+    name = f"chemclaw_vacuum_{uuid4().hex[:12]}"
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            psycopg.conninfo.make_conninfo(**base), autocommit=True
+        ) as conn:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+    except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - env-dependent
+        pytest.skip("this role cannot CREATE DATABASE, which the vacuum-horizon test needs")
+    private = psycopg.conninfo.make_conninfo(**{**base, "dbname": name})
+    for setting in ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn"):
+        if str(getattr(settings, setting)):
+            monkeypatch.setattr(settings, setting, private)
+    return name
+
+
+async def _drop_database(name: str) -> None:
+    """Drop a database `_private_database` created, closing any connection still open on it."""
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    async with await psycopg.AsyncConnection.connect(
+        psycopg.conninfo.make_conninfo(**base), autocommit=True
+    ) as conn:
+        await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
+    """A row count is not a quantity of disk, and until this the sweep reported only rows.
+
+    **Measured before the fix**: one pass deleted 1 900 rows across five tables and returned
+    **0 bytes** — 1 919 dead tuples left, every relation the same size it started. `deleted` is a
+    row count, and an operator watching a filling disk reads it as progress. Nothing anywhere
+    corrected that: the word `VACUUM` appeared nowhere in `src/`, `infra/` or `deploy/`, so
+    reclamation was left entirely to an autovacuum this repository neither configures nor checks,
+    at the stock `autovacuum_vacuum_scale_factor = 0.2`.
+
+    So this drives the property that actually matters, which is not "one pass frees bytes" — it
+    usually cannot, because retention deletes the *oldest* rows and those sit at the front of the
+    relation, where a plain `VACUUM` truncates nothing. It is that **a table whose live set is
+    constant stops growing**. Six cycles of "insert 500 rows, sweep them" measured
+    319 488 -> 1 277 952 bytes without the vacuum pass (4.0x, live set never above 500) and
+    327 680 -> 344 064 with it, flat from the second cycle on.
+
+    Four cycles here rather than six, and a 2x ceiling rather than an exact figure: the assertion
+    has to survive a heap that starts at a page boundary and a fixture whose row width changes,
+    while still failing the unbounded case, which is already at 3.1x by cycle four.
+
+    The reporting half is asserted beside it, because the growth fix without the report leaves the
+    same misreading in place: `bytes_on_disk` names the tables and `bytes_reclaimed` exists at all.
+    """
+
+    async def _run() -> tuple[list[int], RetentionOutcome, int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        private = await _private_database(monkeypatch)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+        monkeypatch.setattr(settings, "retention_result_publications_days", 0)
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+        try:
+            await migrated_db_or_skip()
+            sizes: list[int] = []
+            outcome = RetentionOutcome()
+            for cycle in range(4):
+                await _seed_fat_sessions(400, cycle * 400)
+                outcome = await retention._prune_expired_rows()
+                sizes.append(await _table_bytes("session_messages"))
+            return (
+                sizes,
+                outcome,
+                await _dead_tuples("session_messages"),
+                await _pinned_horizon(),
+            )
+        finally:
+            monkeypatch.undo()
+            await _drop_database(private)
+
+    sizes, outcome, dead, pinned = asyncio.run(_run())
+    if pinned:
+        pytest.skip(
+            f"{pinned} other backend(s) hold a transaction snapshot on this database, which pins "
+            "the vacuum horizon for every table on it; this run is not evidence about reclamation"
+        )
+    assert sizes[0] > 0, "the fixture never put anything on disk"
+    assert dead == 0, (
+        f"{dead} dead tuple(s) are still in session_messages after a pass that deleted every row "
+        "it inserted: the sweep marks tuples dead and nothing reclaims them, so the space is not "
+        "even reusable, let alone returned"
+    )
+    # Convergence rather than an absolute ceiling, because the shape is what separates the two
+    # cases and a ceiling would be a number about this fixture. Measured over the four cycles:
+    # 147 456 / 245 760 / 270 336 / 294 912 with the vacuum pass — increments 98 304 then 24 576
+    # then 24 576: one step down as the freed pages come back into use, and flat at the reuse floor
+    # after it. (Not "decelerating", which is what this line said over three increments two of which
+    # are equal; the assertion below compares the first against the last and never needed the
+    # stronger shape.) Against 253 952 -> 737 280
+    # without it, where every cycle adds a fresh cycle's worth and nothing is ever reused.
+    early, late = sizes[1] - sizes[0], sizes[3] - sizes[2]
+    assert late * 2 <= early, (
+        f"session_messages grew {sizes} bytes over four cycles that each deleted every row they "
+        f"inserted, and the last cycle added {late} against the first cycle's {early}: the sweep "
+        "removes rows and reclaims nothing, so the table grows without bound while the job "
+        "reports success"
+    )
+    assert "session_messages" in outcome.bytes_on_disk, (
+        "the pass reports what it deleted in rows and says nothing about bytes, which is the "
+        "quantity an operator watching a disk is actually asking about"
+    )
+    assert outcome.bytes_reclaimed.get("session_messages", -1) >= 0
+
+
+def test_an_orphaned_checkpoint_row_is_swept_rather_than_permanent() -> None:
+    """A blob or write row whose thread has no `checkpoints` row was unreachable, for ever.
+
+    The register said both tables are *"swept by `_prune_checkpoints` with the thread it belongs
+    to"*. That is true of every thread that has one. `_DELETE_EXPIRED_CHECKPOINTS` and
+    `_DELETE_ORPHANED` are both restricted to `thread_id = ANY(candidates)`, and the candidate list
+    comes from `_EXPIRED_THREADS`, which selects **out of `checkpoints`** — so a thread that is not
+    in that table is not a candidate for either statement, at any window, on any pass. Measured
+    against the unfixed sweep: three such rows survived a full `_prune_checkpoints` and nothing in
+    the module could ever reach them. They also pin that session's `session_owners` row for ever
+    through `_untouched_arms`, which is the outcome the ordering rule exists to prevent.
+
+    This module's single transaction is what stops *this* sweep producing one, and it is not the
+    only producer: a restore to a point in time, hand surgery, or a partial delete on any other
+    path leaves one, and nothing repaired it.
+
+    The live thread in the same fixture is the counter-example every retention test here carries:
+    an unrestricted `DELETE ... WHERE NOT EXISTS` that took a live thread's blobs would pass an
+    assertion that only looked at the orphan, and would silently blank a running conversation.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                for table in CHECKPOINT_TABLES:
+                    await cur.execute(f"TRUNCATE {table}")
+                # A live thread, whole: it must survive.
+                await cur.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+                    "checkpoint, metadata) VALUES ('orphan-live', '', 'c1', %s, '{}'::jsonb)",
+                    (Jsonb({"v": 1, "id": "c1", "ts": "2999-01-01T00:00:00+00:00"}),),
+                )
+                for thread in ("orphan-live", "orphan-dead"):
+                    await cur.execute(
+                        "INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, channel, "
+                        "version, type, blob) VALUES (%s, '', 'messages', 'c1', 'msgpack', %s)",
+                        (thread, b"payload"),
+                    )
+                    await cur.execute(
+                        "INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, "
+                        "task_id, idx, channel, type, blob) VALUES (%s, '', 'c1', 't', 0, "
+                        "'messages', 'msgpack', %s)",
+                        (thread, b"payload"),
+                    )
+            await conn.commit()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await _prune_checkpoints(conn, 30)
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_blobs WHERE thread_id = 'orphan-dead'"
+            )
+            blobs = int((await cur.fetchone() or (0,))[0])
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_writes WHERE thread_id = 'orphan-dead'"
+            )
+            writes = int((await cur.fetchone() or (0,))[0])
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_blobs WHERE thread_id = 'orphan-live'"
+            )
+            live = int((await cur.fetchone() or (0,))[0])
+        return blobs, writes, live
+
+    blobs, writes, live = asyncio.run(_run())
+    assert (blobs, writes) == (0, 0), (
+        f"an orphaned thread's rows survived the sweep ({blobs} blob(s), {writes} write(s)): "
+        "no window, cap or later pass reaches a thread that has no `checkpoints` row, so those "
+        "rows are permanent and pin their session's ownership row with them"
+    )
+    assert live == 1, "the repair took a live thread's blob, which blanks a running conversation"
+
+
+def test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table() -> None:
+    """Erasure is a leaver's request, and this register already says so about another table.
+
+    `_NOT_PRUNED["store"]` read *"the scratchpad memory store; erasure reaches it per actor"* — a
+    disposal route that fires only when somebody leaves. The `session_owners` prose four screens
+    up **rejects exactly that reasoning in its own words**: *"the only DELETE against this table
+    was actor-scoped erasure, which a deployment that no one leaves never runs."* One argument,
+    applied in two directions in one file, which is the same shape as the erasure/retention split
+    `test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock` exists to join.
+
+    So the rule, derived from `agent/leaver.py`'s erasable tier rather than typed out here: for a
+    table erasure *deletes from*, mentioning that erasure is not stating a bound, and the entry has
+    to also say what does bound it — including saying that nothing does, which is this register's
+    own recognised way of recording a finding rather than inventing an answer.
+
+    **The trigger is a keyword family and it shipped as two literals, which a synonym walked past.**
+    Mutation testing put `"a leaver sweep removes it per actor"` — the identical defect, no
+    "erasure" and no "erases" in it — into an entry and this test stayed green. The family below is
+    the concepts `agent/leaver.py` actually uses, and it is a *gate* rather than the assertion: all
+    it decides is whether the stricter arm runs, so a miss costs a check and never a false failure.
+    The same run found this loop could pass having examined nothing at all, which the intersection
+    assertion now refuses: `erasable` being non-empty says the erasure register still has a shape,
+    and it said nothing about whether any of those tables reaches `_NOT_PRUNED`.
+    """
+    erasable = {table for table, *_ in leaver_erase}
+    assert erasable, "the erasure register's shape moved; this rule now derives from nothing"
+    examined = sorted(erasable & set(_NOT_PRUNED))
+    assert examined, (
+        "no table that erasure deletes from is in `_NOT_PRUNED`, so this rule examined nothing and "
+        "passed. Either every erasable table gained a clock — delete this test and say so — or one "
+        "of the two registers moved out from under it"
+    )
+    rests_on_erasure = re.compile(r"erasure|erase[sd]|per[- ]actor|actor[- ]scoped|leaver", re.I)
+    knobs = set(type(settings).model_fields)
+    for table in examined:
+        stated = _NOT_PRUNED[table]
+        if not rests_on_erasure.search(stated):
+            continue
+        # A fourth accepted form, added when `store` gained an actual bound
+        # (`D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`): the entry may *name
+        # the knob*. Not the word "bounded" — "bounded by actor erasure" is the defect this test
+        # exists for, and it contains that word. A `Settings` field name is the thing erasure is
+        # not, and requiring it to be a field that exists means a renamed setting turns this red
+        # rather than leaving a register sentence pointing at nothing.
+        named = knobs & set(re.findall(r"[a-z][a-z0-9_]+", stated))
+        assert (
+            "nothing bounds it" in stated
+            or stated.startswith(("refused:", "cascades from"))
+            or named
+        ), (
+            f"{table} is erased per actor and its disposal entry leans on that erasure without "
+            f"saying what bounds the table; `_NOT_PRUNED` says {stated!r}. A leaver's request is "
+            "not a clock — this register's own `session_owners` entry argues so"
+        )
+
+
+def test_a_pass_publishes_what_the_store_holds() -> None:
+    """Nothing reported disposal to `/metrics`, so a sweep that stopped looked like a quiet one.
+
+    `core/metrics.py` declared no series matching retention, disk, table size or prune, and
+    `durable/retention.py` imported no metrics at all — so "the sweep ran and found nothing
+    expired" and "the sweep has not run since Tuesday" were the same silence. That is not the
+    flat-counter case this repository keeps finding; the series did not exist.
+
+    **The whole register, not just the tables the sweep touched**, because the table filling the
+    volume is quite often one nothing prunes: `audit_events` and `calculation_results` are refused
+    on purpose and two entries say in their own words that nothing bounds them. A reading that
+    covered only the prunable set would answer "did the sweep work" rather than "is the store
+    filling", which is the question an operator brings.
+
+    Republished on every pass including one that disposed of nothing, because the *absence* of
+    this family is what `ChemclawRetentionNotSweeping` fires on — a family that appeared only when
+    the sweep found work would make a drained backlog look like a dead job.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, str]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+        monkeypatch.setattr(settings, "retention_result_publications_days", 0)
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+        try:
+            await _seed_expired_sessions(3, "metrics-")
+            outcome = await retention._prune_expired_rows()
+            return outcome, METRICS.render()
+        finally:
+            monkeypatch.undo()
+
+    outcome, rendered = asyncio.run(_run())
+    assert outcome.deleted["session_messages"] == 3
+    assert 'chemclaw_table_bytes{table="session_messages"}' in rendered, (
+        "no series says how large the store is, which is the question an operator watching a "
+        "filling volume actually brings — and whose absence is the only signal that the sweep "
+        "has stopped running at all"
+    )
+    assert 'chemclaw_table_bytes{table="audit_events"}' in rendered, (
+        "only the swept tables are measured, so the tables the register *refuses* to prune — the "
+        "ones with no bound at all — are the ones nothing can see filling the volume"
+    )
+
+
+_RETENTION_ALERT = "ChemclawRetentionNotSweeping"
+
+# The two arms the rule is driven over, as `promtool` input series. Both tick at the deployment's
+# own sweep cadence, because the rule's window and hold are multiples of it: a series sampled at
+# any other rate would be driving different arithmetic from the one that ships. `stale` is how
+# `promtool` expresses a series that ends, which is exactly what a retention pass that stops firing
+# looks like on `/metrics` — `chemclaw_table_bytes` is republished by every pass and by nothing
+# else, so its absence *is* the fault.
+_SWEEPING = "581632 581632 581632 581632 581632 581632 581632 581632"
+_STOPPED = "581632 581632 stale stale stale stale stale stale"
+
+
+def _rendered_retention_rule() -> dict[str, object]:
+    """The `{_RETENTION_ALERT}` rule as Helm renders it, with retention windows stated.
+
+    Rendered rather than read out of the template, because the rule's two durations are Helm
+    arithmetic over the deployment's own sweep cadence — the template text carries `{{ mul ... }}`
+    and not a number, so a test that read the file would be checking a string nothing evaluates.
+
+    It is also the only render that produces this rule at all: it is behind
+    `{{- if .Values.retention.windows }}`, and every `helm template` in the Makefile passes
+    `retention.unboundedGrowthAccepted=true` instead — the "a rule behind a flag is a rule nothing
+    else parses" case that file's own PromQL check was written for.
+    """
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+            "--set",
+            "retention.artifactGrowthAccepted=true",
+            "--set",
+            "retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365",
+            "--set",
+            "retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=365",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for document in yaml.safe_load_all(rendered):
+        if not isinstance(document, dict) or document.get("kind") != "PrometheusRule":
+            continue
+        for group in document["spec"]["groups"]:
+            for rule in group["rules"]:
+                if rule.get("alert") == _RETENTION_ALERT:
+                    return cast(dict[str, object], rule)
+    raise AssertionError(f"{_RETENTION_ALERT} is not in the render that states retention windows")
+
+
+def test_a_sweep_that_stops_firing_raises_an_alert(tmp_path: Path) -> None:
+    """Twelve Temporal Schedules run here; the two disposal jobs had no liveness alert at all.
+
+    A retention sweep that silently stops — a Schedule paused by hand, a `background-jobs` worker
+    that never came back, an activity failing every attempt — left every durable table growing with
+    no signal anywhere, and arrived as an out-of-disk incident months later. `prometheusrule.yaml`
+    held no alert about the store filling and none about this job running.
+
+    **Driven, not asserted.** A rule that has never been evaluated against firing data is a claim
+    that an alert exists, which is the same shape as a gate nothing has watched refuse. So this
+    renders the rule Helm actually produces and runs `promtool test rules` over it in both
+    directions: silent while the sweep reports every pass, firing once the family has been absent
+    for the window *and* the hold. Both arms matter — an absence rule with no hold pages on every
+    fresh install, before the first pass has run.
+    """
+    if not shutil.which("helm") or not shutil.which("promtool"):  # pragma: no cover - env
+        # The counted literal, as above.
+        pytest.skip(
+            "helm is not installed (or promtool is): both are needed to evaluate a "
+            "rendered alert rule"
+        )
+    rule = _rendered_retention_rule()
+    expression = " ".join(str(rule["expr"]).split())
+    window = int(re.search(r"\[(\d+)m\]", expression).group(1))  # type: ignore[union-attr]
+    hold = int(str(rule["for"]).removesuffix("m"))
+    # The cadence the render was given: `retention_schedule_minutes` defaults to 1440 and the
+    # window is `silenceWindowPasses` of them, so the unit test's series has to tick at the same
+    # rate the deployment sweeps at or the arithmetic under test is not the arithmetic driven.
+    cadence = 1440
+    assert window > cadence, (
+        "the absence window is shorter than one sweep, so an ordinary pass pages"
+    )
+    assert hold >= cadence, "the hold is under one sweep, so a fresh install pages before its first"
+    series = 'chemclaw_table_bytes{table="session_messages"}'
+    (tmp_path / "rules.yaml").write_text(
+        yaml.safe_dump({"groups": [{"name": "chemclaw.durable", "rules": [rule]}]})
+    )
+    expected = {
+        "exp_labels": {"alertname": _RETENTION_ALERT, **cast(dict[str, str], rule["labels"])},
+        "exp_annotations": rule["annotations"],
+    }
+    (tmp_path / "unit.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "rule_files": ["rules.yaml"],
+                "evaluation_interval": "30m",
+                "tests": [
+                    {
+                        # The sweep is running: every pass republishes the family, so the rule
+                        # never fires however long it is left evaluating.
+                        "interval": f"{cadence}m",
+                        "input_series": [{"series": series, "values": _SWEEPING}],
+                        "alert_rule_test": [
+                            {
+                                "eval_time": f"{window + hold + cadence * 2}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [],
+                            }
+                        ],
+                    },
+                    {
+                        # The sweep stopped after two passes. Silent while the window still holds a
+                        # reading and through the hold, then firing — the hold is what keeps a
+                        # fresh install, where the family is absent from t=0, from paging.
+                        "interval": f"{cadence}m",
+                        "input_series": [{"series": series, "values": _STOPPED}],
+                        "alert_rule_test": [
+                            {
+                                "eval_time": f"{window}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [],
+                            },
+                            {
+                                "eval_time": f"{window + hold + cadence * 2}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [expected],
+                            },
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+    driven = subprocess.run(
+        ["promtool", "test", "rules", "unit.yaml"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert driven.returncode == 0, (
+        f"the rule does not behave as an absence alert:\n{driven.stdout}\n{driven.stderr}"
+    )

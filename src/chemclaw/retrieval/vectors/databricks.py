@@ -1,19 +1,12 @@
 """Databricks Mosaic AI Vector Search as a `VectorStore`, with the vendor client late-bound.
 
-The client package is imported at first use and is not a project dependency; CI exercises the
-adapter against an injected fake.
-
-**The score is not a cosine.** Databricks scores `1 / (1 + d²)` over Euclidean distance, while
-`VectorMatch.score` is a cosine. Normalising both sides to unit length makes the L2 order equal the
-cosine order and the conversion exact:
+Databricks scores `1 / (1 + d²)` over Euclidean distance; with unit vectors on both sides that
+orders like cosine and converts exactly:
 
     unit vectors  ->  d² = 2 - 2cos  ->  score = 1/(3 - 2cos)  ->  cos = 1.5 - 0.5/score
 
-**The client blocks**, so every call goes through `asyncio.to_thread` to keep the retrieval
-fan-out's event loop free.
-
-**The index is created by the operator** and must be a Direct Vector Access index with the three
-columns below; a Delta Sync index cannot be upserted into.
+The client blocks, so calls go through `asyncio.to_thread`. The operator creates a Direct Vector
+Access index with the three columns below.
 """
 
 import asyncio
@@ -83,9 +76,7 @@ class DatabricksSearchClient(Protocol):
 def _client_class() -> Any:
     """Import the Vector Search client, or say which package to install.
 
-    Imported via `importlib` by string, since the package is not a declared dependency. Both the old
-    (`databricks.vector_search`) and new (`databricks.ai_search`) module names are tried. A
-    `VectorStoreConfigError` because no retry can install a package.
+    Tries both the old and new module names; a config error because no retry installs a package.
     """
     refused: list[str] = []
     for module_name, attribute in (
@@ -145,9 +136,7 @@ def _unit(vector: list[float]) -> list[float]:
 def cosine_from_score(score: float) -> float:
     """Invert Databricks' `1/(1 + d²)` back to the cosine this seam's contract promises.
 
-    Exact for unit vectors, which is why `_unit` is applied on both sides. Clamped into [0, 1] after
-    conversion: the top absorbs rounding, and a negative cosine becomes `0.0`, which `_matches`
-    drops.
+    Exact for unit vectors; clamped into [0, 1], so a negative cosine becomes `0.0` and is dropped.
     """
     if score <= 0.0:
         return 0.0
@@ -247,10 +236,8 @@ class DatabricksVectorStore:
 def _matches(response: Any) -> list[VectorMatch]:
     """Read a `similarity_search` response into `VectorMatch`es, dropping anything unusable.
 
-    Tolerant of shape because the format is not published API. Reads the documented envelope
-    (`{"result": {"data_array": [[id, group, score], ...]}, "manifest": {"columns": [{"name": ...},
-    ...]}}`) and a plain sequence of mappings. A row without an id cannot be rejoined to the
-    catalogue and is dropped.
+    Accepts the `result.data_array` + `manifest.columns` envelope or a plain list of mappings; rows
+    without an id are dropped.
     """
     rows = _rows(response)
     matches: list[VectorMatch] = []

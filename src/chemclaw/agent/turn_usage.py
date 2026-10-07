@@ -40,8 +40,7 @@ class TurnUsage:
     cache_read: int = 0
     cache_write: int = 0
     total: int = 0
-    # Usage blocks that were present and yielded no token count — see `graph_usage_tokens`. Not a
-    # token quantity, so it is deliberately not summed into `total`.
+    # Usage blocks present but unreadable — a count, not tokens, so not in `total`.
     unreadable: int = 0
 
     def add(self, other: "TurnUsage") -> None:
@@ -84,8 +83,7 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
         cache_read=cache_read,
         cache_write=cache_write,
         total=int(total or 0),
-        # A usage block that was present and yielded no total means either a genuinely empty
-        # chunk, or the keys moved under us — see the docstring for what the second one costs.
+        # Present but no total: an empty chunk, or upstream renamed the keys (see the docstring).
         unreadable=0 if total else 1,
     )
 

@@ -38,8 +38,7 @@ from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
-# Re-exported: the prefix belongs to `core.identity_context`'s role vocabulary and is still read
-# as `auth.GROUP_ROLE_PREFIX`.
+# Re-exported from `core.identity_context`, which owns the role vocabulary.
 __all__ = [
     "GROUP_ROLE_PREFIX",
     "AuthError",
@@ -50,8 +49,7 @@ __all__ = [
     "validate_token",
 ]
 
-# The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
-# real deployment, where every request is a validated Entra token.
+# The dev stand-in, used only when `entra_required` is False.
 DEV_PRINCIPAL_OID = "dev-user"
 # Public spelling so a per-actor guard can recognise the one principal that is not an actor (see
 # `chemclaw.api.routes.turns`).
@@ -127,15 +125,13 @@ class _HttpxJwkClient(PyJWKClient):
                 )
                 if waited_behind_one or backing_off:
                     if failing:
-                        # A fresh instance: re-raising the stored one would grow its traceback
-                        # by a frame on every request it answered.
+                        # A fresh instance, so the stored one's traceback does not grow per request.
                         raise IdentityProviderUnavailable(str(outcome)) from outcome
                     return outcome
             try:
                 keys = self._fetch()
             except IdentityProviderUnavailable as unavailable:
-                # Remember a copy without a traceback: the raised one holds frames with the raw
-                # bearer token.
+                # A copy without a traceback: the raised one holds frames with the raw bearer token.
                 self._outcome = IdentityProviderUnavailable(str(unavailable))
                 self._fetched_at = time.monotonic()
                 raise
@@ -276,8 +272,7 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
     Records the attempt when it grants one, so the first caller after a key rotation pays and later
     callers read the refreshed cache.
     """
-    # Locked: concurrent check-then-set would grant two refreshes, and upstream's lock would only
-    # serialise them.
+    # Locked: a concurrent check-then-set would grant two refreshes.
     with _forced_refresh_lock:
         last = _last_forced_refresh.get(endpoint)
         if last is not None and now - last < settings.entra_jwks_refresh_cooldown_seconds:
@@ -296,8 +291,7 @@ def _signing_key(token: str) -> Any:
     """
     endpoint = settings.entra_jwks_endpoint
     client = _client_for(endpoint)
-    # Raises `DecodeError` (an `InvalidTokenError`) on a malformed token, which `validate_token`
-    # already turns into a 401 — so garbage never reaches the network at all.
+    # A malformed token raises `DecodeError` here (a 401), before any network call.
     kid = jwt.get_unverified_header(token).get("kid")
     if not kid:
         raise AuthError("token header carries no 'kid'")
@@ -335,8 +329,7 @@ def validate_token(token: str) -> Principal:
             algorithms=["RS256"],
             audience=settings.entra_audience,
             issuer=settings.entra_issuer_url,
-            # Require an expiry: PyJWT only checks `exp` when present, so reject a token that omits
-            # it (Entra always issues one; this closes the no-exp edge). (review finding)
+            # PyJWT checks `exp` only when present, so require it.
             options={"require": ["exp"]},
         )
     except jwt.InvalidTokenError as exc:  # signature/audience/issuer/expiry all funnel here
@@ -351,8 +344,7 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     gate reads, so no gate has to decide separately whether to consult groups.
     """
     oid = claims.get("oid")
-    # Checked as `Principal` will check it (a string, non-empty once stripped), so a malformed
-    # claim is a 401 here rather than a pydantic `ValidationError` escaping as a 500.
+    # Checked as `Principal` checks it, so a malformed claim is a 401, not a 500.
     if not isinstance(oid, str) or not oid.strip():
         raise AuthError("token has no 'oid' claim")
     upn = claims.get("preferred_username") or claims.get("upn") or ""
@@ -421,8 +413,8 @@ async def require_principal(request: Request) -> Principal:
     try:
         principal = await asyncio.to_thread(validate_token, header[len("Bearer ") :])
     except IdentityProviderUnavailable as exc:
-        # 503, not 401: we could not reach the tenant to decide. `warning` rather than `info`
-        # because this one is actionable — the token is fine and the dependency is not.
+        # 503, not 401: the tenant could not be reached. `warning`, since the dependency is at
+        # fault.
         _count_auth_failure("provider_unavailable")
         logger.warning("identity provider unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="identity provider unavailable") from exc
@@ -531,8 +523,7 @@ def _within_budget(principal: Principal) -> Principal:
         raise HTTPException(
             status_code=429,
             detail="too many requests",
-            # Seconds until one token refills, so a client backs off by the right amount rather
-            # than guessing — the same courtesy the budget guard's 429 already extends.
+            # Seconds until one token refills, so a client backs off by the right amount.
             headers={"Retry-After": str(max(1, int(exc.retry_after_seconds + 0.999)))},
         ) from exc
     return principal

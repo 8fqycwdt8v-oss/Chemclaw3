@@ -400,16 +400,12 @@ def connector_app(
 ) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
-    Args:
-        server: The `FastMCP` instance holding the capability's tools. Every tool served is
-        reachable by anything that can reach the pod, so `connector-validate` refuses one the
-            manifest does not declare.
-        name: The connector's name (must match its bundle folder and manifest `name`), used in the
-            health payload and the request log.
-        token_env: The environment variable holding this surface's bearer token, for a surface with
-            no `connector.yaml` (core's read-only MCP face). Omitted, the bundle's manifest decides.
-        on_start: Optional diagnostic coroutine started (not awaited) once at startup, e.g. to log
-            the index size; it must swallow its own failures.
+    Every tool `server` serves is reachable by anything that can reach the pod, so
+    `connector-validate` refuses one the manifest does not declare. `name` must match the bundle
+    folder and manifest `name`. `token_env` names the bearer-token variable for a surface with no
+    `connector.yaml` (core's read-only MCP face); omitted, the manifest decides. `on_start` is an
+    optional diagnostic coroutine started, not awaited, at startup; it must swallow its own
+    failures.
 
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /livez`, `GET /metrics`, and the MCP endpoint

@@ -1,8 +1,7 @@
 """The in-memory reference `VectorStore` — exact cosine, no server, no client package.
 
-What tests of the composition run against and what the adapters must agree with. Exact rather than
-approximate: real stores answer from an ANN index and may miss a neighbour; ordering is the same,
-recall is not.
+What the adapters must agree with; real stores are approximate (ANN), so only ordering, not recall,
+matches.
 """
 
 import math

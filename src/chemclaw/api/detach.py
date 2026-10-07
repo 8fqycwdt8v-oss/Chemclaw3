@@ -46,8 +46,7 @@ _DONE: Any = object()
 #: This reader fell a full buffer behind and the pump stopped offering it events.
 _LAGGED: Any = object()
 
-#: What a cut-off reader is told. An error event because the stream contract is that a stream ends
-#: with an answer or an error, and a view that simply stopped would read as a turn that did.
+#: What a cut-off reader is told: a stream ends with an answer or an error, never just stops.
 _LAGGED_MESSAGE = (
     "This view of the turn fell too far behind and was closed; the turn is still running. Reopen "
     "it, or read the answer in the conversation once it lands."
@@ -149,13 +148,13 @@ class DetachableTurn:
         self._readers: set[_Reader] = {self._sender}
         # Watchers whose stream is still open — fed or cut off — which is what the cap counts.
         self._watching: set[_Reader] = set()
-        # Who each open watch belongs to, so a deferred unload stop can tell whether the page it
-        # was waiting for is already here (`_stop_after`).
+        # Who owns each open watch, so `_stop_after` can tell whether the awaited page is already
+        # here.
         self._watcher_oids: dict[_Reader, str | None] = {}
         self._sender_attached = True
         self._stopper: asyncio.Task[None] | None = None
-        # An unload stop waiting out its grace window (`defer_stop`), who may cancel it by
-        # reattaching, and how many this turn has been granted.
+        # A deferred unload stop (`defer_stop`), who may cancel it, and how many this turn was
+        # granted.
         self._pending_stop: asyncio.Task[None] | None = None
         self._resumers: frozenset[str] = frozenset()
         self._deferrals = 0
@@ -194,8 +193,8 @@ class DetachableTurn:
             async for item in source:
                 self._offer(item)
         finally:
-            # Never block teardown: a full buffer loses the marker, and `_next_event` checks the
-            # pump's state for that case.
+            # Never block teardown; `_next_event` also checks the pump's state in case the marker is
+            # lost.
             for reader in list(self._readers):
                 with contextlib.suppress(asyncio.QueueFull):
                     reader.queue.put_nowait(_DONE)
@@ -266,8 +265,8 @@ class DetachableTurn:
         """
         if task.cancelled():
             return
-        # Called for its side effect as much as its value: retrieving the exception is what clears
-        # asyncio's `_log_traceback`, and it must happen even when there is nothing to log.
+        # Retrieving the exception clears asyncio's `_log_traceback`, even when there is nothing to
+        # log.
         failure = task.exception()
         if failure is not None:
             logger.warning(
@@ -407,8 +406,7 @@ class DetachableTurn:
         the old page's stop, and an unloading page's own watch closes within the window.
         """
         await asyncio.sleep(grace)
-        # Past the window the stop is no longer cancellable: released *before* the await below, so
-        # a reattach racing it cannot cancel this task half-way through the turn's teardown.
+        # Cleared before the await, so a racing reattach cannot cancel this task mid-teardown.
         self._pending_stop = None
         if not self.running:
             return
@@ -436,8 +434,7 @@ class DetachableTurn:
         200 means "stopped". A teardown that raised is logged and suppressed: the turn is stopped
         either way.
         """
-        # An explicit stop is immediate whatever is pending: the window was for a reload, and
-        # this is somebody pressing Stop (or the window itself expiring, which released it first).
+        # An explicit stop is immediate, whatever unload stop is pending.
         self._drop_pending_stop()
         self._task.cancel()
         try:

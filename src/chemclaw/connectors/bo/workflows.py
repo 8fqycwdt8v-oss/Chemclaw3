@@ -192,8 +192,7 @@ class BoCampaignWorkflow:
     _carried_spend: timedelta = timedelta(0)
 
     #: Activities still to dispatch, so `_queue_wait` shares the remaining execution budget rather
-    # than
-    #: giving the first step most of it. Re-synced from `rounds_remaining` every round.
+    #: than giving the first step most of it. Re-synced from `rounds_remaining` every round.
     _dispatches_left: int = 1
 
     def _spent(self) -> timedelta:

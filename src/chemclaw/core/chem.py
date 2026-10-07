@@ -2,36 +2,20 @@
 
 Two questions, two pairs of names, so a caller cannot pick the wrong one by omitting a flag:
 
-- `canonical_smiles` / `require_canonical_smiles` answer "is this the same structure?": RDKit
-  canonical SMILES, spelling only. They key the calculation cache, workflow-dedup ids and the
-  prediction ledger, where an anion is a different calculation from its conjugate acid.
-- `standard_smiles` / `require_standard_smiles` answer "is this the same compound?": the
-  standardization pipeline. They key `compound_id`, the fingerprint index and species matching in
-  `memory.chains` and `memory.progression`, where a hydrochloride and its free base are one
-  substance.
+- `canonical_smiles` / `require_canonical_smiles`: "same structure?" (spelling only). They key the
+  calculation cache, dedup ids and the prediction ledger, where an anion differs from its acid.
+- `standard_smiles` / `require_standard_smiles`: "same compound?" (the `standardize` pipeline).
+  They key `compound_id`, the fingerprint index and species matching in `memory`, where a
+  hydrochloride and its free base are one substance.
 
-`standardize` is the conventional pipeline in the conventional order:
-
-1. `Cleanup` (sanitize, disconnect metals, normalize functional groups), with the metal
-   disconnection taken first so a cyclopentadienide is re-perceived aromatic (`_cleaned`); atom
-   maps are cleared, since they are reaction bookkeeping, not structure.
-2. Keep the one fragment `_is_organic` names, discarding a spectator only if it is charged, a
-   solvent RDKit's list knows, or an ionisable neutral acid the organic fragment could be the salt
-   of (`_IONISABLE_NEUTRAL_ACIDS`, `_can_take_the_proton`).
-3. `Uncharger`, so a carboxylate meets its acid, re-perceived (`_uncharged`).
-4. `TautomerEnumerator.Canonicalize`, one representative per tautomer set, configured to keep sp3
-   and bond stereo: RDKit's defaults erase stereocentres a transform touches, which would merge
-   enantiomers and E/Z isomers into one compound.
-
-Steps 2 and 3 assert "the counterion is not part of the identity", and `standardize` declines to
-apply them where that is false: when nothing organic remains (NaOH, K2CO3), when the metal is the
-chemistry (a d/f-block metal, `_REACTIVE_METALS`, or a metal-carbon bond such as n-BuLi;
-`_metal_is_the_compound`), when two or more fragments are organic (a solvate or co-crystal names
-no winner), and when neutralizing would remove a hydride rather than add a proton
-(`_neutralization_is_protonation`). An alkali salt of an organic conjugate acid (KOtBu, NaOMe, LDA)
-still collapses onto the acid, as sodium acetate does; separating those would need a pKa-shaped
-rule (`D-2026-09-09-a-map-number-is-not-a-molecule`), and `tests/test_compound_identity.py` pins
-the collapse.
+`standardize` is the conventional pipeline: `Cleanup` (metals disconnected first, atom maps
+cleared), keep the organic fragment and drop its counterions and known solvents, `Uncharger`, then
+one tautomer per set with stereo preserved (RDKit's default would merge enantiomers). Dropping the
+counterion is declined where it is false: nothing organic remains (NaOH, K2CO3), the metal is the
+chemistry (`_metal_is_the_compound`), two or more fragments are organic (a solvate names no
+winner), or neutralizing would remove a hydride (`_neutralization_is_protonation`). Alkali salts of
+organic acids (KOtBu, NaOMe, LDA) still collapse onto the acid, as sodium acetate does
+(`D-2026-09-09-a-map-number-is-not-a-molecule`; pinned in `tests/test_compound_identity.py`).
 """
 
 from functools import lru_cache
@@ -497,23 +481,14 @@ def compound_id_of_standard(standard: str) -> str:
 
 
 def torsion_handle(mol: Chem.Mol, bond: tuple[int, int]) -> str:
-    """A content-addressed name for one rotatable bond: the verifying half of the handle.
+    """A content-addressed name (`tor_` plus sixteen hex characters) for one rotatable bond.
 
-    `Chemclaw3-mcp`'s `servers/chem` mints these and this repository checks them; neither may import
-    the other, so the function is written twice and pinned by a shared table of literal handles that
-    both suites assert.
-
-    Atom indices are not names (the same indices pick a different bond once the SMILES is
-    rewritten), so the two atoms are named by canonical symmetry class. The RDKit build is part of
-    the payload, so a handle minted under another build fails to resolve rather than resolving to a
-    different bond.
-
-    Args:
-        mol: The molecule the bond belongs to.
-        bond: The bond's two atom indices, in either order.
-
-    Returns:
-        `tor_` followed by sixteen hex characters.
+    `Chemclaw3-mcp`'s `servers/chem` mints these and this repository verifies them; neither may
+    import the other, so the function is written twice and pinned by a shared table of literal
+    handles. Atom indices are not names (the same indices pick a different bond once the SMILES is
+    rewritten), so `bond`'s two atoms are named by canonical symmetry class. The RDKit build is part
+    of the payload, so a handle minted under another build fails to resolve rather than naming
+    another bond.
     """
     ranks = list(Chem.CanonicalRankAtoms(mol, breakTies=False))
     low, high = sorted((ranks[bond[0]], ranks[bond[1]]))

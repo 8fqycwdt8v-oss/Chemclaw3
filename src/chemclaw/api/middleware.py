@@ -239,8 +239,7 @@ class _RequestObservability:
                 # `MutableHeaders` raises without it, which would leave the connection hanging.
                 message.setdefault("headers", [])
                 answered = True
-                # `setdefault`, so a route's own id is kept. Every response carries one for bug
-                # reports.
+                # `setdefault`, so a route's own id is kept.
                 MutableHeaders(scope=message).setdefault(HEADER_CORRELATION, correlation)
             elif message["type"] == "http.response.body":
                 response_bytes += len(message.get("body", b""))
@@ -250,8 +249,8 @@ class _RequestObservability:
             try:
                 await self._app(scope, receive, _send)
             except Exception:
-                # Not `BaseException`: a cancelled request — a client that hung up, a pod draining
-                # — is an ended connection, not a server error, and must stay one.
+                # Not `BaseException`: a cancelled request is an ended connection, not a server
+                # error.
                 logger.exception(
                     "unhandled error serving %s %s (correlation %s)",
                     scope.get("method", ""),
@@ -281,14 +280,12 @@ _SCOPE_BOUND = "chemclaw.observed"
 # owns every reset because it runs on every exit path.
 _SCOPE_IDENTITY_TOKEN = "chemclaw.identity_token"
 _SCOPE_SESSION_TOKEN = "chemclaw.session_token"
-# The session for the access-log line, stamped by the ownership gate once it has *resolved* one —
-# never read off `path_params`. See `_record_request` for what that distinction is worth.
+# The resolved session for the access-log line, never `path_params` (see `_record_request`).
 _SCOPE_SESSION = "chemclaw.session_id"
 # The actor for the access-log line, stamped by the authentication gate once it knows one.
 _SCOPE_ACTOR = "chemclaw.actor"
 
-# The route label for a request that matched no route. A fixed literal, so the whole family stays
-# bounded by the route table (a source constant) rather than by what a caller puts in a URL.
+# The route label for an unmatched request, keeping the series bounded by the route table.
 _UNMATCHED_ROUTE = "<unmatched>"
 
 # The shape an inbound correlation id must have to be adopted: hex, dashes, underscores, bounded
@@ -332,12 +329,10 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
     `null`, so the client sees which value to fix.
     """
     if isinstance(value, float):
-        # `isfinite` rather than `!= value`, so ±inf is caught alongside NaN — both are refused
-        # by `json.dumps`, and `Infinity` is a `json.loads` literal exactly as `NaN` is.
+        # `isfinite` also catches ±inf, which `json.dumps` refuses like NaN.
         return value if isfinite(value) else repr(value)
     if depth >= _MAX_ERROR_DEPTH:
-        # Named rather than truncated silently, for `clip_for_log`'s reason: a reader cannot tell a
-        # dropped value from an absent one.
+        # Named rather than silently truncated, so a dropped value is not read as absent.
         return f"…(nested past {_MAX_ERROR_DEPTH})"
     if isinstance(value, dict):
         return {key: _json_safe(item, depth + 1) for key, item in value.items()}
@@ -356,14 +351,12 @@ def _render_errors(errors: list[Any]) -> list[Any]:
     rendered: list[Any] = []
     for error in errors:
         if not isinstance(error, dict):
-            # Not every producer of a `RequestValidationError` is pydantic; anything that is not a
-            # mapping is passed through as it came rather than being guessed at.
+            # Not every producer is pydantic; a non-mapping error passes through unchanged.
             rendered.append(error)
             continue
         trimmed = {key: value for key, value in error.items() if key != "url"}
         if "input" in trimmed and len(str(trimmed["input"])) > _MAX_LOGGED_CHARS:
-            # Stringified and clipped only when too big, so ordinary `input` keeps its original JSON
-            # shape.
+            # Stringified and clipped only when too big, so ordinary `input` keeps its JSON shape.
             trimmed["input"] = clip_for_log(str(trimmed["input"]))
         if "loc" in trimmed:
             trimmed["loc"] = [

@@ -161,8 +161,7 @@ def _kept(spans: list[str], limit: int, notice: str, carrier: int = 0) -> list[s
     for index in range(len(spans) - 1, max(last_head - 1, -1), -1):
         if tail_budget <= 0:
             break
-        # Never re-emit what the head already kept: where the two walks meet in one span, the tail
-        # may only draw from the part the head did not take.
+        # Where both walks meet in one span, the tail draws only from what the head did not take.
         available = spans[index][len(heads[index]) :]
         tails[index] = available[-tail_budget:] if tail_budget < len(available) else available
         tail_budget -= len(tails[index])
@@ -189,8 +188,7 @@ def _rebuilt(content: Any, kept: list[str]) -> Any:
             if text:
                 rebuilt.append({**block, "text": text})
             continue
-        # No text span to cut — an image or an embedded resource. Carried through untouched, for
-        # the same reason `_rewritten_block` carries one through: there is nothing here to shorten.
+        # No text span (an image or embedded resource): carried through untouched.
         rebuilt.append(block)
     return rebuilt
 
@@ -226,11 +224,9 @@ def bounded_content(
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    # The notice speaks about the tool's output; the cut is made against the text in hand. They are
-    # the same number for every caller that bounds a result once.
+    # The notice describes the tool's output; the cut is made against the text in hand.
     charged = total if charged_total is None else charged_total
-    # How much of the text in hand corresponds to one character of the tool's output. `total` when
-    # nothing expanded it, which makes every conversion below the identity.
+    # The pre-expansion size of the text in hand; `total` makes every conversion the identity.
     source = total if expanded_from is None else expanded_from
     widest = len(_notice(tool, charged, charged, mark, remedy))
     carrier = _carrier(content, spans)
@@ -411,8 +407,7 @@ def bounded_for_batch(
     """
     tool = str(request.tool_call["name"])
     ceiling = settings.agent_max_tool_result_chars
-    # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
-    # to it would restore the unbounded behaviour exactly where the batch is widest.
+    # Floored at 1, since 0 would mean "no cap" exactly where the batch is widest.
     limit = max(ceiling // batch_width(request), 1) if ceiling else 0
     bounded, removed = bounded_content(
         content,

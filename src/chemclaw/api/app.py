@@ -106,8 +106,7 @@ __all__ = [
     "cancel_job",
     "expand_note",
     "fetchable_refs",
-    # Patched to observe the width the lifespan sizes this process's shared `to_thread` pool to —
-    # the argument, not a re-derivation of it, is what a test of that arithmetic has to read.
+    # Patched so tests read the width the lifespan sizes the `to_thread` pool to.
     "install_default_executor",
     "job_status",
     "load_tool_result",
@@ -199,8 +198,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Likewise the peer roster: one typo can make the mesh indistinguishable from the feature being
     # off.
     refuse_an_unknown_peer_roster(registered_profile_names())
-    # After `configure_logging()` so the line is formatted the way the operator asked, and after
-    # the profiles load so a malformed one fails before anything claims the deployment is sound.
+    # After logging is configured and profiles load, so a malformed profile fails first.
     _report_inventory()
     # Before anything offloads. Every `asyncio.to_thread` here (token validation, retrieval,
     # embeddings, parses) shares one pool, and the stock default is small enough for admitted turns
@@ -219,8 +217,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            # Inside `db.pooling()` and before either close, because a draining turn still writes
-            # its checkpoint, its transcript and its cost row through all three.
+            # Inside `db.pooling()` and before the closes: a draining turn still writes through
+            # them.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
             # After the drain, so a Stop sent from another replica still reaches a draining turn.
@@ -231,8 +229,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # After the turns (which book spend as they finish) and before the pool closes (the
             # booking needs it); otherwise a rollout drops each in-flight principal's last booking.
             await drain_pending()
-            # One call, not two. `close_checkpointer` drops the memory store itself, in the order
-            # the store's dependency on its pool requires — see the paragraph above.
+            # `close_checkpointer` also closes the memory store, in the order their pools require.
             await close_checkpointer()
 
 
@@ -283,15 +280,13 @@ def create_app(
     # before any of these run.
     _add_body_size_limit(app)
     _add_security_headers(app)
-    # Outermost, and correctly so: a 500 raised anywhere below has to come back out through CORS
-    # or a browser cannot read it. A preflight is therefore answered here, above everything.
+    # Outermost, so even a 500 passes through CORS and a browser can read it.
     _add_cors(app)
     # One handler instead of per-route try/except: `chemclaw.db` maps both "no database" and "pool
     # timeout" to `ConnectionError`. See `_database_unavailable`.
     app.add_exception_handler(ConnectionError, _database_unavailable)
     app.add_exception_handler(SubsystemUnavailableError, _subsystem_unavailable)
-    # Both are called per turn: a connector session belongs to one turn and a graph binds its tools
-    # at construction. Nothing outlives a turn.
+    # Both are called per turn: a connector session and a graph's tools belong to one turn.
     app.state.connector_factory = connector_factory
     app.state.graph_factory = graph_factory
 
@@ -310,13 +305,11 @@ def create_app(
     app.state.live_sessions = _LiveSessions(
         settings.service_max_live_sessions, pinned=_turn_in_flight
     )
-    # Durable session-ownership registry, which a restarted front door rehydrates from. `None` with
-    # the in-memory store, where a cache miss stays a 404.
+    # Durable session ownership, for rehydrating after a restart; `None` under the in-memory store.
     app.state.session_owners = owner_store if owner_store is not None else _default_owner_store()
     # Through the factory so the plan routes and `chemclaw.agent.plan_gate` share one store.
     app.state.plan_approvals = plan_approval_store()
-    # The history provider the agent writes through, used read-only to serve transcripts. Stateless
-    # per session in both backends, so one instance serves all.
+    # The agent's history provider, read-only here to serve transcripts; one instance serves all.
     app.state.history = history_provider()
     # Admission control on concurrent turns: a permit is held for a turn's whole run, and a turn
     # that cannot get one within the admission timeout is shed with 503. Built here to bind to the
@@ -327,31 +320,25 @@ def create_app(
     # one thread, so a second turn gets 409. A lease rather than a set because an entry can leak
     # (`_claim_turn_slot` owns atomicity and expiry); also the eviction pin `_turn_in_flight` reads.
     app.state.active_turns = {}
-    # The live turns, so the stop route can get a handle: a disconnect only detaches
-    # (`chemclaw.api.detach`).
+    # The live turns, so the stop route can find one (a disconnect only detaches).
     app.state.running_turns = RunningTurns()
-    # The same gate across replicas: a leased row in `session_turns` every process can see. `None`
-    # under the in-memory store.
+    # The same gate across replicas (`session_turns` leases); `None` under the in-memory store.
     app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
-    # Lets a turn held here be followed and stopped from another replica, and vice versa. Only where
-    # the claim above is durable.
+    # Follows and stops turns across replicas; only where the claim above is durable.
     app.state.turn_relay = (
         TurnRelay(TurnRemotes(), app.state.running_turns, app.state.active_turns)
         if app.state.turn_claims is not None and settings.session_store == "postgres"
         else None
     )
-    # Each session's queue of messages waiting for its running turn, and the wake-up for local
-    # waiters. Durable exactly where the claim above is.
+    # Per-session queue of messages waiting for the running turn; durable where the claim is.
     app.state.turn_queue = _default_turn_queue()
     app.state.queue_signal = QueueSignal()
-    # This process's waiting messages per `(sender, session)`: bounds the sockets they hold and
-    # feeds the per-actor cap. The queue above is the order; this is the load.
+    # This process's waiting messages per `(sender, session)`: the load, where the queue is the
+    # order.
     app.state.queue_waiters = {}
-    # Per-user count of open push-back event streams. Each polls the database for its lifetime, so
-    # it is capped per user; an entry is removed when a user's last stream closes.
+    # Per-user count of open push-back event streams, each of which polls the database.
     app.state.event_streams = {}
-    # Runaway-cost guard: meters tokens and counts turns per session and user, refusing (429) a turn
-    # over a configured cap. Off unless `budget_enabled`.
+    # Runaway-cost guard (429 over a session or user cap); off unless `budget_enabled`.
     app.state.budget = BudgetTracker()
     # Gauges read the live structures, so nothing has to be kept in sync. Turns in flight against
     # the cap is the saturation signal to scale on. Counts unexpired leases only, since the sweep
@@ -385,21 +372,16 @@ def create_app(
         "chemclaw_event_stream_capacity",
         lambda: float(settings.service_max_event_streams_total),
     )
-    # Connector health snapshot, refreshed by readiness and at startup; the gauge reads it, since a
-    # scrape must not do network I/O.
+    # Connector health snapshot, refreshed by readiness; gauges read it without network I/O.
     app.state.connector_health = []
-    # When that snapshot was taken (`time.monotonic`), so readiness can reuse it. Negative infinity
-    # so an empty snapshot is always stale.
+    # When the snapshot was taken (monotonic); negative infinity so an empty one is stale.
     app.state.connector_health_at = float("-inf")
-    # The database probe's cached verdict and when it was taken. `True` before any probe, so a pod
-    # is not refused traffic for never having asked.
+    # Cached database verdict; `True` until probed, so a new pod is not refused traffic.
     app.state.database_reachable = True
-    # Whether the schema carries the newest migration this image ships. `True` before any probe and
-    # whenever it cannot be answered: it gates only on positive evidence of a mismatch.
+    # Whether the schema has this image's newest migration; `True` unless a mismatch is proven.
     app.state.schema_current = True
     app.state.database_probed_at = float("-inf")
-    # Readiness probe tasks in flight, by name. Probes are single-flight
-    # (`chemclaw.api.routes.ops._shared_probe`), so a burst of probes costs one fan-out.
+    # In-flight readiness probe tasks by name, for single-flight (`routes.ops._shared_probe`).
     app.state.readiness_probes = {}
     # Pool gauges are bound by `chemclaw.core.db.pooling`, so every process with a pool reports.
     # `unhealthy` includes `unpolled` (a jobs-only bundle with no poller); the predicate lives on

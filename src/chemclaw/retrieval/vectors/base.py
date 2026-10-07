@@ -1,14 +1,8 @@
 """The narrow seam a vector database attaches on — Protocols, and nothing that can reach one.
 
-Imports no client, so the composition above it runs in CI against a fake; a real client lives in its
-own adapter module, imported only when configuration names it.
-
-Only the dense half is pluggable: the catalogue (file table, fingerprints, sweep, lexical leg) stays
-in Postgres, which has the joins and the clock a vector database lacks. A point carries an id, a
-vector and one grouping key (the `doc_id` for a chunk) and no other metadata: tags belong to a path
-while chunks belong to content, so filtering on a payload tag could match a chunk whose *other* copy
-carries it. Eligibility therefore arrives as a scope of groups, applied before the top-k so a narrow
-filter keeps full recall.
+Only the dense half is pluggable; the catalogue stays in Postgres. A point carries an id, a vector
+and one grouping key (a `doc_id`), never metadata like tags, which belong to a path rather than to
+content. Eligibility arrives as a scope of groups applied before the top-k.
 """
 
 from typing import Protocol, runtime_checkable
@@ -21,11 +15,8 @@ from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 def stored_embedding_key(embedding_key: str, provider: str, collection: str) -> str:
     """The `embedding_key` a catalogue row carries when its vector lives in an external store.
 
-    `embedding_config_key` says whether a vector is still *valid*; this also records where it is
-    *reachable*, so moving a corpus to another store re-embeds instead of silently searching an
-    empty collection. The provider is included because both indexes default to a vendor-neutral
-    collection name. Repointing the URL or recreating a collection in place is not caught; the
-    answer to that is `--full` (keying on the URL would re-embed on every hostname change).
+    Adds provider and collection so moving a corpus between stores re-embeds instead of searching an
+    empty collection. Repointing a URL is not caught; use `--full`.
     """
     return f"{embedding_key}@{provider}:{collection}"
 
@@ -98,9 +89,8 @@ class VectorStore(Protocol):
     ) -> list[VectorMatch]:
         """Return up to `top_k` points most similar to `embedding`, best first.
 
-        `groups` restricts the search **before** the top-k cut. `None` means the whole collection;
-        an *empty* set means nothing is eligible and returns nothing — an adapter must not send it
-        as an unfiltered search. Non-positive similarity is not a hit and is dropped.
+        `groups` restricts the search before the top-k: `None` is the whole collection, an empty set
+        returns nothing. Non-positive similarity is dropped.
         """
         ...
 

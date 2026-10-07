@@ -159,14 +159,8 @@ def bearer_token_env_names() -> tuple[str, ...]:
     """Every environment variable holding an enabled connector's bearer token.
 
     The one definition used by both scrubs: `core.logging.SecretRedactingFilter` (log lines) and
-    `deliver.message.Message.redacted` (webhooks). An opaque connector token matches no structural
-    pattern, so it must be named.
-
-    Returns:
-        The variable names.
-
-    Raises:
-        Whatever `enabled()` raises on a malformed manifest; both callers catch and report it.
+    `deliver.message.Message.redacted` (webhooks); an opaque token matches no structural pattern, so
+    it must be named. Propagates whatever `enabled()` raises; both callers catch and report it.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
 
@@ -280,19 +274,12 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
 
     Public so tests exercise this client rather than a lookalike. It carries our credential as
     `auth` (so it is on the MCP handshake too) and the turn's identity as a request hook (a header
-    callback would run in the wrong task and never land).
+    callback would run in the wrong task and never land). The MCP adapter owns and closes it.
 
     Redirects are not followed, as a security property: httpx carries headers across a redirect
     (stripping only `Authorization`), so a connector answering `302` could harvest the caller's
-    identity and roles. MCP streamable-HTTP never needs a redirect; `turn_identity_hook` strips the
-    headers on a foreign origin as a second layer.
-
-    Args:
-        connector: The bundle's name, for the deployment URL override and the credential error.
-        endpoint: The manifest's HTTP endpoint declaration.
-
-    Returns:
-        A client the MCP adapter owns and closes with the session it opened.
+    identity. MCP streamable-HTTP never needs a redirect; `turn_identity_hook` strips the headers on
+    a foreign origin as a second layer.
     """
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
@@ -454,22 +441,15 @@ async def open_connector_specs(
 ) -> tuple[list[BaseTool], list[str]]:
     """Open every connector for this turn; return the tools that came up and the names that did not.
 
-    The single connector lifecycle for every caller that runs a turn. Tools come back with the
-    casualties because a connector's tools only exist once its session is open. Nothing is caught: a
-    failed connect is non-fatal by construction (`chemclaw.connectors.transport`), so an unreachable
-    connector contributes no tools and is retried next turn.
+    The single connector lifecycle for every caller that runs a turn; `stack` owns tearing the
+    sessions down. Tools come back with the casualties because a connector's tools only exist once
+    its session is open. Nothing is caught: a failed connect is non-fatal by construction
+    (`chemclaw.connectors.transport`), so an unreachable connector contributes no tools and is
+    retried next turn.
 
     Concurrent, so a dark fleet costs one connect timeout rather than their sum; safe because each
     `HeldConnectorSession` confines its cancel scope to its own task. The degradation is logged and
-    counted here so no caller can forget the operator-visible half; callers that reach a human also
-    surface the list themselves.
-
-    Args:
-        stack: The caller's exit stack, which owns tearing the sessions down.
-        specs: This turn's connector specs (`chemclaw.agent.chemclaw_agent.connector_specs`).
-
-    Returns:
-        The tools every reachable connector advertises, and the names of those that did not come up.
+    counted here; callers that reach a human also surface the list themselves.
     """
     held = [HeldConnectorSession(spec) for spec in specs]
     opened = await asyncio.gather(*(stack.enter_async_context(session) for session in held))

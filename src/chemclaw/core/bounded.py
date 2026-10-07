@@ -1,22 +1,16 @@
-"""One bounded LRU map for every cache keyed by an unbounded identity.
+"""One bounded LRU map for every cache keyed by an unbounded identity (session, oid, principal).
 
-Such keys are session ids, user oids and principals. Shared by the front door's live sessions, the
-budget counters, the rate limiter's buckets and the attachment store. `core/metrics.py`'s
-label-series cap deliberately does not use it: that cap refuses new series rather than evicting old
-ones, since evicting would let an attacker reset real counters.
-
-Semantics:
+Not used by `core/metrics.py`'s label-series cap, which refuses new series rather than evicting
+old ones so an attacker cannot reset real counters.
 
 - `get` marks the entry most-recently-used; `peek` reads without marking.
-- `put` inserts or refreshes as most-recently-used, then evicts least-recently-used entries past
-  capacity. The entry just put is never the victim, since its value is being handed to the caller.
+- `put` inserts or refreshes, then evicts least-recently-used entries past capacity; the entry just
+  put is never the victim.
 - `capacity` may be an int or a zero-argument callable, so a config-backed bound stays live.
-- `weight`/`max_weight` (both or neither) add a second bound in the caller's unit (bytes, for the
-  attachment store). Weight is measured at `put`, so a mutated value must be `put` back. An entry
-  heavier than `max_weight` is held alone without evicting anything else for it, since no eviction
-  could reach the bound.
-- `pinned` names keys eviction must skip right now; when every candidate is pinned the map briefly
-  exceeds `capacity` rather than corrupt an in-use entry.
+- `weight`/`max_weight` add a second bound in the caller's unit. A mutated value must be `put`
+  back to be re-weighed; an entry heavier than `max_weight` is held alone without evicting others.
+- `pinned` keys are skipped by eviction; if every candidate is pinned the map briefly exceeds
+  `capacity`.
 
 Not thread-safe; threaded callers hold their own lock.
 """
@@ -42,13 +36,9 @@ class BoundedLru(Generic[K, V]):
     ) -> None:
         """Create the map with `capacity` (fixed, or a callable read at each eviction pass).
 
-        `pinned` says which keys must not be evicted right now. `weight` and `max_weight` are one
-        bound: `weight` measures an entry at each `put`, `max_weight` is the total before
-        least-recently-used entries are evicted. Omit both to bound by entry count alone.
-
-        Raises:
-            ValueError: if exactly one of `weight`/`max_weight` is given; either half alone reads as
-            a bound that is not there.
+        `pinned` says which keys must not be evicted right now. `weight` measures an entry at each
+        `put` and `max_weight` caps their total; pass both or neither (either alone raises
+        `ValueError`, since it would read as a bound that is not there).
         """
         if (weight is None) != (max_weight is None):
             raise ValueError("weight and max_weight are one bound: pass both or neither")

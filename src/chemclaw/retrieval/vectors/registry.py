@@ -1,12 +1,8 @@
 """Which vector store this deployment uses — the one place a provider name becomes an object.
 
-`vector_store_provider` is a shipped short name or a `module:callable`, resolved late through
-`chemclaw.core.connect.resolve_driver`, so a new vector database needs no core edit and an unused
-adapter's client package is never loaded.
-
-A custom adapter implements `VectorStore`, takes no constructor arguments, and reads its own
-configuration from `settings`. There is no `isinstance` gate (a runtime Protocol check proves
-little); a missing method fails on first search with an `AttributeError` naming it.
+`vector_store_provider` is a shipped short name or a `module:callable`, resolved late via
+`chemclaw.core.connect.resolve_driver`. A custom adapter implements `VectorStore`, takes no
+constructor arguments and reads its own `settings`.
 """
 
 import logging
@@ -48,13 +44,11 @@ def _configuration() -> tuple[str, ...]:
 def default_vector_store() -> VectorStore:
     """The configured external vector store, built once per process per configuration.
 
-    Only called when `vector_store_provider` is not `pgvector` (whose vectors live in `note_index`),
-    so asking for `pgvector` is a wiring bug. Built once because no adapter can be closed and
-    retrieve halves are built per call; one per configuration keeps client pools from leaking.
+    One per configuration because adapters cannot be closed; asking for `pgvector` is a wiring bug.
 
     Raises:
         VectorStoreConfigError: The provider is `pgvector`, or a reference that does not resolve to
-            something callable.
+        something callable.
     """
     global _STORE
     provider = settings.vector_store_provider

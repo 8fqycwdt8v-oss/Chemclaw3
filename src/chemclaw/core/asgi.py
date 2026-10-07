@@ -103,15 +103,11 @@ class BodySizeLimit:
 def transport_bounds(*, concurrency: bool = True) -> dict[str, Any]:
     """The uvicorn keyword arguments that bound a connection before a route can refuse it.
 
-    Concurrency, keep-alive and header-size limits, shared by every process that launches uvicorn
-    itself (`api/mcp_face.py`, `connectors/server_entry.py`, `core/worker_http.py`); the front door
-    gets the same bounds from `deploy/entrypoint.sh`. In `core` because `api` and `connectors` may
-    not import each other.
-
-    Args:
-        concurrency: Whether to bound simultaneous connections. False for `core/worker_http.py`,
-        which answers the kubelet probes: a liveness probe refused because the limit is full would
-            restart a pod that is merely busy.
+    Concurrency, keep-alive and header-size limits for every process that launches uvicorn itself
+    (`api/mcp_face.py`, `connectors/server_entry.py`, `core/worker_http.py`); the front door gets
+    them from `deploy/entrypoint.sh`. `concurrency=False` is for `core/worker_http.py`, which
+    answers the kubelet probes: a liveness probe refused at the limit would restart a pod that is
+    merely busy.
     """
     bounds: dict[str, Any] = {
         "timeout_keep_alive": settings.service_keepalive_seconds,

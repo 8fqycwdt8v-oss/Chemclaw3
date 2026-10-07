@@ -106,15 +106,8 @@ async def dispatch_queued(
 ) -> CallToolResult:
     """Queue one call and answer as the tool would, within `inline_wait` or as a job id.
 
-    Args:
-        connector: The connector serving `tool`.
-        tool: The tool being called.
-        arguments: Its arguments, as the model sent them.
-        inline_wait: How long the turn waits for the answer before handing back a job id.
-        call_timeout: How long the call may run once it has a slot.
-
-    Returns:
-        The server's `CallToolResult`, a refusal as `isError`, or a text naming the job.
+    `call_timeout` bounds the call once it has a slot. Returns the server's `CallToolResult`, a
+    refusal as `isError`, or a text naming the job.
     """
     call = QueuedToolCall(
         connector=connector,

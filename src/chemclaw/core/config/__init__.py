@@ -307,17 +307,13 @@ class Settings(
     def fleet_connections_per_server(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(connections on postgres_dsn's server, connections on the split session store's)`.
 
-        The one place fleet Postgres spend is added up, as a sum: a front door's `/readyz` pool is
-        one connection wide, so the fleet holds one narrow pool per front-door replica and
-        `pg_pool_max_size` for every other pool. With a split `session_store_dsn` each pooled
-        process opens one more pool and the readiness and checkpointer pools move to the session
-        store; two DSNs naming one endpoint (or an unparseable one) are summed onto the primary.
-        Both figures are ceilings; `tests/test_fleet_pools.py` pins the per-role pool counts.
-
-        Args:
-            at_rollout_peak: Charge both generations of every surging Deployment, as an upgrade
-                does, instead of the steady state. Uses the chart-rendered peak pool and replica
-                counts together; undeclared, they fall back to the steady pair.
+        The one place fleet Postgres spend is added up: one narrow (single-connection `/readyz`)
+        pool per front-door replica and `pg_pool_max_size` for every other pool. With a split
+        `session_store_dsn` the readiness and checkpointer pools move to the session store and each
+        pooled process opens one more; DSNs naming one endpoint (or unparseable) are summed onto the
+        primary. `at_rollout_peak` charges both generations of an upgrade using the chart-rendered
+        peak counts (falling back to the steady pair). `tests/test_fleet_pools.py` pins the per-role
+        pool counts.
         """
         # Narrow pools are one per front door, but only if the declared total can contain them
         # (three pools per front door). Otherwise the pair was set by hand and every pool is charged

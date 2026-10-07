@@ -98,19 +98,11 @@ def _origin(url: httpx.URL) -> tuple[str, str, int]:
 def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable[None]]:
     """Build the `httpx` request hook that stamps the turn's identity for one connector endpoint.
 
-    Registered on the connector's own client so it runs in the task that issues the request (see the
-    module docstring). Bound to the endpoint's origin: httpx runs the hook on every redirect hop and
-    copies the previous request's headers (dropping only `Authorization`), so on a foreign origin
-    the hook removes every header `turn_headers()` produced. `registry.connector_http_client`
-    refuses redirects anyway, but `core.mcp_session.short_connect_client` (the calc backend's
-    client) follows them, so for it this strip is the only layer.
-
-    Args:
-        endpoint_url: The connector's effective endpoint URL, the one origin its identity headers
-            may reach.
-
-    Returns:
-        The request hook to install on that connector's client.
+    Registered on the connector's own client so it runs in the task that issues the request. Bound
+    to `endpoint_url`'s origin: httpx runs the hook on every redirect hop and copies the previous
+    request's headers (dropping only `Authorization`), so on a foreign origin the hook removes every
+    header `turn_headers()` produced. `core.mcp_session.short_connect_client` (the calc backend's
+    client) follows redirects, so for it this strip is the only layer.
     """
     allowed = _origin(httpx.URL(endpoint_url))
 

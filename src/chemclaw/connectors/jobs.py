@@ -262,18 +262,12 @@ def require_funded_ceiling(connector: str, job: JobSpec) -> None:
 
     `awaits_answer` removes a job's execution ceiling, so a manifest (which is data) could grant
     itself unbounded runtime; the operator must name the job in `connector_jobs_awaiting_answer`.
-    Checked in the shared pre-flight (`prepare_job_launch`) so every launcher, including the
-    template job step, is covered; and at launch rather than at tool build, so one bad declaration
-    refuses only its own job instead of the whole tool surface. `make connector-validate` calls it
+    Checked in the shared pre-flight so every launcher is covered, and at launch rather than at tool
+    build so one bad declaration refuses only its own job. `make connector-validate` calls it
     directly.
 
-    Args:
-        connector: The owning connector's name, half of the name the operator grants.
-        job: The declared job.
-
     Raises:
-        ConnectorJobError: The job declares `awaits_answer` and the deployment has not named it in
-            `connector_jobs_awaiting_answer`.
+        ConnectorJobError: The job declares `awaits_answer` and the deployment has not named it.
     """
     qualified = f"{connector}.{job.name}"
     if job.awaits_answer and qualified not in settings.connector_jobs_awaiting_answer_list:
@@ -292,15 +286,9 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
 
     Validate, check funding and availability, authorize the expensive trigger, run the declared
     precondition, serialize. The single pre-flight shared by every launcher (the agent tool below
-    and `durable.template_activities.authorize_job_step`), so no launcher can skip a step.
-
-    Args:
-        connector: The owning connector's name, for the refusal message only.
-        job: The declared job.
-        params: The launch arguments, as a `dict` or an already-built params model.
-
-    Returns:
-        The validated launch payload, JSON-ready, as the workflow input's `payload`.
+    and `durable.template_activities.authorize_job_step`), so no launcher can skip a step. `params`
+    may be a `dict` or an already-built params model; the result is the JSON-ready workflow
+    `payload`.
 
     Raises:
         AuthorizationError: The job is `expensive` and the ambient user is not entitled to it.
@@ -333,16 +321,9 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
     The returned coroutine's `__name__` is the job name (also the authorization and profile key),
-    its docstring is the model-facing description, and its single parameter is the params model.
-    Building refuses nothing; `prepare_job_launch` refuses at launch.
-
-    Args:
-        connector: The owning connector's name, part of the workflow id and reported in the
-            push-back payload.
-        job: The declared job.
-
-    Returns:
-        An async tool function, unregistered; `chemclaw.connectors.registry` registers it.
+    its docstring is the model-facing description, and its single parameter is the params model. It
+    is returned unregistered; `chemclaw.connectors.registry` registers it. Building refuses nothing;
+    `prepare_job_launch` refuses at launch.
     """
     params_model = _params_model(connector, job)
 
@@ -477,18 +458,11 @@ async def _still_running(handle: Any) -> bool:
 async def failed_job_reason(handle: Any) -> str:
     """Why a durable run that did not complete ended the way it did, in one readable sentence.
 
-    The single answer used by the status tool, the in-turn wait and the push-back. `handle.result()`
-    on a closed run is a history read, so this is one round trip. `WorkflowFailureError` covers
-    failed, cancelled, terminated and timed-out runs alike, so it is the only clause; its
-    `__cause__` carries the real reason. Transport errors (`RPCError`) propagate: a broker fault is
-    not this run's failure reason.
-
-    Args:
-        handle: A `WorkflowHandle` for a run believed to have ended badly. Typed `Any` because the
-            handle's own generic parameters differ per caller and none of them is used here.
-
-    Returns:
-        The failure's own sentence, or `""` if the run actually completed.
+    The single answer used by the status tool, the in-turn wait and the push-back; `""` if the run
+    actually completed. `handle.result()` on a closed run is a history read. `WorkflowFailureError`
+    covers failed, cancelled, terminated and timed-out runs alike, and its `__cause__` carries the
+    reason. Transport errors (`RPCError`) propagate: a broker fault is not this run's failure
+    reason. `handle` is typed `Any` because its generic parameters differ per caller.
     """
     try:
         await handle.result()

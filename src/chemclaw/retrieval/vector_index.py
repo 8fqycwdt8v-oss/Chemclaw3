@@ -1,13 +1,8 @@
 """Derived note index for hybrid retrieval — dense and lexical entry points.
 
-`search_dense` (cosine over an embedding) and `search_lexical` (Postgres full-text `ts_rank`) over a
-derived index of the notes; the git-markdown graph stays the source of truth and the index is
-rebuildable from it at any time.
-
-Two backends behind one `NoteIndex` interface: `InMemoryNoteIndex` ranks in Python (the test
-reference), `PostgresNoteIndex` persists to `note_index` and ranks in SQL. Dense ranking is
-identical across both; the in-memory lexical score is a token-overlap proxy of `ts_rank`, but the
-boolean rule (match any term, complete matches first, honour `-term`) is shared exactly via
+`search_dense` (cosine) and `search_lexical` (`ts_rank`) over an index rebuildable from the
+git-markdown graph, which stays the source of truth. `InMemoryNoteIndex` is the test reference and
+`PostgresNoteIndex` the deployed backend; both share the boolean lexical rule in
 `chemclaw.core.fulltext`.
 """
 
@@ -82,33 +77,25 @@ class NoteIndex(Protocol):
     ) -> None:
         """Insert or replace index rows by note id, recording which configuration embedded them.
 
-        `embedding_key` (`embedding_config_key()`) is batch-level, so one upsert never writes two
-        generations of vector. `corpus_revision` is the commit count of the checkout the notes came
-        from; it is stored because `retire_absent`'s `built_before` is compared against it and a
-        later pass on another pod cannot recover it.
+        `embedding_key` and `corpus_revision` are batch-level; the revision is stored for
+        `retire_absent`'s `built_before`.
         """
         ...
 
     async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete every indexed note whose id is not in `keep`; return how many went.
 
-        "Keep exactly these" because the caller has just listed the corpus on disk and the backend
-        can compute the difference itself. Rows built from a corpus revision newer than
-        `built_before` are left alone: the index is shared but each pod's checkout is not, so
-        absence on one pod's disk cannot distinguish a deleted note from one not yet fetched. `None`
-        retires everything absent.
-
-        **An empty `keep` must delete nothing**: a mis-pointed notes directory would otherwise wipe
-        the index, and a rebuild costs one embedding call per note.
+        Rows built from a corpus revision newer than `built_before` are kept, since pods have
+        separate checkouts of a shared index (`None` retires everything absent). **An empty `keep`
+        deletes nothing**, so a mis-pointed directory cannot wipe the index.
         """
         ...
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """The stored `note_id -> fingerprint` for notes embedded under `embedding_key`.
 
-        `reindex_notes` diffs on-disk fingerprints against this; a missing entry reads as "changed".
-        Scoping to the current configuration makes a model swap self-healing, since a file
-        fingerprint cannot see a model change.
+        A missing entry reads as "changed"; scoping to the configuration makes a model swap
+        re-embed.
         """
         ...
 
@@ -117,9 +104,8 @@ class NoteIndex(Protocol):
     ) -> list[IndexHit]:
         """Return up to `top_k` notes most cosine-similar to `query_embedding`, best first.
 
-        `within` restricts hits to the given note ids (`None` = whole index), applied in the
-        backend's own query. On an approximate backend (pgvector HNSW) it filters the candidate list
-        rather than bounding the scan, so fewer than `top_k` hits does not mean there were no
+        `within` restricts hits to these note ids (`None` = all). On HNSW it filters candidates
+        rather than bounding the scan, so fewer than `top_k` hits does not prove there are no
         others.
         """
         ...
@@ -129,20 +115,15 @@ class NoteIndex(Protocol):
     ) -> list[IndexHit]:
         """Return up to `top_k` notes best matching the terms in `query`, best first.
 
-        A note matching every term outranks one matching only some, a partial match is still a hit,
-        and a note carrying a `-excluded` term is not a hit — one rule for both backends
-        (`chemclaw.core.fulltext`), matching `GraphRetriever`. `within` is an exact bound before the
-        `LIMIT` here.
+        Notes matching every term rank first, partial matches still hit, `-term` excludes
+        (`chemclaw.core.fulltext`). `within` is an exact bound here.
         """
         ...
 
 
-# Version of the note-text derivation behind every stored row, folded into the note-side key:
-# `embedding_config_key()` cannot see a change to what text is embedded. Bump it whenever the text a
-# fresh index would store differs from what an existing row holds — the composition in
-# `kg.search.search_text` *or* the normalisation `upsert` applies. A bump hides old rows from dense
-# reads and empties their fingerprints, so the next reindex rewrites them (lexical reads do not
-# filter on it).
+# Version of the note-text derivation, folded into the note-side key. Bump it whenever the text a
+# fresh index would store differs from an existing row's (`kg.search.search_text` or `upsert`'s
+# normalisation); the next reindex then rewrites every row.
 _NOTE_TEXT_VERSION = "ntv3"
 
 
@@ -161,9 +142,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
 class InMemoryNoteIndex:
     """Process-local `NoteIndex` computing the reference ranking in Python.
 
-    A differential test oracle, not a deployment backend: no configuration returns it. Dense search
-    is exact cosine (the same ordering as pgvector up to HNSW recall); lexical search is a
-    token-overlap proxy of `ts_rank`, but the boolean rule must not drift — see `search_lexical`.
+    A test oracle, not a deployment backend. Lexical scores are a token-overlap proxy of `ts_rank`;
+    the boolean rule must match exactly.
     """
 
     def __init__(self) -> None:
@@ -247,9 +227,7 @@ class InMemoryNoteIndex:
     ) -> list[IndexHit]:
         """Rank notes sharing any wanted token, those sharing every one first; tie-break by id.
 
-        The same boolean semantics as `PostgresNoteIndex`, including `-term` exclusion. Tokens stand
-        in for lexemes (no stemming or stop-words), so scores differ from `ts_rank`; ordering intent
-        and the boolean rule must match.
+        Same boolean rule as `PostgresNoteIndex`, `-term` included; tokens stand in for lexemes.
         """
         wanted, excluded = reference_terms(query)
         if not wanted and not excluded:
@@ -284,9 +262,7 @@ def _scope_array(within: set[str] | None) -> list[str] | None:
 class PostgresNoteIndex:
     """Durable `NoteIndex` backed by Postgres + pgvector over the `note_index` table.
 
-    Dense search is cosine distance (`<=>`) over the HNSW `vector_cosine_ops` index; lexical search
-    is `ts_rank` over the GIN-indexed `tsvector`. `settings.embedding_dim` must equal the table's
-    `vector(N)` width, or inserts raise.
+    `settings.embedding_dim` must equal the table's `vector(N)` width, or inserts raise.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -304,18 +280,12 @@ class PostgresNoteIndex:
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
             "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"
         )
-        # The `> 0` floor mirrors the in-memory reference: without it pgvector returns the top-k
-        # nearest unconditionally and a small corpus would cite unrelated notes. The `within` scope
-        # is in the SQL (NULL = unrestricted); with HNSW in use it is a post-filter over the
-        # candidate list, so a selective scope can return fewer than k (hence "mostly" in
-        # `NoteIndex.search_dense`). `settings.hnsw_ef_search` / `hnsw_iterative_scan` trade latency
-        # for recall, applied per query by `db.apply_vector_recall_settings`; both default to
-        # leaving the server alone.
+        # The `> 0` floor matches the reference, so a small corpus does not cite unrelated notes.
+        # Under HNSW the `within` scope is a post-filter and may return fewer than k;
+        # `settings.hnsw_ef_search`/`hnsw_iterative_scan` trade latency for recall.
         scope = "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[])) "
-        # The `note_id` tie-break sorts the k rows in the outer query, not the table: in the inner
-        # ORDER BY it stops the planner using the vector index. It makes equal-similarity order
-        # match the in-memory reference. `embedding_key` is a read predicate too: rows from another
-        # model of the same width would otherwise be scored against the new model's query.
+        # The `note_id` tie-break is in the outer query so the planner can still use the vector
+        # index. `embedding_key` is a read predicate: rows from another model must not be scored.
         self._dense = (
             "SELECT note_id, score FROM ("
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
@@ -325,11 +295,8 @@ class PostgresNoteIndex:
             f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, note_id"
         )
-        # Match any term; rank notes matching every term first; honour a `-term` exclusion — the
-        # rule `chemclaw.core.fulltext` builds once and `InMemoryNoteIndex.search_lexical` states.
-        # The widening is over the parsed query's clauses, not its lexemes, so negation survives.
-        # One statement rather than query-then-retry: the `lexeme @@ all_terms` sort key guarantees
-        # complete matches lead.
+        # Any term matches; complete matches lead via the `lexeme @@ all_terms` sort key; widening
+        # is over parsed clauses, so `-term` exclusions survive.
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, any_terms) AS score "
             f"FROM note_index, {TSQUERY_TERMS} "
@@ -395,10 +362,8 @@ class PostgresNoteIndex:
     ) -> list[str]:
         """The shared half: delete and report which ids went. Empty `keep` deletes nothing.
 
-        A NULL `built_before` on either side prunes; only a row that states a newer corpus than the
-        caller holds is protected. The `::int` casts let Postgres type the parameter even when it is
-        NULL, and the `IS NULL` arms are spelled out because three-valued logic would make a folded
-        `NOT (... AND ...)` protect NULL rows.
+        The `::int` casts let Postgres type a NULL parameter, and the `IS NULL` arms are explicit
+        because a folded `NOT (... AND ...)` would protect NULL rows under three-valued logic.
         """
         if not keep:
             return []
@@ -486,9 +451,8 @@ class PostgresNoteIndex:
 def default_note_index() -> NoteIndex:
     """The production note index — one place the retrievers get their backend.
 
-    Chosen by `vector_store_provider`: `pgvector` (default) keeps vectors in `note_index`; any other
-    provider moves only the dense half to that store and keeps text, `tsvector`, fingerprint and
-    embedding key in `note_index`.
+    Non-`pgvector` providers hold only the dense half; text, `tsvector` and fingerprints stay in
+    `note_index`.
     """
     if settings.vector_store_provider == "pgvector":
         return PostgresNoteIndex()
@@ -502,9 +466,8 @@ def default_note_index() -> NoteIndex:
 def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, str]) -> bool:
     """Whether `note_id` must be (re-)embedded: its file fingerprint differs from the stored one.
 
-    A note the fingerprint scan does not know (filename disagrees with its frontmatter id) is always
-    re-embedded: absent means unknown, and unknown means embed. Logged at WARNING because it costs
-    an embedding on every run until the filename is fixed.
+    A note the fingerprint scan does not know (filename disagrees with its id) is always
+    re-embedded, with a WARNING.
     """
     fingerprint = current.get(note_id)
     if fingerprint is None:
@@ -521,10 +484,8 @@ def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, st
 def _notes_that_failed_to_parse(directory: Path, stems: set[str]) -> list[str]:
     """Which of `stems` are notes that failed to parse — not files that were never notes.
 
-    A Markdown file with no frontmatter (e.g. `knowledge/README.md`) is not a note and must not
-    raise the alarm. `read_note` is the one definition of both "is a note" and "failed"
-    (`NoteError`), so each stem is re-read; the set is normally empty. First path per stem wins,
-    matching `note_file_fingerprints` and `_parse_notes`.
+    Re-reads each with `read_note`, the one definition of both, so a frontmatter-less `README.md`
+    raises no alarm.
     """
     if not stems:
         return []
@@ -546,16 +507,10 @@ async def reindex_notes(
 ) -> int:
     """(Re)build `index` from the notes on disk; return how many notes were (re-)embedded.
 
-    Incremental: a note whose content hash (`note_file_fingerprints`) matches the stored one under
-    the current embedding configuration is skipped, so an unchanged corpus embeds nothing and a
-    model change re-embeds everything without a flag. The fingerprint is content, not mtime, because
-    the index is shared between pods with separate checkouts. `full=True` re-embeds unconditionally.
-    Idempotent (upsert by id).
-
-    Notes deleted from disk are retired before the "nothing changed" exit, since an external vector
-    store has no other pruner. Both the graph cache and the per-file parse cache are bypassed
-    (`reparse=True`), so the parsed bodies and the fingerprints come from the same moment; otherwise
-    an old body could be stored under a new digest and never heal.
+    Incremental: a note whose content hash matches the stored one under the current embedding
+    configuration is skipped, so a model change re-embeds without a flag; `full=True` re-embeds all.
+    Notes deleted from disk are retired. Both note caches are bypassed (`reparse=True`) so parsed
+    bodies and fingerprints come from the same moment.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))

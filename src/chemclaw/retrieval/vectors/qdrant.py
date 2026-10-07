@@ -1,13 +1,7 @@
 """Qdrant as a `VectorStore`, with the vendor client late-bound and never a hard dependency.
 
-The client is imported when a connection is first needed and is not a runtime dependency; CI
-exercises the adapter against an injected fake. The three operations map onto `upsert_points`,
-`query_points` and `delete_points`.
-
-The group scope is a server-side filter applied before Qdrant's top-k (filterable HNSW), never a
-post-filter. The collection must be configured for cosine distance, since `VectorMatch.score` is a
-cosine in [0, 1]; the operator creates it, so this is a documented requirement rather than enforced
-here.
+The group scope is a server-side filter applied before Qdrant's top-k. The operator must create the
+collection with cosine distance, since `VectorMatch.score` is a cosine.
 """
 
 import importlib
@@ -30,9 +24,8 @@ logger = logging.getLogger(__name__)
 class QdrantClient(Protocol):
     """The slice of the Qdrant async client this adapter uses, so a fake is three methods.
 
-    Declared rather than imported because `qdrant-client` is not a dependency. Signatures are
-    keyword-only where the real client's are, so a fake cannot accept a call the real client would
-    reject.
+    Keyword-only where the real client's signatures are, so a fake cannot accept what the client
+    would reject.
     """
 
     async def upsert(self, *, collection_name: str, points: list[Any]) -> Any:
@@ -80,9 +73,7 @@ def _models() -> Any:
 def open_qdrant_client() -> QdrantClient:
     """Build the async Qdrant client this deployment is configured for.
 
-    Reads URL and API key from settings, the one production entry point. The key is registered for
-    log redaction here, where it is read; it is also a `SecretStr` in `_SECRET_SETTINGS`, which
-    covers it whatever source supplied it.
+    The API key is registered for log redaction here, where it is read.
     """
     module = _client_module()
     register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
@@ -191,9 +182,8 @@ class QdrantVectorStore:
 def _point_id(reference: str) -> str:
     """Qdrant's own id for a catalogue reference.
 
-    Qdrant accepts only unsigned integers or UUIDs, so a UUIDv5 over the reference: deterministic
-    (re-embedding replaces the point) and collision-free. The readable reference is kept in the
-    payload as `ref`, which the scope filter matches.
+    A deterministic UUIDv5 (Qdrant accepts only integers or UUIDs); the readable reference stays in
+    the payload as `ref`, which the scope filter matches.
     """
     import uuid
 

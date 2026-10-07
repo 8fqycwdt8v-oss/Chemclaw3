@@ -321,8 +321,8 @@ class BudgetTracker:
             try:
                 stored = await budget_store.book(user, tokens)
             except asyncio.CancelledError:
-                # Cancellation (shutdown, rollout) is the common loss mode for a fire-and-forget
-                # task and is not an `Exception`, so it is recorded separately.
+                # Cancellation is not an `Exception` and is the usual loss mode here, so record it
+                # separately.
                 degraded(
                     logger,
                     "budget_window",
