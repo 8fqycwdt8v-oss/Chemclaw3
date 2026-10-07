@@ -957,7 +957,7 @@ def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
 def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     """What governs a tool call, outermost first.
 
-    - audit outermost, so a denied or refused attempt is a recorded attempt;
+    - audit outermost of the gates, so a denied or refused attempt is a recorded attempt;
     - authorization, dry-run and repeat gates inside audit, each a decision worth recording;
     - `announce_tool_failures` first in this list (inside the converters), because it must see every
       failure, including refusals raised by gates below it.

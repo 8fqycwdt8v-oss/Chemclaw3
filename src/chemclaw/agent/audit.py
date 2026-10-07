@@ -364,8 +364,8 @@ async def _recording(
     event_actor = get_current_actor() or actor
     # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
     event_cid = get_current_correlation_id() or correlation_id
-    # Read ambiently like the actor: agents are cached per profile for the process, so anything
-    # bound at build time would be shared across users. Empty off the request path.
+    # Read ambiently like the actor, so the row carries the session the turn bound rather than
+    # anything fixed when the middleware was built. Empty off the request path.
     event_session = get_current_session_id() or ""
     start = time.perf_counter()
     # `start` measures the call; `started_at` dates it for the row (see `AuditEvent.ts`).
