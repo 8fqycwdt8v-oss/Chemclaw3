@@ -59,7 +59,7 @@ and W5 once W2 lands.
 
 Entry: none.
 
-- [ ] **W0.1 Baseline script** (`src/chemclaw/cli/bench_baseline.py`, or extend the existing
+- [x] **W0.1 Baseline script** (`src/chemclaw/cli/bench_baseline.py`, or extend the existing
       `live_*` harnesses rather than adding a fourth). It records, as JSON committed under
       `data/evals/baselines/architecture-2026-10.json`:
   - cold and warm import time of `chemclaw.api.app` (measured: 16.6 s cold, 6.5 s warm);
@@ -71,14 +71,14 @@ Entry: none.
   - LOC and prose ratio per package (the AST/tokenize script the review used, saved to
     `scripts/` so it can be re-run);
   - Helm render line count; number of settings fields; number of `CHEMCLAW_*` names.
-- [ ] **W0.2 Same baseline for the fleet** (`Chemclaw3-mcp/scripts/bench_baseline.py`): per-server
+- [x] **W0.2 Same baseline for the fleet** (`Chemclaw3-mcp/scripts/bench_baseline.py`): per-server
       cold start, `/mcp` handshake + `list_tools` latency, `calc` `calculation_key` round trip.
-- [ ] **W0.3 Freeze the overhead while it is cut.** Agree, in this file, that until W1 closes:
+- [x] **W0.3 Freeze the overhead while it is cut.** Agree, in this file, that until W1 closes:
   no new ADR without an Options section; no new meta-test of prose; no docstring longer than
   ~10 lines in new code. (A rule here rather than a test: W1 decides which tests survive.)
-- [ ] **W0.4 Tracking.** One GitHub issue per wave per repo, linked here, so a session claims a
+- [x] **W0.4 Tracking.** One GitHub issue per wave per repo, linked here, so a session claims a
       wave atomically (the repo's own claim rule, `D-2026-08-15-a-claim-is-a-mutex-not-a-line-edit`).
-- [ ] **W0.5 Programme ADR** `D-2026-10-xx-the-architecture-programme`: the choices this plan takes
+- [x] **W0.5 Programme ADR** `D-2026-10-xx-the-architecture-programme`: the choices this plan takes
       (KG system of record, agent builder, backend RPC, tenancy model), each as Options + Decision +
       `Revisit when:`. This ADR **supersedes** the ones it overturns, listed by id. Written once, not
       per wave.
@@ -97,67 +97,67 @@ behaviour, which is what makes it the right first wave.
 Entry: W0.3 agreed.
 
 ### Track A — CLAUDE.md and session reading (all repos)
-- [ ] **W1.1** Rewrite `Chemclaw3/CLAUDE.md` to ≤150 lines of **current rules only**: layers (once),
+- [x] **W1.1** Rewrite `Chemclaw3/CLAUDE.md` to ≤150 lines of **current rules only**: layers (once),
       where things go, commands, workflow, quality bar, persistent-knowledge files. Delete every
       "used to / this sentence / audited" passage, the duplicated layer section, and the reference
       to the archived G1–G7 checklist. **Resolve the contradiction** between "when unsure, ask" and
       "fix autonomously / merge yourself": state when to ask (destructive, ambiguous, outside scope)
       and that everything else is autonomous.
-- [ ] **W1.2** Same for `Chemclaw3-mcp/CLAUDE.md` (671 lines → ≤150). The egress, auth, health and
+- [x] **W1.2** Same for `Chemclaw3-mcp/CLAUDE.md` (671 lines → ≤150). The egress, auth, health and
       manifest rules stay **as rules**; their history moves to the ADRs that already hold it.
-- [ ] **W1.3** `Chemclaw3_ui`: check its CLAUDE.md/README for the same pattern and trim.
-- [ ] **W1.4** `ARCHITECTURE.md`: one table row per directory, ≤2 sentences each. The paragraphs
+- [x] **W1.3** `Chemclaw3_ui`: check its CLAUDE.md/README for the same pattern and trim.
+- [x] **W1.4** `ARCHITECTURE.md`: one table row per directory, ≤2 sentences each. The paragraphs
       inside cells move to the package READMEs (which already exist).
 
 ### Track B — Decision record
-- [ ] **W1.5** Write `docs/decisions/CURRENT.md`: one page of the decisions in force, grouped by
+- [x] **W1.5** Write `docs/decisions/CURRENT.md`: one page of the decisions in force, grouped by
       area, each one line plus its ADR id. This is what CLAUDE.md links to.
-- [ ] **W1.6** Mark superseded ADRs. Today 72 mention supersession and 6 say "superseded by". Add a
+- [x] **W1.6** Mark superseded ADRs. Today 72 mention supersession and 6 say "superseded by". Add a
       `Superseded-by:` header line (a one-time mechanical exception to "never edit a merged ADR",
       stated in W0.5's ADR). `test_decision_log.py` is reduced to: unique ids, filename matches
       heading, ledger row exists, superseded-by target exists.
-- [ ] **W1.7** Add an ADR template with a mandatory `## Options` section and `Revisit when:` for
+- [x] **W1.7** Add an ADR template with a mandatory `## Options` section and `Revisit when:` for
       declines, and a check that new ADRs (after a cursor) carry both.
-- [ ] **W1.8** Mark the ~60% of ADRs that are defect reports `Kind: defect-record` in the ledger
+- [x] **W1.8** Mark the ~60% of ADRs that are defect reports `Kind: defect-record` in the ledger
       (no file edits), so CURRENT.md and readers can skip them. No new defect ADRs from here on.
 
 ### Track C — Source prose (core, then mcp)
-- [ ] **W1.9** Write the docstring standard in CLAUDE.md: what, why, invariants, ≤~10 lines; no
+- [x] **W1.9** Write the docstring standard in CLAUDE.md: what, why, invariants, ≤~10 lines; no
       history, no "measured on date X", no correction of earlier prose; at most one ADR id per
       module docstring, and none in inline comments.
-- [ ] **W1.10** Mechanical pass, **one package per PR**, largest-prose first: `agent/` (2.06 prose to
+- [x] **W1.10** Mechanical pass, **one package per PR**, largest-prose first: `agent/` (2.06 prose to
       code), `core/config/` (92% prose), `api/`, `durable/`, `kg/`, `science/`, `connectors/`, the
       rest. The history goes into the PR description and commit message; the ADR stays the record.
       Target ≤30% prose per package. Each PR is behaviour-neutral: `make lint type test` green and
       the W0 benchmark unchanged.
-- [ ] **W1.11** Same pass over `Chemclaw3-mcp` (54.5% prose) and `test_fleet.py`'s docstrings.
-- [ ] **W1.12** Tests: trim docstrings over ~10 lines (27% of test lines are docstrings).
+- [x] **W1.11** Same pass over `Chemclaw3-mcp` (54.5% prose) and `test_fleet.py`'s docstrings.
+- [x] **W1.12** Tests: trim docstrings over ~10 lines (27% of test lines are docstrings).
 
 ### Track D — Planning and memory files
-- [ ] **W1.13** `tasks/lessons.md` → ≤30 rules, no incident narratives. The rule broken 20 times (the
+- [x] **W1.13** `tasks/lessons.md` → ≤30 rules, no incident narratives. The rule broken 20 times (the
       destructive git command) becomes a **PreToolUse hook** in `.claude/settings.json` that blocks it
       (`update-config` skill). Delete `test_lessons_stay_a_digest.py` once the file is short.
-- [ ] **W1.14** Move `tasks/audit-2026-08-16/` (49k lines), the dated `review-*`, `story-audit-*`,
+- [x] **W1.14** Move `tasks/audit-2026-08-16/` (49k lines), the dated `review-*`, `story-audit-*`,
       `live-test*`, `paperclip-*` and concept files to `docs/archive/tasks/` (or delete; git keeps
       them). `tasks/` keeps `README.md`, `todo.md`, `lessons.md`.
-- [ ] **W1.15** Merge `docs/planning/DEFERRED.md` into `BACKLOG.md` as a `Deferred` section, **one
+- [x] **W1.15** Merge `docs/planning/DEFERRED.md` into `BACKLOG.md` as a `Deferred` section, **one
       line per item** (what / why not now / trigger). Collapse the 496-line BACKLOG to ≤2 lines per row.
       Keep one register test (`test_backlog_register.py`), delete `test_deferred_register.py`.
 
 ### Track E — Meta-tests
-- [ ] **W1.16** Delete the tests that police prose: `test_claude_md_figures`, `test_dead_vocabulary`,
+- [x] **W1.16** Delete the tests that police prose: `test_claude_md_figures`, `test_dead_vocabulary`,
       `test_docstring_symbols`, `test_docstring_paths`, `test_declines_carry_a_trigger` (replaced by
       W1.7's template check), `test_literature_index_decline`, `test_deferred_register`,
       `test_lessons_stay_a_digest`. In mcp: the 14 CLAUDE.md-prose tests in `test_fleet.py`.
-- [ ] **W1.17** **Keep** and simplify: `test_layering`, `test_third_party_layering`,
+- [x] **W1.17** **Keep** and simplify: `test_layering`, `test_third_party_layering`,
       `test_upstream_surface` (until W5 shrinks it), `test_sibling_manifest_agreement` (until W2
       replaces it), `test_repo_map` (directories and READMEs only, no prose), `test_context_floor`,
       `test_decision_log` (reduced per W1.6).
-- [ ] **W1.18** Split mcp `tests/test_fleet.py` (5.2k lines) by concern: layout, deploy shape,
+- [x] **W1.18** Split mcp `tests/test_fleet.py` (5.2k lines) by concern: layout, deploy shape,
       egress, auth, manifests.
 
 ### Track F — Make and CI
-- [ ] **W1.19** Collapse the 79 Make targets: keep the gate (`lint type test check cov`), `ci`,
+- [x] **W1.19** Collapse the 79 Make targets: keep the gate (`lint type test check cov`), `ci`,
       the validators, `up/down/chat/connectors/db-migrate`, and move the live/bench/storm harnesses
       behind one `make live-<x>` family. `make help` grouped by section.
 - [ ] **W1.20** Fix the parallel-only flaky tests named in
@@ -628,6 +628,46 @@ Exit: the review table below is filled in, with every row measured.
 | Contract versioning blocks releases | W2/W6 | Minor mismatch warns, only major refuses. The umbrella release pins all three. |
 | Tenancy retrofit misses a table | W7 | Migration test that every table except an allowlist has `tenant_id` and an RLS policy. Leak test over all routes. |
 | Parallel sessions collide | all | One issue per wave track as the claim. Tracks own disjoint files. |
+
+## W0 + W1 review (2026-10-07)
+
+Shipped as one PR per repo: Chemclaw3_ui#153 and Chemclaw3-mcp#161 (both merged), and this
+repository's PR. Tracking issue #569.
+
+**How it was kept behaviour-neutral.** All prose edits went through a tool that refuses any file whose
+AST, with docstrings stripped, would change. Two classes of docstring are prompts or schemas rather
+than prose, and both were restored to `main`'s text: agent-tool docstrings, and pydantic, TypedDict
+and Enum class docstrings. The fleet reviewer caught this class. Every tool schema is byte-identical
+to `main`: 75 here (agent tools and in-repo MCP servers) and 81 in the fleet.
+
+Fresh-context reviewers checked every repository. In total, 4 here, 3 in the fleet and 1 in the UI
+reported no code change, and their findings were fixed.
+
+| Metric (this repo) | Before | After | Target | Met? |
+| --- | --- | --- | --- | --- |
+| CLAUDE.md lines | 532 | 149 | ≤150 | yes |
+| `src/` prose share | 55.6% | 37.2% | ≤30% | no — tool/schema docstrings restored, 1–2 line docstrings kept |
+| `src/` lines | 201,462 | 146,858 | — | −27% |
+| Test lines | 253,130 | 217,070 | — | −14% |
+| Markdown outside `docs/decisions` + `docs/archive` | 83,415 | 22,748 | −60% | yes (−73%) |
+| `tasks/` files | 1,640 | 3 | 3 | yes |
+| `lessons.md` lines | 1,924 | 77 (30 rules) | ≤30 rules | yes |
+| Gate wall time | 18:13 serial | serial (unchanged) | ≤10 min | no — W1.20 open |
+
+The Fleet's prose share went from 47.0% to 32.1%; CLAUDE.md there went from 671 to 150 lines. In the UI, Markdown went
+from 6,008 to 934 lines and the comment share from 39.3% to 23.6%.
+
+**Left open, on purpose.**
+- **W1.20.** The parallel-only flake in `test_context_budget` did not reproduce under load, so it
+  was not fixed. The retention one is isolated in a private database. The gate stays serial, as
+  `D-2026-09-13` says, until a parallel run is shown stable.
+- **The `.claude/hooks/block_destructive_git.py` hook.** It misses `git checkout -f`,
+  `git switch --discard-changes` and `bash -c` wrapping, and it over-blocks `git stash pop`. The
+  permission classifier refused an agent's edit to it as self-modification, so a person makes that
+  change.
+- **Schema-class docstrings that still carry history.** Some pydantic model and tool docstrings
+  still contain history. They are prompts, so shortening them is a behaviour change, to be made
+  with an eval run in a later wave.
 
 ## Review (filled in at W8.5)
 
