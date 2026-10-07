@@ -4,6 +4,17 @@ Source: the read-only architecture review of 2026-10-07 across Chemclaw3, Chemcl
 Chemclaw3_ui. This file is the plan for implementing **every** finding of that review, in waves.
 The previous task (deep documentation pass, 2026-10-04) shipped and its record is in git history.
 
+## Decisions taken (2026-10-07, by the owner)
+
+- **Knowledge graph: Postgres only, no git.** Not a mirror, not an export target: git leaves the
+  knowledge path entirely. History is `kg_note_revisions`; human edits go through the API.
+- **Shared coordination: Postgres only.** No Redis.
+- **Agent builder: stay on off-the-shelf `deepagents`** to profit from upstream updates. The
+  self-build is the thing to challenge, not the default: every workaround is either replaced by a
+  public deepagents/LangChain seam, contributed upstream, or argued as the one remaining gap. The
+  standard is that deepagents covers everything a self-built builder would.
+- **Tenancy: `tenant_id` + Postgres row-level security** in one deployment.
+
 Scope: all three repos (`Chemclaw3_mock` only where a contract it serves changes). Each repo's change
 is its own branch and PR, as the repo's rules require.
 
@@ -31,7 +42,7 @@ is its own branch and PR, as the repo's rules require.
 | W2 | One owner per contract (manifests, events, API types) | all | low–med | M | W0 |
 | W3 | Horizontal scale foundations (no per-process truth) | core | med | M | W0 |
 | W4 | Knowledge graph in Postgres | core (+ui read paths) | high | L | W3 (shared locks), W1 |
-| W5 | Agent core: own the builder, one mechanism per concern | core | high | L | W0 baselines, W2 (event schema) |
+| W5 | Agent core: deepagents via public seams, one mechanism per concern | core | high | L | W0 baselines, W2 (event schema) |
 | W6 | Backend RPC, fleet Helm, release unit, CI | mcp, core, ui | med | M | W2 |
 | W7 | Missing capabilities: semantic retrieval, tenancy, backup, lineage, BFF auth, config profiles | all | med–high | L | W3, W4, W6 |
 | W8 | Decomposition, dead-code sweep, final measurement | all | low | M | W1–W7 |
@@ -236,9 +247,8 @@ background worker are all per-process or singleton.
 
 Entry: W0. Can run in parallel with W1 and W2.
 
-- [ ] **W3.1 ADR** (in W0.5): the shared coordination substrate. Options: Postgres only (advisory
-      locks, `SKIP LOCKED`, a small counters table) or Postgres plus Redis. **Recommendation: Postgres
-      only.** It is already required, already pooled and already backed up, and the rates involved
+- [ ] **W3.1 ADR** (in W0.5): the shared coordination substrate is **Postgres only (decided)** —
+      advisory locks, `SKIP LOCKED`, a small counters table; no Redis. It is already required, already pooled and already backed up, and the rates involved
       (turns/s, not requests/ms) are well within it. Revisit when the limiter needs more than
       ~1k decisions/s.
 - [ ] **W3.2 Shared rate limiter and concurrency cap.** Replace the in-memory `BoundedLru` limiter and
@@ -288,18 +298,17 @@ flips once the lane is green.
 
 ## W4 — Knowledge graph in Postgres
 
-**Goal.** Postgres becomes the knowledge graph's system of record, and git becomes an export/audit
-mirror. This removes the cluster-wide git lock (~300 ms/note, ≈3 notes/s ceiling), the per-pod
+**Goal.** Postgres becomes the knowledge graph's **only** store; git leaves the knowledge path
+entirely (decided). This removes the cluster-wide git lock (~300 ms/note, ≈3 notes/s ceiling), the per-pod
 NetworkX copy (~5 kB/note/pod), the per-pod clone plus `reset --hard` sidecar, and the
 `note_index` second copy.
 
 Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smaller files to move).
 
-- [ ] **W4.1 ADR** (in W0.5): Postgres is the system of record for notes, and git is a mirror.
-      Supersedes the git-write half of the layer-4 description, and keeps "Markdown with frontmatter"
-      as the **format**. Options: (a) keep git and batch, (b) Postgres plus a git mirror,
-      (c) a graph database. Recommendation (b): one store, existing backups, transactional writes,
-      and pgvector already sits beside it.
+- [ ] **W4.1 ADR** (in W0.5): Postgres is the only store for notes (decided; options weighed were
+      git + batching, Postgres + git mirror, Postgres only, a graph database). Supersedes the
+      git half of the layer-4 description; "Markdown with frontmatter" survives as the note **format**
+      (body + JSONB frontmatter), not as files.
 - [ ] **W4.2 Schema** (`infra/sql/122_kg_notes.sql`):
   - `kg_notes` (id, type, frontmatter JSONB, body text, created_by, valid_from, valid_to,
     revision, content_sha, created_at);
@@ -324,15 +333,12 @@ Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smalle
 - [ ] **W4.6 Backfill and dual-write.** A `cli/kg_import` command loads the git corpus (42 notes
       today) into Postgres. Under setting `kg_store=dual`, writes go to both, reads come from git,
       and a nightly `kg-validate --compare` diffs the two.
-- [ ] **W4.7 Flip reads** (`kg_store=postgres`), then make **git the mirror**: a background job
-      exports changed notes as Markdown and pushes in batches (using the existing
-      `BatchingNoteWriter`, already measured at 8.5–31.6 ms/note). A push failure delays the mirror
-      and never a write.
-- [ ] **W4.8 Human edits.** A reviewed commit to the knowledge repo is imported by the same job
-      (git → Postgres on a fast-forward), so "corrected, not pre-approved" still works from git.
-      A conflict (both sides changed) is resolved by revision number and raises a `kg/conflicts`
-      entry.
-- [ ] **W4.9 Delete** the per-pod clone, `deploy/knowledge-sync.sh`, the init container and sidecar,
+- [ ] **W4.7 Flip reads** (`kg_store=postgres`). No mirror: git is not written after the flip.
+- [ ] **W4.8 Human edits through the API.** `PUT /knowledge/notes/{id}` (privileged role for
+      others' notes) writes a new revision through `kg/record.py`; a `cli/kg_export` dumps the
+      corpus as Markdown on demand for offline review, and `cli/kg_import` is the one-time and
+      disaster-recovery loader. The shipped seed corpus in `knowledge/` becomes import fixtures.
+- [ ] **W4.9 Delete** `kg/git_writer.py`, `BatchingNoteWriter`, the per-pod clone, `deploy/knowledge-sync.sh`, the init container and sidecar,
       the advisory lock held across the push, the stat-fingerprint cache in `graph.py`,
       `knowledge_sync_age_seconds` and its alert. Update the chart values (`knowledge.*`).
 - [ ] **W4.10 Validators.** `kg-validate` runs against the Postgres store (citation existence in one
@@ -346,50 +352,53 @@ Exit (measured against W0):
 - No git process on the request path.
 - `kg-validate --compare` is clean for 7 days before W4.9.
 
-Rollback: until W4.9, flip `kg_store` back to `git`; dual-write keeps git current.
+Rollback: until W4.9, flip `kg_store` back to `git`; dual-write keeps git current. After W4.9 the
+rollback is a Postgres restore (W7.7), which is why W7.7's drill is pulled forward to run before W4.9.
 
 ---
 
-## W5 — Agent core: own the builder, one mechanism per concern
+## W5 — Agent core: deepagents via public seams, one mechanism per concern
 
-**Goal.** Stop fighting `create_deep_agent` (32 middlewares, 64 pinned private upstream shapes),
-then merge the parallel mechanisms that successive redesigns left (spend 3.1k LOC, context 4.5k,
+**Goal.** Use `create_deep_agent` through its public seams instead of fighting it (32 middlewares,
+64 pinned private upstream shapes), then merge the parallel mechanisms that successive redesigns left (spend 3.1k LOC, context 4.5k,
 persistence 5.5k, authz 2.5k, skills 3.2k, plan 2.1k).
 
 Entry: W0 baselines (turn latency, middleware count). W1.10 `agent/` prose pass done. W2.8 event
 schema (so the UI cannot drift during the refactor).
 
-### Track A — The builder
-- [ ] **W5.1 Spike (time-boxed, one session): `create_agent` plus an explicit middleware list.** The
-      docstring in `langgraph_agent.py` names the two reasons for `create_deep_agent`:
-  - **filesystem `permissions=`**, reachable only through upstream's private `_permissions=`;
-  - **`subagents=`**, which controls the `task` roster.
+### Track A — The builder: stay on deepagents, and make it carry everything (decided)
 
-  The spike proves both without deepagents:
-  - **(a)** Own the filesystem tools through a first-party backend that enforces the permission
-    rules itself. `agent/skill_backend.py` already does this for skills, and `agent/scratchpad.py`
-    already withholds verbs.
-  - **(b)** Own the `task` tool: a ~150-line first-party delegation tool that compiles each helper
-    with `build_langgraph_agent`, so helpers *always* carry audit, authz and the plan gate. This
-    also removes the silent no-audit trap CLAUDE.md warns about.
-  - **(c)** Skills via `SkillsMiddleware` alone, or a first-party loader over the same three
-    predicates.
+The decision is to **stay on off-the-shelf `deepagents`**. The self-built builder is challenged,
+not adopted: for each workaround the question is "which public deepagents/LangChain seam does this,
+and if none, can upstream take it?" The bar: deepagents must cover everything a self-built builder
+could.
 
-  Go/no-go: all of `test_middleware_order`, `test_subagents`, `test_skill_*` and `test_handoff`
-  pass, and the W0 benchmark is equal or better.
-- [ ] **W5.2 ADR** (record the spike's result): own builder or stay on deepagents. If go:
-- [ ] **W5.3** Implement `agent/builder.py` behind `agent_builder=native|deepagents`. Delete
-      `disabled_summarizer`, the `_permissions=` re-pass, the `ReloadingSkillsState` channel
-      redeclaration and the `.name` splicing. Shrink `test_upstream_surface.py` to the public
-      LangChain/LangGraph surface still used. Target ≤15 root middlewares.
-- [ ] **W5.4 Build once per process, bind per turn.** Compile the graph once per (profile,
+- [ ] **W5.1 Gap inventory.** For every workaround in `agent/` (and every entry in
+      `tests/test_upstream_surface.py`), record against the **current** deepagents/LangChain
+      release: (a) now covered by a public API → migrate; (b) coverable by a documented extension
+      point (custom `BackendProtocol`, `SubAgent`/`CompiledSubAgent`, `AgentMiddleware`,
+      `context_schema`) → migrate; (c) a real upstream gap → open an upstream issue/PR and keep a
+      minimal shim with the upstream link. Known items:
+  - filesystem `permissions=` reached via private `_permissions=` → a permission-enforcing
+    `BackendProtocol` (as `skill_backend.py` already is) or upstream public parameter;
+  - helpers built as bare `SubAgent` dicts with only `spec["middleware"]` (no audit/authz/plan
+    gate) → pass `CompiledSubAgent`s compiled by `build_langgraph_agent`, so a helper always carries
+    the chain;
+  - `disabled_summarizer`, `ReloadingSkillsState` redeclaration, `.name` splicing, the
+    `ModelCallLimitMiddleware` incompatibility, `task` returning `Command` → each classified (a)/(b)/(c).
+- [ ] **W5.2 Upgrade deepagents/langchain/langgraph to latest** and migrate every (a)/(b) item. The
+      upgrade is the first deliverable because each later release should then be a lockfile bump.
+- [ ] **W5.3 Upstream the (c) items** (issues/PRs against `langchain-ai/deepagents`), each shim
+      carrying its upstream link and a test that turns red when upstream fixes it (the pattern
+      `test_upstream_surface.py` already uses for absences). Target: `test_upstream_surface.py`
+      ≤500 lines; root middlewares ≤15 by removing first-party ones that duplicate upstream
+      behaviour, not by replacing upstream ones.
+- [ ] **W5.4 Build once per process, bind per turn.** Compile the deep agent once per (profile,
       bundle-set) and inject the turn's connector sessions through `runtime.context` (LangGraph
-      `context_schema`) instead of closing over them, so a turn does not recompile. Keep the per-turn
-      build only for the narrowed helper surfaces if needed. Target: steady-state build cost
-      ≈0, TTFT −100 ms.
+      `context_schema`) instead of closing over them. If deepagents cannot take per-turn tools that
+      way, that is a (c) item for W5.3, and the per-turn build stays meanwhile.
 - [ ] **W5.5 Import time.** Lazy-import heavy stacks (bofire/torch, rdkit) out of the API's import
-      path. Target: cold import of `chemclaw.api.app` ≤5 s (from 16.6 s), which also speeds up
-      every test process and pod start.
+      path. Target: cold import of `chemclaw.api.app` ≤5 s (from 16.6 s).
 
 ### Track B — One mechanism per concern
 - [ ] **W5.6 Spend.** One `spend/` module holding:
@@ -425,7 +434,7 @@ schema (so the UI cannot drift during the refactor).
 - [ ] **W5.13 Split `api/runner.py`** (3k LOC, `run_turn` ≈570 lines) into stages: `open_surface`,
       `stream`, `resume_on_jobs`, `verify`, `settle`. Each stage is a function with its own test,
       and `run_turn` is the 30-line pipeline.
-- [ ] **W5.14 Delegation re-check.** With the native builder, re-run `make live-delegation`
+- [ ] **W5.14 Delegation re-check.** After the upgrade, re-run `make live-delegation`
       (`D-2026-09-27`). If it still does not pay, ship `agent_helper_roster` **off** by default (its
       surface stays available).
 
@@ -437,7 +446,7 @@ Exit (against W0):
 - Cold import ≤5 s.
 - No test removed without its behaviour being covered by a new one.
 
-Rollback: `agent_builder=deepagents` for one release; each Track B item is an internal refactor
+Rollback: the deepagents upgrade is a lockfile revert; each Track B item is an internal refactor
 behind unchanged public tools and events (the W2.8 schema pins the events).
 
 ---
@@ -521,14 +530,13 @@ Entry: W3, W4 (lineage and tenancy touch KG tables), W6 (chart for backup jobs).
       with a recall@k floor, run with the real provider in the live lane.
 
 ### Track B — Multi-tenancy
-- [ ] **W7.4 ADR**: the tenancy model. Options: (a) deployment-per-tenant (today, documented and
-      chart-guarded), (b) a `tenant_id` column plus Postgres RLS within one deployment,
-      (c) schema-per-tenant. Recommendation: (b) for data plus (a) as the option for regulated
-      separation. Revisit if a tenant needs separate encryption keys.
-- [ ] **W7.5** If (b): `tenant_id` on every table (migration with a default tenant), RLS policies,
+- [ ] **W7.4 ADR** (in W0.5): the tenancy model is `tenant_id` + Postgres RLS (decided; options
+      weighed were deployment-per-tenant, RLS, schema-per-tenant). Revisit if a tenant needs separate
+      encryption keys.
+- [ ] **W7.5** `tenant_id` on every table (migration with a default tenant), RLS policies,
       the tenant set per connection from the authenticated principal (`SET app.tenant`), the KG
       (`kg_notes`) and the vector stores included, and a cross-tenant leak test over every API route.
-- [ ] **W7.6** Whatever the option: a chart guard that two releases do not share a database without
+- [ ] **W7.6** A startup guard that two releases do not share a database without
       tenancy (the gap CLAUDE.md says "no chart guard can check" — a startup check of a `deployment_id`
       row in the database can).
 
@@ -615,7 +623,7 @@ Exit: the review table below is filled in, with every row measured.
 | Risk | Wave | Mitigation |
 | --- | --- | --- |
 | Knowledge-store cutover loses or diverges notes | W4 | Dual-write, nightly compare, 7 clean days before deleting git reads, git mirror kept forever. |
-| The native builder loses a security property deepagents gave | W5 | Spike with go/no-go on the existing authz, subagent, skill and handoff tests. Helpers compiled by our builder always carry audit and authz, which is stricter than today. |
+| A deepagents upgrade breaks a security property | W5 | Upgrade gated on the existing authz, subagent, skill and handoff tests; helpers passed as `CompiledSubAgent`s built by `build_langgraph_agent` always carry audit and authz, which is stricter than today. |
 | The prose cut removes knowledge someone needed | W1 | History moves to commit messages and ADRs, never just deleted. `CURRENT.md` is reviewed by a human. |
 | Contract versioning blocks releases | W2/W6 | Minor mismatch warns, only major refuses. The umbrella release pins all three. |
 | Tenancy retrofit misses a table | W7 | Migration test that every table except an allowlist has `tenant_id` and an RLS policy. Leak test over all routes. |

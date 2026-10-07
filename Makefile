@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status kind-up kind-down kind-status kind-smoke kind-validate
+.PHONY: help install architecture-baseline lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status kind-up kind-down kind-status kind-smoke kind-validate
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -425,6 +425,9 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 	  echo "deps-audit: SKIPPED - the advisory database is unreachable and CI is unset."; \
 	  echo "deps-audit: the lockfile was NOT audited. Re-run with a network before you push."; \
 	fi
+
+architecture-baseline:  ## Measure the architecture programme's baseline (import, build, prose, sizes) to docs/planning/.
+	uv run python -m chemclaw.cli.architecture_baseline
 
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
