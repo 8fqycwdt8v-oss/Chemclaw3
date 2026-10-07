@@ -108,7 +108,7 @@ def failed_and_recovered(messages: list[BaseMessage]) -> tuple[frozenset[str], f
 
 
 def _failure_census(sessions: list[SessionFailures]) -> dict[str, Any]:
-    """The failure arm's numbers: failure classes recurring across sessions, and repeats after a fix.
+    """The failure arm: failure classes recurring across sessions, and repeats after a fix.
 
     A failure class is one tool name that errored; it recurs when it errored in ≥ 2 sessions. It was
     repeated after recovery when a session that failed and recovered on it precedes one that failed

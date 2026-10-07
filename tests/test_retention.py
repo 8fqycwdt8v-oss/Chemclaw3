@@ -2551,6 +2551,41 @@ async def _seed_fat_sessions(count: int, start: int) -> None:
         await conn.commit()
 
 
+async def _private_database(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Create an empty database and point every DSN setting at it; returns its name.
+
+    `VACUUM`'s horizon is per database: any backend in the same database holding a snapshot stops
+    dead tuples being removed. Under `pytest -n` every worker shares one database (each in its own
+    schema), so a sibling worker's transaction pinned the horizon mid-test and the reclamation
+    assertions failed only in parallel. A private database has no other backends.
+    """
+    name = f"chemclaw_vacuum_{uuid4().hex[:12]}"
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            psycopg.conninfo.make_conninfo(**base), autocommit=True
+        ) as conn:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+    except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - env-dependent
+        pytest.skip("this role cannot CREATE DATABASE, which the vacuum-horizon test needs")
+    private = psycopg.conninfo.make_conninfo(**{**base, "dbname": name})
+    for setting in ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn"):
+        if str(getattr(settings, setting)):
+            monkeypatch.setattr(settings, setting, private)
+    return name
+
+
+async def _drop_database(name: str) -> None:
+    """Drop a database `_private_database` created, closing any connection still open on it."""
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    async with await psycopg.AsyncConnection.connect(
+        psycopg.conninfo.make_conninfo(**base), autocommit=True
+    ) as conn:
+        await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
 def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
     """A row count is not a quantity of disk, and until this the sweep reported only rows.
 
@@ -2579,15 +2614,14 @@ def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
     async def _run() -> tuple[list[int], RetentionOutcome, int, int]:
         await migrated_db_or_skip()
         monkeypatch = pytest.MonkeyPatch()
+        private = await _private_database(monkeypatch)
         monkeypatch.setattr(settings, "retention_session_messages_days", 365)
         monkeypatch.setattr(settings, "retention_session_events_days", 0)
         monkeypatch.setattr(settings, "retention_tool_results_days", 0)
         monkeypatch.setattr(settings, "retention_result_publications_days", 0)
         monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
         try:
-            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-                await cur.execute("TRUNCATE session_messages")
-                await conn.commit()
+            await migrated_db_or_skip()
             sizes: list[int] = []
             outcome = RetentionOutcome()
             for cycle in range(4):
@@ -2602,6 +2636,7 @@ def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
             )
         finally:
             monkeypatch.undo()
+            await _drop_database(private)
 
     sizes, outcome, dead, pinned = asyncio.run(_run())
     if pinned:
