@@ -1,29 +1,10 @@
-"""One boolean semantics for the lexical leg, so the rank fusion is not fed an empty list.
+"""One boolean semantics for the lexical leg, so rank fusion is not fed an empty list.
 
-The open finding this covers is "the two lexical legs disagree on AND vs OR": `PostgresNoteIndex`
-ANDed the query's terms (`websearch_to_tsquery`) while `InMemoryNoteIndex` — the reference the unit
-tests stand on — scored any note sharing a single token. The consequence was not a cosmetic
-mismatch: an ordinary multi-word question matched nothing in production, so the lexical leg
-contributed no chunks and Reciprocal Rank Fusion ran one-legged, while every test passed on the
-in-memory OR.
-
-**Widening a query is not the same as widening its lexemes, and the first fix confused the two.**
-The widened form was built by ORing `tsvector_to_array(to_tsvector(q))` — every stem in the query
-text — and `to_tsvector` does not know `websearch_to_tsquery`'s `-term` exclusion syntax. So a
-`-solvent` exclusion came back as a positive OR term and a chemist who typed it got the solvent
-notes: measured on the corpus below, `amide coupling -solvent` returned all four notes including
-`solvent-guide`, whose whole body is "solvent selection guide". `test_a_negated_term_is_excluded_*`
-is what would have caught it, and it is asserted on both backends because a reference that reads an
-exclusion as a request is the same defect in the mirror.
-
-**RRF is not the fix for that, and this file is where the distinction is made checkable.** Fusing by
-rank is what lets a cosine and a `ts_rank` be combined without agreeing on a score scale, and it is
-already how `hybrid` mode merges the sources — but a leg that returns *no rows* contributes nothing
-to any fusion rule. So the semantics had to be made one, and the tests below assert both halves:
-that the two backends now answer a multi-word question the same way, and that the fusion is
-consequently two-legged where it used to be one.
-
-The server-backed half needs a real Postgres and skips in the offline sandbox.
+`PostgresNoteIndex` and the in-memory reference must agree: an AND-only backend makes an ordinary
+multi-word question match nothing, so fusion runs one-legged. The widened form ORs the parsed
+query's clauses, so `websearch_to_tsquery`'s `-term` exclusion and quoted phrases survive; both are
+asserted on both backends. RRF cannot fix an empty leg: a list with no rows contributes nothing to
+any fusion rule. The server-backed half needs Postgres and skips offline.
 """
 
 import asyncio
@@ -55,10 +36,7 @@ _CORPUS = {
     "unrelated": "distillation reflux ratio study",
 }
 _QUERY = "amide coupling solvent screen"
-# The same question with the solvent notes taken out of it. The corpus needs nothing added to make
-# this discriminating: two of its notes carry `solvent` and must drop out, `partial-amide` carries
-# both wanted stems and neither excluded one, and `unrelated` carries nothing wanted — so the
-# answer is exactly one note, while the shipped widened form returned three.
+# The same question with the solvent notes excluded: exactly one note (`partial-amide`) qualifies.
 _EXCLUDING_QUERY = "amide coupling -solvent"
 
 
@@ -123,11 +101,9 @@ async def test_postgres_lexical_states_the_same_boolean_rule_as_the_reference() 
 
 
 async def test_a_negated_term_is_excluded_by_the_reference() -> None:
-    """`-solvent` removes the solvent notes instead of asking for them.
+    """`-solvent` removes the solvent notes in the in-memory reference instead of asking for them.
 
-    The in-memory half of the regression: the reference tokenized the query flat, so the `-` was
-    punctuation and `solvent` was a term the chemist had *asked* for. A reference that reads an
-    exclusion backwards cannot witness the durable backend reading it backwards either.
+    A reference that reads an exclusion backwards cannot witness the durable backend doing so.
     """
     index = InMemoryNoteIndex()
     await _load(index)
@@ -136,11 +112,10 @@ async def test_a_negated_term_is_excluded_by_the_reference() -> None:
 
 
 async def test_a_negated_term_is_excluded_by_the_durable_backend() -> None:
-    """The live regression, on the backend that shipped it: `-solvent` returned the solvent notes.
+    """`-solvent` removes the solvent notes in the durable backend.
 
-    Measured on this corpus against PostgreSQL 16 / pgvector 0.8.0 before the fix — the widened form
-    was `'amid' | 'coupl' | 'solvent'`, so `complete` and `partial-solvent` came back as hits and a
-    chemist excluding solvent got solvent notes. It is now `( 'amid' | 'coupl' ) & !'solvent'`.
+    The widened query must be `( 'amid' | 'coupl' ) & !'solvent'`, not `'amid' | 'coupl' |
+    'solvent'`.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -161,11 +136,10 @@ async def test_a_negated_term_is_excluded_by_the_durable_backend() -> None:
 
 
 async def test_a_quoted_phrase_survives_the_widening() -> None:
-    """A phrase is one clause, so splitting the parsed query on ` & ` leaves it whole.
+    """A quoted phrase survives the widening.
 
-    The widening turns the parsed query's top-level conjunction into a disjunction, and the one way
-    that could go wrong quietly is by taking a `'a' <-> 'b'` phrase apart into two independent
-    terms — which would silently answer a different question rather than fail.
+    Splitting the top-level conjunction must not take a `'a' <-> 'b'` phrase apart, which would
+    silently answer a different question.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -216,9 +190,7 @@ def _chunks(retriever: str, note_ids: list[str], score: float) -> list[EvidenceC
 def test_rrf_is_decided_by_rank_and_not_by_the_legs_score_scales() -> None:
     """Two legs whose scores differ by two orders of magnitude fuse purely on position.
 
-    This is why the legs never had to agree on a *score*: a cosine in [0, 1] and a `ts_rank` in the
-    hundredths are not comparable quantities, and RRF never compares them. It is also why RRF alone
-    could not have fixed the AND/OR disagreement — see the next test.
+    RRF never compares scores across legs, which is also why it could not fix an empty leg.
     """
     dense = _chunks("vector", ["b", "a", "c"], score=0.91)
     lexical = _chunks("lexical", ["a", "b", "c"], score=0.004)
@@ -235,19 +207,12 @@ def test_rrf_is_decided_by_rank_and_not_by_the_legs_score_scales() -> None:
 
 
 def test_three_legs_over_one_corpus_vote_once() -> None:
-    """The correlated-ranker fix: a corpus read by three legs does not outvote a one-leg corpus.
+    """Three legs over one corpus vote once, not three times.
 
-    RRF's premise is *independent* rankers, and `graph`, `lexical` and `vector` are three rankers
-    over one note tree — measured on the shipped corpus, their pairwise agreement is 47/55, 44/55
-    and 41/53, because the shipped `embedding_provider` is `hash` and all three are therefore
-    term-overlap rankers. Single-stage, that corpus casts three votes for the same note and a
-    second corpus's best hit cannot reach it: the agreement term carries no `k`, so `3/(k+1)` beats
-    `1/(k+1)` for every positive `k` and every weight.
-
-    Here `shared` is ranked first by all three legs of one corpus and `other` first by the only leg
-    of another. Single-stage puts `shared` first on the strength of its corpus having three legs.
-    Two-stage fuses each corpus first, so both arrive as one rank-1 vote and the tie breaks by note
-    id — which is the correct answer for two corpora that each put their best foot forward.
+    RRF assumes independent rankers, and `graph`, `lexical` and `vector` over one note tree are
+    correlated. Single-stage, a three-leg corpus's shared hit beats another corpus's best hit for
+    any `k` and weight. Two-stage fuses each corpus first, so both arrive as one rank-1 vote and
+    tie.
     """
     legs = [
         _chunks("graph", ["shared", "filler-a"], score=1.0),
@@ -278,20 +243,11 @@ def test_three_legs_over_one_corpus_vote_once() -> None:
 
 
 def test_an_empty_leg_does_not_pull_its_corpus_tier_toward_neutral() -> None:
-    """The control the comment beside the code claimed and the code did not implement.
+    """An empty leg does not pull its corpus tier toward neutral.
 
-    That comment says an empty list "contributes nothing to the ranking and must not skew its
-    corpus's mean either", and `tiers.setdefault(corpus, []).extend(tier or {1.0})` did exactly the
-    second thing: it defaulted the empty leg to the *neutral* tier 1.0 and averaged it in. Measured
-    with `{graph: 1.5, lexical: 1.5, eln: 1.0}` — two legs over one note corpus weigh 1.5, and the
-    lexical leg returning zero chunks weighed **1.25**, a corpus pulled a quarter of the way to
-    neutral by a leg that found nothing.
-
-    Asserted on the weight the cross-corpus stage is given rather than on an output order, because
-    no order flip was observable: RRF is near-flat at `k=60`, which is why this survived as a
-    comment claiming a control. Spying on the recursive call is what makes the internal number a
-    fact — the alternative was asserting a rank that does not move, i.e. a test that passes either
-    way.
+    An empty list contributes nothing and must not be averaged into its corpus's weight as 1.0.
+    Asserted on the weight passed to the cross-corpus stage (by spying on the recursive call), since
+    RRF is near-flat at `k=60` and no output order flips.
     """
     from chemclaw.retrieval import hybrid
 
@@ -324,12 +280,10 @@ def test_an_empty_leg_does_not_pull_its_corpus_tier_toward_neutral() -> None:
 
 
 def test_a_corpus_whose_every_leg_came_back_empty_still_has_a_weight() -> None:
-    """The edge the fix above opens, and the one place a neutral default is right.
+    """A corpus whose every leg came back empty still has a weight.
 
-    Skipping an empty leg means a corpus all of whose legs are empty has no tier at all, and the
-    mean of nothing is a `ZeroDivisionError` on a total retrieval miss for that corpus. It
-    contributes no chunk, so the weight is never applied to anything — which is what makes 1.0
-    the honest answer there rather than a skew.
+    The mean of nothing would raise on a total miss; the weight applies to no chunk, so 1.0 is
+    harmless there.
     """
     legs = [_chunks("graph", ["n1"], score=1.0), _chunks("lexical", [], score=1.0)]
     fused = reciprocal_rank_fusion(
@@ -339,11 +293,9 @@ def test_a_corpus_whose_every_leg_came_back_empty_still_has_a_weight() -> None:
 
 
 def test_all_distinct_corpora_fuse_exactly_as_before() -> None:
-    """The other direction: naming every list its own corpus is the single-stage fusion.
+    """Naming every list its own corpus is exactly the single-stage fusion.
 
-    Without this the two-stage path could be satisfied by changing every ordering, and a
-    deployment running one leg per corpus — which is every shipped configuration — would have had
-    its retrieval silently re-ranked by a change that was supposed to leave it alone.
+    Every shipped configuration runs one leg per corpus, and the two-stage path must not re-rank it.
     """
     legs = [
         _chunks("graph", ["a", "b", "c"], score=1.0),
@@ -362,11 +314,9 @@ def test_a_corpus_list_that_does_not_match_the_ranked_lists_is_refused() -> None
 
 
 def test_a_leg_that_returns_nothing_cannot_be_rescued_by_the_fusion() -> None:
-    """An empty lexical list leaves the dense ranking untouched — the one-legged sweep, exactly.
+    """A leg that returns nothing cannot be rescued by the fusion.
 
-    The point of asserting this: it is the reason the AND/OR disagreement had to be fixed in the
-    backends rather than in the fusion. Whatever `k` is, `sum(1/(k+rank))` over an empty list is
-    zero, so no fusion rule can recover evidence a leg never returned.
+    `sum(1/(k+rank))` over an empty list is zero for any `k`, so the fix belongs in the backends.
     """
     dense = _chunks("vector", ["b", "a", "c"], score=0.91)
     one_legged = [chunk.source_note_id for chunk in reciprocal_rank_fusion([dense, []], k=60)]
@@ -374,11 +324,9 @@ def test_a_leg_that_returns_nothing_cannot_be_rescued_by_the_fusion() -> None:
 
 
 async def test_the_widened_lexical_leg_changes_what_the_fusion_produces() -> None:
-    """End to end: the leg now contributes a ranking, and the fused order reflects it.
+    """End to end: the widened lexical leg contributes a ranking, and the fused order reflects it.
 
-    Same dense ranking in both halves; the only difference is whether the lexical leg answered the
-    multi-word question. Under the old AND semantics it did not, and the sweep returned the dense
-    ranking verbatim.
+    Same dense ranking in both halves; under AND-only semantics the sweep returned it verbatim.
     """
     index = InMemoryNoteIndex()
     await _load(index)
@@ -422,38 +370,17 @@ def test_a_larger_k_flattens_the_advantage_of_the_top_rank(k: int) -> None:
     ]
 
 
-# --- What a source weight can and cannot do to a correlated leg ---------------------------------
-#
-# Added after the fourth remedy for the correlation row was measured and found to be a no-op
-# (`D-2026-09-15-a-weight-small-enough-to-work-is-a-removal-spelled-as-a-number`). `BACKLOG.md`
-# already records `retrieval_fusion_k`, `retrieval_source_weights` tiering *up*, and
-# one-corpus-one-vote as measured no-ops; down-weighting the correlated leg is the one a reader
-# reaches for next, and it fails for a reason that is arithmetic rather than a tuning miss.
-#
-# Nothing exercised the `weights=` path in this file before this, which is why the property was
-# available to be believed either way.
+# --- What a source weight can and cannot do to a correlated leg ---
 
 
 def test_a_weight_in_any_range_a_person_would_try_cannot_undo_a_correlated_leg() -> None:
-    """The fourth measured no-op, as the arithmetic that makes it one.
+    """No weight in a range a person would try undoes a correlated leg.
 
-    The defect `BACKLOG.md` measures: three legs over one note corpus agree with each other, so a
-    note two of them rank displaces the note the question is about. Down-weighting the third leg
-    looks like the remedy.
-
-    The shape, minimised. `gold` is what the question is about and only the graph leg finds it, at
-    rank 1. `pair` is a near-miss the graph leg ranks *second* and the dense leg ranks first — so
-    the dense leg's vote is exactly what puts `pair` ahead, and removing that vote is what the row
-    wants undone.
-
-    A weight divides the **rank**, and the rank term is nearly flat at `k=60` (the
-    `reciprocal_rank_fusion` docstring says so for a different purpose): a rank-1 hit contributes
-    `1/(60 + 1/w)`, which falls only from 0.01639 to 0.01429 as `w` goes 1.0 → 0.1. That is a 13%
-    change across a **tenfold** weight, against a gap the vote has to give up entirely. So every
-    weight in the range the config's own ENV example uses leaves the order exactly as it was.
-
-    Driven end to end over the shipped corpus and the 46 labelled pairs, this is what "mean gold
-    rank 4.72 → 4.56 → 4.69 → 4.67 at weights 1.0 / 0.5 / 0.25 / 0.1" looks like in one function.
+    `gold` is found only by the graph leg at rank 1; `pair` is ranked second by graph and first by
+    dense, so dense's vote puts it ahead. A weight divides the rank, and the rank term is nearly
+    flat at `k=60`: a rank-1 hit contributes `1/(60 + 1/w)`, about 13% less across a tenfold weight,
+    which cannot close the gap the vote creates. So every weight in the documented range leaves the
+    order unchanged.
     """
     for weight in (1.0, 0.5, 0.25, 0.1, 0.01, 0.001):
         fused = reciprocal_rank_fusion(
@@ -474,22 +401,12 @@ def test_a_weight_in_any_range_a_person_would_try_cannot_undo_a_correlated_leg()
 
 
 def test_the_weight_that_would_work_is_small_enough_to_be_a_removal() -> None:
-    """Where the crossover actually is, which is the finding rather than "no weight works".
+    """The weight that would work is small enough to be a removal.
 
-    Solving `1/(60 + 1/w) < 1/61 - 1/62` puts it at **w < 2.7e-4**: the dense leg's rank-1 hit has
-    to fuse as though it were rank 3,729 before it stops deciding this pair. `retrieval_source_
-    weights` accepts that — it refuses non-positive weights and nothing else — so the dial *can*
-    reach the behaviour. It reaches it by being a removal written as a number, which is not a
-    tuning range any operator would find and not a setting anybody should ship.
-
-    That is why the options left in `BACKLOG.md` are an orthogonal embedding provider or not
-    running three legs over one corpus, rather than a dial. **Neither is "drop the dense leg"**,
-    and the same measurement is why: dropping it took mean gold rank 4.69 → 3.69 and cost 3 of 39
-    gold notes, every one of them found *only* by that leg and one at rank 3. Recall is the gated
-    retrieval metric here and rank is the diagnostic, so the trade goes the wrong way.
-
-    Asserted in both directions, because a threshold claim with only its failing side checked is a
-    claim that the feature does nothing.
+    `1/(60 + 1/w) < 1/61 - 1/62` gives w < 2.7e-4, i.e. the dense hit fusing as though at rank
+    ~3,700. `retrieval_source_weights` accepts it, but that is removal written as a number. Dropping
+    the dense leg is not the answer either: it loses gold notes only that leg finds, and recall is
+    the gated metric. Asserted in both directions.
     """
 
     def order_at(weight: float | None) -> list[str]:

@@ -1,19 +1,9 @@
 """Standardization must not merge stereoisomers into one identity.
 
-`standardize` feeds `compound_id`, the ECFP4 and DRFP fingerprint rows and the knowledge graph's
-note ids, so anything it collapses becomes *the same substance* everywhere downstream. RDKit's
-`TautomerEnumerator` defaults `removeSp3Stereo` and `removeBondStereo` to True — a defensible rule
-for a molecule in solution, where a tautomerising centre is not configurationally stable, and the
-wrong rule for an identity function.
-
-Left at the default this erased every stereocentre alpha to a carbonyl, which is most chiral drug
-molecules: (S)/(R)-naproxen, L/D-alanine and R/S-thalidomide each produced one `compound_id`, one
-fingerprint row and one note. The failure was not merely a merged record — chain detection then
-built a product→reactant edge between a run that made one enantiomer and a run that consumed the
-other, asserting a chemical relationship that does not exist.
-
-These tests are written as pairs rather than as assertions about flags, because the flag is the
-mechanism and the pair is the property. A future RDKit that renames the setter should fail here.
+`standardize` feeds `compound_id`, the fingerprint rows and note ids, so a collapse merges
+substances everywhere downstream. RDKit's `TautomerEnumerator` defaults remove sp3 and bond
+stereo, which would erase stereocentres alpha to a carbonyl. Written as pairs of isomers, so a
+renamed RDKit setter fails here.
 """
 
 import pytest
@@ -114,12 +104,10 @@ def test_standardization_version_moved_past_the_stereo_erasing_pipeline() -> Non
 
 
 def test_standardization_version_moved_past_the_atom_map_and_hydride_pipeline() -> None:
-    """The same guard for D-2026-09-09, and the reaction side's *only* retirement lever.
+    """`STANDARDIZATION_VERSION` moved past the atom-map and hydride changes.
 
-    The molecule rows carry `chiral` in their own definition, so they would be retired by that
-    token alone. The DRFP rows have no such token and two things changed under them: atom maps are
-    cleared, and a neutralization that would remove a hydride no longer runs. `std6` rows
-    describe a different notion of sameness and must fall out rather than be ranked against `std7`.
+    It is the reaction side's only retirement lever: DRFP rows carry no other token, so rows built
+    under the old pipeline must fall out rather than be ranked against new ones.
     """
     assert STANDARDIZATION_VERSION != "std6", (
         "atom-map clearing and the protonation guard changed what `standardize` collapses, so "
@@ -127,23 +115,17 @@ def test_standardization_version_moved_past_the_atom_map_and_hydride_pipeline() 
     )
 
 
-# --- the fingerprint half of the same claim (D-2026-09-09) -------------------------------------
+# --- the fingerprint half of the same claim --------------------------------------------------
 #
-# Everything above proves standardization *preserves* stereo. Nothing proved the fingerprints
-# *carry* it, and they did not: `GetMorganGenerator` leaves `includeChirality` at RDKit's `False`
-# default, so every pair above produced bit-identical ECFP4 rows. The two halves are not
-# interchangeable — `compound_id` separating the enantiomers while the bits tie them at 1.0000 is
-# strictly worse than either alone, because a similarity hit cites `compound_id`: the search
-# reports "identical" and hands the reader a citation to the *other* enantiomer's note.
+# ECFP4 must carry chirality too: if `compound_id` separates enantiomers while the bits tie, a
+# similarity hit cites the other enantiomer's note as identical.
 
 
 @pytest.mark.parametrize(("name", "left", "right"), ENANTIOMERS, ids=[c[0] for c in ENANTIOMERS])
 def test_enantiomers_do_not_share_a_fingerprint_row(name: str, left: str, right: str) -> None:
-    """Bits, not ids: this is the assertion `test_enantiomers_keep_separate_identities` cannot make.
+    """Enantiomers do not share a fingerprint row.
 
-    A Tanimoto floor would be the wrong shape here. The failure is a *tie* at exactly 1.0000 —
-    `find_similar_molecules` orders by similarity and breaks ties on the label collation, so the
-    enantiomer sorted first outranks the query's own exact match — and only inequality catches it.
+    Asserted as inequality, since the failure is a tie at exactly 1.0 broken by label collation.
     """
     assert ecfp_bitstring(left) != ecfp_bitstring(right), (
         f"{name}: the two enantiomers hold identical ECFP4 bits, so a search for one returns the "
@@ -160,12 +142,7 @@ def test_double_bond_geometry_reaches_the_fingerprint_too(name: str, left: str, 
 
 
 def test_the_exact_match_outranks_its_own_enantiomer() -> None:
-    """The property the bits exist for, stated as the ranking a chemist reads.
-
-    Not a restatement of the pair tests: those say the rows differ, this says the *ordering* a
-    chemist sees is right. Measured before the fix, all three scored 1.0000 and the (S) enantiomer
-    sorted above the query's own structure.
-    """
+    """The exact match outranks its own enantiomer in the ranking a chemist reads."""
     query = "COc1ccc2cc([C@H](C)C(=O)O)ccc2c1"  # (R)-naproxen
     corpus = {
         "(R)": "COc1ccc2cc([C@H](C)C(=O)O)ccc2c1",
@@ -182,14 +159,9 @@ def test_the_exact_match_outranks_its_own_enantiomer() -> None:
 
 
 def test_a_stereo_unspecified_query_still_finds_a_stereo_specified_record() -> None:
-    """What the change costs, pinned so it cannot quietly get worse.
+    """A stereo-unspecified query still finds a stereo-specified record above the shipped threshold.
 
-    Telling the bits apart means a flat query no longer scores 1.0000 against a specified record,
-    and for a stereo-dense molecule that fall is steep: sucrose measures 0.3061 against the default
-    0.3 threshold. That is the whole cost of the decision, and it is a cost in *ranking* — the
-    neighbour is still returned — where the alternative was a citation error the reader cannot see.
-    A drop below the threshold would turn it back into "no precedent", so the floor is asserted
-    against the shipped one.
+    Chirality-aware bits lower such scores, steeply for stereo-dense molecules; this pins the cost.
     """
     floor = settings.fingerprint_similarity_threshold
     dense = [
@@ -228,11 +200,6 @@ def test_an_achiral_molecule_pays_nothing_for_the_change() -> None:
 
 
 def test_the_definition_names_what_decides_the_bits() -> None:
-    """A stereo-blind row and a stereo-aware one are the same width and are not comparable.
-
-    The same argument the `agents-excluded` token makes on the reaction side: the retirement
-    mechanism is the definition string, so what changed the bits has to be *in* it. Riding on
-    `STANDARDIZATION_VERSION` alone would retire the rows once and then let a later pipeline change
-    move that token while this one silently stayed true.
+    """The fingerprint definition names chirality, since the definition string is what retires rows.
     """
     assert "chiral" in molecule_definition()

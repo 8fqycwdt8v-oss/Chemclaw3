@@ -1,8 +1,7 @@
 """Classifying a forge's refusal, and surviving what a forge writes into a log record.
 
-Three findings, one subject: everything on this path is somebody else's text. The refusal wordings
-this gate reads are four vendors' prose, the stderr it logs is a remote server's output, and the
-branch it interpolates comes from a database row.
+Everything on this path is somebody else's text: refusal wordings are vendors' prose, stderr is a
+remote server's output, and the interpolated arguments come from data.
 """
 
 import asyncio
@@ -19,10 +18,8 @@ from chemclaw.kg.git_writer import (
 )
 from chemclaw.kg.record import NoteFile, NoteWrite
 
-# What each forge actually says when it refuses *this credential*. `GitWriteError` is in
-# `durable/publish.py`'s non-retryable list, so classifying one of these as transient retries a
-# push that will never succeed until a human changes a permission — and classifying a throttle as
-# one of these drops the note proposal outright.
+# What each forge says when it refuses *this credential*. `GitWriteError` is non-retryable, so
+# missing one of these retries forever, and classifying a throttle as one drops the note write.
 _DENIALS = {
     "github-invalid-password": (
         "remote: Invalid username or password.\nfatal: Authentication failed for 'https://host/x'"
@@ -82,22 +79,20 @@ _TRANSIENT = {
 
 @pytest.mark.parametrize("stderr", list(_DENIALS.values()), ids=list(_DENIALS))
 def test_every_forge_in_the_family_has_its_denial_classified(stderr: str) -> None:
-    """The marker list was GitHub-shaped; five of these twelve retried a dead credential forever.
+    """Every forge in the family has its denial classified.
 
-    Surveyed 2026-08-28: GitLab, Bitbucket (Server and Cloud), Azure DevOps and Gerrit each refuse
-    in their own words, and GitHub has a second wording of its own for an unauthorized SSO token.
-    None of them is reachable by the phrases written for GitHub's HTTPS credential failures.
+    GitLab, Bitbucket (Server and Cloud), Azure DevOps, Gerrit and GitHub's SSO wording each refuse
+    in their own words, none matched by GitHub's HTTPS phrases.
     """
     assert _is_auth_failure(stderr)
 
 
 @pytest.mark.parametrize("stderr", list(_TRANSIENT.values()), ids=list(_TRANSIENT))
 def test_a_fault_that_clears_on_its_own_is_never_classified_as_a_credential(stderr: str) -> None:
-    """The other direction, and the reason the list must be wrong in the safe direction.
+    """A fault that clears on its own is never classified as a credential.
 
-    A missed phrase costs a retry; a false positive raises `GitWriteError`, which is non-retryable,
-    so it *drops* the note proposal — the PR-gate stops proposing while every run reports success.
-    Three of these carry a 403 and one carries a 429; none may be read as a credential fact.
+    A false positive raises the non-retryable `GitWriteError` and drops the note write silently, so
+    throttles carrying 403 or 429 must stay transient.
     """
     assert not _is_auth_failure(stderr)
 
@@ -105,11 +100,11 @@ def test_a_fault_that_clears_on_its_own_is_never_classified_as_a_credential(stde
 def test_git_stderr_reaches_the_log_bounded_and_the_exception_whole(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A `pre-receive` hook writes as much as its author chose, into a record under a global lock.
+    """Git stderr reaches the log bounded, and the exception whole.
 
-    `SecretRedactingFilter` regex-scans every record's message while holding the logging lock, so an
-    unbounded field is an unbounded stall for every thread logging in the process. The exception
-    keeps the whole text: it is raised, caught and read, never scanned under that lock.
+    `SecretRedactingFilter` regex-scans every record under the logging lock, so an unbounded field
+    (e.g. a `pre-receive` hook's output) stalls every logging thread. The exception keeps the full
+    text; it is never scanned under that lock.
     """
     submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
     shouting = "remote: " + ("x" * 200_000)
@@ -133,11 +128,9 @@ def test_git_stderr_reaches_the_log_bounded_and_the_exception_whole(
 def test_a_long_branch_is_bounded_in_the_log_line_too(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The same format string interpolates `" ".join(args)`, which carries `refs/heads/<branch>`.
-
-    The docstring used to argue this was safe because "the stderr is git's output rather than a
-    user's text" — an argument that says nothing about the argument list, and is wrong about the
-    stderr as well (`remote:` lines are the remote server's).
+    """A long branch is bounded in the log line too: the format string interpolates `"
+    ".join(args)`,
+    which carries `refs/heads/<branch>`.
     """
     submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
 
@@ -174,15 +167,12 @@ def test_for_log_says_that_it_cut_rather_than_cutting_silently() -> None:
 def test_a_commit_message_a_log_record_could_not_survive_is_refused_at_the_model(
     message: str,
 ) -> None:
-    """Nothing bounded this field's charset or length before it reached a log record.
+    """A commit message a log record could not survive is refused at the model.
 
-    Inherited verbatim from the branch-name rule this replaces
-    (`D-2026-09-05-the-gate-is-deleted-not-dormant` removed the branch): `git_writer._git`
-    interpolates the message into a log record, so a newline forges a log line and an unbounded one
-    stalls every thread behind the redaction filter's regex scan. `record._build_write` composes it
-    from a `Note.id` this repository validates, so on the shipped path the check is redundant — and
-    it is not redundant against a `NoteWrite` constructed directly, which is the only reason a
-    model-level constraint is the right place for it.
+    `git_writer._git` interpolates the message into a log record, so a newline forges a log line and
+    an unbounded one stalls every thread behind the redaction filter. Redundant on the shipped path
+    (`record._build_write` composes it from a validated `Note.id`), but not for a `NoteWrite`
+    constructed directly, which is why the constraint is on the model.
     """
     with pytest.raises(ValueError, match="not usable"):
         NoteWrite(

@@ -56,8 +56,8 @@ class EvalSettings(BaseSettings):
     live_probe_timeout_seconds: float = Field(default=300.0, gt=0)
     # Concurrent probes; they share one front door, Postgres and model account.
     live_probe_concurrency: int = Field(default=4, ge=1)
-    # Where transcripts land; each probe writes one, the evidence a finding cites.
-    live_probe_transcript_dir: str = "tasks/live-test/transcripts"
+    # Where transcripts land (gitignored); each probe writes one, the evidence a finding cites.
+    live_probe_transcript_dir: str = ".live/transcripts"
     # The judge model is routed by `model_routes["live-probe-judge"]`, ideally stronger than the
     # agent; `evals/live_judge.py` warns when unset. This is its output ceiling, which must fit a
     # verdict, a reason and a claims array without truncating the JSON.

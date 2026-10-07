@@ -1,11 +1,8 @@
-"""The skills backend is a gate, not a listing (M4, D-2026-08-10).
+"""The skills backend is a gate, not a listing.
 
-This is the migration's load-bearing security test. Under MAF, narrowing the advertised skill list
-*was* the gate, because `SkillsProvider` was the only way to a skill body. Under deepagents the
-model is handed skill paths and reads them with a filesystem tool, so a backend that filtered only
-`ls` would hide a role-gated skill from the listing and hand it over on request.
-
-Every test here therefore asks the same question twice: is it hidden, and is it unreachable.
+The model is handed skill paths and reads them with a filesystem tool, so a backend that
+filtered only `ls` would hand a hidden skill over on request. Every test asks both: is it hidden,
+and is it unreachable.
 """
 
 import asyncio
@@ -27,11 +24,9 @@ from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, SkillsR
 
 _SKILLS = ("alpha", "beta", "gamma")
 
-# The verbs the gate refuses outright rather than narrowing, sync and async. Written down in one
-# place because two tests need the same answer: one calls every name here and requires a
-# `SkillsReadOnlyRefusal`, the other requires that this set plus the reach probes account for every
-# public method the backend exposes. Neither is a list of what upstream had when it was written —
-# the second test fails if it becomes one.
+# The verbs the gate refuses outright, sync and async. One test requires each to raise
+# `SkillsReadOnlyRefusal`; another requires these plus the reach probes to cover every public
+# method.
 _WRITE_METHODS = frozenset(
     {"write", "edit", "delete", "upload_files", "awrite", "aedit", "adelete", "aupload_files"}
 )
@@ -96,12 +91,10 @@ def test_glob_and_grep_cannot_reach_past_the_gate(tree: str) -> None:
 
 
 def test_the_async_twins_go_through_the_same_gate(tree: str) -> None:
-    """`aread`/`als` dispatch to the overridden sync methods — measured, not assumed.
+    """`aread`/`als` dispatch to the overridden sync methods.
 
-    `FilesystemBackend` implements each async twin as `asyncio.to_thread(self.read, ...)`, so a
-    subclass override is honoured. That is an upstream implementation detail this gate depends on
-    completely, so it is pinned here: if a release ever gives the async half its own body, every
-    async reach would bypass the narrowing silently and this test is what fails.
+    The gate depends on upstream implementing async twins via `asyncio.to_thread(self.read, ...)`;
+    if that changes, async reads would bypass the narrowing and this fails.
     """
     backend = _backend(tree, _only_alpha)
 
@@ -111,25 +104,14 @@ def test_the_async_twins_go_through_the_same_gate(tree: str) -> None:
 
 
 def test_path_traversal_is_refused(tree: str) -> None:
-    """Virtual mode is on, so `..` cannot leave the skills tree.
-
-    deepagents' warning on the old default (`virtual_mode=False`) said it "allows absolute paths and
-    `'..'` to bypass `root_dir`". 0.7 flipped the default to `True` and dropped the warning, which
-    makes this assertion more useful rather than less: the constructor still sets it explicitly, and
-    what is checked here is the *behaviour*, which no longer depends on whose default is in force.
-    """
+    """Path traversal with `..` cannot leave the skills tree; virtual mode is set explicitly."""
     backend = _backend(tree, lambda _: True)
     with pytest.raises(ValueError, match="traversal"):
         backend.read("/../../etc/hostname")
 
 
 def test_the_skills_tree_is_read_only(tree: str) -> None:
-    """An agent that can edit — or delete — a `SKILL.md` decides what judgment the next turn loads.
-
-    Every write verb is probed, not a chosen three: `delete` arrived in deepagents 0.7 and was
-    inherited working, which is why the classification below is the thing under test rather than
-    the three calls that used to be here.
-    """
+    """The skills tree is read-only: every write verb, including `delete`, is refused."""
     backend = _backend(tree, lambda _: True)
     writes: dict[str, Callable[[], Any]] = {
         "write": lambda: backend.write("/alpha/SKILL.md", "rewritten"),
@@ -146,10 +128,8 @@ def test_the_skills_tree_is_read_only(tree: str) -> None:
     for name, call in writes.items():
         assert _call(call) == "refused: SkillsReadOnlyRefusal", f"{name} did not refuse"
 
-    # The *type* is the contract, not the class name: `SkillsReadOnlyRefusal` is an
-    # `AuthorizationError` so that `tool_authz.surface_authorization_denials` — which sits outside
-    # the catch-all converter — is the one that answers the model. A bare `PermissionError` is
-    # neither of the chain's two deliberately-worded families, so it read as an unclassified crash.
+    # The type is the contract: as an `AuthorizationError`, the refusal is answered by
+    # `surface_authorization_denials` rather than read as an unclassified crash.
     assert issubclass(SkillsReadOnlyRefusal, AuthorizationError)
 
     assert Path(tree, "alpha", "SKILL.md").exists(), "a refused write still changed the tree"
@@ -158,16 +138,8 @@ def test_the_skills_tree_is_read_only(tree: str) -> None:
 def test_every_method_the_backend_exposes_is_either_gated_or_refused(tree: str) -> None:
     """No method reaches a refused skill — enumerated from the backend, not from a written list.
 
-    The point of deriving the list is that it survives an upstream release adding a method. A new
-    reach path that this class does not override shows up here as an unexpected mention of `beta`,
-    rather than as a quiet hole a hand-maintained list would never have mentioned.
-
-    **The classification is what is derived, and that is the change 0.7 forced.** This used to
-    subtract a hand-written set of write methods and check only the remainder, so a name added to
-    that set was exempted from every assertion in the file — a hole in the shape of the one it
-    existed to close. Now the reach probes and `_WRITE_METHODS` must *together* cover the surface,
-    so an upstream addition has to be triaged into one or the other before this file passes.
-    `delete` is the case that proves it: 0.7 added it, and neither list mentioned it.
+    The reach probes and `_WRITE_METHODS` must together cover the public surface, so a method
+    upstream adds must be classified before this passes.
     """
     backend = _backend(tree, _only_alpha)
     probes: dict[str, Callable[[], Any]] = {
@@ -183,10 +155,8 @@ def test_every_method_the_backend_exposes_is_either_gated_or_refused(tree: str) 
         "adownload_files": lambda: backend.adownload_files(["/beta/SKILL.md"]),
     }
 
-    # The concrete class as well as the protocol: what a model can reach is what
-    # `NarrowedSkillsBackend` inherits, and a public method upstream adds to `FilesystemBackend`
-    # alone would be invisible to a protocol-only derivation. The two surfaces are identical today,
-    # which is a fact worth failing on rather than an assumption worth resting on.
+    # The concrete class as well as the protocol: a method added to `FilesystemBackend` alone would
+    # be inherited by `NarrowedSkillsBackend` and invisible to a protocol-only derivation.
     surface = {m for m in (*dir(BackendProtocol), *dir(FilesystemBackend)) if not m.startswith("_")}
     unclassified = surface - set(probes) - _WRITE_METHODS
     assert not unclassified, (
@@ -203,11 +173,8 @@ def test_every_method_the_backend_exposes_is_either_gated_or_refused(tree: str) 
 
 
 def test_grep_forwards_the_arguments_upstream_introspects_for() -> None:
-    """`max_count` and `context_lines` must be accepted, because upstream asks whether they are.
-
-    `protocol._method_accepts_max_count` decides whether the cap is pushed down to the backend or
-    applied above it, so an override that dropped the keyword would change how many matches a
-    caller gets depending on which class is underneath — the quietest kind of difference.
+    """`grep` accepts `max_count` and `context_lines`, since upstream introspects for them to decide
+    where the cap is applied.
     """
     accepted = set(inspect.signature(NarrowedSkillsBackend.grep).parameters)
     declared = set(inspect.signature(FilesystemBackend.grep).parameters)
@@ -219,9 +186,7 @@ def test_grep_forwards_the_arguments_upstream_introspects_for() -> None:
 def _call(probe: Callable[[], Any]) -> Any:
     """Run a probe, treating a raised error as a refusal rather than a leak.
 
-    Awaitables are driven to completion: the protocol's async twins are half its reach surface, and
-    a coroutine object's `repr` names no skill at all — so leaving them unawaited would make every
-    one of them pass by never running.
+    Awaitables are driven to completion, or the async half would pass by never running.
     """
     try:
         result = probe()
@@ -246,12 +211,10 @@ def _p(hit: Any) -> str:
 
 
 def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call() -> None:
-    """`SKILL_READ_TOOL` must match deepagents' own prompt, or skills are unloadable.
+    """`SKILL_READ_TOOL` matches the `read_file` name deepagents' skills prompt tells the model to
+    use.
 
-    `SkillsMiddleware` publishes each skill's path and instructs the model to "use `read_file` on
-    the path shown". A tool named anything else leaves every skill advertised and unreadable —
-    a failure that would look exactly like a model declining to load skills, so it is pinned
-    against the prompt rather than trusted to stay in step.
+    Otherwise every skill is advertised and unreadable, which looks like the model declining.
     """
     from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
 
@@ -263,14 +226,8 @@ def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call()
 def _read(backend: BackendProtocol, path: str) -> str:
     """Read one path through upstream's `read_file`, bound to a narrowed backend.
 
-    The hand-written tool this replaced is gone: `FilesystemMiddleware` registers `read_file` over
-    whatever backend it is given, which is the same verb reading through the same gate. These tests
-    therefore exercise *upstream's* tool against the narrowing, which is the arrangement that
-    actually ships — the previous version could only prove the first-party wrapper honoured it.
-
-    The `runtime` is constructed rather than mocked because upstream injects it from the graph and
-    the tool takes it as a required argument. Only the fields the read path touches are populated;
-    a stub that satisfied the signature without carrying the backend would be testing nothing.
+    This is the tool that ships. The `runtime` is constructed with the fields the read path uses,
+    since upstream injects it and the tool requires it.
     """
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from langgraph.prebuilt import ToolRuntime
@@ -293,35 +250,18 @@ def test_the_read_tool_reads_a_permitted_skill(tree: str) -> None:
 
 
 def test_the_read_tool_carries_no_authority_of_its_own(tree: str) -> None:
-    """It reads through the narrowed backend, so it cannot reach what the listing hid.
-
-    The model's only route to a skill body is this tool, so this is the assertion that the gate
-    survives being given a way in: a refused skill stays refused when asked for by name. It matters
-    more now than it did, because the tool is no longer first-party — the refusal has to come from
-    the backend, which is exactly where `NarrowedSkillsBackend` puts it.
-    """
+    """The read tool carries no authority of its own: a refused skill stays refused by name."""
     assert REFUSED in _read(_backend(tree, _only_alpha), "/beta/SKILL.md")
 
 
 def test_a_refused_skills_write_reaches_the_model_as_a_refusal(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The refusal must cross the real chain worded as a refusal, not as an unclassified crash.
+    """A refused skills write reaches the model as a refusal, not as an unclassified crash.
 
-    **Driven through a compiled graph rather than by calling a converter**, because what is under
-    test is the classification *reaching* the model: `surface_authorization_denials` sits outside
-    `surface_domain_errors`, and only the composed chain shows which of the two answered. The
-    raising tool is bound through `connectors=` — the seam `tests/test_tool_authz.py` already uses
-    for a tool whose failure behaviour is the subject — so the refusal travels the same path a
-    backend's would.
-
-    Measured before `SkillsReadOnlyRefusal` existed: `PermissionError` is neither a `ChemclawError`
-    nor an `AuthorizationError`, so it fell into `surface_domain_errors`' catch-all, the model was
-    told "that tool failed unexpectedly and returned nothing" — the opposite of what happened, and
-    an invitation to retry — and `logger.exception` wrote a full traceback at ERROR, a line any
-    model can produce at will by naming a skills path in `write_file`.
-
-    Both are asserted, because the log half is what a wording change alone would leave behind.
+    Driven through a compiled graph, with the raising tool bound via `connectors=`, so the
+    classification is shown reaching the model. Both the wording and the absence of an ERROR
+    traceback are asserted.
     """
     from langchain_core.messages import ToolMessage
     from langchain_core.tools import tool
@@ -364,16 +304,9 @@ def test_a_refused_skills_write_reaches_the_model_as_a_refusal(
 
 
 def test_a_capped_grep_still_says_it_was_capped(tree: str) -> None:
-    """The gate filters the match list; it must not also erase the flag that says it was cut.
+    """A capped grep still says it was capped: the gate must preserve `GrepResult.truncated`.
 
-    `GrepResult` carries `truncated` beside `error` and `matches`, and the rebuild this override
-    used to do named two of the three — so a base backend answering `truncated=True` came back
-    `truncated=False` and upstream's `_format_grep_tool_result` withheld its truncation note. The
-    model then read a capped match list as the whole tree, which is the failure this repository
-    names for `NoteSearch` ("a capped list with no marker reads as the whole corpus", D-066 #4).
-
-    Driven against an all-permitting predicate so the filter removes nothing: what is asserted is
-    that the *narrowing* is the only difference between the two backends, not the disclosure.
+    Driven with an all-permitting predicate, so the narrowing is the only possible difference.
     """
     base = FilesystemBackend(root_dir=tree, virtual_mode=True)
     narrowed = _backend(tree, lambda _name: True)
@@ -386,21 +319,11 @@ def test_a_capped_grep_still_says_it_was_capped(tree: str) -> None:
 
 
 def test_a_skill_longer_than_the_read_default_says_so_rather_than_stopping_silently() -> None:
-    """Why `_SKILL_READ_LIMIT` was deleted rather than wired up: nothing is silent here.
+    """A skill longer than the read default says so rather than stopping silently.
 
-    That constant was `1000` with no reader anywhere, under a comment saying the default "lives
-    here rather than in the model's hands so a skill is not silently truncated when the model
-    forgets". Both halves were measured false. It could not be spent where it was written —
-    `FilesystemMiddleware` calls `backend.read(path, offset=offset, limit=limit)` with `limit`
-    always bound, from the *tool's* signature default of 100, so a backend signature default is
-    unreachable by construction. And the truncation it named is disclosed twice over: upstream's
-    skills prompt tells the model to "pass `limit=1000`", and a partial read comes back with a
-    notice naming the window, the total and the offset to resume from.
-
-    So the constant was a claim that a control existed, which is the `map_to_hpc_identity` shape
-    this tree deletes on sight. This test is what stands in its place, in both directions: it fails
-    if the constant comes back without a seam to be spent at, and it fails if upstream ever drops
-    the disclosure — which is the day a default here would start being worth having.
+    The tool always passes `limit`, so a backend default cannot be spent; upstream's partial-read
+    notice discloses the window instead. Fails if a read-limit constant returns without a seam, or
+    if upstream drops the disclosure.
     """
     from chemclaw.agent import skill_backend
 
@@ -444,12 +367,7 @@ def _empty_listing(tmp_path: Path) -> str:
 
 
 def test_an_empty_skills_listing_does_not_invite_the_model_to_write_one(tmp_path: Path) -> None:
-    """Upstream's empty listing tells the model to create a skill; every write verb refuses one.
-
-    Verbatim on a cold deployment: `(No skills available yet. You can create skills in /cold)` —
-    an instruction to attempt the one thing `SkillsReadOnlyRefusal` exists to refuse, naming a
-    virtual route that is not a path on the pod. The same prompt elsewhere says "Load the
-    safety-screening skill", so the two halves of one system message contradicted each other.
+    """An empty skills listing does not invite the model to write a skill, which every verb refuses.
     """
     section = _empty_listing(tmp_path)
     assert "You can create skills" not in section
@@ -459,11 +377,9 @@ def test_an_empty_skills_listing_does_not_invite_the_model_to_write_one(tmp_path
 def test_the_skills_prompt_drops_a_source_distinction_this_deployment_has_no_sources_for(
     tmp_path: Path,
 ) -> None:
-    """The Deepagents/Agents sentence describes labels `_labelled` never produces.
+    """The skills prompt drops the source distinction this deployment has no sources for.
 
-    Sources here are labelled from their directory — `skills`, or a bundle's name — and there is no
-    machine-wide tree for the "Agents" half to refer to. A distinction the model cannot apply to
-    anything it can see, paid for on every model call.
+    Sources are labelled by directory; there is no machine-wide "Agents" tree.
     """
     section = _empty_listing(tmp_path)
     assert 'Sources labeled "Deepagents"' not in section

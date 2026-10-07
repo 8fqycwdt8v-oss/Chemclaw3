@@ -1,19 +1,9 @@
-"""A BO campaign is an entity, and the inline suggestion path stops discarding its own framing.
+"""A BO campaign is an entity, and the inline suggestion path records it.
 
-`suggest_next_experiment` is the path the conversational agent actually uses. It took a decision
-space and a run history, fitted a surrogate, returned candidates, and wrote nothing — so the
-expensive part of an optimization, a chemist and an agent jointly framing the problem out of
-scattered history, was rebuilt from scratch on every question. Meanwhile
-`knowledge/optimization-campaign/` notes came from retrospective DRFP clustering with no identity
-link to any BO run: a word for a campaign, with no object behind it.
-
-The load-bearing choice is that **the campaign is identified by its problem**, not minted per call.
-That is what turns a sequence of turns into one campaign's history without anyone having to start
-one, and it is what these tests mostly pin.
-
-`InMemoryCampaignStore` is exercised directly because it is the backend a `session_store="memory"`
-deployment really gets, not a double — so this is production behaviour on that path, and the
-contract its Postgres sibling must match.
+`suggest_next_experiment` writes the campaign and its suggestions, so framing a problem is not
+redone every turn. The campaign is identified by its problem, not minted per call, which turns a
+sequence of turns into one history; most tests pin that identity. `InMemoryCampaignStore` is a
+real backend, the contract its Postgres sibling must match.
 """
 
 import asyncio
@@ -93,10 +83,7 @@ def test_a_different_decision_space_is_a_different_campaign() -> None:
 def test_descriptors_do_not_change_a_campaign_s_identity() -> None:
     """A recomputed or upgraded descriptor must not fork the campaign.
 
-    Descriptors are computed *from* the structures, so they are a consequence of the space rather
-    than part of it. If they counted, a cache miss recomputing them — or a calculator upgrade
-    shifting one in the sixth decimal — would silently start a second campaign over the same
-    problem, and the history would split in two with nothing to say why.
+    Descriptors computed from structures are a consequence of the space, not part of it.
     """
     bare = _problem()
     featurized = bare.model_copy(
@@ -124,15 +111,8 @@ def _ordering_problem(
 def test_the_order_the_space_was_written_in_does_not_fork_the_campaign() -> None:
     """The same decision space is one campaign however the caller happened to list it.
 
-    Constraint *terms* were already canonicalized against precisely this failure (`_canonical`),
-    and the two lists beside them were not: `[temperature, solvent]` and `[solvent, temperature]`
-    hashed to two ids, and reversing the categories gave a third — three empty histories over one
-    optimization, which is the fork `read_campaign_thread` exists to prevent.
-
-    Parameter order is provably inert: measured with a fixed seed, `[T, E, S]` and `[S, E, T]`
-    propose byte-identical candidates. Category order moves the acquisition optimizer slightly
-    (a bare `CategoricalInput` is ordinally encoded), which is why only the *identity* payload is
-    sorted — the problem the surrogate sees keeps the caller's order.
+    Parameter and category order are canonicalized in the identity payload only; the surrogate keeps
+    the caller's order, since category order slightly affects ordinal encoding.
     """
     temperature = ContinuousParameter(name="temperature", lower=20.0, upper=120.0)
     solvent = CategoricalParameter(name="solvent", categories=["THF", "toluene"])
@@ -285,11 +265,9 @@ def test_suggestions_are_append_only(store: InMemoryCampaignStore) -> None:
 def test_a_later_session_recovers_the_space_and_the_runs_it_never_saw(
     store: InMemoryCampaignStore,
 ) -> None:
-    """User story 3.2: ask, observe, ask again — across sessions, not across one transcript.
+    """Ask, observe, ask again — across sessions, not across one transcript.
 
-    The record was written on every suggestion and had no reader, so turn N+1 could recover turn
-    N's observations only from the chat transcript. This is the whole loop: one turn records, a
-    second turn holding *nothing but the id* gets the decision space and the runs back.
+    A second turn holding only the id gets the decision space and the runs back.
     """
     problem = _problem()
     observations = [
@@ -349,12 +327,10 @@ def test_resuming_returns_the_latest_turn_s_evidence_not_the_first(
 def test_an_unknown_id_says_the_space_changed_rather_than_answering_from_nothing(
     store: InMemoryCampaignStore,
 ) -> None:
-    """The failure mode that decided the design: a hashed id cannot conflict, only miss.
+    """An unknown id says the space changed rather than answering from nothing.
 
-    A changed decision space yields a *different* id, so an unresolvable id means "this is a new
-    campaign" — not "your history is lost". Returning an empty thread would answer a question about
-    a real campaign with silence, and merging into a suggestion call would seed a new campaign with
-    another one's runs invisibly.
+    A changed space yields a different id, so a miss means "new campaign", not "history lost"; an
+    empty thread would answer with silence.
     """
     _run(
         record_suggestion(
@@ -372,11 +348,10 @@ def test_an_unknown_id_says_the_space_changed_rather_than_answering_from_nothing
 
 
 def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignStore) -> None:
-    """Reachability is the item: the store had both backends, a migration, and no caller at all.
+    """The bo connector serves and declares resuming.
 
-    Both halves, because either alone leaves it unreachable — a tool the MCP server serves but the
-    manifest does not allow-list is never advertised to the agent, and a manifest entry with no
-    tool behind it fails the first time a chemist asks.
+    A served tool not in the manifest is never advertised, and a manifest entry with no tool fails
+    at call time.
     """
     from chemclaw.connectors.bo.server.tools import resume_campaign, server
     from chemclaw.connectors.registry import discovered
@@ -405,16 +380,10 @@ def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignSt
 
 # --- the campaign-id compatibility pins (W3) ---------------------------------------------------
 
-# The ids these three shapes hash to. A change that moves one does not break a test somewhere — it
-# tells every chemist with a running campaign that their campaign is new, silently, because
-# `read_campaign_thread` cannot find a row it never wrote. So each move is a decision, recorded.
-#
-# **They moved once, on purpose**: `campaign_id_for` now canonicalizes the parameter and category
-# order (D-2026-08-08-a-partial-answer-must-say-so), and all three of these shapes happen to be
-# written unsorted. Each landed *on the id its sorted spelling already carried* — the values below
-# were captured from the pre-canonicalization code by hashing each shape rewritten in sorted order,
-# so nothing new was minted: the unsorted spelling joined the sorted one's row. That is also the
-# pin that an already-sorted campaign keeps its id, which is what bounds the re-partition.
+# The ids these three shapes hashed to before parameter and category order were canonicalized
+# (D-2026-08-08-a-partial-answer-must-say-so). A moved id silently makes every running campaign
+# look new, so each move is recorded. Each shape moved onto the id its sorted spelling already had,
+# so an already-sorted campaign kept its id.
 _PRE_CANONICALIZATION_IDS = {
     "continuous-only": "campaign-6958b7edaa261c83",
     "mixed": "campaign-55e5f929fe83a9a5",
@@ -427,18 +396,9 @@ _PRE_FOLDING_IDS = {
     "with-structures": "campaign-59d74ed90e64b3f2",
 }
 # Generation 3, and current: names, category labels and objective names folded, bounds rounded
-# (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
-#
-# **The second deliberate move, and unlike the first it orphans nothing**:
-# `chemclaw.cli.rekey_campaigns` recomputes each row's id from the `problem` migration 031 already
-# stores, so a chemist resuming a campaign framed before this finds it. The first move had no such
-# path and its cost was a `BACKLOG.md` row about orphaned rows; this one has one because the same
-# review that asked for the fold asked what it would break.
-#
-# `continuous-only` is deliberately *unchanged*: its names are already lower-case and its bounds
-# already round, so folding is the identity on it. That is the bound on the re-partition — the fold
-# moves exactly the spaces that carry a capital letter or stray whitespace, which is exactly the set
-# that was forking.
+# (D-2026-08-21-a-geometry-is-an-address-not-a-payload). `chemclaw.cli.rekey_campaigns` re-keys
+# stored rows, so nothing is orphaned. `continuous-only` is unchanged because folding is the
+# identity on it, which bounds the re-partition to spaces carrying capitals or stray whitespace.
 _BASELINE_IDS = {
     "continuous-only": "campaign-a97f5dd910a2cc79",
     "mixed": "campaign-d1c269048981a830",
@@ -485,12 +445,9 @@ def test_a_single_objective_problem_keeps_the_id_it_had_before_the_migration() -
 def _pre_folding_space(parameter: Any, *, sort_categories: bool) -> dict[str, Any]:
     """`_space_of` as it dumped one parameter *before* names and labels were folded.
 
-    Reconstructed rather than called, because the two historical claims below are statements about
-    algorithms that are gone, and the current `_space_of` folds. `sort_categories` selects between
-    generation 1 (the caller's order, the fork) and generation 2 (sorted).
-
-    Faithful for the three baseline shapes only: none carries a descriptor map supplied without
-    structures, so `_space_of`'s conditional `descriptors` key is not reproduced here.
+    Reconstructed because the old algorithms are gone; `sort_categories` selects generation 1
+    (caller's order) or 2 (sorted). Faithful for the three baseline shapes only (no descriptor map
+    without structures).
     """
     # Annotated because `parameter` is `Any` (three unrelated parameter classes reach here), so
     # `model_dump` returns `Any` and the declared return type would be unchecked.
@@ -507,14 +464,9 @@ def _pre_folding_space(parameter: Any, *, sort_categories: bool) -> dict[str, An
 def _pre_canonicalization_id(problem: OptimizationProblem) -> str:
     """`campaign_id_for` as it hashed *before* parameter and category order were canonicalized.
 
-    Rebuilt here rather than asserted about, because the claim this pins is a statement about the
-    old algorithm and the old algorithm is gone: the id a shape carried then cannot be recovered by
-    calling the current function, which sorts and folds whatever it is handed. The first assertion
-    below keeps the reconstruction honest — it must reproduce the three ids captured from the parent
-    commit, or this helper has drifted from the code it stands in for.
-
-    Faithful for the three baseline shapes only: none carries a constraint or a second objective,
-    so the two conditional keys of the identity payload are not reproduced here.
+    The current function sorts and folds, so the old id cannot be recovered by calling it; the first
+    assertion below checks this reconstruction reproduces the captured ids. Faithful for the three
+    baseline shapes only (no constraint or second objective).
     """
     space = [
         _pre_folding_space(parameter, sort_categories=False) for parameter in problem.parameters
@@ -536,18 +488,9 @@ def _pre_folding_id(problem: OptimizationProblem) -> str:
 def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
     """The one deliberate id move, pinned in both directions so it can never happen quietly.
 
-    Each shape above is written unsorted, so ordering canonicalization had to move it. What is
-    asserted here is *where*: onto the id the same space already carried when written in sorted
-    order, so an already-sorted campaign keeps its row and its unsorted twin merges into it. Rows
-    written under the pre-canonicalization ids are orphaned — a one-time cost, recorded in
-    `BACKLOG.md`, against a fork that would otherwise recur on every re-declaration.
-
-    **The old algorithm has to appear in the test, and `_pre_canonicalization_id` is it.** The
-    claim is about where an id computed the *old* way landed, so computing both sides with the
-    current code cannot state it: today's hash sorts whatever it is given, which makes the unsorted
-    and sorted spellings identical before hashing and reduces the whole assertion to two literals
-    being equal. Mutations removing either sort survive that. A test of a migration needs the
-    pre-migration function.
+    Each unsorted shape moved onto the id its sorted spelling already carried. The old algorithm
+    (`_pre_canonicalization_id`) must appear here, since computing both sides with today's sorting
+    code would compare two equal literals.
     """
     for label, problem in _baseline_problems().items():
         rewritten = [
@@ -569,11 +512,8 @@ def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
 def test_folding_moved_only_the_spaces_that_carry_a_capital_letter() -> None:
     """The second deliberate id move, pinned in both directions and bounded.
 
-    Folding names and labels is what stops a re-typed decision space from minting a campaign with
-    no history (D-2026-08-21) — measured, `THF` against `thf` was two rows, silently, because
-    `record_suggestion` upserts. What is asserted here is the *extent*: a space already written in
-    lower case keeps its id exactly, so the re-partition is confined to the spaces that were
-    forking, and `chemclaw.cli.rekey_campaigns` moves the rest rather than leaving them orphaned.
+    Folding stops a re-typed space (`THF` vs `thf`) minting a history-less campaign. A space already
+    in lower case keeps its id exactly; `chemclaw.cli.rekey_campaigns` moves the rest.
     """
     for label, problem in _baseline_problems().items():
         previous = _pre_folding_id(problem)
@@ -607,13 +547,8 @@ def test_a_recased_or_padded_spelling_is_the_same_campaign() -> None:
 def test_two_libraries_whose_smiles_differ_only_in_case_are_two_campaigns() -> None:
     """The bound on the fold: case is chemistry in a SMILES, so the fold must not reach one.
 
-    `molecule_library_problem` makes the canonical SMILES *itself* the category label, and SMILES
-    spells an aromatic atom in lower case — `C1CCNCC1` is piperidine, `c1ccncc1` is pyridine, and
-    `str.casefold` maps them onto one string. Measured before this: two chemists screening those two
-    libraries got one campaign id, the second was told their campaign was not new, its decision
-    space overwrote the first's, and `read_campaign_thread` then handed whoever resumed either one
-    the other's observations. That is the "seeded with observations from a different campaign"
-    failure `_space_of`'s descriptor rule exists to prevent, arriving through the label instead.
+    `C1CCNCC1` (piperidine) and `c1ccncc1` (pyridine) casefold to one string, which would merge two
+    libraries' campaigns and hand each the other's observations.
     """
     piperidine = molecule_library_problem(["C1CCNCC1", "CCO"])
     pyridine = molecule_library_problem(["c1ccncc1", "CCO"])
@@ -626,12 +561,8 @@ def test_two_libraries_whose_smiles_differ_only_in_case_are_two_campaigns() -> N
 def test_a_spelling_of_one_molecule_is_the_same_campaign_as_another() -> None:
     """And the fold's *purpose* survives on the same labels: one molecule is one campaign.
 
-    A label that is a structure is reduced by RDKit rather than by `str.casefold`, which is the
-    same act on the right data type — `OCC` and `CCO` are one molecule, so a space that names it
-    either way is one campaign, exactly as `THF` and `thf` are.
-
-    Built by hand rather than through `molecule_library_problem`, which canonicalizes its library on
-    the way in: routing through it would assert RDKit's idempotence rather than this rule.
+    A structure label is reduced by RDKit (`OCC` and `CCO` are one molecule). Built by hand, since
+    `molecule_library_problem` already canonicalizes.
     """
 
     def library(ethanol: str) -> OptimizationProblem:
@@ -646,14 +577,8 @@ def test_a_spelling_of_one_molecule_is_the_same_campaign_as_another() -> None:
 def test_labels_that_fold_onto_each_other_keep_their_own_spellings() -> None:
     """A fold that merges two of one space's *own* labels is not a canonicalisation of it.
 
-    `structures` is keyed by the category labels, so folding `L1` and `l1` onto one key does not
-    merely lose a distinction — the dict comprehension building the identity payload **drops an
-    entry**, and two genuinely different label→SMILES maps hash to the same shortened one. Measured
-    before this: `{"L1": "CCO", "l1": "CCN"}` and `{"L1": "c1ccccc1", "l1": "CCN"}` were one
-    campaign, one feature space silently standing in for the other.
-
-    The labels are kept exact only where the fold would merge them, which is why this costs the
-    ordinary spaces nothing — asserted directly above by the baseline ids.
+    `structures` is keyed by label, so folding `L1` and `l1` together would drop an entry and make
+    different maps hash alike. Labels stay exact only where the fold would merge them.
     """
 
     def ligands(structures: dict[str, str]) -> OptimizationProblem:
@@ -674,10 +599,8 @@ def test_labels_that_fold_onto_each_other_keep_their_own_spellings() -> None:
 def test_an_exclusion_naming_one_molecule_is_not_the_exclusion_naming_another() -> None:
     """The same rule on the other half of the identity, where the labels are re-typed too.
 
-    `_canonical` folds an exclusion's options because they are category labels a model re-emits —
-    and they are category labels, so when they name molecules the fold is wrong there for the
-    identical reason. Over a library holding both, "never piperidine in THF" and "never pyridine in
-    THF" are different campaigns; the space alone cannot tell them apart, because it holds both.
+    An exclusion naming molecules must not be casefolded: over a library holding both, "never
+    piperidine in THF" and "never pyridine in THF" are different campaigns.
     """
 
     def excluding(molecule: str) -> OptimizationProblem:
@@ -698,16 +621,9 @@ def test_an_exclusion_naming_one_molecule_is_not_the_exclusion_naming_another() 
 def test_a_lab_code_that_happens_to_parse_as_a_molecule_does_not_fork_its_space() -> None:
     """The reduction is decided per *space*, because a one-label decision cannot see the space.
 
-    Deciding per label re-opened the fork the fold exists to close, on the labels a chemist is most
-    likely to type: `B`, `C`, `N`, `O`, `P`, `S`, `CO`, `CN` and `CS` are all legal SMILES, so a
-    screen over gas atmospheres `["CO", "N2", "H2"]` kept its case while the same space re-emitted
-    as `["co", "n2", "h2"]` folded — two campaigns, two empty histories, and `read_campaign_thread`
-    joining neither. Opaque catalyst codes `["A", "B", "C"]` did the same.
-
-    A label list is chemistry when *all* of it is chemistry. `N2` and `H2` are not molecules to
-    RDKit, so the space they are in is not a library, and the whole of it folds as text. The bound
-    below is the same one the per-label rule was introduced for and it still holds: a space whose
-    every label parses is reduced as chemistry, so piperidine and pyridine stay two campaigns.
+    Many short labels parse as SMILES (`CO`, `CN`, `B`), so a per-label rule would fork mixed
+    spaces. A label list is chemistry only when all of it parses; otherwise the whole list folds as
+    text. Piperidine and pyridine still stay two campaigns.
     """
 
     def screen(categories: list[str]) -> OptimizationProblem:
@@ -730,12 +646,8 @@ def test_a_lab_code_that_happens_to_parse_as_a_molecule_does_not_fork_its_space(
 def test_an_exclusion_reduces_its_options_the_way_its_own_parameter_does() -> None:
     """One label set, one reduction — the rule `_space_of` already states for `structures`.
 
-    An exclusion's options *are* category labels, so reducing them on their own asks the per-space
-    question of a subset and can answer it differently: over `["CO", "N2", "H2"]` the space folds
-    as text while the option list `["CO"]` is a molecule all by itself, and the fork the space no
-    longer has comes back through the constraint. The options are re-keyed through the parameter's
-    own map instead, for the reason `structures` and `descriptors` are: two reductions of one label
-    set can only ever disagree.
+    An exclusion's options are re-keyed through their parameter's own reduction map, so a subset
+    cannot answer the per-space question differently.
     """
 
     def excluding(atmosphere: str, solvent: str, categories: list[str]) -> OptimizationProblem:
@@ -807,13 +719,10 @@ def test_a_second_objective_is_a_different_campaign() -> None:
 
 
 def test_caller_supplied_descriptors_identify_the_space() -> None:
-    """Three different feature spaces used to collide on one campaign id.
+    """Caller-supplied descriptors identify the space.
 
-    `descriptors` was excluded outright, on the reasoning that they are computed *from*
-    `structures`. That holds only when structures are set. With none, the caller stated the
-    descriptors directly and they are the **only** statement of what the surrogate sees — so a bare
-    categorical, one featurized on `{A: 1, B: 2}` and one on `{A: 99, B: -99}` all hashed alike,
-    and `record_suggestion`'s upsert let one overwrite another's decision space on the shared row.
+    With no structures, the descriptors are the only statement of what the surrogate sees, so spaces
+    featurized differently must get different ids.
     """
     objectives = [Objective(name="yield", direction="maximize")]
     ids = {
@@ -916,23 +825,19 @@ def test_an_exclusion_written_either_way_round_is_one_campaign() -> None:
 
 
 def test_the_identity_allowlist_still_covers_every_parameter_field() -> None:
-    """An allowlist inverts the denylist's failure; this is what stops it inverting silently.
+    """The identity allowlist still covers every parameter field.
 
-    A field added to a parameter later would not be hashed, so two different decision spaces would
-    share one id and one history — the same invisible fork, one direction over. Failing here forces
-    an explicit decision about whether the new field identifies the space.
+    A field added later would not be hashed and two spaces would share a history; failing here
+    forces a decision about the new field.
     """
     declared = set(ContinuousParameter.model_fields) | set(CategoricalParameter.model_fields)
     assert declared == _SPACE_FIELDS | _IDENTIFYING_EXCLUSIONS
 
 
 def test_a_programming_error_in_the_write_is_not_swallowed_as_a_database_blip() -> None:
-    """`except Exception` made a deployment where every write fails look like one where none do.
+    """A programming error in the write is not swallowed as a database blip.
 
-    The models are constructed inside the same `try`, so a `ValidationError`, a `TypeError` or a
-    non-finite float refused by the store all produced the one WARNING line a dropped connection
-    produces — and the tool still answered successfully. Only the database's own failures are the
-    database's fault; ours must surface.
+    Only the database's own failures are tolerated; a `ValidationError` or `TypeError` must surface.
     """
 
     class BrokenStore(InMemoryCampaignStore):
@@ -960,13 +865,11 @@ def test_a_programming_error_in_the_write_is_not_swallowed_as_a_database_blip() 
 
 
 def test_a_durable_campaign_run_is_recorded_and_resumable(store: InMemoryCampaignStore) -> None:
-    """The gap the BO deep review found: hours of evaluation that `resume_campaign` denied existed.
+    """A durable campaign run is recorded and resumable.
 
-    Both paths mint ids from one `campaign_id_for` space, and only the inline tool ever wrote — so
-    `resume_campaign` on a campaign that had run durably reported no such campaign about work that
-    was actually done. The activity is driven directly here because it is a plain coroutine; what
-    the workflow adds on top (reading the actor off the run's memo) is pinned by
-    `tests/test_connector_job_workflow.py` for every bundle.
+    Both paths mint ids from `campaign_id_for`, so `resume_campaign` finds durable work too. The
+    activity is driven directly; reading the actor off the memo is pinned in
+    `tests/test_connector_job_workflow.py`.
     """
     from chemclaw.connectors.bo.activities import record_campaign_run
 
@@ -994,12 +897,10 @@ def test_a_durable_campaign_run_is_recorded_and_resumable(store: InMemoryCampaig
 def test_a_retried_durable_write_does_not_append_a_second_identical_suggestion(
     store: InMemoryCampaignStore,
 ) -> None:
-    """A Temporal activity is retried by design, and history is meant to record what was proposed.
+    """A retried durable write does not append a second identical suggestion.
 
-    The inline path never needed this — it wrote once per turn, and a duplicate was harmless
-    because the read takes the latest. The durable path made the duplicate routine. Keyed on the
-    run id, never on the content: two genuinely identical *asks* are two history entries, which is
-    what "the sequence is the campaign's history" means.
+    Activities are retried, so the write is keyed on the run id, never on content: two identical
+    asks are two history entries.
     """
     from chemclaw.connectors.bo.activities import record_campaign_run
 
@@ -1016,11 +917,9 @@ def test_a_retried_durable_write_does_not_append_a_second_identical_suggestion(
 
 
 def test_two_inline_suggestions_are_still_two_entries(store: InMemoryCampaignStore) -> None:
-    """The idempotency key is the *run*, so the path that has no run is left exactly as it was.
+    """The idempotency key is the run, so the path that has no run keeps every entry.
 
-    `job_id` defaults to empty for the inline tool, and the unique index is partial on `job_id <>
-    ''` for the same reason: a shared default would collapse a campaign's whole inline history into
-    one row.
+    `job_id` defaults to empty and the unique index is partial on `job_id <> ''`.
     """
     problem = _problem()
     campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c"))).campaign_id
@@ -1029,11 +928,10 @@ def test_two_inline_suggestions_are_still_two_entries(store: InMemoryCampaignSto
 
 
 def test_a_suggestion_remembers_the_space_it_was_made_in(store: InMemoryCampaignStore) -> None:
-    """The campaign row holds the *latest* problem, which is right for it and wrong for its history.
+    """A suggestion remembers the space it was made in.
 
-    A chemist who widens a bound is still working the same campaign, so the upsert refreshes the
-    space — and a suggestion read back afterwards was then described by bounds that never applied
-    to it. The candidates and observations were already snapshotted for exactly this reason.
+    The campaign row holds the latest problem (a widened bound is the same campaign), so each
+    suggestion snapshots its own space, as candidates and observations already are.
     """
     problem = _problem()
     campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c"))).campaign_id
@@ -1044,15 +942,10 @@ def test_a_suggestion_remembers_the_space_it_was_made_in(store: InMemoryCampaign
 def test_the_fork_flag_comes_from_the_write_and_not_from_a_read_before_it(
     store: InMemoryCampaignStore,
 ) -> None:
-    """`opened_new_campaign` used to be a read taken just before the write, which raced it.
+    """The fork flag comes from the write, not from a read before it.
 
-    Two turns opening the same decision space concurrently both read no campaign and both reported
-    having opened one, while the upsert underneath serialized them — so exactly one was right and
-    nothing could tell which. The write knows; the write says.
-
-    Asserted as the sequence a race would break: the first record of a space reports opening it,
-    every record after reports joining it. A read-before-write cannot promise the second line
-    without a lock the store never took.
+    Two concurrent turns would both read "no campaign"; the upsert knows which one opened it. The
+    first record of a space reports opening it, every later one joining.
     """
     problem = _problem()
     first = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
@@ -1066,12 +959,9 @@ def test_the_fork_flag_comes_from_the_write_and_not_from_a_read_before_it(
 def test_a_failed_write_reports_no_fork_rather_than_guessing_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blip is ignorance, and ignorance must not be announced as a fork.
+    """A failed write reports no fork rather than guessing one.
 
-    The read this replaced erred in the same direction deliberately ("assume known"), because
-    raising a fork on the strength of a failed read sends a chemist looking for a problem a
-    database outage invented. The candidates are still returned, which is the whole point of
-    swallowing the failure at all.
+    A database blip must not send a chemist hunting a fork; the candidates are still returned.
     """
 
     class BrokenStore(InMemoryCampaignStore):
@@ -1089,18 +979,11 @@ def test_a_failed_write_reports_no_fork_rather_than_guessing_one(
 def test_an_inline_suggestion_replayed_with_the_same_ask_records_one_row(
     store: InMemoryCampaignStore,
 ) -> None:
-    """The inline tool passed no `job_id`, so the dedupe index did not cover its row.
+    """An inline suggestion replayed with the same ask records one row.
 
-    `record_suggestion`'s own parameter docstring said what the absence costs — "empty for the
-    inline tool. Makes the write idempotent — a Temporal activity is retried by design" — and the
-    index is partial on exactly that column, `ON CONFLICT (campaign_id, job_id) WHERE job_id <> ''`.
-    Since `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` a tool
-    killed mid-call is re-run with its original arguments, so the inline path had to supply a key
-    too. It derives one from the ask, the way every other idempotency key in this tree is derived.
-
-    Both arms: the same ask twice is one row, and a *different* ask is still a second one — because
-    a key that collapsed every suggestion into one would lose the campaign history this entity
-    exists to keep.
+    A tool killed mid-call is re-run with its original arguments, so the inline path derives an
+    idempotency key from the ask (the dedupe index is partial on `job_id <> ''`). A different ask is
+    still a second row.
     """
     problem = _problem()
     history = [Observation(params={"temperature": 40.0, "ligand": "PPh3"}, value=55.0)]

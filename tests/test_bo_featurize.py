@@ -1,16 +1,9 @@
-"""Behavioral tests for xTB descriptor featurization of categorical BO choices (U1).
+"""Behavioral tests for xTB descriptor featurization of categorical BO choices.
 
-The point of featurization is that the surrogate stops seeing an opaque label and starts seeing a
-position in chemical space, so these check both halves: that a category gains a descriptor vector
-at all, and that BoFire actually *uses* it rather than falling back to an ordinal index.
-
-**The calculator is injected, not imported**, since
-`D-2026-08-16-the-physics-leaves-the-cache-stays`: the xTB engine is `Chemclaw3-mcp`'s and the
-client that reaches it lives one package above `science/`, which `science/` may not import. So
-`featurize_problem` takes a `PropertiesFor` callable and `connectors/bo/calculators.py` binds it in
-production. Here that seam is bound to `tests/calc_server_fake.py` through the real client and the
-real cache, which is what keeps the caching assertion below honest — it counts calls that actually
-crossed `cached_remote`.
+A category gains a descriptor vector, and BoFire uses it instead of an ordinal index. The
+calculator is injected (`featurize_problem` takes a `PropertiesFor`; `science/` may not import the
+client), bound here to `tests/calc_server_fake.py` through the real client and cache, so the
+caching assertion counts real `cached_remote` calls.
 """
 
 import asyncio
@@ -113,9 +106,7 @@ def test_descriptor_matrix_rows_and_columns_follow_the_declared_order() -> None:
 def test_the_surrogate_actually_uses_the_descriptors() -> None:
     """BoFire descriptor-encodes a featurized categorical and ordinal-encodes a bare one.
 
-    The load-bearing assertion of U1. Descriptor encoding is a BoFire *default* we depend
-    on rather than set, and the failure mode if it changed is silent: the campaign would
-    still run, still return candidates, and simply stop generalizing across ligands.
+    A BoFire default we depend on; if it changed, campaigns would silently stop generalizing.
     """
 
     def encoding(problem: OptimizationProblem) -> CategoricalEncodingEnum:
@@ -141,23 +132,12 @@ def test_a_featurized_campaign_still_proposes_real_categories() -> None:
 
 
 def test_descriptors_inform_a_ligand_that_was_never_run() -> None:
-    """The payoff of U1, measured on the surrogate's own prediction.
+    """Descriptors inform a ligand that was never run.
 
-    Three ligands are observed and PCy3 is not. Without descriptors the surrogate has literally no
-    information about PCy3: its prediction collapses to the mean of the observed values, because an
-    ordinal code for an unseen category carries nothing. With descriptors placing PCy3 beside the
-    high-performing PtBu3 in electronic space, the prediction moves toward it.
-
-    This is the assertion that would fail if the featurization were wired up but inert — the failure
-    mode a candidate-shape test cannot see.
-
-    **The descriptors are stated rather than computed**, and that is the split showing through: the
-    numbers are `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and
-    whether real xTB descriptors place PCy3 near PtBu3 is a claim about that engine's chemistry,
-    tested where the engine lives. What is this repository's — and what this pins — is that a
-    descriptor vector actually reaches BoFire's surrogate and changes what it believes about an
-    option nobody has run. The values below are the ordering a chemist expects (trialkyl donors
-    together, the triaryl apart), so a reader can see the premise the assertion rests on.
+    Without descriptors the prediction for unseen PCy3 is the mean of observed values; with
+    descriptors placing it beside PtBu3 it moves toward PtBu3's. The descriptors are stated rather
+    than computed (trialkyl donors together, the triaryl apart): whether real xTB agrees is the
+    engine's concern; this pins that a descriptor vector reaches BoFire's surrogate.
     """
     informed = OptimizationProblem(
         parameters=[
@@ -230,10 +210,7 @@ def test_an_unfeaturizable_category_names_itself() -> None:
 async def test_featurization_is_cached(_calc_server: FakeCalcServer) -> None:
     """Re-featurizing the same molecules costs nothing — the second pass is all store hits.
 
-    Asserted as the *call count* rather than as equal output, because equal output is what a broken
-    cache also produces. Four ligands, four calculations, however many times the problem is
-    featurized — which is the property a durable campaign depends on across rounds and worker
-    restarts.
+    Asserted as the call count, since a broken cache also produces equal output.
     """
     store = InMemoryStore()
     first = (await featurize_problem(properties_for(store), _ligand_problem())).problem

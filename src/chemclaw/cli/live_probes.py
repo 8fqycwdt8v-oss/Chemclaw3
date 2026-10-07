@@ -363,10 +363,9 @@ _RUN_STAMP = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
 def run_output_dir(suite: str) -> Path:
     """`<live_probe_transcript_dir>/<suite>/<this run's UTC stamp>` — where a live run writes.
 
-    The parent stays the committed transcripts directory (`.gitignore` exempts it so live results
-    can be read back); a per-run subdirectory means no run overwrites the record or dirties a
-    tracked file, and promoting a run is a deliberate copy. `live_jobs` and `live_data` write
-    through this function too.
+    The parent is the gitignored transcripts directory; a per-run subdirectory means no run
+    overwrites an earlier one, and keeping a run is a deliberate copy. `live_jobs` and `live_data`
+    write through this function too.
     """
     return Path(settings.live_probe_transcript_dir) / suite / _RUN_STAMP
 
@@ -930,7 +929,7 @@ async def _main(args: argparse.Namespace) -> int:
         probes, outcomes = _load_transcripts(directory)
         if not outcomes:
             # A re-grade over no transcripts measured nothing; it must not write an empty summary
-            # over the committed record and exit 0.
+            # over an earlier run's and exit 0.
             logger.error("no transcripts to re-grade in %s — nothing was measured", directory)
             return 2
         logger.info("re-grading %d stored transcripts from %s", len(outcomes), directory)

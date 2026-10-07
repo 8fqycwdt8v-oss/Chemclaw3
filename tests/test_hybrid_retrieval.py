@@ -1,8 +1,8 @@
-"""Hybrid retrieval: the vector/lexical retrievers, RRF fusion, and gather_evidence's mode switch.
+"""Hybrid retrieval: the vector and lexical retrievers, RRF fusion, and `gather_evidence`'s modes.
 
-Offline with an in-memory index and fake sources — proves the new retrievers cite real notes and
-honor filters, that Reciprocal Rank Fusion rewards notes ranked by more than one source, and that
-`gather_evidence` fuses in `hybrid` mode while keeping the flat union in `graph` mode (the default).
+Offline with an in-memory index and fake sources: the retrievers cite real notes and honour
+filters, RRF rewards notes ranked by more than one source, and `gather_evidence` fuses in `hybrid`
+mode and round-robins in `graph` mode (the default).
 """
 
 import asyncio
@@ -106,13 +106,10 @@ async def test_type_filter_keeps_recall_past_global_top_k(
 async def test_retriever_drops_a_stale_index_hit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hit whose note is not on disk (stale derived row) is dropped, never cited.
+    """A hit whose note is not on disk (a stale derived row) is dropped, never cited.
 
-    Pins `graph_cache_ttl_seconds = 0` because this asserts the *disk-authoritative* guard, and
-    the TTL window (DA-5) deliberately skips the disk scan. That window does not weaken the guard
-    in production: it exists to compensate for a derived index rebuilt by a background job, whose
-    staleness is minutes-to-hours — against that, seconds are noise. The test needs the scan to
-    run to be deterministic.
+    Pins `graph_cache_ttl_seconds = 0` so the disk scan runs deterministically; the TTL window is
+    seconds against an index whose staleness is minutes to hours.
     """
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
 
@@ -177,11 +174,9 @@ def test_gather_evidence_hybrid_mode_fuses_rankings(monkeypatch: pytest.MonkeyPa
 def test_gather_evidence_graph_mode_round_robins_the_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In the default graph mode gather_evidence merges the sources by rank, de-duplicating.
+    """In graph mode `gather_evidence` merges the sources by rank, de-duplicating.
 
-    Named for what it does rather than "flat union": the merge takes each source's best hit before
-    any source's second, which for these two two-hit sources is the same answer the old
-    concatenation gave, and is not the same answer once one source is longer than the cap.
+    Each source's best hit comes before any source's second.
     """
     _wire_two_sources(monkeypatch)
     monkeypatch.setattr(settings, "retrieval_mode", "graph")
@@ -203,20 +198,11 @@ def _ranked(prefix: str, retriever: str, scores: list[float]) -> list[EvidenceCh
 
 
 def test_truncation_is_fair_across_sources(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No enabled source is starved by the cap, whatever scale its scores happen to use.
+    """No enabled source is starved by the cap, whatever scale its scores use.
 
-    The measured defect, with the measured numbers. `EvidenceChunk.score` is a note's `confidence`
-    from the graph, a `ts_rank` from Postgres FTS, a cosine from the dense index and a Tanimoto
-    from the fingerprint store — comparable *within* a source and meaningless across them, which
-    the field's own docstring states. `graph` mode nonetheless concatenated the lists and sorted
-    the union by that number, so the cap kept a prefix of whichever scale ran highest.
-
-    Against this fixture (45 graph hits at the notes' 0.8 confidence, 8 lexical at ts_rank
-    0.02-0.09, 7 dense at cosine 0.60-0.85, 40-chunk cap) the flat union returned 38 graph /
-    0 lexical / 2 vector; with the sort removed it returned 40 / 0 / 0, so the concatenation order
-    alone starved the later sources and the sort was mitigating rather than causing it. The lexical
-    leg contributed nothing an agent could read either way, which is the entire reason a deployment
-    enables it. Round-robin gives every source its best hit before any source gets its second.
+    `EvidenceChunk.score` is comparable only within a source (confidence, `ts_rank`, cosine,
+    Tanimoto). With 45 graph, 8 lexical and 7 dense hits against a 40-chunk cap, concatenation or a
+    score sort starves the later legs; round-robin gives every source its best hit first.
     """
     sources = [
         _FakeSource("graph", _ranked("g", "graph", [0.8] * 45)),
@@ -235,13 +221,10 @@ def test_truncation_is_fair_across_sources(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_a_single_source_keeps_its_own_ranking(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The merge never re-ranks a source, because the source already ranked itself.
+    """The merge never re-ranks a single source, because the source already ranked itself.
 
-    Concretely the case the union's score sort broke: on a widened search `GraphRetriever` orders
-    by term *coverage* first and confidence only within it, so a note matching three of four terms
-    leads one matching a single term. Re-sorting the union by score alone discarded that and put
-    the confident near-miss on top. The default deployment runs exactly one text source, so this is
-    the ordering most sweeps actually get.
+    On a widened search `GraphRetriever` orders by term coverage first; re-sorting by score would
+    put a confident near-miss on top. The default deployment runs one text source.
     """
     ranked = _ranked("n", "graph", [0.2, 0.9, 0.5])  # the retriever's order, not score order
     monkeypatch.setattr(research_tools, "_text_retrievers", lambda: [_FakeSource("graph", ranked)])
@@ -287,16 +270,10 @@ def _three_incomparable_legs() -> list[tuple[str, Any]]:
 def test_hybrid_mode_reports_the_fused_rank_not_the_finders_own_score(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After fusion the chunk's own score explains nothing a reader can see.
+    """Hybrid mode reports the fused rank, not the finder's own score.
 
-    `EvidenceChunk.score`'s own field comment says it orders *one source's* list and nothing wider.
-    Fusion destroys that list: the order is a summed reciprocal rank, and each chunk still carried
-    its finder's number on its finder's scale. Measured over the shipped `knowledge/` corpus with
-    all three note legs, the reported score was monotone with the fused order on **0 of 7**
-    ordinary queries — on one, the column read 0.85 at position 1 and 0.90 at position 10.
-
-    So the model was handed a ranking and a number that contradict it, and had no way to tell which
-    to believe. What is reported now is the only quantity the fusion actually produced: rank.
+    After fusion the order is a summed reciprocal rank, and each finder's score is on its own scale,
+    so the reported number would contradict the delivered order.
     """
     monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
     monkeypatch.setattr(research_tools, "_sources", lambda _anchor: _three_incomparable_legs())
@@ -312,19 +289,11 @@ def test_hybrid_mode_reports_the_fused_rank_not_the_finders_own_score(
 
 
 def test_graph_mode_reports_the_merged_position_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default mode has the same defect, and this test used to pin the exemption.
+    """Graph mode reports the merged position too.
 
-    It asserted that `graph` keeps the finder's own number, on the argument that round-robin
-    preserves each source's ordering so the score still explains a chunk's position "within the
-    list it came from". The model is not handed four lists — it is handed one interleaved column,
-    where a note's `confidence`, a `ts_rank` and a cosine sit under one heading. Measured over the
-    shipped corpus in this mode, that column was monotone with the delivered order on **2 of 7**
-    queries, and both of those returned fewer than three chunks.
-
-    The exemption's second argument — that restating would "throw away KM-5's truncation signal" —
-    was wrong about where the signal lives twice over: the score orders a source's own list and the
-    cap *inside* the retriever, both of which have happened by the time a chunk reaches here, and
-    the note's confidence is on `EvidenceChunk.confidence`, a field of its own.
+    The model sees one interleaved column, where confidences, `ts_rank`s and cosines are not
+    comparable. The score already did its work inside each retriever, and the note's confidence has
+    its own field, `EvidenceChunk.confidence`.
     """
     monkeypatch.setattr(settings, "retrieval_mode", "graph", raising=False)
     monkeypatch.setattr(research_tools, "_sources", lambda _anchor: _three_incomparable_legs())
@@ -339,8 +308,6 @@ def test_graph_mode_reports_the_merged_position_too(monkeypatch: pytest.MonkeyPa
     assert not {chunk.score for chunk in sweep.chunks} & {0.30, 0.40, 0.02, 0.09, 0.60, 0.95}, (
         "a finder's own scale reached the model beside an order it does not explain"
     )
-    # The signal the old exemption said this would delete lives in a field of its own, which is
-    # what makes restating `score` lossless. Asserted against the model rather than these chunks:
-    # the fixture's retrievers build chunks directly and set no confidence, so reading it off them
-    # would be a fact about the fixture.
+    # Confidence has a field of its own, which makes restating `score` lossless. Asserted against
+    # the model, since these fixture chunks set no confidence.
     assert "confidence" in EvidenceChunk.model_fields

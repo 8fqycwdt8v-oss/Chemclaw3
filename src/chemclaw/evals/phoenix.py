@@ -83,7 +83,7 @@ def load_grades(directory: Path) -> dict[str, Mapping[str, Any]]:
     Args:
         directory: The transcript directory, or the run directory beside it. Both are searched,
             because `cli/live_probes.py` writes `grades.json` next to the transcripts for a probe
-            run and one level up for the archived sets in `tasks/live-test/`.
+            run and one level up for an archived set.
 
     Returns:
         `{probe_id: judgement}` for whichever file was found first.

@@ -1,21 +1,9 @@
-"""Behavioral tests for the content-addressed `Structure` — now a cross-repository contract.
+"""Behavioral tests for the content-addressed `Structure`, a cross-repository contract.
 
-The three properties everything keyed on a geometry depends on: identity is the chemical content
-and nothing else, coordinates are normalized so float noise cannot fork the cache, and a physically
-impossible structure is rejected at construction rather than converged into a meaningless number
-(gate G4).
-
-**They matter more since the physics left** (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
-`structure_id` is half of every key `relax_structure`, `compute_hessian`, `scan_point` and the two
-CREST searches are cached under, and it is derived on *both* sides of the wire — measured identical
-for `CCO` (`st_739a222f45be0c3a`). A divergence in the rounding or the hash payload below would
-raise nowhere: every lookup would simply miss, forever, while `calculator_trust` reported a
-confident `UNCALIBRATED`.
-
-The embedding itself is no longer here — `structure_from_smiles` went with the engines, because a
-geometry built by a different RDKit build is a different id and every result keyed on it would miss.
-`connectors/calc/compose.py::embed` asks the server for it, which keeps the two sides in agreement
-by construction rather than by a version comparison nobody runs.
+Identity is the chemical content only, coordinates are normalized so float noise cannot fork the
+cache, and an impossible structure is rejected at construction. `structure_id` is derived on both
+sides of the wire, so any divergence here would make every lookup miss silently. Embedding is the
+server's (`connectors/calc/compose.py::embed`).
 """
 
 import pytest
@@ -42,17 +30,8 @@ def test_identity_is_the_chemical_content() -> None:
 def test_identity_ignores_provenance() -> None:
     """A geometry is the same structure however it was produced.
 
-    This is what lets a downstream task hit the cache whether its input was embedded
-    from a SMILES or produced by an optimizer.
-
-    **Built through the constructor, and the provenance is read back before the two ids are
-    compared.** The first version set both fields with `model_copy(update=…)`, which writes into
-    `__dict__` past validation and therefore supplies a key whether or not the model declares one.
-    Driven: with `smiles` and `origin` *deleted from `Structure`* this test still passed — it was
-    asserting that two structures carrying no provenance at all share an id, which is true and is
-    not the property. `Structure` takes `extra` at pydantic's default of `"ignore"`, so a
-    constructor handed a field the model does not declare drops it silently; the read-back below is
-    what turns that into a failure rather than a vacuous pass.
+    Built through the constructor with provenance read back before comparing ids, because
+    `Structure` ignores undeclared fields and the property needs provenance actually present.
     """
     water = _water()
     labelled = Structure(
@@ -107,13 +86,10 @@ def test_odd_electron_count_names_the_open_shell_problem() -> None:
 
 
 def test_declared_open_shell_is_allowed() -> None:
-    """A methyl radical is computable once its multiplicity is stated, not rejected outright.
+    """A declared open-shell structure such as a methyl radical is allowed.
 
-    This is the generalization the Fukui ions depend on: the old check refused every odd-electron
-    system, which would have made the N-1/N+1 single points impossible. It is also why
-    `connectors/calc/compose.py::radical_multiplicity` derives the value from the SMILES' own
-    radical electrons before embedding — the server reads an unstated multiplicity as closed-shell
-    singlet and refuses this species outright, which would take homolysis reactions with it.
+    Fukui N-1/N+1 single points need it. `radical_multiplicity` states the multiplicity before
+    embedding, since the server reads an unstated one as a closed-shell singlet.
     """
     radical = Structure(elements=[6, 1, 1, 1], positions=[[0.0, 0.0, 0.0]] * 4, multiplicity=2)
     assert radical.multiplicity == 2
@@ -127,12 +103,7 @@ def test_mismatched_arrays_are_rejected() -> None:
 
 
 def test_symbols_index_the_atoms_in_order() -> None:
-    """Element symbols pair with `elements` positionally — the per-atom results' contract.
-
-    Heavy atoms keep their canonical-SMILES order and hydrogens follow, because that is the order
-    the server embeds in; what this pins is that the mapping from atomic number to symbol does not
-    reorder anything on the way to a chemist reading an atom index.
-    """
+    """Element symbols pair with `elements` positionally, heavy atoms first and hydrogens after."""
     ethanol = Structure(
         elements=[6, 6, 8, 1, 1, 1, 1, 1, 1], positions=[[0.0, 0.0, float(i)] for i in range(9)]
     )

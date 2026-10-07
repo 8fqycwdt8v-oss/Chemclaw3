@@ -1,8 +1,7 @@
 """The tournament's ranking measured against a constructed ground truth, with a null control.
 
-Every figure here was produced by running `evals.hypothesis_tournament.simulate` and then pinned.
-Bounds are loose enough to survive an unrelated change and tight enough that a broken pairing or a
-broken fit moves them — a test asserting only `> 0` would pass with the ranking reversed.
+Figures come from running `evals.hypothesis_tournament.simulate` and are pinned with bounds loose
+enough to survive unrelated changes and tight enough that a broken pairing or fit moves them.
 """
 
 import pytest
@@ -22,13 +21,10 @@ def test_a_perfect_judge_recovers_the_ordering_exactly() -> None:
 
 
 def test_a_judge_with_no_information_scores_exactly_at_the_null() -> None:
-    """The control that matters most, and the one this eval failed before the labels were shuffled.
+    """A judge with no information scores exactly at the null.
 
-    A coin-flip judge carries zero information, so recovery must be indistinguishable from chance.
-    It was not: with truth fixed at `h0 > h1 > ...` the ids were also the pairing's tiebreak, so the
-    bracket itself favoured lexically-early ids and a coin flip scored Spearman **+0.22** with
-    `beats_null=True`. The artefact is fixed in `pairing.py`; this test is what would catch it
-    coming back, and no amount of shuffling the *null* would have — the labels had to move.
+    A coin-flip judge must be indistinguishable from chance. The truth labels are shuffled relative
+    to the ids, so a bracket favouring early ids would show up here.
     """
     result = simulate(field=10, judge_accuracy=0.5, runs=600, seed=7)
     assert result.spearman == pytest.approx(0.0, abs=0.06)
@@ -48,17 +44,11 @@ def test_ranking_beats_not_ranking_even_with_a_barely_better_than_chance_judge()
 
 
 def test_a_realistic_judge_leaves_the_leader_wrong_more_often_than_right() -> None:
-    """The finding that justifies the report refusing to name an undecided leader.
+    """A realistic judge leaves the leader wrong more often than right.
 
-    At 75% judge accuracy over ten hypotheses the top-rated one is genuinely best about **39%** of
-    the time — four times the 10% a shuffle gives, and nowhere near good enough to present as an
-    answer. A table printing a strict order here would be read as far more certain than it is,
-    which is why `TournamentOutcome.leader_is_decisive` exists and why `report.summarise` leads with
-    "the field does not separate" whenever it is False.
-
-    This figure was 0.48 before `pairing.py`'s id tiebreak was fixed; the inflation was the bracket
-    favouring lexically-early ids, which the eval's own labels were aligned with. The corrected
-    number makes the argument for `leader_is_decisive` stronger, not weaker.
+    At 75% judge accuracy over ten hypotheses the top-rated one is best only about 39% of the time,
+    so a strict order would overstate certainty. This is why `TournamentOutcome.leader_is_decisive`
+    exists and `report.summarise` leads with "the field does not separate" when it is False.
     """
     result = simulate(field=10, judge_accuracy=0.75, runs=600, seed=7)
     assert 0.30 < result.top_one < 0.50

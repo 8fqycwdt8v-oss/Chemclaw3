@@ -1,8 +1,7 @@
 """Behavioral tests for the shared identity helpers (`chemclaw.core.chem`, `chemclaw.core.ids`).
 
-Proves the two properties every content-addressed key in the system relies on:
-canonicalization collapses equivalent SMILES to one key, and the hash is stable
-and order-independent. These back the D-011 "compute once, never twice" guarantee.
+Canonicalization collapses equivalent SMILES to one key, and the hash is stable and
+order-independent: the two properties every content-addressed key relies on.
 """
 
 import pytest
@@ -79,22 +78,18 @@ def test_require_canonical_smiles_tolerates_surrounding_whitespace() -> None:
         "",
         "   ",
         "not-a-molecule(((",
-        # RDKit skips a non-ASCII run at either *edge* of the string and fails on one in the
-        # middle, so these three are methane, ethane and ethane to a bare parse — the whitespace
-        # truncation in another character, and a clean screen of a molecule nobody named if it
-        # reaches one. Prose is where it comes from: a unit symbol, a dash or a quotation mark
-        # copied in beside a structure.
+        # RDKit skips a non-ASCII run at either edge of the string and fails on one in the middle,
+        # so these parse as methane, ethane and ethane unless refused. They come from prose: a unit
+        # symbol, a dash or a quotation mark copied beside a structure.
         "°C",
         "CC°",
         "°CC°",
     ],
 )
 def test_the_three_strict_helpers_share_one_definition_of_parses(bad: str) -> None:
-    """`require_molecule` is the gate; the two SMILES helpers must not have their own.
+    """The three strict helpers share one definition of "parses".
 
-    They each spelled the same four lines out, which is how the hazard screens ended up with a
-    *fifth*, weaker copy — a bare `Chem.MolFromSmiles` that accepted `"CCO junk"` as ethanol. One
-    definition means adding a case to it reaches every caller, and this pins that they agree.
+    `require_molecule` is the gate; the SMILES helpers must not keep their own weaker copy.
     """
     for helper in (require_molecule, require_canonical_smiles, require_standard_smiles):
         with pytest.raises(InvalidSmilesError):
@@ -102,11 +97,9 @@ def test_the_three_strict_helpers_share_one_definition_of_parses(bad: str) -> No
 
 
 def test_require_molecule_returns_the_molecule_the_canonical_form_is_taken_from() -> None:
-    """The reason it exists: a caller needing the molecule gets the gate without a second parse.
+    """`require_molecule` returns the molecule the canonical form is taken from.
 
-    A SMARTS matcher works on the molecule and then echoes `Chem.MolToSmiles` of it back as the
-    structure it looked at, so the two must be the same object's two faces rather than two parses
-    of one string.
+    A SMARTS matcher echoes back the structure it looked at, so both must come from one parse.
     """
     from rdkit import Chem
 
@@ -132,14 +125,11 @@ def test_calc_cache_key_collapses_equivalent_smiles() -> None:
 async def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_store(
     tool: str, pair: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every calculator computes once for a molecule, then serves the other spelling.
+    """Every calculator computes once for a molecule, then serves the other spelling from the store.
 
-    `CCO` misses and computes; `OCC` (the same molecule) is a store hit, proving the canonical cache
-    key defeats duplicate compute across SMILES spellings. Since
-    `D-2026-08-16-the-physics-leaves-the-cache-stays` the canonicalization happens where the key is
-    derived — on the calculation server — so what this pins now is that the property **survived the
-    wire**: two spellings still reach one row, and a client that canonicalized differently on this
-    side would produce a second key that misses forever with nothing raising.
+    `CCO` misses and computes; `OCC` is a hit. Canonicalization happens on the calculation server,
+    so this pins that the property survives the wire: a client canonicalizing differently would mint
+    a second key that always misses.
     """
     server = install(monkeypatch, FakeCalcServer())
 
@@ -154,27 +144,12 @@ async def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_sto
 
 
 def test_a_value_whose_str_is_not_stable_is_refused_rather_than_hashed() -> None:
-    """`default=str` is documented as making non-JSON values "serialize deterministically".
+    """A value whose `str` is not stable is refused rather than hashed.
 
-    It does not, for the two classes whose `str()` is a property of the *run* rather than of the
-    value, and both were measured rather than reasoned about:
-
-    - a `set` iterates in an order Python randomises per process, so `stable_hash({'s': {...}})`
-      over one six-element set gave five different digests under five `PYTHONHASHSEED` values;
-    - an object whose type overrides neither `__str__` nor `__repr__` renders its **memory
-      address**, so the same class in three processes gave `668cc845d7aa6ec5`, `f5fdffea01ba84c2`
-      and `f4a76c115ad11869`.
-
-    Neither is on a live path today — every caller reaches this with JSON-parsed data — which is
-    exactly what makes it a trap rather than an outage: the sentence in the docstring invites the
-    call, and this hash keys the calculation cache, a campaign's decision space, a report id and a
-    workflow id. A campaign id is a hash of its decision space, and the failure `canonical_text`
-    already records for a re-cased label is worse there than a duplicate run: a *new campaign with
-    no history*, minted silently.
-
-    `str()` is kept for everything else rather than replaced by an allow-list, because it is
-    deterministic for every value type that actually reaches this — `datetime`, `Decimal`, `Enum`,
-    `UUID`, `Path` — and an allow-list would refuse those to close a hole neither of them is in.
+    A `set` iterates in a per-process random order, and an object without `__str__`/`__repr__`
+    renders its memory address. This hash keys the calculation cache, campaign decision spaces,
+    report and workflow ids, so an unstable digest would silently mint new identities. `str()` is
+    kept for other types (`datetime`, `Decimal`, `Enum`, `UUID`, `Path`), where it is deterministic.
     """
 
     class Marker:
@@ -212,11 +187,9 @@ def test_the_value_types_that_do_reach_this_still_hash() -> None:
     assert stable_hash(payload) == stable_hash(dict(reversed(list(payload.items()))))
 
 
-#: SMILES chosen for the features an RDKit release has historically re-ranked — fused and
-#: bridged rings, aromatic perception on hetero rings, stereocentres and double-bond geometry,
-#: charges, isotopes, a radical, a salt and an explicitly-mapped atom. A corpus rather than one
-#: molecule, because a canonical-ranking change moves *some* molecules: ethanol agreeing proves
-#: almost nothing on its own.
+#: SMILES covering features RDKit releases have re-ranked: fused and bridged rings, hetero-aromatic
+#: perception, stereo, charges, isotopes, a radical, a salt and a mapped atom. A corpus, because a
+#: ranking change moves only some molecules.
 _CANONICALISATION_CORPUS = (
     "CCO",
     "OCC",
@@ -250,28 +223,13 @@ print(json.dumps({
 
 
 def test_the_molecule_hash_this_repo_derives_is_the_one_the_fleet_writes() -> None:
-    """`molecule_hash` re-derives somebody else's `input_hash`, and nothing checked that it does.
+    """The molecule hash this repository derives is the one the fleet writes.
 
-    `find_calculations(smiles=…)` cannot scan — `input_hash` is not reversible — so the browse
-    hashes the query molecule the way a key was built and compares. The rows were keyed in
-    `Chemclaw3-mcp`, by `CalculationKey.build(inputs={"smiles": require_canonical_smiles(...)})`,
-    in a different image with a different RDKit pin: `rdkit>=2026.3.4` here against
-    `rdkit>=2024.3.1` there. The *shape* agrees; the **canonicalizer** is a `>=` on both sides,
-    so nothing makes the
-    two images run one version, and RDKit's canonical ranking is not contractually stable across
-    releases. A divergence answers "nothing found" about rows that exist — the same silent failure
-    `connectors/calc/remote.py` forbids for `calc_version` and `structure_id`, reintroduced one
-    function away by the one value this repository does still derive locally.
-
-    **A matching pin floor is not the fix and was rejected.** Two `>=` floors do not equalise two
-    images' versions, and no floor reaches a row already on disk, written by an image that has
-    since been upgraded. What is checkable is what the two *checkouts* do, so that is what is
-    checked — against the fleet's own `cache_key` functions rather than against a re-derivation of
-    them here, which would compare this file's idea of the fleet with this repository's.
-
-    Skips **loudly** where there is no sibling checkout (`tests/conftest.py::_report_sibling_skips`
-    counts it), because a check that quietly shrinks is worse than one that says what it did not
-    look at.
+    `find_calculations(smiles=…)` hashes the query the way `Chemclaw3-mcp` built the key, with a
+    different RDKit pin; RDKit's canonical ranking is not stable across releases, and a divergence
+    answers "nothing found" about rows that exist. A matching pin floor would not equalise versions
+    or reach stored rows, so the two checkouts are compared against the fleet's own `cache_key`.
+    Skips loudly without the sibling checkout (`tests/conftest.py::_report_sibling_skips`).
     """
     import json
     import subprocess

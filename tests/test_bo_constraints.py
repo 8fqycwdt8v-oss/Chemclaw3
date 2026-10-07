@@ -1,10 +1,8 @@
-"""Tests for cross-parameter constraints on a BO problem (W4).
+"""Tests for cross-parameter constraints on a BO problem.
 
-The measurement that decided this wave (M-3) is the reason there is no rejection-sampling path
-here: the risk was never `SoboStrategy` but `RandomStrategy`, which seeds every cold-start
-campaign. Had it ignored `Domain.constraints`, the schema would have claimed a limit was honoured
-while every seed point violated it. Both honour them, so the tests below assert the property
-directly on what each path returns.
+Both `RandomStrategy` (which seeds every cold start) and `SoboStrategy` honour
+`Domain.constraints`, so there is no rejection-sampling path; the tests assert the property on what
+each path returns.
 """
 
 import asyncio
@@ -73,9 +71,8 @@ def _feasible_runs() -> list[Observation]:
 def test_the_seeding_path_honours_the_constraint() -> None:
     """`initial_candidates` is `RandomStrategy`, and it seeds every cold start.
 
-    This is the measurement the whole wave turned on. A seeding path that ignored the constraint
-    would let the schema claim a limit was honoured while every first point violated it — and a
-    chemist would only find out in the lab.
+    If it ignored the constraint, every first point would violate a limit the schema claims to
+    honour.
     """
     candidates = initial_candidates(_capped_problem(), 20)
     # Bound and counted first: `for x in []: assert ...` passes, so a strategy that returned
@@ -90,11 +87,8 @@ def test_the_seeding_path_honours_the_constraint() -> None:
 def test_the_proposing_path_honours_the_constraint() -> None:
     """And so does the model-guided ask, on a mixed domain.
 
-    **Two candidates, not five, and the number is measured.** A constraint makes the acquisition
-    step several times more expensive — 10.3s against 3.2s for one candidate on this domain, then
-    about 9s per further candidate, so five took 46s locally and blew a 180s CI timeout under
-    coverage. The property under test is that every returned point satisfies the relation, which two
-    points prove as well as five.
+    Two candidates rather than more: a constraint makes acquisition several times slower, and two
+    points prove the property.
     """
     candidates = propose_candidates(_capped_problem(), _feasible_runs(), n=2)
     assert len(candidates) == 2
@@ -104,11 +98,10 @@ def test_the_proposing_path_honours_the_constraint() -> None:
 
 
 def test_a_greater_than_constraint_is_honoured_in_the_direction_the_caller_wrote() -> None:
-    """The M-3(a) pin, and the one bug here that yields a confident wrong answer.
+    """A greater-than constraint is honoured in the direction the caller wrote.
 
-    BoFire has no `>=` class, so it is the same inequality with every sign flipped. Getting that
-    negation backwards would silently invert a limit the chemist stated — the optimizer would
-    happily return points *below* a floor they asked to stay above, with no error anywhere.
+    BoFire has no `>=` class, so it is the same inequality with signs flipped; a wrong negation
+    would silently invert a chemist's floor.
     """
     candidates = initial_candidates(_capped_problem(relation=">=", rhs=2.0), 20)
     assert len(candidates) == 20
@@ -169,14 +162,10 @@ def test_a_coefficient_count_mismatch_is_refused() -> None:
 
 
 def test_an_unconstrained_problem_keeps_the_campaign_id_it_had() -> None:
-    """`constraints` enters the identity only when non-empty (the W3 rule, one field on).
+    """`constraints` enters the identity only when non-empty.
 
-    The literal is the same `continuous-only` shape `tests/test_bo_campaign_record.py` pins, and it
-    moved there for the same reason: `campaign_id_for` now sorts the parameter list, and this shape
-    is written unsorted, so it landed on the id its sorted spelling already carried
-    (D-2026-08-08-a-partial-answer-must-say-so; the pre-canonicalization id was
-    `campaign-6958b7edaa261c83`). What this test asserts is unaffected — an empty `constraints`
-    list still contributes nothing.
+    The literal is the canonicalized `continuous-only` id from `tests/test_bo_campaign_record.py`;
+    an empty list contributes nothing.
     """
     unconstrained = OptimizationProblem(
         parameters=[
@@ -197,9 +186,8 @@ def test_adding_a_constraint_makes_it_a_different_campaign() -> None:
 def test_a_screen_refuses_a_constrained_problem_rather_than_violating_it() -> None:
     """`FractionalFactorialStrategy` honours no constraint; it enumerates corners.
 
-    Measured: BoFire rejects every constraint class for this strategy at construction, linear and
-    exclusion alike. So the refusal here is the *message* — raised where the caller can act on it,
-    rather than arriving as a pydantic error naming a BoFire class.
+    BoFire rejects every constraint class for it, so the refusal here is a message the caller can
+    act on.
     """
     with pytest.raises(ValueError, match="cannot honour a constraint"):
         factorial_design(_capped_problem())
@@ -297,10 +285,8 @@ def test_the_proposing_path_honours_an_exclusion() -> None:
         ]
     ]
     candidates = propose_candidates(problem, runs, n=3)
-    # **Fewer than asked for, and that is measured, not assumed.** Four runs are already told, so
-    # only two feasible cells remain and BoFire warns "Expected 3 candidates, got 2". Asserting
-    # `_forbidden(...) == 0` alone would pass on an empty list; the count is what makes the zero
-    # mean something, and pinning the shortfall is what stops it changing unnoticed.
+    # Fewer than asked for: with four runs told only two feasible cells remain. The count makes the
+    # zero-violations assertion meaningful and pins the shortfall.
     assert len(candidates) == 2
     assert _forbidden(candidates) == 0
 
@@ -360,13 +346,10 @@ def test_an_exclusion_naming_a_continuous_parameter_says_which_shape_to_use() ->
 
 
 def test_an_exclusion_shrinks_the_space_every_caller_counts() -> None:
-    """The bug this wave could have shipped: an over-counted space.
+    """An exclusion shrinks the space every caller counts.
 
-    2x2x2 is eight cells, but the excluded catalyst/solvent pairing removes two, so the feasible
-    space holds six. Both readers of that number act on it — `initial_candidates` refuses `n` above
-    it, and `space_exhausted` calls a campaign finished by it — so counting the product would have
-    made a loop ask for two points that cannot exist and let BoFire's discrete acquisition raise
-    mid-campaign, which is the exact failure the count was introduced to prevent.
+    2x2x2 is eight cells; the exclusion removes two. `initial_candidates` and `space_exhausted` both
+    act on the count, so over-counting would ask for points that cannot exist.
     """
     problem = _excluding_problem()
     assert discrete_candidate_count(problem) == 6
@@ -377,20 +360,11 @@ def test_an_exclusion_shrinks_the_space_every_caller_counts() -> None:
 
 
 def test_an_excluded_run_in_the_history_does_not_consume_a_feasible_cell() -> None:
-    """The other half of the same count, which was wrong in the opposite direction.
+    """An excluded run in the history does not consume a feasible cell.
 
-    `discrete_candidate_count` counts *feasible* cells — six of the eight, after the exclusion. The
-    history it is compared against was counted with no such filter, so an observation of an
-    excluded pairing consumed one of six cells it was never part of, and both consumers reached the
-    ceiling early: `space_exhausted` stops a durable campaign with fresh points left, and
-    `_require_fresh_points_exist` refuses an inline ask with "the screen is complete".
-
-    The trigger is ordinary rather than adversarial, which is why it is worth a test: a chemist
-    learns a pairing decomposes *after* running it, adds the exclusion, and keeps the measurement —
-    which is the correct thing to do with a real run, and is exactly this input.
-
-    Six feasible cells, six feasible runs recorded, plus one excluded run. Counting the excluded
-    one makes seven and reports a space with one cell left as over-full.
+    The history must be counted with the same feasibility filter, or a run of a later-excluded
+    pairing makes the space look exhausted early. Six feasible runs plus one excluded run is still
+    exactly full, not over-full.
     """
     problem = _excluding_problem()
     feasible = [
@@ -425,18 +399,11 @@ def test_an_exclusion_round_trips_through_the_discriminated_union() -> None:
 
 
 def test_an_exhausted_space_is_refused_with_a_sentence_instead_of_a_keyerror() -> None:
-    """The crash two independent reviews found, and the mystery it turned out to be.
+    """An exhausted space is refused with a sentence instead of a `KeyError`.
 
-    When every cell of a discrete space has been run, BoFire's `_optimize_acqf_discrete` drops the
-    already-run rows, hands an empty frame to `domain.inputs.transform`, and raises
-    `KeyError: '<parameter>'`. That is neither a `ValueError` nor one of `_SURROGATE_FAILURES`, so
-    `connectors.server` replaced it with "an internal error occurred" — nothing the model can act
-    on, and it retries.
-
-    `_require_observed_params_match`'s docstring records a live `KeyError: 'base'` from this exact
-    BoFire frame that could not be reproduced and was written up as **unproven**. This is it: the
-    cause is exhaustion, not a parameter mismatch, which is why driving mismatched parameters never
-    reproduced it. W4 made it reachable sooner, because an exclusion removes cells.
+    When every discrete cell has been run, BoFire hands an empty frame to `domain.inputs.transform`
+    and raises `KeyError: '<parameter>'`, which would surface as an internal error the model
+    retries. The guard refuses with a message first.
     """
     problem = OptimizationProblem(
         parameters=[CategoricalParameter(name="catalyst", categories=["Pd", "Ni"])],
@@ -472,22 +439,12 @@ def test_a_space_with_room_left_is_still_answered() -> None:
 def test_counting_a_huge_excluded_space_is_bounded_rather_than_enumerated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exclusion-aware count walks the cross product, and nothing bounded that walk.
+    """Counting a huge excluded space is bounded rather than enumerated.
 
-    `discrete_candidate_count` enumerates cell by cell when an exclusion is present, because
-    exclusions can overlap and inclusion-exclusion would over-subtract. The justification for
-    walking was that "this space is small by construction" — which is an assumption about the
-    caller, not a property of the input. Every category list here is model-supplied, so the product
-    is exponential in the parameter count, and `campaign_progress` reaches this function
-    synchronously on a request: ten parameters of ten options is 10^10 cells and a walk that never
-    returns.
-
-    Above the ceiling the answer is `None` — the same "effectively unbounded" every continuous
-    space already returns — so the exhaustion guards simply do not fire. That is the safe
-    degradation: a space this size cannot be exhausted by any campaign this system can run.
-
-    The ceiling is lowered here rather than building a 10^10-cell problem, which is the point: the
-    guard must decide from the *count*, before the walk.
+    With exclusions the count walks the cross product, which is exponential in model-supplied
+    parameters and reached synchronously by `campaign_progress`. Above the ceiling the answer is
+    `None` (effectively unbounded), so exhaustion guards do not fire. The ceiling is lowered here,
+    so the guard is shown to decide from the count before walking.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -511,17 +468,11 @@ def test_counting_a_huge_excluded_space_is_bounded_rather_than_enumerated(
 def test_the_enumeration_bound_counts_the_work_not_just_the_cells(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The walk costs cells x exclusions, and a cells-only ceiling bounded the wrong product.
+    """The enumeration bound counts the work, not just the cells.
 
-    Every cell is tested against every exclusion and `constraints` has no length bound, so a space
-    inside a cells-only ceiling could still take tens of seconds — measured on this tree, one
-    exclusion over 10^6 cells walks in 2.18 s and fifteen over the same cells in 26.06 s. That
-    matters twice: `campaign_progress` is `read_only`, so the plan gate never sees the cost, and
-    `BoCampaignWorkflow` calls this on the *workflow* thread on every replay, where Temporal's
-    10 s workflow-task timeout turns a slow answer into a task-failure loop.
-
-    Pinned at the ceiling rather than by timing, because a wall-clock assertion is a flake: the
-    same cell count is counted under one exclusion and declined under several.
+    The walk costs cells x exclusions; `campaign_progress` is `read_only` and `BoCampaignWorkflow`
+    calls this on the workflow thread under Temporal's task timeout. Pinned at the ceiling, not by
+    timing: the same cell count is counted under one exclusion and declined under several.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -549,14 +500,10 @@ def test_the_enumeration_bound_counts_the_work_not_just_the_cells(
 def test_a_space_too_large_to_count_still_seeds_distinctly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Declining the exclusion walk must not cost seeding its two guarantees.
+    """A space too large to count still seeds distinctly.
 
-    `discrete_candidate_count` returns `None` both for a genuinely infinite space and for a finite
-    one it declined to enumerate. `initial_candidates` read that single `None` and took the branch
-    written for infinity — one `ask(n)`, no deduplication, no refusal of an `n` the space cannot
-    hold. Measured before the fix on a 27-cell space with the ceiling lowered: 40 requested, 40
-    returned, **20 distinct**, and no refusal. The ceiling is ENV-overridable, so a deployment
-    lowering it to bound the walk would have got that on ordinary spaces.
+    `None` means either infinite or declined-to-enumerate; for a finite space `initial_candidates`
+    must still deduplicate and refuse an `n` the space cannot hold.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -596,17 +543,10 @@ def _contradictory_problem() -> OptimizationProblem:
 
 
 def test_contradictory_constraints_are_diagnosed_as_constraints_not_as_bad_measurements() -> None:
-    """The refusal was right and the advice was wrong twice, on the path that has no data.
+    """Contradictory constraints are diagnosed as constraints, not as bad measurements.
 
-    Measured before the fix, seeding a fresh campaign whose constraints cannot both hold:
-    `SurrogateFitError: ... No feasible point found. Constraint polytope appears empty ... This is
-    usually duplicate or near-duplicate observations collapsing the model's kernel, or an objective
-    with no spread — vary the inputs, or the measured values, before retrying`.
-
-    There is no surrogate on the seeding path (`RandomStrategy`) and there are **zero**
-    observations, so "vary the measured values" is not an action that exists — and a model handed
-    that sentence retries with different numbers against a polytope that is still empty. What is
-    wrong is the pair of constraints, so the message names them.
+    Seeding has no surrogate and no observations, so "vary the measured values" is not actionable;
+    the message names the constraints.
     """
     with pytest.raises(SurrogateFitError) as raised:
         initial_candidates(_contradictory_problem(), 3)
@@ -617,13 +557,10 @@ def test_contradictory_constraints_are_diagnosed_as_constraints_not_as_bad_measu
 
 
 def test_botorch_still_raises_a_typed_error_for_an_empty_polytope() -> None:
-    """The branch above keys on a botorch *type*, not on a sentence, so the type is pinned here.
+    """botorch still raises a typed error for an empty polytope.
 
-    `InfeasibilityError` is what "the constraints admit no point" is, wherever it is raised from;
-    matching its message instead would break on any rewording upstream makes, and reading a
-    substring is how the generic advice came to be attached to it in the first place. If a bump
-    removes or re-parents this class, the empty-polytope branch silently stops firing and every
-    contradictory spec goes back to being called bad chemistry data — so this fails first.
+    The branch above keys on `InfeasibilityError`, not on wording; if a bump removes or re-parents
+    it, this fails first.
     """
     from botorch.exceptions.errors import BotorchError, InfeasibilityError
 

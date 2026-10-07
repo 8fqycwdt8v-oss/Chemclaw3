@@ -1,12 +1,8 @@
-"""What changed between two revisions — the product, not a debugging aid.
+"""What changed between two revisions.
 
-The claim worth proving is the `_KEYED_LISTS` one: a list of arms reordered is **not** fourteen
-changes, and flattening by index would say it was. The complement matters just as much and is
-easy to lose in a refactor — `base.steps` is *not* keyed, because position is identity in a
-procedure, so a swapped pair of instructions has to read as a change.
-
-If the first half broke, a chemist's plate-map reshuffle would drown every real edit they made; if
-the second broke, reordering a procedure would be invisible to the miner that reads these paths.
+`_KEYED_LISTS` makes a reordered list of arms zero changes rather than one per position, so a
+plate-map reshuffle does not drown real edits. `base.steps` is deliberately not keyed: position is
+identity in a procedure, so a swapped pair of steps is a change.
 """
 
 import time
@@ -235,24 +231,19 @@ def test_a_boolean_renders_as_a_word_rather_than_a_python_repr() -> None:
 
 
 def test_a_path_segment_a_chemist_typed_cannot_crash_the_ordering() -> None:
-    r"""`'²'.isdigit()` is `True` and `int('²')` raises, and a factor name is free text.
+    r"""A path segment a chemist typed cannot crash the ordering.
 
-    `_NATURAL` splits on `\\d`, which does not match a superscript, so `'²'` arrived through the
-    *non-digit* branch and `str.isdigit` sent it to `int()` anyway — a `ValueError` out of
-    `diff_designs`, which is a 500 on the diff route from a name somebody typed into a form. The
-    regex's own group decides now, so the test and the pattern cannot disagree.
+    `'²'.isdigit()` is `True` but `int('²')` raises; the regex's own group now decides what is a
+    number, so a superscript in a factor name cannot become a 500.
     """
     for name in ("²", "²³", "½", "①", "٣", "plain"):
         assert _reading_order(f"factors.{name}.name")
 
 
 def test_the_reading_order_is_a_total_order_over_distinct_paths() -> None:
-    """`A1` and `A01` used to produce identical keys, so their order came from a set's hash seed.
+    """The reading order is a total order over distinct paths.
 
-    `int('01') == int('1')` and the residual text is empty in both, so `sorted` fell back to its
-    stability over `set(left) | set(right)` — and a set of strings iterates in an order that varies
-    between processes. The same diff of the same two revisions listed its rows differently from one
-    run to the next.
+    `A1` and `A01` must not tie, or rows are ordered by a set's per-process hash seed.
     """
     colliding = ["arms.A1.control", "arms.A01.control", "arms.A001.control"]
     shuffled = ["arms.A001.control", "arms.A1.control", "arms.A01.control"]
@@ -266,9 +257,7 @@ def test_the_reading_order_is_a_total_order_over_distinct_paths() -> None:
 def _at_the_count_ceilings(equivalents: float) -> ExperimentDesign:
     """A legal design with every count `ExperimentDesign` bounds at its own ceiling.
 
-    50 factors of 96 levels, 1536 arms, 500 charge lines — 1.6 MB of JSON, inside the 4 MB
-    `service_max_request_bytes` a browser may post to `POST /protocols/{design_id}/revisions`, and
-    105,869 flattened paths. `equivalents` moves exactly one of them.
+    Inside the request-size limit of the revisions route; `equivalents` moves exactly one path.
     """
     factors = [
         Factor(
@@ -302,20 +291,11 @@ def _at_the_count_ceilings(equivalents: float) -> ExperimentDesign:
 
 
 def test_a_diff_costs_what_the_answer_is_worth_and_not_what_the_document_weighs() -> None:
-    """One edited field at every declared count ceiling, measured against the work it cannot avoid.
+    """A diff costs what the answer is worth, not what the document weighs.
 
-    `diff_designs` used to `sorted(set(left) | set(right), key=_reading_order)` — a reading-order
-    key for every path in the *document*, thrown away for all but the handful that moved. Measured
-    at the ceilings, a chemist changing one number cost **1.67 s** of sorting 105,869 paths to
-    report a diff of one, on a loop `service_uvicorn_workers` refuses to run more than one of: every
-    other chemist's SSE stream and both kubelet probes stalled for the whole of it. Ordering only
-    what differs made the same edit **0.18 s**.
-
-    **The bound is a ratio against `flatten`, not a number of seconds**, because the seconds are a
-    property of whatever machine runs this and the claim is not: flattening both documents is the
-    work every diff must do whatever it reports, so the whole call costing a small multiple of it
-    is what says the cost tracks the answer. Measured 1.5x-1.7x here against the 15x the full sort
-    charged.
+    Only differing paths are sorted, so one edited field at every count ceiling stays cheap on the
+    single event loop. Bounded as a ratio against `flatten` (work every diff must do), because
+    seconds depend on the machine.
     """
     before = _at_the_count_ceilings(2.0)
     after = _at_the_count_ceilings(3.0)

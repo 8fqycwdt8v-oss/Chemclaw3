@@ -1,11 +1,9 @@
-"""Answer verification (plan F10-B): deterministic citation gate + LLM-as-judge, both offline.
+"""Answer verification: deterministic citation gate and LLM-as-judge, both offline.
 
-The deterministic path (verifier off, the default) reuses the report citation check, so a fabricated
-citation is caught with no network. The LLM path (verifier on) is exercised with a fake structured
-client, proving it returns the judge's verdict and degrades to the deterministic gate when the model
-yields nothing parseable. `turn_evidence` builds the evidence a conversational answer is scored
-against out of what the turn's tools actually returned, and `ungrounded_parameter_shapes` is the
-deterministic scan for method parameters no tool in the turn produced.
+The deterministic path reuses the report citation check, so a fabricated citation is caught with
+no network. The judge path uses a fake structured client and degrades to the deterministic gate
+when it yields nothing usable. `turn_evidence` builds evidence from what the turn's tools
+returned, and `ungrounded_parameter_shapes` scans for method parameters no tool produced.
 """
 
 import asyncio
@@ -50,11 +48,8 @@ class _FakeResponse:
 class _FakeVerifierClient:
     """A fake chat model whose structured output is a preset value.
 
-    Shaped around `with_structured_output(schema).ainvoke(prompt)`, which is how the judge is asked
-    now — the schema is enforced by the provider rather than parsed out of prose, so a
-    `response_format` the caller passed and a `schema` the model was bound to are the same
-    decision seen from either side. `response_formats` keeps the old name because that is what the
-    assertions call it, and it records exactly the same thing.
+    Shaped around `with_structured_output(schema).ainvoke(prompt)`; `response_formats` records the
+    schema each call bound.
     """
 
     def __init__(self, value: Any) -> None:
@@ -65,8 +60,7 @@ class _FakeVerifierClient:
     def with_structured_output(self, schema: Any, **kwargs: Any) -> "_FakeVerifierClient":
         """Record the schema the judge was bound to and keep replaying the preset value.
 
-        `**kwargs` carries `method="json_schema"`, which the caller passes so the provider
-        enforces every field rather than only the ones without defaults — see
+        `**kwargs` carries `method="json_schema"`; see
         `test_the_judges_schema_requires_every_field`.
         """
         self.response_formats.append(schema)
@@ -76,10 +70,9 @@ class _FakeVerifierClient:
     async def ainvoke(self, prompt: str, config: Any = None) -> Any:
         """Return the preset structured value, as a provider-enforced schema would.
 
-        `config` is accepted and ignored: the caller passes `off_stream_metering()` there, and a
-        fake that refused the keyword would make every test below exercise the *degrade* path while
-        still asserting the judge's verdict — which is how a fake stops testing what it claims to.
-        The metering itself is asserted against a real chat model, below.
+        `config` is accepted and ignored: the caller passes `off_stream_metering()` there, and
+        refusing the keyword would silently route every test through the degrade path. Metering is
+        tested against a real chat model below.
         """
         return self._value
 
@@ -107,12 +100,9 @@ def test_deterministic_passes_grounded_answer(monkeypatch: pytest.MonkeyPatch) -
 def test_deterministic_uncited_answer_is_unverified_not_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An answer that cites nothing is unverified — the metric must not reward citing nothing.
+    """An answer that cites nothing is unverified, not supported.
 
-    This returned `confidence=1.0` and no unsupported claim, which made the score maximal exactly
-    where the answer was least anchored. In the 190-probe live run 0 of 33 analytical answers
-    carried a single wikilink, so every fabricated method in that slice earned a perfect
-    citation-faithfulness result and `review_required=False`.
+    Otherwise the score would be maximal exactly where the answer is least anchored.
     """
     monkeypatch.setattr(settings, "verifier_enabled", False)
     result = asyncio.run(
@@ -134,13 +124,10 @@ def test_an_empty_answer_is_not_routed_to_a_human(monkeypatch: pytest.MonkeyPatc
 def test_an_unreachable_judge_does_not_certify_an_uncited_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A verifier that could not run must not produce a *stronger* signal than one that did.
+    """An unreachable judge does not certify an uncited answer.
 
-    The degradation path returned the deterministic gate's verdict, and for an ordinary chat answer
-    — which carries no `[[wikilinks]]` — that gate has nothing to check and said `confidence=1.0`.
-    So with the judge endpoint down, every answer in the deployment came back maximally confident
-    with `review_required=False`, while nothing had been verified at all. The failure was invisible
-    on precisely the surface that exists to make it visible.
+    A verifier that could not run must not produce a stronger signal than one that did; for an
+    uncited answer the citation gate has nothing to check.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
 
@@ -182,11 +169,8 @@ def test_llm_verifier_returns_the_judges_verdict(monkeypatch: pytest.MonkeyPatch
     result = asyncio.run(
         verify_answer("An answer [[reaction-z]].", [_chunk("reaction-z")], client=client)
     )
-    # `verified_by` is stamped by the call site, not accepted from the model. It is in the schema
-    # handed to the judge as `response_format`, so the judge is literally asked for it — and a
-    # model asserting which check ran would be certifying its own reliability. The fake judge
-    # therefore returns the *wrong* value and this asserts it is overwritten; asserting against
-    # the default would be a tautology that passes with the stamping deleted.
+    # `verified_by` is stamped by the call site, not accepted from the model, which would otherwise
+    # certify its own reliability. The fake returns the wrong value so the overwrite is observable.
     assert verdict.verified_by == "citation-gate", "the fake judge must claim the wrong provenance"
     assert result.verified_by == "judge"
     assert result.claims == verdict.claims and result.confidence == verdict.confidence
@@ -220,11 +204,10 @@ def test_llm_verifier_falls_back_when_the_client_raises(monkeypatch: pytest.Monk
 
 
 def test_turn_evidence_grounds_a_citation_in_the_tool_result_that_returned_it() -> None:
-    """A cited id is evidence only when a tool result in *this turn* mentions it.
+    """A cited id is evidence only when a tool result in this turn mentions it.
 
-    Substring containment against the result text, so a tool that renders ids as wikilinks, as
-    bare slugs or inside JSON is read identically. `reaction-b` is returned by a tool and never
-    cited, which must not make it evidence for a claim; `reaction-x` is cited and never returned.
+    Matched against the result text, so ids rendered as wikilinks, slugs or in JSON read alike.
+    `reaction-b` is returned but not cited; `reaction-x` is cited but not returned.
     """
     outputs = ['{"notes": ["reaction-a", "reaction-b"]}']
     evidence = turn_evidence("From [[reaction-a]] and [[reaction-x]].", outputs)
@@ -235,9 +218,7 @@ def test_turn_evidence_grounds_a_citation_in_the_tool_result_that_returned_it() 
 def test_turn_evidence_keeps_an_uncited_tool_result_under_an_unciteable_id() -> None:
     """A result no citation matched is still evidence to read, never grounding to claim.
 
-    The judge has to see everything the turn retrieved to check the answer's prose, but a
-    synthetic `tool-output-N` id is one no `[[wikilink]]` can accidentally resolve to — so adding
-    it cannot turn an ungrounded citation into a grounded one.
+    Its synthetic `tool-output-N` id cannot be resolved by any wikilink.
     """
     evidence = turn_evidence("No citations here.", ["pKa 15.9", "", "  "])
     assert [chunk.source_note_id for chunk in evidence] == ["tool-output-0"]
@@ -283,12 +264,10 @@ def test_a_method_parameter_no_tool_produced_is_named() -> None:
 
 
 def test_a_parameter_class_some_tool_produced_is_left_alone() -> None:
-    """Per shape *class*, not per value: an answer reasoning about a retrieved number is clean.
+    """A parameter class some tool produced is left alone.
 
-    Comparing values instead would flag every answer that rounds or reformats one, and a
-    heuristic that fires on a legitimate answer is worse than no heuristic. The wavelength here
-    is ungrounded and still caught, so the class check is doing work rather than passing
-    everything.
+    Checked per shape class rather than value, so rounding or reformatting a retrieved number is
+    clean; an ungrounded wavelength here is still caught.
     """
     answer = "Run it at 0.8 mL/min and detect at 254 nm."
     found = ungrounded_parameter_shapes(answer, ["method: 1.0 mL/min on a C18 column"])
@@ -296,28 +275,19 @@ def test_a_parameter_class_some_tool_produced_is_left_alone() -> None:
 
 
 def test_ordinary_chemistry_prose_does_not_trip_the_scan() -> None:
-    r"""The over-firing the pattern table is shaped to avoid: "to form a complex" is not a form.
-
-    Matched case-insensitively, `\bform\s+[A-D]\b` hits every sentence of ordinary prose that
-    says "form a", which would make the gate fire on almost every legitimate answer and cost a
-    chemist their trust in every mark that follows.
+    r"""Ordinary chemistry prose does not trip the scan: "to form a complex" is not a polymorph
+    form.
     """
     prose = "The base deprotonates the amide to form a stabilised anion; warming drives it to bar."
     assert ungrounded_parameter_shapes(prose, []) == []
 
 
 def test_one_tool_result_reaches_the_judge_once_however_many_ids_it_grounds() -> None:
-    """The judge prompt is linear in the evidence, not in the citations naming it.
+    """One tool result reaches the judge once, however many ids it grounds.
 
-    `turn_evidence` emits a chunk per *(tool output x cited id)* pair because the citation gate
-    downstream reads only the set of `source_note_id`s. Rendering that shape verbatim sent the
-    same text once per citation: a `gather_evidence` result is ~20,000 characters and an answer
-    citing it well names ~40 ids, which measured at a 40x prompt — quadratic in exactly the
-    behaviour the verifier exists to encourage.
-
-    The fixture is one result naming three ids, so a naive implementation gives the wrong answer:
-    every id must still appear (they are what the judge attributes a claim to), and the body must
-    appear once.
+    `turn_evidence` emits a chunk per (output × cited id) pair for the citation gate; rendering that
+    verbatim would make the prompt quadratic. One result naming three ids: every id appears, the
+    body once.
     """
     body = "gather_evidence: [[reaction-1]] [[reaction-2]] [[reaction-3]] all used K2CO3 in THF."
     answer = "They used K2CO3 [[reaction-1]] [[reaction-2]] [[reaction-3]]."
@@ -334,14 +304,11 @@ def test_one_tool_result_reaches_the_judge_once_however_many_ids_it_grounds() ->
 
 
 def test_the_judge_prompt_is_budgeted_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The evidence in one judge prompt is capped; past the cap the oldest are named, not shown.
+    """The judge prompt's evidence is budgeted newest first; past the cap the oldest are named, not
+    shown.
 
-    The prompt used to embed every distinct output whole, so its size was the *turn's* — a 30-step
-    turn with ~20 kB results built a ~600 kB judge prompt, one call costing more than the turn it
-    graded and past some length exceeding the judge's own context. The newest outputs are what the
-    answer was written from, so they are what the judge reads; the omitted ids are named so a
-    claim resting on them reads as unverifiable rather than unsupported. At least the newest
-    always survives, whatever the budget — the same one-chunk floor `gather_evidence` holds.
+    The newest outputs are what the answer was written from; named omissions make a claim resting on
+    them read as unverifiable rather than unsupported. The newest always survives.
     """
     from chemclaw.core.config import settings
 
@@ -383,12 +350,9 @@ def test_distinct_tool_results_each_get_their_own_envelope() -> None:
 
 
 def test_a_longer_note_id_does_not_ground_a_citation_to_its_prefix() -> None:
-    """The substring hole: `playbook-degassing-old` must not vouch for `playbook-degassing`.
+    """A longer note id does not ground a citation to its prefix.
 
-    Both ids are in the committed corpus, so this is a live collision rather than a contrived one.
-    Under plain containment a turn that retrieved only the *retired* note certified a citation to
-    the *current* one at confidence 1.0 — the precise failure `turn_evidence` exists to catch, and
-    the one it was silently unable to catch.
+    `playbook-degassing-old` must not vouch for `playbook-degassing`; both are in the corpus.
     """
     retired_only = "gather_evidence: [[playbook-degassing-old]] — sparge with N2 for 30 min."
     assert turn_evidence("Degas per [[playbook-degassing]].", [retired_only]) == [
@@ -405,11 +369,9 @@ def test_a_numeric_id_is_not_grounded_by_a_longer_one_sharing_its_digits() -> No
 
 
 def test_an_id_the_turn_really_did_retrieve_is_still_grounded() -> None:
-    """The boundary must not break the ordinary case — the exact id, however it is rendered.
+    """An id the turn really retrieved is still grounded, however it is rendered.
 
-    Three renderings in one result, because the substring rule was chosen precisely so this
-    function need not know each tool's output format, and a boundary that only understood
-    wikilinks would trade one hole for another.
+    Three renderings in one result, since the boundary must not assume one tool's output format.
     """
     for rendering in ("[[reaction-12]]", "reaction-12", '{"note_id": "reaction-12"}'):
         output = f"similar_reactions: {rendering} gave 84% yield."
@@ -431,14 +393,10 @@ def test_a_fabricated_residual_solvent_limit_is_scanned_like_an_elemental_one() 
 
 
 def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_the_cost_the_default_pays() -> None:
-    """Pin the false positives rather than claim they are rare — the docstring reasons about a rate.
+    """The shape scan's false positives on a chemist's own figures are pinned.
 
-    Every answer below is legitimate: the chemist supplied the number and the turn called no tool,
-    so the scan has nothing to match against and marks it for review. This is the documented cost
-    of a shape heuristic. It was the whole argument for `answer_shape_gate_enabled` defaulting to
-    off; the default is now on, so this file is where that cost is *paid* rather than avoided —
-    which makes the rate more worth pinning, not less. A test that only showed the true positives
-    would let it drift unnoticed.
+    With no tool called, a user-supplied number has nothing to match and is marked for review. The
+    gate is on by default, so this cost is paid and pinned rather than left to drift.
     """
     over_fires = {
         "Your 7.26 ppm singlet is residual CHCl3, not product.": ["ppm limit: 7.26 ppm"],
@@ -456,13 +414,9 @@ def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_the_cost_the_def
 def test_a_verifier_that_cannot_be_built_still_gets_the_offline_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Flipping the switch without a reachable model must not leave the answer unscored.
+    """A verifier that cannot be built still gets the offline gate.
 
-    Constructing the client used to sit above the guard, so a deployment turning verification on
-    for the first time — the moment its `"verifier"` route is most likely to be missing — got an
-    exception out of `verify_answer` and, through the runner's own guard, a plain unscored answer.
-    Every failure mode of the judge now lands on the offline citation gate, which is what the
-    contract says and what makes the switch worth flipping.
+    Every failure mode of the judge, including client construction, lands on the citation gate.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
 
@@ -478,18 +432,10 @@ def test_a_verifier_that_cannot_be_built_still_gets_the_offline_gate(
 def test_a_stalled_judge_degrades_to_the_deterministic_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A judge that hangs costs the score, never the turn — bounded by the verifier's own budget.
+    """A stalled judge degrades to the deterministic gate within the verifier's own budget.
 
-    The judge call had no timeout of its own, so a stalled endpoint was charged to the front
-    door's whole-turn deadline (`service_turn_timeout_seconds`, minutes): the finished answer sat
-    undelivered behind a scoring aid, and the teardown that eventually arrived rolled the turn
-    back. On expiry the verdict must be the same one an *unreachable* judge produces — the
-    deterministic citation gate's — because a slow judge and a down judge are the same event to
-    the chemist waiting.
-
-    The outer `wait_for` is the mutation guard: without `asyncio.timeout` around the judge call
-    the stall escapes `verify_answer` entirely and this test fails as a `TimeoutError` rather
-    than hanging the suite.
+    A slow judge and a down judge are the same event to the waiting chemist, so they give the same
+    verdict. The outer `wait_for` turns a missing `asyncio.timeout` into a failure, not a hang.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_timeout_seconds", 0.05)
@@ -510,12 +456,9 @@ def test_a_stalled_judge_degrades_to_the_deterministic_gate(
 
 
 def test_a_tool_named_but_never_called_is_flagged() -> None:
-    """The verbatim live failure: two tools promised, neither called, the turn ends.
+    """A tool named but never called is flagged.
 
-    The answer text is the one a live run produced (`docs/archive/live-grounded-2026-08-03.md`).
-    An instruction against this was added and the next run produced the same sentence about the
-    same two tools, which is why the check is a scan over the finished text rather than a rule in
-    the prompt.
+    A prompt instruction did not stop this, so the check scans the finished text.
     """
     answer = (
         "I'll call `calculator_trust` to show you the **average bias and error** the model carries "
@@ -555,15 +498,11 @@ def test_a_word_that_merely_resembles_a_tool_name_is_not_flagged() -> None:
 
 
 def test_retrieved_content_cannot_close_the_judges_evidence_block() -> None:
-    """The judge prompt used a hand-rolled `<evidence>` tag: neither nonce'd nor defanged.
+    """Retrieved content cannot close the judge's evidence block.
 
-    Any retrieved or uploaded text containing `</evidence>` closed it, and everything after landed
-    at top level in the prompt that decides `confidence` and `review_required` — an instruction to
-    the judge, authored by whoever can place a document in a retrieval source. The mechanism to
-    prevent it was one import away and already used for the conversation prompt.
-
-    Two properties, because only the pair is the guarantee: hostile text stays *inside* the
-    envelope, and a close tag it forges does not end it.
+    Text containing a closing tag would otherwise reach top level in the prompt that decides
+    `confidence` and `review_required`. Both properties are asserted: hostile text stays inside, and
+    a forged close tag does not end the envelope.
     """
     from chemclaw.agent.framing import ENVELOPE_TAG
     from chemclaw.agent.verifier import _verifier_prompt
@@ -590,13 +529,10 @@ def test_retrieved_content_cannot_close_the_judges_evidence_block() -> None:
 
 
 def test_a_degraded_verdict_says_which_check_produced_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The judge and the citation gate answer different questions; the result must say which ran.
+    """A degraded verdict says which check produced it.
 
-    The judge scores *faithfulness*; the gate scores *resolvability*. Measured, substituting the
-    second for the first inverted the score on exactly the answers a judge exists to catch — a
-    cited-but-contradicted answer went from 0.0/unsupported judged to 1.0/supported degraded, with
-    no field on the result differing. `_deterministic_result` is right about what it measures; the
-    defect was that nothing recorded which measurement had been taken.
+    The judge scores faithfulness and the gate scores resolvability; a cited but contradicted answer
+    scores opposite ways, so the result must record which ran.
     """
     from chemclaw.agent.verifier import verify_answer
 
@@ -618,13 +554,10 @@ def test_a_degraded_verdict_says_which_check_produced_it(monkeypatch: pytest.Mon
 
 
 def test_a_hostile_note_id_cannot_reach_the_judge_prompt_raw() -> None:
-    """The channel the first fix opened while closing another.
+    """A hostile note id cannot reach the judge prompt raw.
 
-    Framing the *content* left the **id list** — written in a line the prompt author composes,
-    ahead of the envelope — unsanitised. A note id is retrieved data like any other: it comes from
-    `source_note_id`, and `cited_ids`' wikilink pattern does not exclude newlines, so an indexed
-    document can put a forged closing tag and a fresh instruction at top level in the prompt that
-    decides `confidence` and `review_required`.
+    Note ids are retrieved data, written in a line outside the envelope, and the wikilink pattern
+    admits newlines, so the id list must be sanitised too.
     """
     from chemclaw.agent.verifier import _verifier_prompt
 
@@ -638,12 +571,10 @@ def test_a_hostile_note_id_cannot_reach_the_judge_prompt_raw() -> None:
 
 
 def test_a_forged_envelope_in_the_answer_is_not_read_as_evidence() -> None:
-    """The answer is the span under review, and this prompt names the envelope as authoritative.
+    """A forged envelope in the answer is not read as evidence.
 
-    The answering model's own instructions name the same `ENVELOPE_TAG`, so it can spell it, and
-    injected retrieval content can induce it to. Unframed and undefanged, a forged envelope in the
-    answer arrives at the judge indistinguishable from real evidence — fabricated support for the
-    very claim being checked.
+    The answering model knows `ENVELOPE_TAG` and can be induced to spell it, which would fabricate
+    support for the claim being checked.
     """
     from chemclaw.agent.verifier import _verifier_prompt
 
@@ -656,11 +587,10 @@ def test_a_forged_envelope_in_the_answer_is_not_read_as_evidence() -> None:
 
 
 def _gather_evidence_output(count: int) -> str:
-    """The shape `gather_evidence` really reaches the verifier in: a serialized list of chunks.
+    """The shape `gather_evidence` reaches the verifier in: a serialized list of chunks.
 
-    Each chunk's `content` was framed by `research_tools.gather_evidence`; the runner then
-    stringifies the whole list, so the envelopes end up *inside JSON string literals* rather than
-    being the whole string — with their quotes and newlines escaped by that serialization.
+    Each chunk's `content` is framed, and the runner then stringifies the list, so the envelopes sit
+    inside JSON string literals with quotes and newlines escaped.
     """
     import json
 
@@ -682,21 +612,12 @@ def _gather_evidence_output(count: int) -> str:
 
 @pytest.mark.parametrize("chunks", [3, 40])
 def test_a_serialized_tool_result_is_framed_once_and_stays_enclosed(chunks: int) -> None:
-    """What the judge prompt actually does with an already-framed tool result, pinned honestly.
+    """A serialized tool result is framed once and stays enclosed.
 
-    A `_framed` guard used to sit in `_verifier_prompt` skipping the wrap when the content
-    "already carried this process's envelope", tested with `startswith`/`endswith`. **It could not
-    fire on any real producer.** `turn_evidence` sets a chunk's `content` to the whole *serialized*
-    tool result, and every framing tool returns a structure rather than a bare envelope —
-    `gather_evidence` a list, `expand_note` a `NoteView` — so the string is a JSON blob beginning
-    `[{"content": "<retrieved-note-…`. Measured on this shape: detected `False` at both sizes.
-
-    Making it fire is not the fix, and this test exists to stop that being tried again. Skipping
-    the wrap would put JSON scaffolding at top level in the prompt that names `ENVELOPE_TAG` as
-    authoritative evidence; splitting the blob to frame each gap keeps everything enclosed but
-    costs an envelope per gap — measured at 40 chunks, +3565 bytes against +325 for escaping.
-    Escaping is the safe option *and* the cheap one, so what is asserted is the property that
-    matters: exactly one envelope, nothing of the tool result outside it.
+    Framing tools return structures, so a result is a JSON blob, never a bare envelope; skipping the
+    wrap would expose JSON scaffolding and per-gap framing would cost an envelope per gap. Escaping
+    is safe and cheap, so the asserted property is one envelope with nothing of the result outside
+    it.
     """
     from chemclaw.agent.verifier import _verifier_prompt
 
@@ -721,11 +642,9 @@ def test_a_serialized_tool_result_is_framed_once_and_stays_enclosed(chunks: int)
 
 
 def _outside_envelopes(text: str) -> str:
-    """Everything in `text` that no envelope encloses — what the judge reads in its own voice.
+    """Everything in `text` that no envelope encloses: what the judge reads in its own voice.
 
-    Written as "remove complete envelope spans, keep the rest" rather than as a parse, because the
-    claim under test is exactly that no span of tool output is left over once envelopes are taken
-    away.
+    Complete envelope spans are removed and the rest kept, matching the claim under test.
     """
     import re
 
@@ -733,12 +652,10 @@ def _outside_envelopes(text: str) -> str:
 
 
 def test_a_hostile_chunk_cannot_close_the_envelope_it_is_placed_in() -> None:
-    """The boundary the envelope exists for: a live closing delimiter in tool output is defanged.
+    """A hostile chunk cannot close the envelope it is placed in.
 
-    The reason the wrap cannot be made conditional on "it looks framed already". A tool result
-    carrying a live closing delimiter in text we did not frame must not be able to end its own
-    envelope and continue at top level, where the prompt's own instruction would read it as the
-    verifier's voice rather than as evidence.
+    A live closing delimiter in unframed tool output is defanged, so the wrap cannot be conditional
+    on looking framed already.
     """
     from chemclaw.agent.verifier import _verifier_prompt
 
@@ -755,19 +672,11 @@ def test_a_hostile_chunk_cannot_close_the_envelope_it_is_placed_in() -> None:
 
 
 def test_the_function_calling_rendering_demands_only_confidence() -> None:
-    """The trap, pinned: the default rendering asks the provider to enforce almost nothing.
+    """The function-calling rendering demands only `confidence`.
 
-    `convert_to_openai_tool` drops any field carrying a default out of `required`, so `claims`
-    (`default_factory=list`) and `verified_by` disappear and the emitted tool schema demands
-    `confidence` alone. Under `method="function_calling"` that is *all* the provider enforces —
-    types included — so a model returning the whole verdict as a JSON string inside `claims` is
-    accepted at the wire and only fails when `VerificationResult` validates it locally, inside
-    `verify_answer`'s `try`. Measured against a live model: 8 of 8 calls degraded that way, and
-    `score_answer`'s third rule then appends "the judge did not run" and flags — so switching
-    `verifier_enabled` on flagged **every** non-empty answer, with a log line as the only evidence.
-
-    Pinned rather than fixed, because it is upstream's rendering and correct on its own terms: a
-    field with a default *is* optional. The fix is on the caller, asserted below.
+    `convert_to_openai_tool` drops defaulted fields from `required`, so under
+    `method="function_calling"` a malformed verdict passes the wire and fails only local validation.
+    Pinned as upstream's correct behaviour; the caller's fix is asserted below.
     """
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
@@ -782,31 +691,20 @@ def test_the_function_calling_rendering_demands_only_confidence() -> None:
 
 
 def test_the_structured_schema_demands_the_claims_list() -> None:
-    """The judge named no claims on most turns, and the schema is why — not the prompt.
+    """The structured schema demands the claims list.
 
-    `_verifier_prompt` asks, in words, for "each distinct factual claim". A model is free to ignore
-    that; what it is not free to ignore is the schema `method="json_schema"` makes the provider
-    enforce. While `claims` carried `default_factory=list` the emitted schema required `confidence`
-    alone, so `{"confidence": 0.9}` was a complete, valid verdict — it validated, `verified_by` was
-    stamped "judge", and `score_answer` read `result.unsupported` as empty. A verdict naming nothing
-    is indistinguishable from a verdict finding nothing wrong, which is the one distinction this
-    module exists to make.
-
-    Required now, with an empty list still legal and meaning exactly one thing: the answer makes no
-    factual claim. Asserted on the schema rather than on a call, for the same reason as the pair
-    above — this is where the defect lived and it needs no credential to see.
+    With `claims` defaulted, `{"confidence": 0.9}` was a complete verdict naming nothing, which is
+    indistinguishable from one finding nothing wrong. An empty list stays legal and means the answer
+    makes no factual claim. Asserted on the schema, which needs no credential.
     """
     assert "claims" in VerificationResult.model_json_schema()["required"]
 
 
 def test_a_verdict_omitting_claims_no_longer_validates() -> None:
-    """The other half: what the required field actually rejects.
+    """A verdict omitting `claims` no longer validates.
 
-    The schema assertion above says what the provider is asked to enforce; this says what happens
-    when one does not. A judge answering `{"confidence": 0.9}` used to produce a certified verdict
-    with an empty claim list. It is now a validation error, which lands in `verify_answer`'s
-    `except` and degrades to the citation gate — visible on `chemclaw_verifier_degraded_total` and
-    flagged by `score_answer`, rather than silently passing as a clean judgement.
+    It degrades to the citation gate, visible on `chemclaw_verifier_degraded_total` and flagged by
+    `score_answer`.
     """
     with pytest.raises(ValidationError):
         VerificationResult.model_validate({"confidence": 0.9})
@@ -817,16 +715,10 @@ def test_a_verdict_omitting_claims_no_longer_validates() -> None:
 async def test_the_judge_is_bound_with_json_schema_enforcement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`verify_answer` asks for strict schema enforcement, so a malformed verdict never validates.
+    """`verify_answer` binds the judge with `method="json_schema"`.
 
-    What `json_schema` buys is *provider-side* enforcement of the whole model — types included —
-    rather than a looser tool call the client validates afterwards. That is the difference between
-    a wrong-typed field being rejected at the wire and it arriving, failing validation locally, and
-    silently degrading. Confirmed end to end at 13 of 13 against a live model; asserted here as the
-    binding, because the confirmation needs a credential and this must not.
-
-    Paired with the test above deliberately: that one shows the loose rendering exists, this one
-    shows the caller does not use it. Either alone would pass while the feature stayed broken.
+    That makes the provider enforce the whole schema, types included. Paired with the rendering test
+    above: one shows the loose rendering exists, this shows the caller does not use it.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     client = _FakeVerifierClient(VerificationResult(claims=[], confidence=0.9, verified_by="judge"))
@@ -836,28 +728,19 @@ async def test_the_judge_is_bound_with_json_schema_enforcement(
     assert client.methods == ["json_schema"], client.methods
 
 
-# --- the `openai_compatible` provider: does the real bind-and-call path survive a server that ---
-# --- does not implement OpenAI's Structured Outputs? (measured against a real local endpoint, ---
-# --- not argued from the SDK source — see the class and tests below) -----------------------------
+# --- the `openai_compatible` provider against a server that may not implement Structured Outputs --
 #
-# CLAUDE.md names `openai_compatible` (an internal OpenAI-compatible endpoint) as the real
-# deployment target; every test above drives `verify_answer` through a fake client that never
-# touches `langchain_openai`. These instead build the *real* client via
-# `agent.llm_provider.build_chat_model` — the same factory `_default_client` uses in production —
-# and point it at a real local HTTP server, so `with_structured_output(..., method="json_schema")`
-# actually binds and actually posts. Only the endpoint underneath is fake, and it never leaves
-# loopback (`tests/test_no_egress.py` scans `src/`, not `tests/`, for exactly this reason).
+# These build the real client via `agent.llm_provider.build_chat_model`, as `_default_client` does,
+# and point it at a real loopback HTTP server, so `with_structured_output(method="json_schema")`
+# really binds and posts. Only the endpoint is fake.
 
 
 class _FakeOpenAiEndpoint:
-    """A real uvicorn server speaking just enough of `/v1/chat/completions` to drive `ChatOpenAI`.
+    """A real uvicorn server speaking enough of `/v1/chat/completions` to drive `ChatOpenAI`.
 
-    Three shapes, one per measured server behaviour: `status=200` with JSON `content` (the server
-    honours `response_format` and returns a well-formed verdict), `status=400` (the server rejects
-    `response_format` outright), and `status=200` with prose `content` (the server accepts the
-    request and silently ignores the field). `requests` records every decoded body this endpoint
-    received, so a test can confirm the real client actually sent `response_format` rather than
-    merely receiving a response that happens to fit.
+    Three behaviours: 200 with a JSON verdict, 400 rejecting `response_format`, and 200 with prose
+    ignoring it. `requests` records each decoded body, so a test can confirm `response_format` was
+    sent.
     """
 
     def __init__(self, *, status: int = 200, content: str = "", error: str = "") -> None:
@@ -933,11 +816,9 @@ def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) ->
     return build_chat_model("verifier")
 
 
-# A cited claim the evidence *contradicts* — the shape `VerificationResult`'s own docstring measures
-# the danger of. A working judge must catch it (confidence 0.0, unsupported); the deterministic
-# citation gate can only see that the citation resolves, and certifies it at confidence 1.0. Reusing
-# this one fixture across all three server behaviours is what makes the degraded results comparable
-# to the judged one below, rather than three unrelated verdicts.
+# A cited claim the evidence contradicts: a working judge scores it 0.0/unsupported, while the
+# citation gate only sees the citation resolve. One fixture across all three server behaviours
+# keeps the verdicts comparable.
 _CONTRADICTED_ANSWER = "Yield was 99% [[reaction-a]]."
 _CONTRADICTING_EVIDENCE = [
     EvidenceChunk(
@@ -979,15 +860,10 @@ def test_a_real_openai_compatible_server_that_honours_response_format_is_scored_
 def test_a_real_openai_compatible_server_rejecting_response_format_inverts_the_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """(b) A 400 naming `response_format` unsupported lands in `verify_answer`'s broad `except`.
+    """(b) A 400 rejecting `response_format` degrades to the citation gate.
 
-    The OpenAI SDK raises `openai.BadRequestError` for the 400; `langchain_openai` either re-raises
-    it or wraps it, and either way it is still an `Exception` that never leaves `verify_answer`
-    unhandled — it degrades to the deterministic citation gate, silently, with only the counter and
-    a log line to say so. Because the citation resolves, the *contradicted* claim the judge above
-    correctly scored 0.0/unsupported now clears the gate at confidence 1.0 — the inversion
-    `VerificationResult.verified_by`'s docstring measures, reached here through a real 400 rather
-    than an injected exception.
+    The error is caught inside `verify_answer`, and the contradicted claim then clears the gate at
+    confidence 1.0, the inversion `verified_by` exists to expose.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     before = METRICS.value("chemclaw_verifier_degraded_total")
@@ -1013,13 +889,9 @@ def test_a_real_openai_compatible_server_rejecting_response_format_inverts_the_v
 def test_a_real_openai_compatible_server_that_ignores_response_format_degrades_the_same_way(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """(c) A 200 of ordinary prose fails `VerificationResult` validation client-side and degrades.
+    """(c) A 200 of prose fails validation client-side and degrades the same way.
 
-    A server that accepts the request but never actually constrains generation to the schema — the
-    behaviour of a `json_object`-only or format-blind "OpenAI-compatible" endpoint — returns prose
-    that is not valid JSON. `model_validate_json` raises inside the OpenAI SDK's own parsing, and
-    that exception is likewise caught by `verify_answer`'s blanket `except Exception`, landing on
-    exactly the same degraded, confidence-inverted verdict as the 400 case above.
+    A format-blind server returns non-JSON; the parse error is caught by `verify_answer`.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     before = METRICS.value("chemclaw_verifier_degraded_total")
@@ -1044,14 +916,12 @@ def test_a_real_openai_compatible_server_that_ignores_response_format_degrades_t
 def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The inversion above stops mattering only because `score_answer` reads `verified_by`.
+    """A degraded judge is still routed to a human by `score_answer`.
 
-    `VerificationResult` alone is not distinguishable from a genuinely strong verdict on
-    `confidence`/`unsupported` — the test above proves exactly that. This drives the real
-    `_default_client()` construction path (not an injected `client=`) through `score_answer`, the
-    one function `api/runner_answer.py` actually reads, and shows the degraded call is still
-    flagged: `review_required` is forced `True` and the reason is stated, regardless of the
-    confidence the deterministic gate reported.
+    Driven through the real `_default_client()` path and `score_answer`, which
+    `api/runner_answer.py`
+    reads: `review_required` is forced `True` with the reason stated, whatever confidence the gate
+    reported.
     """
     from chemclaw.agent.verifier import score_answer
 
@@ -1072,23 +942,17 @@ def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_
     assert review.verified_by == "citation-gate"
     assert review.confidence == 1.0
     assert review.review_required is True
-    # `review_notes`, not `unsupported`: this is a statement about which check produced the
-    # verdict, not a claim the answer made — and `api/runner.py`'s revision loop reads the second
-    # list as claims to quote back at the model. Here the gate resolved the citation, so it found
-    # nothing wrong with the answer itself: the whole verdict is the note, and the loop therefore
-    # has nothing to send back.
+    # `review_notes`, not `unsupported`: this is about which check ran, not a claim the answer made,
+    # and the revision loop quotes `unsupported` back to the model.
     assert review.unsupported == []
     assert review.review_notes == ["verified by the citation gate only; the judge did not run"]
 
 
 class _MeteredJudge(GenericFakeChatModel):
-    """A judge that reports usage the way a provider does — through the callback machinery.
+    """A judge that reports usage the way a provider does, through the callback machinery.
 
-    A real `BaseChatModel` rather than the duck-typed fake above, because the property under test is
-    that the call's usage reaches a callback at all: `with_structured_output(...)` returns the
-    *parsed* model, so nothing about the token count survives into the caller's return value, and a
-    fake that skipped LangChain's runnable machinery would prove nothing about where the number
-    goes.
+    A real `BaseChatModel`, since `with_structured_output` returns the parsed model and the usage
+    only reaches a callback.
     """
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
@@ -1110,19 +974,11 @@ class _MeteredJudge(GenericFakeChatModel):
 
 
 def test_the_judges_tokens_are_booked_against_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The judge is a model call this turn paid for, and something has to count it.
+    """The judge's tokens are booked against the turn.
 
-    **It is the one call a turn makes that no stream carries.** Every model call inside the graph —
-    the model node's own, and the ones a tool body makes, which inherit the graph's callbacks
-    through LangChain's ambient config — is metered off the `messages` stream by
-    `api/graph_stream`. `score_answer` runs from `api/runner_answer.build_answer_event`, after that
-    stream is exhausted, so its tokens reached neither `BudgetTracker.record`, nor
-    `chemclaw_tokens_total`, nor the `turn_costs` row. Measured against this fake before
-    `off_stream_metering()` existed: 930 tokens spent, 0 booked — with `budget_enabled` on, which
-    is what the chart ships.
-
-    That is the same defect `agent/turn_usage.py`'s own docstring says it changed packages to close
-    for the template path, on the one path neither module mentioned.
+    The judge runs after the graph's `messages` stream is exhausted, so it is the one model call no
+    stream meters; `off_stream_metering()` books it into the budget, `chemclaw_tokens_total` and the
+    `turn_costs` row.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     ledger = TurnUsage()
@@ -1159,13 +1015,10 @@ def test_the_judge_meters_nothing_off_the_request_path() -> None:
 
 
 def test_the_runner_publishes_the_ledger_the_judge_books_into() -> None:
-    """The other half: a call that books into an ambient nobody stamps books into nothing.
+    """The runner publishes the ledger the judge books into.
 
-    `off_stream_metering()` is correct and inert unless the turn's ledger is the ambient one, which
-    is the failure shape this repository keeps meeting — a decision that is right and wired to
-    nothing. So the production stamper is driven rather than a hand-set contextvar:
-    `api/runner._turn_ambient` is the one place a turn's ambients are established, and what is
-    asserted is that the object it publishes is the very ledger `_book_turn_spend` later reads.
+    `off_stream_metering()` is inert unless the turn's ledger is ambient, so the production stamper
+    `api/runner._turn_ambient` is driven and its ledger must be the one `_book_turn_spend` reads.
     """
     from chemclaw.agent.turn_usage import _ledger
     from chemclaw.api.runner import _turn_ambient
@@ -1192,15 +1045,10 @@ def test_the_probe_is_a_no_op_while_verification_is_off(monkeypatch: pytest.Monk
 def test_the_probe_now_runs_on_every_deployment_that_enables_the_judge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The second half of the skip condition is gone, and that widens a control.
+    """The structured-output probe runs on every deployment that enables the judge.
 
-    It read `settings.llm_provider != "openai_compatible"`, so an Anthropic-configured deployment
-    with the judge on never probed — correctly, because `ChatAnthropic` has no `response_format`
-    seam to misbehave. With one gateway there is no such deployment shape left
-    (`D-2026-09-04-a-gateway-is-the-only-provider`), so `verifier_enabled` is the whole condition.
-
-    Asserted by driving the probe with a client that *raises*: if the guard still skipped, this
-    would pass silently, which is exactly how a no-op control reads as a working one.
+    With a single gateway provider, `verifier_enabled` is the whole condition. Driven with a client
+    that raises, so a guard that still skipped would fail.
     """
 
     class _Explodes:
@@ -1261,11 +1109,9 @@ def test_the_probe_refuses_a_server_ignoring_response_format(
 
 
 class _SequencedVerifierClient:
-    """A fake judge that answers each roll from a script — a verdict, or an exception to raise.
+    """A fake judge that answers each roll from a script: a verdict, or an exception to raise.
 
-    The band's whole subject is what happens *across* rolls, which the single-value fake above
-    cannot express: it replays one verdict forever, so a test against it would show the median of
-    three identical rolls and prove nothing about the re-roll at all.
+    The band concerns behaviour across rolls, which a single replayed verdict cannot express.
     """
 
     def __init__(self, script: list[Any]) -> None:
@@ -1361,17 +1207,10 @@ def test_the_bands_rerolls_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_ungated_answer_is_distinguishable_from_a_cleared_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unchecked answer and a checked-and-clean one must not be the same bytes.
+    """An ungated answer is distinguishable from a cleared one.
 
-    Both honesty gates ship off, and with them off every scored field is at its `None`/`False`
-    default. That is right for the verifier — `confidence`/`verified_by` are its own null — and
-    the shape gate has no field of its own at all, so an answer it scanned and cleared serialized
-    byte-for-byte identically to one nothing looked at. A surface flagging on `review_required`
-    renders both as an unflagged answer, which is the honest half; what it cannot say is which one
-    it is looking at.
-
-    Measured before `checks_run` existed: `model_dump_json()` of the two was identical, character
-    for character.
+    With the gates off every scored field is at its default, so `checks_run` is what tells an answer
+    nothing scanned from one scanned and found clean.
     """
     from chemclaw.api.runner_answer import build_answer_event
 
@@ -1409,20 +1248,11 @@ def test_every_gate_that_ran_names_itself(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_the_scan_does_not_read_ordinary_english_as_a_promised_tool() -> None:
-    """The shape gate scans for a bare token, so its name space must hold no English words.
+    """The shape scan does not read ordinary English as a promised tool.
 
-    `available_tool_names()` is the validators' union and includes three spaces that are the agent's
-    own scaffolding rather than a capability: the subagent spawner (`task`), the harness todo writer
-    and the backend filesystem verbs (`ls`, `grep`, `glob`). Scanning over that union, *"the first
-    task is to degas the solvent"* and *"use grep to find it"* both came back as an answer promising
-    a tool it never called.
-
-    That is not a stray log line at the shipped defaults. `answer_shape_gate_enabled` is on and
-    `answer_review_max_rounds` is 2, so a false positive here costs two full graph runs and then
-    files a durable review request asking a person to read a correct answer.
-
-    Both arms are asserted: the scaffolding words must not fire, and a real capability promise must
-    still fire — a narrowing that silenced the gate entirely would pass the first arm alone.
+    `available_tool_names()` includes scaffolding names such as `task`, `ls`, `grep` and `glob`,
+    which appear in ordinary prose. A false positive here costs review rounds and a durable review
+    request. Both arms: scaffolding words do not fire, a real capability promise still does.
     """
     for prose in (
         "The first task is to degas the solvent thoroughly.",
@@ -1441,12 +1271,9 @@ def test_the_scan_does_not_read_ordinary_english_as_a_promised_tool() -> None:
 
 
 def test_no_capability_tool_is_short_enough_to_collide_with_english() -> None:
-    """What makes the bare-token match safe, asserted rather than assumed.
+    """No capability tool name is short enough to collide with English.
 
-    The scan is safe over the capability name spaces because none of those names is an English
-    word — which is a property of the *surface*, not of the scan, and a bundle enabled next year
-    could break it. This is the assertion that fails on the day one does, rather than the day a
-    chemist's answer is sent to a reviewer for saying "task".
+    That is a property of the tool surface, not the scan, so a newly enabled bundle could break it.
     """
     from chemclaw.agent.chemclaw_agent import available_tool_names, capability_tool_names
 

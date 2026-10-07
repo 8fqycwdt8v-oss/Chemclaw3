@@ -1,14 +1,9 @@
-"""Per-process resources that were being rebuilt per call.
+"""Per-process resources are held for the process, not rebuilt per call.
 
-Three of these showed up as steady background cost in a 50-user load test, all of the same shape:
-something expensive to construct was constructed inside a hot path instead of held for the process.
-
-- A Temporal `Client` per call — every connector-job launch, every status poll, every approval
-  route. Production runs Temporal over mTLS, so each was a TLS handshake plus three blocking PEM
-  reads on the loop serving the chat surface.
-- An `httpx.AsyncClient` per *connector* on every `/readyz`, and `/readyz` re-probed the whole
-  fleet on every call — a route the kubelet hits every 10 s per pod and that any unauthenticated
-  caller can hit as fast as it likes.
+- A Temporal `Client`: every job launch, status poll and approval route would otherwise pay an
+  mTLS handshake plus blocking PEM reads on the loop serving chat.
+- An `httpx.AsyncClient` per connector on `/readyz`, a route probed every 10 s per pod and
+  reachable unauthenticated, which also must not re-probe the whole fleet on every call.
 """
 
 import asyncio

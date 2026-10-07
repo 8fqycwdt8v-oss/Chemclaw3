@@ -1,14 +1,9 @@
 """What `core/db.py` measures, and what it must not claim to have measured.
 
-Both defects here were reproduced with a number before they were fixed, and both are the same
-shape: a *label* that was a true-sounding sentence about something else. The duration histogram
-timed the caller's whole block and its HELP said "one pooled database operation"; the failure
-counter tested the *builtin* `ConnectionError` and its own docstring said a caller's exception is
-not a fact about Postgres.
-
-These drive the real `db.connection` seam against the real registry, for the reason
-`tests/test_datapath_observability.py` gives: the failure being closed is "the wrong thing was
-recorded", which a call-assertion cannot see.
+The duration histogram times the caller's whole block, and the failure counter counts only this
+module's own unavailability, not a caller's `ConnectionError`. Driven through the real
+`db.connection` seam and registry, since "the wrong thing was recorded" is invisible to a
+call-assertion.
 """
 
 import asyncio
@@ -36,13 +31,11 @@ def _series_or_none(name: str, **labels: str) -> float | None:
 
 
 def test_the_timed_span_is_the_callers_whole_block() -> None:
-    """Pin what `chemclaw_db_query_duration_seconds` means, because its HELP got it wrong.
+    """Pin what `chemclaw_db_query_duration_seconds` means.
 
-    Not a regression guard — this passes before and after, deliberately. It is the executable
-    statement of the contract the corrected HELP has to describe: the span runs from before the
-    checkout to after the `with` body, so whatever the caller does while holding the connection is
-    inside the number. Measured on the unfixed tree, a block that slept three seconds booked
-    3.015 s and emitted `db.slow`; nothing about that reading was wrong except the word "query".
+    Not a regression guard: the executable statement of the contract the HELP describes. The span
+    runs from before checkout to after the `with` body, so whatever the caller does while holding
+    the connection is inside the number.
     """
     asyncio.run(migrated_db_or_skip())
     operation = "review_probe_hold"
@@ -66,13 +59,10 @@ def test_the_timed_span_is_the_callers_whole_block() -> None:
 def test_the_submit_lock_names_the_thing_it_holds_a_connection_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_cluster_lock` holds a connection across an entire git submission, push included.
+    """`_cluster_lock` holds a connection across a whole git submission, push included.
 
-    Unnamed — which is how it shipped — every note submission booked a network-to-a-forge sample
-    into `chemclaw_db_query_duration_seconds{operation="unspecified"}` and emitted a `db.slow`
-    WARNING saying a *database operation* held a connection that long. The hold is real and worth
-    measuring; what it lacked was a label saying what it is, so a dashboard rendered a remote git
-    push as database latency.
+    It is labelled with what it is, so a dashboard does not render a remote git push as database
+    latency.
     """
     asyncio.run(migrated_db_or_skip())
     # The cross-pod lock only exists where the deployment shares a database; a memory-store
@@ -99,14 +89,11 @@ def test_the_submit_lock_names_the_thing_it_holds_a_connection_for(
 def test_a_callers_own_connection_error_is_not_a_database_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`ConnectionResetError` from the caller's code booked `kind="unavailable"` and named the DB.
+    """A caller's own `ConnectionError` is not a database failure.
 
-    The builtin `ConnectionError` is the base of `ConnectionResetError`, `BrokenPipeError`,
-    `ConnectionAbortedError` and `ConnectionRefusedError` — every one of which an HTTP client, an
-    MCP session or a sink driver raises from inside the block. Measured on the unfixed tree,
-    `raise ConnectionResetError("my HTTP client died")` produced
-    `chemclaw_db_query_failures_total{kind="unavailable"} 1` and a `db.failed` WARNING naming this
-    deployment's database, which is a page for somebody else's socket.
+    The builtin is the base of `ConnectionResetError`, `BrokenPipeError` and others that HTTP
+    clients, MCP sessions and sink drivers raise inside the block; counting them as `unavailable`
+    would page for somebody else's socket.
     """
     asyncio.run(migrated_db_or_skip())
     before = _counter("chemclaw_db_query_failures_total")
@@ -139,21 +126,19 @@ def test_a_callers_own_connection_error_is_not_a_database_failure(
 def test_only_this_modules_own_unavailability_counts_as_unavailable(
     exc: BaseException, kind: str | None
 ) -> None:
-    """The class of the exception is now the same statement as the label.
+    """The class of the exception is the same statement as the label.
 
-    Four of these six were `unavailable` before the fix, for faults that had nothing to do with
-    Postgres. `_DatabaseUnavailable` is raised only by the two places in `core/db.py` that mean it,
-    so it cannot be produced by a caller's socket.
+    `_DatabaseUnavailable` is raised only where `core/db.py` means it, so a caller's socket cannot
+    produce `unavailable`.
     """
     assert db._failure_kind(exc) == kind
 
 
 def test_an_unreachable_database_is_still_counted() -> None:
-    """Narrowing the test must not stop counting the thing it was there for.
+    """An unreachable database is still counted.
 
-    `connect()` wraps a real `OperationalError` into this module's own class, so a genuinely
-    unreachable server in a non-pooling process — a migration, a script, a test — still books
-    `unavailable`. Port 1 on loopback is closed by construction and reachable with no egress.
+    `connect()` wraps a real `OperationalError` into this module's class, so a non-pooling process
+    still books `unavailable`. Port 1 on loopback is closed and needs no egress.
     """
     with pytest.raises(ConnectionError) as caught:
         asyncio.run(db.connect("postgresql://nobody@127.0.0.1:1/none"))

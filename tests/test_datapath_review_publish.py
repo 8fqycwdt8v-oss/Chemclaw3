@@ -1,10 +1,8 @@
-"""The three publish/ingest readings a reviewer executed and found saying the wrong number.
+"""Three publish/ingest readings that must report the right number.
 
-Each one had a comment asserting the property it did not have: the ingest lag gauge was documented
-as a per-source reading and one naive datetime removed the whole family; the dead-letter count was
-documented as "exact rather than inferred" and was per call rather than per transition; and the
-backlog refresh was documented as excluding the rows a pass is about to deliver, while `_CLAIM`
-leaves them `pending`.
+The ingest lag gauge must survive one naive datetime, the dead-letter count must be per
+transition, and the backlog must be read after a pass marks its rows (a claim leaves them
+`pending`).
 """
 
 import asyncio
@@ -53,17 +51,12 @@ def _clean_cursor_observations() -> Iterator[None]:
 def test_one_naive_cursor_does_not_take_the_whole_lag_family_off_the_scrape(
     _clean_cursor_observations: None,
 ) -> None:
-    """`_cursor_lags` subtracts in a comprehension, so one bad value poisons every source.
+    """One naive cursor does not take the whole lag family off the scrape.
 
-    Measured on the unfixed tree: `observe_cursor("naive-source", datetime(2026, 1, 1))` made the
-    gauge callable raise `TypeError: can't subtract offset-naive and offset-aware datetimes`, the
-    registry's guard dropped `chemclaw_ingest_cursor_lag_seconds` **entirely** from the exposition,
-    and `ChemclawIngestCursorStalled` had nothing left to fire on — for every source, permanently,
-    with `chemclaw_gauge_read_failures_total` the only trace.
-
-    `store_cursor` is the reachable door: `sync_cursors.cursor` is `TIMESTAMPTZ` so the load path
-    cannot produce one, but the store path persists whatever `durable/eln_sync.py` computed from an
-    ELN's own timestamps and nothing enforces tz-awareness on the way in.
+    `_cursor_lags` subtracts in a comprehension, so one naive datetime would raise and the registry
+    would drop `chemclaw_ingest_cursor_lag_seconds` for every source. `store_cursor` is the
+    reachable
+    door: it persists what `durable/eln_sync.py` computed from an ELN's own timestamps.
     """
     eln_cursor.observe_cursor("review-aware", datetime.now(UTC))
     eln_cursor.observe_cursor("review-naive", datetime(2026, 1, 1))
@@ -80,13 +73,10 @@ def test_one_naive_cursor_does_not_take_the_whole_lag_family_off_the_scrape(
 
 
 def test_the_dead_letter_count_is_per_transition_not_per_call() -> None:
-    """`RETURNING state` returns the new state for every *matched* row, changed or not.
+    """The dead-letter count is per transition, not per call.
 
-    `outbox.py` claims `RETURNING state` "is what makes the dead-letter count exact rather than
-    inferred". Measured without the `AND state = 'pending'` guard: `mark_failed(ids)` on the same
-    three ids twice booked `chemclaw_results_dead_lettered_total` 0 → 3 → 6 and logged "3 retired
-    to dead-letter" both times, for three retirements. Retiring a row is a transition, and a
-    transition happens once.
+    `RETURNING state` returns every *matched* row, changed or not, so without `AND state =
+    'pending'` a repeated `mark_failed` would count the same retirements again.
     """
     asyncio.run(migrated_db_or_skip())
     before = _counter("chemclaw_results_dead_lettered_total")
@@ -116,26 +106,17 @@ def test_the_dead_letter_count_is_per_transition_not_per_call() -> None:
 def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_CLAIM` only spends the attempt; the row it returns is still `pending`.
+    """Claiming publishes no backlog reading, because a claim delivers nothing.
 
-    The refresh used to sit inside `claim()`, justified by a comment saying the reading was taken
-    after the claim "so the reading excludes the rows this pass is about to deliver". Measured:
-    three rows, one `claim()`, and `chemclaw_outbox_pending{sink=...}` read **3.0** with all three
-    still pending — the pre-drain depth, published as the current one and held for a whole pass.
-
-    So a claim now publishes nothing, and the reading a scrape sees is the one taken after the
-    rows were marked.
+    `_CLAIM` only spends the attempt; its rows are still `pending`, so a reading taken there would
+    be the pre-drain depth held for a whole pass. The reading is taken after the rows are marked.
     """
     asyncio.run(migrated_db_or_skip())
     sink = "review-claim"
     outbox._PENDING_GAUGE.pop(sink, None)
-    # **The backlog gauges read only the *enabled* sinks**, so this probe sink has to be one for
-    # the second half of this test to observe anything. That scoping is deliberate: rows queued for
-    # a sink an operator has removed from `CHEMCLAW_RESULT_SINKS` are drained by nobody and pruned
-    # by nobody, and counting them here made `ChemclawResultOutboxStuck` fire permanently for a
-    # destination that was switched off on purpose. Patched at the module the reader uses, exactly
-    # as `tests/test_publish_outbox.py::_with_sink` does, because `enabled()` validates names
-    # against discovered manifests and this file is testing the reading, not discovery.
+    # The backlog gauges read only *enabled* sinks (a removed sink's rows would page forever), so
+    # the probe sink is enabled, patched at the module the reader uses as
+    # `tests/test_publish_outbox.py::_with_sink` does, since this tests the reading, not discovery.
     monkeypatch.setattr(outbox, "enabled_names", lambda: [sink])
 
     async def run() -> list[outbox.Lease]:
@@ -172,11 +153,8 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
 def test_a_drain_pass_refreshes_the_backlog_once_after_every_sink() -> None:
     """The refresh is a property of the *pass*, not of a claim — and it runs with no sink enabled.
 
-    Both halves matter. Once per pass rather than once per sink, because `refresh_backlog` reads
-    every sink in two `GROUP BY sink` statements and one of them is a sequential scan of the whole
-    table (`_DEAD_LETTERED`, ~20 ms on 200k rows measured with `EXPLAIN (ANALYZE, BUFFERS)`) — N-1
-    of N reads per pass were redundant. And after the marking rather than before it, which is the
-    reading `claim()` could not give.
+    Once per pass rather than per sink, because `refresh_backlog` reads every sink and one of its
+    statements is a sequential scan; and after the marking, which `claim()` could not give.
     """
     asyncio.run(migrated_db_or_skip())
     calls: list[int] = []
@@ -260,17 +238,12 @@ async def _row_state(row_id: int) -> tuple[str, int, bool]:
 
 
 def test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds() -> None:
-    """The lease said *that* a row was claimed and not *whose* claim it was.
+    """A superseded pass cannot release the lease the live pass holds.
 
-    `claimed_at = NULL` is a release, and both marks keyed on `id = ANY(%s)` alone — so a pass whose
-    lease had expired, reporting the outage it saw, put a row a live pass was mid-delivery on
-    straight back into the queue. Driven against real Postgres before the fence: the stale
-    `mark_failed` released the lease and the *next* claim took the same row again, so a budget of
-    `result_publish_max_attempts` destination outages was being spent on releases nobody intended —
-    zero deliveries per attempt.
-
-    The fence is `attempts`, which `_CLAIM` increments in the same statement that takes the lease,
-    so the number a pass holds names that pass's claim and no later one. No new column.
+    `claimed_at = NULL` is a release, and keyed on id alone an expired pass's `mark_failed` would
+    requeue a row a live pass is delivering, spending attempts on nobody's failure. The fence is
+    `attempts`, which `_CLAIM` increments in the statement that takes the lease, so the number a
+    pass holds names its own claim.
     """
     asyncio.run(migrated_db_or_skip())
 
@@ -301,23 +274,12 @@ def test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds() -> Non
 
 
 def test_a_superseded_pass_cannot_mark_delivered_what_the_live_pass_still_holds() -> None:
-    """The `mark_failed` twin of the fence, on the mark where booking it wrong is worse.
+    """A superseded pass cannot mark delivered what the live pass still holds.
 
-    `_MARK_DELIVERED` carries two guards and the site says so — "**Matched on the lease, not on the
-    id, and guarded on `pending`.** Both were missing and each is its own defect." The state guard
-    has `test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back`; **the fence had
-    nothing**, and dropping `AND p.attempts = lease.attempt` from that one statement was green over
-    222 tests across eleven publish modules — found by mutating it, not by reading it.
-
-    What the state guard cannot cover: a `pending` row is exactly the shape a live pass holds, so
-    `state = 'pending'` is satisfied by the victim. Driven against real Postgres with the fence
-    dropped, a superseded pass reporting a delivery it made under an expired lease moved the row to
-    `('delivered', 1, released)` — the row leaves the queue, `chemclaw_results_published_total`
-    counts a transition that did not happen, and the live pass's real outcome is then dropped by
-    its own `state='pending'` guard, so the true result is lost in both directions at once.
-
-    That is strictly worse than the `mark_failed` case this mirrors: a wrongly released row is
-    re-claimed and re-delivered, while a wrongly *delivered* row is never looked at again.
+    The state guard cannot cover this: a live pass's row is `pending` too. Without the
+    `AND p.attempts = lease.attempt` fence a stale delivery report would retire the row, count a
+    publication that did not happen, and make the live pass's real outcome a no-op. Worse than the
+    `mark_failed` twin, because a wrongly delivered row is never looked at again.
     """
     asyncio.run(migrated_db_or_skip())
     before = _counter("chemclaw_results_published_total")
@@ -351,13 +313,10 @@ def test_a_superseded_pass_cannot_mark_delivered_what_the_live_pass_still_holds(
 
 
 def test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back() -> None:
-    """`_MARK_DELIVERED` had no state guard at all, where `_MARK_FAILED` had argued for one.
+    """A stale `mark_delivered` cannot walk a dead-lettered row back.
 
-    Driven against real Postgres: a row already `state='failed'` with its budget spent — counted on
-    `chemclaw_results_dead_lettered_total`, listed by `backfill_publications --requeue` — became
-    `'delivered'` on a `mark_delivered` carrying its id, so the queue reported a publication that
-    never happened and the dead-letter count and the table disagreed for good. A claimed row is
-    `pending` by construction, so the guard is the transition's own precondition.
+    A claimed row is `pending` by construction, so the guard is the transition's own precondition;
+    without it a `failed` row would become `delivered` and the dead-letter count and table disagree.
     """
     asyncio.run(migrated_db_or_skip())
     before = _counter("chemclaw_results_published_total")
@@ -383,11 +342,10 @@ def test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back() -> None:
 
 
 def test_the_pass_that_holds_the_lease_delivers_and_marks_normally() -> None:
-    """The fence must not cost the ordinary path, asserted beside the two refusals above.
+    """The fence must not cost the ordinary path.
 
-    A guard that also blocks the legitimate mark would show up as a queue that never drains, which
-    is a worse failure than the one being fixed — so the happy path is pinned here rather than
-    inferred from the two tests that prove the fence bites.
+    A guard that also blocked the legitimate mark would be a queue that never drains, so the happy
+    path is pinned beside the two refusals.
     """
     asyncio.run(migrated_db_or_skip())
     before = _counter("chemclaw_results_published_total")

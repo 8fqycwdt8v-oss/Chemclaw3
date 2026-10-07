@@ -1,18 +1,12 @@
 """The Databricks Vector Search adapter, against a fake index client.
 
-Its own file rather than a section in `tests/test_vector_store.py`, because that module installs an
-**autouse** fixture patching the Qdrant adapter's `_models` namespace: anything added beside it
-would silently inherit that patch. `tests/test_warehouse_retriever.py` is its own file for the same
-reason.
+Its own file because `tests/test_vector_store.py` has an autouse fixture patching the Qdrant
+adapter. What is tested is where the adapter can be wrong silently:
 
-What is worth testing here is not "does the fake echo what it was handed" — it is the three places
-this adapter can be wrong in a way no exception reports:
-
-* the score arithmetic, because Databricks ranks by a rescaled *Euclidean* distance while this
-  seam's contract is a cosine, and a mis-scaled score mis-ranks every fusion above it silently;
-* the scope, because an empty one means "nothing is eligible" and sending it as an unfiltered
-  search returns the whole corpus; and
-* the normalisation, because Databricks' L2 ordering only equals cosine ordering for unit vectors.
+* the score arithmetic (Databricks ranks by rescaled Euclidean distance; this seam's contract is
+  a cosine);
+* the scope (an empty one means "nothing eligible", never an unfiltered search);
+* normalisation (L2 ordering equals cosine ordering only for unit vectors).
 """
 
 import math
@@ -98,9 +92,8 @@ def test_the_databricks_score_converts_back_to_the_cosine_it_came_from(
 ) -> None:
     """`cos = 1.5 - 0.5/score` inverts `score = 1/(1 + d²)` exactly, for unit vectors.
 
-    The whole reason this adapter normalises. A negative cosine converts to a negative number and
-    is floored at 0 here, which is what makes it *not a hit* to the caller — the `> 0` rule
-    `retrieval/vectors/base.py` states and both Postgres indexes apply.
+    A negative cosine is floored at 0, which makes it *not a hit* (the `> 0` rule in
+    `retrieval/vectors/base.py`).
     """
     assert cosine_from_score(_score_for(cosine)) == pytest.approx(max(0.0, expected), abs=1e-9)
 
@@ -243,9 +236,7 @@ async def test_an_unreadable_response_shape_warns_rather_than_reading_as_no_matc
 ) -> None:
     """Tolerant parsing must not turn a client-version change into a silently empty corpus.
 
-    `_rows` reads two shapes and falls through for anything else. Falling through *quietly* would
-    make every search return nothing with no trace — the failure the tolerance exists to absorb,
-    inverted, and the one an operator has no way to notice.
+    `_rows` reads two shapes; anything else warns rather than reading as no matches.
     """
     import logging
 

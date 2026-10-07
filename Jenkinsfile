@@ -5,7 +5,7 @@
 // every component imports as a non-root UID. Reproducing that here would be a second answer to the
 // same question, maintained by hand, in a second language. What Jenkins adds is the half GitHub
 // Actions has never had: a registry to push to and a cluster to reach
-// (`docs/planning/BACKLOG.md` — "Push-to-registry + `helm upgrade` rollout in CI").
+// (`docs/planning/BACKLOG.md` — "Push-to-registry + `helm upgrade` rollout, run").
 //
 // `RUN_GATE` exists for a Jenkins-only, air-gapped estate where the GitHub half does not run. It is
 // off by default rather than absent, because a pipeline that silently gates nothing and a pipeline

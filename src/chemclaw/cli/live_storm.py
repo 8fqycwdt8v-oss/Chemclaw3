@@ -1227,7 +1227,7 @@ def main(argv: list[str] | None = None) -> int:
         default="".join(FAMILIES),
         help=f"which families to run, as letters (default every one: {''.join(FAMILIES)})",
     )
-    parser.add_argument("--report", type=Path, default=Path("tasks/live-test/storm.md"))
+    parser.add_argument("--report", type=Path, default=Path(".live/storm.md"))
     args = parser.parse_args(argv)
 
     planned = [letter for letter in args.families.upper() if letter in FAMILIES]

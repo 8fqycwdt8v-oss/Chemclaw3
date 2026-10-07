@@ -4,7 +4,7 @@ The command half of `evals/phoenix.py`: it owns the endpoint and client. Nothing
 model; the transcripts are the record.
 
     make phoenix-up
-    uv run python -m chemclaw.cli.phoenix_publish tasks/live-test/transcripts --name haiku-run
+    uv run python -m chemclaw.cli.phoenix_publish .live/transcripts --name haiku-run
 """
 
 import argparse

@@ -6,8 +6,9 @@ KUBE_VERSION ?= 1.29.0
 # Must equal `case_set_version` in data/evals/baseline.json; bump with `make eval-baseline`.
 EVAL_CASE_SET_VERSION ?= live-cost-2026-09-14
 
-# pytest-xdist workers for `test` and `cov`; 0 is serial. Not `auto`: each worker draws its own
-# Postgres pools, so tests/conftest.py caps each worker's pool instead.
+# pytest-xdist workers for `test` and `cov`. The gate is serial (0); 4 is a local opt-in, and a
+# failure seen only in parallel is re-run serially. Not `auto`: each worker draws its own Postgres
+# pools, so tests/conftest.py caps each worker's pool instead.
 PYTEST_WORKERS ?= 0
 PYTEST_XDIST := $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS),)
 

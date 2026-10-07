@@ -13,7 +13,7 @@ live-probe outcomes `evals/live.py` writes and reports, per directory:
   `min_structures` heavy atoms;
 - how often `render_structure` ran.
 
-Run: `python -m chemclaw.evals.answer_shape tasks/live-test*/ ...` (directories are searched
+Run: `python -m chemclaw.evals.answer_shape .live/transcripts/ ...` (directories are searched
 recursively; each directory holding outcomes is one row).
 """
 

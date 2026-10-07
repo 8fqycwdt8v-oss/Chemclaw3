@@ -1,8 +1,7 @@
-"""Tests for the durable BO campaign (plan step 1d.4).
+"""Tests for the durable BO campaign.
 
-The registry and activities are exercised directly (fast, no server). The full
-durable workflow runs on Temporal's time-skipping server in CI and skips in the
-offline sandbox — proving a real reaction campaign runs end-to-end and resumably.
+The registry and activities are exercised directly. The full workflow runs on Temporal's
+time-skipping server (skipped offline), proving a reaction campaign runs end to end and resumably.
 """
 
 import asyncio
@@ -66,10 +65,8 @@ from tests.temporal_env import (
 
 warnings.filterwarnings("ignore")
 
-# Taken from the registry rather than written out, for the reason the registry exists: a
-# hand-maintained list re-creates the "written, imported, absent from the worker's list, never
-# runs" failure one level down, and the durable campaign's record-writing activity was added to
-# this workflow long after this list was first spelled (`chemclaw.durable.registry`).
+# Taken from the registry rather than written out, so a newly added activity cannot be missing from
+# this worker (`chemclaw.durable.registry`).
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities(bundle_queue("bo"))
 
 
@@ -77,20 +74,16 @@ _BO_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities(bundle_queu
 def _no_op_heartbeat_outside_activity_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Let the BO activities run directly (not under a Temporal worker) in this file.
 
-    `activity.heartbeat` raises outside a real activity context (Conn-F2 gave all three BO
-    activities a heartbeat), and this file calls them directly rather than through Temporal — the
-    same idiom `tests/test_calc_jobs.py` uses for the same reason.
+    `activity.heartbeat` raises outside a real activity context; the same idiom as
+    `tests/test_calc_jobs.py`.
     """
     monkeypatch.setattr(activity, "heartbeat", lambda *args: None)
     yield
 
 
-# A deterministic stand-in for the solubility calculator. The model itself is the calculation
-# server's since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and `solubility_objective` now
-# takes the scorer as an argument for exactly that reason (`science/bo/objectives.py::LogSFor`) —
-# so what these tests inject is a monotone surrogate rather than a mock of a network call. It is
-# the honest shape for them: what is under test is the *search*, and a search is tested by whether
-# it finds the best member of a library under an objective it does not get to see.
+# A deterministic, monotone stand-in for the solubility scorer, which `solubility_objective` takes
+# as an argument (`science/bo/objectives.py::LogSFor`). The search is tested by whether it finds the
+# best library member under an objective it cannot see.
 def _log_s(smiles: str) -> float:
     """Negated Crippen LogP — ordered like an aqueous solubility and free of any server."""
     molecule = Chem.MolFromSmiles(smiles)
@@ -124,11 +117,8 @@ def test_campaign_spec_rejects_insufficient_seed(n_initial: int) -> None:
 def test_campaign_spec_carries_per_campaign_seed() -> None:
     """The spec is the per-campaign seed seam; unset means the config default.
 
-    The replicate is *constructed* with the seed rather than copied onto with
-    `model_copy(update={"seed": 7})`. The claim is that a caller can hand `CampaignSpec` a seed —
-    a property of the constructor — and `model_copy` assigns past it, so the old form asserted
-    only that `model_copy` does what `model_copy` does: it would have held with `seed` refused by
-    the model, or absent from it.
+    Constructed with the seed, because the claim is about the constructor; `model_copy` would bypass
+    it.
     """
     problem = build_problem(load_dataset())
     spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki")
@@ -252,13 +242,9 @@ async def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
 async def test_durable_campaign_runs_end_to_end() -> None:
     """The workflow runs a small Reizman campaign durably and returns a correct result.
 
-    This test's job is the *durable workflow* — that a real campaign seeds, runs its
-    rounds, and returns a complete, correctly-reduced result across the Temporal
-    serialization boundary. It deliberately does not assert an absolute yield (e.g.
-    "beats the dataset median"): a 6-evaluation campaign can't clear that reliably, and
-    the BoTorch acqf optimizer's trajectory differs across BLAS/scipy builds, so such a
-    threshold is platform-flaky. Optimization *quality* is covered deterministically by
-    `test_bo.py`'s convergence tests and `test_candidate_set_bo_finds_soluble_molecule`.
+    Asserts the durable workflow — seeding, rounds and a correctly reduced result across the
+    Temporal boundary — not an absolute yield, which is platform-flaky at six evaluations.
+    Optimization quality is covered in `test_bo.py`.
     """
     spec = CampaignSpec(
         problem=build_problem(load_dataset()),
@@ -297,14 +283,9 @@ async def test_durable_campaign_runs_end_to_end() -> None:
 async def test_a_resumed_run_picks_the_campaign_up_instead_of_re_seeding() -> None:
     """The continue-as-new carry-over is a real resumption, not a restart.
 
-    `_carry_on_if_history_is_filling_up` ends a run mid-campaign and hands the next one a
-    `CampaignCarryOver`. The trigger is the server's own `is_continue_as_new_suggested()`, which a
-    test cannot force without pushing tens of thousands of events through the loop — so what is
-    pinned here is the half that carries the risk: that a run *given* a carry-over spends exactly
-    the rounds still owed, keeps the observations already paid for, and never re-seeds.
-
-    A re-seed would be the expensive bug — silently paying for `n_initial` evaluations again every
-    time the history filled up, on a campaign long enough to fill it more than once.
+    `is_continue_as_new_suggested()` cannot be forced cheaply, so this pins the risky half: a run
+    given a `CampaignCarryOver` spends exactly the rounds still owed, keeps paid-for observations,
+    and never re-seeds.
     """
     spec = CampaignSpec(
         problem=build_problem(load_dataset()),
@@ -347,13 +328,9 @@ def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
 ) -> None:
     """`require_rounds_within_ceiling` gates creation; the spec model itself stays config-free.
 
-    The ceiling bounds what a spec may *spend* — every round is a real evaluation. It is not what
-    keeps the campaign inside Temporal's event history, though it was once described that way;
-    `_carry_on_if_history_is_filling_up` does that. But `CampaignSpec` crosses the Temporal
-    serialization boundary: a model validator reading live `bo_max_rounds` would make an
-    in-flight campaign's own input fail deserialization at replay when the setting is lowered.
-    So the ceiling is a creation-time check, and a spec serialized under a higher ceiling must
-    still round-trip after the ceiling drops.
+    `CampaignSpec` crosses the Temporal boundary, so a validator reading live `bo_max_rounds` would
+    fail an in-flight campaign's replay after the setting is lowered. A spec serialized under a
+    higher ceiling must still round-trip.
     """
     monkeypatch.setattr(settings, "bo_max_rounds", 3)
     with pytest.raises(ValueError, match="bo_max_rounds=3"):
@@ -369,16 +346,10 @@ def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
 def test_the_evaluation_budget_is_bounded_and_not_only_the_round_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A round is not a unit of cost, and the round ceiling was read as though it were.
+    """The evaluation budget is bounded, not only the round count.
 
-    `require_rounds_within_ceiling` says, correctly, that "every round costs a real evaluation" —
-    but a round costs `batch` of them, and `batch` has no upper bound. So a spec sitting *inside*
-    the round ceiling could ask for arbitrarily many evaluations, each one a registered objective
-    that may call an uncached calculator. The ceiling written to refuse "a spec that would spend
-    thousands of evaluations" permitted exactly that, because it never multiplied.
-
-    Pinned here at both ends: the round count alone passes, and the same spec is refused once the
-    batch is what makes it expensive.
+    A round costs `batch` evaluations, so the ceiling multiplies rounds by batch. The round count
+    alone passes; the same spec is refused once the batch makes it expensive.
     """
     monkeypatch.setattr(settings, "bo_max_rounds", 500)
     monkeypatch.setattr(settings, "bo_max_evaluations", 100)
@@ -438,11 +409,9 @@ def _point(t: float, yield_: float, impurity: float) -> Observation:
 
 
 def test_best_of_refuses_a_trade_off_rather_than_picking_an_axis() -> None:
-    """A "best" on a trade-off is the overclaim this whole wave exists to make impossible.
+    """`best_of` refuses a trade-off rather than picking an axis.
 
-    Silently returning the lead objective's winner would answer "the best conditions" for a
-    campaign whose premise is that no such point exists — the same shape as the fabrication the
-    old single-objective refusal was written to prevent, arrived at from the other direction.
+    Returning the lead objective's winner would claim a best point a trade-off does not have.
     """
     with pytest.raises(ValueError, match="pareto_front"):
         best_of(_two_objective_problem(), [_point(10.0, 50.0, 1.0), _point(90.0, 80.0, 5.0)])
@@ -524,18 +493,11 @@ def test_the_precondition_still_enforces_the_round_ceiling() -> None:
 
 
 def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> None:
-    """`connector-validate` checks this, and an earlier manifest named a function taking an int.
+    """The manifest names a precondition that accepts the params model.
 
-    Every `start_optimization_campaign` call then raised `TypeError` while CI stayed green, so the
-    reference connector's flagship job could not be started at all. Pinned here too, because this
-    wave renamed the function the manifest points at.
-
-    **The spec is the benchmark's own decision space, and it used to be a one-parameter stand-in
-    named `t`.** That was fine while the precondition only checked arities and counts; it is not
-    once `require_problem_supplies_what_the_objective_reads` compares the space against what
-    `reizman_suzuki` reads, because the stand-in is exactly the incoherent spec that rule refuses.
-    A signature smoke test must not be carried by a spec the system declines to start — it would
-    pass on the refusal instead of on the resolution.
+    `connector-validate` checks this too. The spec is the benchmark's own decision space, since the
+    precondition now refuses a space the objective cannot read; a smoke test must not pass on a
+    refusal.
     """
     from chemclaw.connectors.jobs import resolve_precondition
     from chemclaw.connectors.registry import discovered
@@ -553,12 +515,7 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
 
 
 def test_optimize_refuses_a_trade_off_before_spending_any_budget() -> None:
-    """It returns one best observation, so a trade-off has no answer for it.
-
-    The refusal used to come from `best_of` *after* the loop, i.e. after every evaluation had been
-    paid for. The docstring already promised the round ceiling was "rejected here, before any
-    budget is spent"; this holds the same promise for the objective count.
-    """
+    """`optimize` refuses a trade-off before spending any budget."""
     problem = OptimizationProblem(
         parameters=[ContinuousParameter(name="temperature", lower=20.0, upper=120.0)],
         objectives=[
@@ -579,20 +536,11 @@ def test_optimize_refuses_a_trade_off_before_spending_any_budget() -> None:
 
 
 def test_a_campaign_declaring_the_wrong_direction_is_refused_at_launch() -> None:
-    """The inverted campaign: every number right, the recommendation exactly backwards.
+    """A campaign declaring the wrong direction is refused at launch.
 
-    A campaign carries its direction twice — in `CampaignSpec.problem.objectives[0].direction`,
-    which is what BoFire optimizes, and implicitly in what the *registered* objective means — and
-    nothing compared them. So `objective_name="solubility_max"` with `direction="minimize"` ran to
-    completion, spent the full evaluation budget, wrote a PR-gated `bo-candidate` note, and
-    recommended the **least** soluble molecule in the library as its best point.
-
-    That is the failure a reviewer is least able to catch: nothing in the note is false. The
-    conditions were really evaluated, the objective value really is what the model computed, and
-    the campaign really did find the extremum it was asked for. Only the direction was wrong, and
-    the note does not carry the registry's opinion of which way is better.
-
-    Refused at launch, before an evaluation budget is spent, and the message names the fix.
+    The spec's direction (what BoFire optimizes) must match the registered objective's meaning, or
+    the campaign runs to completion and recommends the worst point while every number in its note is
+    true. Refused before any budget is spent, with a message naming the fix.
     """
     problem = OptimizationProblem(
         parameters=[CategoricalParameter(name="molecule", categories=["CCO", "CCCO"])],
@@ -605,16 +553,10 @@ def test_a_campaign_declaring_the_wrong_direction_is_refused_at_launch() -> None
 
 
 def test_the_direction_rule_costs_nothing_and_passes_the_agreeing_case() -> None:
-    """The other half, and the reason `registered_direction` is not `get_objective`.
+    """The direction rule costs nothing and passes the agreeing case.
 
-    A campaign whose declared direction agrees with the registry must start — an over-eager rule
-    here would refuse every real campaign, which is the failure mode a one-sided test misses.
-
-    And it is answered *without building the objective*: `solubility_objective` closes over a
-    calculator client this precondition has no business constructing, and `_reizman_suzuki` fits a
-    surrogate from a bundled dataset. A campaign refused — or accepted — for its direction should
-    cost neither. `registered_direction` reads the registry row and stops there, which is what makes
-    this test run in milliseconds rather than fitting a model.
+    An over-eager rule would refuse every campaign. `registered_direction` reads the registry row
+    without building the objective (which may need a calculator client or a fitted surrogate).
     """
     problem = OptimizationProblem(
         parameters=[CategoricalParameter(name="molecule", categories=["CCO", "CCCO"])],
@@ -626,11 +568,8 @@ def test_the_direction_rule_costs_nothing_and_passes_the_agreeing_case() -> None
 def test_every_registered_objective_declares_a_direction_the_vocabulary_allows() -> None:
     """A registry row whose direction is a typo would refuse every campaign naming it.
 
-    The check that keeps the two halves speaking one language: `registered_direction` is compared
-    for *equality* against `ObjectiveSpec.direction`, so a row spelling it `"max"` would make its
-    objective permanently unstartable — and the refusal would blame the caller. Asserted over the
-    registry rather than over a list written here, so a new objective is covered on the day it is
-    added.
+    Directions are compared for equality with `ObjectiveSpec.direction`, so every registered row
+    must use the allowed vocabulary; asserted over the registry.
     """
     from chemclaw.science.bo.objectives import _REGISTRY, registered_direction
 
@@ -647,20 +586,10 @@ def test_a_running_campaign_records_each_round_not_only_its_ending(
 ) -> None:
     """Everything a running campaign has paid for must be recoverable before it ends.
 
-    The write used to happen once, after the round loop. Until then every completed round lived
-    only in Temporal's event history, so a campaign cancelled, terminated, or failed
-    non-retryably mid-run answered `resume_campaign` with "no such campaign" about hours of real
-    evaluation — the same gap the terminal write closed for a campaign that *finishes*, left open
-    for every other ending.
-
-    Driven through the real workflow rather than by calling the activity in a loop, because the
-    property under test is the workflow's own sequencing: the record has to land *between* rounds,
-    and an activity called directly cannot show that it does.
-
-    Two rounds, so the assertion distinguishes per-round from once-at-the-end. Three suggestions
-    result: one per round, plus the terminal recommendation. The round rows are keyed
-    `"{workflow_id}:r{n}"`, because `record_suggestion` dedupes on `(campaign_id, job_id)` and a
-    per-round write under the bare workflow id would collide with round 1 and drop the rest.
+    Each round is recorded as it completes, so a campaign cancelled or failed mid-run is still
+    resumable. Driven through the real workflow, since the property is its sequencing. Two rounds
+    give three suggestions (one per round plus the terminal one); round rows are keyed
+    `"{workflow_id}:r{n}"` because `record_suggestion` dedupes on `(campaign_id, job_id)`.
     """
     store = InMemoryCampaignStore()
     monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", lambda: store)
@@ -745,43 +674,15 @@ async def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_i
 ) -> None:
     """A measured campaign must survive its own wait, and must settle it when it does not.
 
-    **The defect this pins.** `_measure` suspends on `AwaitAnswerWorkflow` for
-    `bo_measurement_deadline_days` — fourteen days, a plate turnaround — inside a child that
-    `ConnectorJobWorkflow` bounds at `connector_job_timeout_seconds`, five hours. The wait was 67x
-    the ceiling above it, so the one campaign shape the durable wait was built for could not reach
-    its own deadline: five hours in the child is `TIMED_OUT`, the wrapper reports
-    `job_failed reason="Timed out"`, and every already-paid round is lost.
-
-    **Two arms, one server, because the claim is a difference.** The first arm is the shipped
-    arithmetic scaled 1:one — a real `BoCampaignWorkflow` on a real broker under the ceiling
-    `child_execution_timeout` used to hand it — and it must die with the wait still open. The second
-    is the same campaign under the bound the same function resolves now, and it must live long
-    enough to be answered. Reading either alone proves nothing: the first is only a defect because
-    the second is possible, and the second is only a fix because the first fails.
-
-    **And the first arm measures the second half of the change.** A campaign killed by anything
-    other than completing used to strand its wait: `execute_child_workflow` defaults to
-    `ParentClosePolicy.TERMINATE`, a terminate never resumes workflow code, so `run`'s
-    `except asyncio.CancelledError` — the whole reason `_settle` has a detached form — was
-    unreachable from this call site and the `pending_requests` row stayed `waiting` in every
-    entitled person's inbox for ever. `CANCELED` rather than `TERMINATED` is the deterministic
-    half of that and the one that discriminates; whether the settle itself lands before the run
-    closes is a race `tests/test_awaiting.py` declines to assert, for the reason stated there.
-
-    Real-time rather than time-skipping: an idle time-skipping server fast-forwards to the wait's
-    own deadline, which would expire both arms before either could be answered. Unsandboxed for
-    the reason `tests/test_awaiting.py` is — the deadline and the queue are read off `settings`
-    inside workflow code, and this drives them from the test.
+    `_measure` waits up to `bo_measurement_deadline_days` inside a connector job, so the child must
+    not be bound by `connector_job_timeout_seconds`. Two arms on one server, because the claim is a
+    difference: under the old ceiling the campaign dies with the wait open (and the wait is
+    `CANCELED`, not `TERMINATED`, so it can settle); under the resolved bound it lives to be
+    answered. Real-time, unsandboxed, as in `tests/test_awaiting.py`.
     """
-    # **The whole arithmetic is scaled, not just the ceiling**, and that became necessary when
-    # `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence` made a campaign share
-    # its execution budget between the dispatches still to come. Arm one's ceiling used to be 4 s
-    # against the shipped 300 s activity budget, so under that bound the campaign now refuses its
-    # *first* dispatch — correctly, since four seconds cannot fund a five-minute activity — and dies
-    # before opening the wait this arm exists to strand. Scaling the activity budget and the
-    # activity overhead with the ceiling restores the shape being reproduced: three dispatches at
-    # 2.9 s of queue wait plus 3 s of work is 17.7 s, inside the 18 s ceiling, so the campaign
-    # reaches its wait and is then killed by the ceiling exactly as before.
+    # The whole arithmetic is scaled, not just the ceiling: the campaign shares its budget between
+    # dispatches, so the activity budget and overhead scale too. Three dispatches at 2.9 s wait plus
+    # 3 s work fit the 18 s ceiling, so the campaign reaches its wait before the ceiling kills it.
     ceiling = timedelta(seconds=18)
     queue = "test-bo-measured"
     monkeypatch.setattr(settings, "background_task_queue", queue)
@@ -864,11 +765,8 @@ async def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_i
 def _projection_stubs() -> list[Any]:
     """The wait's four projection activities, recorded rather than written to Postgres.
 
-    `pending_requests` has its own tests; what this file needs is a wait that opens, holds and
-    settles, and a real table would make an offline run depend on a database for a property that is
-    about workflow lifetime. The open stub still has to *answer*: the real activity owns the clamp
-    against `awaiting_max_days` and returns the deadline the workflow schedules its timers against,
-    so a stub returning nothing fails the workflow on the first line that reads it.
+    The open stub must return a deadline, as the real activity does after clamping to
+    `awaiting_max_days`.
     """
 
     async def _open(payload: Any) -> str:
@@ -896,20 +794,12 @@ def _projection_stubs() -> list[Any]:
 def test_a_seed_batch_nobody_reports_ends_the_campaign_instead_of_failing_it(
     monkeypatch: pytest.MonkeyPatch, n_rounds: int
 ) -> None:
-    """The normal end of a plate wait nobody answered, and it used to be an internal error.
+    """A seed batch nobody reports ends the campaign instead of failing it.
 
-    `_measure` returns `[]` on an expired wait and its docstring promises that "the caller sees a
-    campaign that ended with what it had". The loop has the guard that makes that true
-    (`if not measured: break`); the **seed** did not — so the one batch every campaign runs fell
-    through with an empty history into `best_of` ("no observations") at `n_rounds=0` or
-    `propose_next` ("needs at least 2 observations; seed first") at `n_rounds≥1`. Both raise,
-    `failure_exception_types=[Exception]` turns either into a workflow failure, and
-    `ConnectorJobWorkflow` pushes `job_failed` carrying a precondition message that names neither
-    the campaign nor the batch the chemist was asked for. Both round counts are driven because the
-    two took different raises out of the same hole.
-
-    The time-skipping server is what expires the wait: left idle it fast-forwards to the deadline,
-    which is exactly the campaign nobody reported.
+    An expired wait returns `[]`; the seed batch must stop the campaign with what it has, as the
+    round loop does, rather than reach `best_of` or `propose_next` with an empty history and raise.
+    Both round counts are driven because they raised differently. The idle time-skipping server
+    expires the wait.
     """
     queue = "test-bo-unanswered-seed"
     monkeypatch.setattr(settings, "background_task_queue", queue)
@@ -947,29 +837,21 @@ def test_a_seed_batch_nobody_reports_ends_the_campaign_instead_of_failing_it(
 
 
 def test_a_failed_secondary_assay_is_refused_rather_than_read_as_no_difference() -> None:
-    """A NaN in a non-lead objective was a wildcard that never lost, and took the whole front.
+    """A failed secondary assay is refused rather than read as no difference.
 
-    `_dominates` compares `gain < -tolerance` and `gain > tolerance`, and **both** are False for a
-    NaN — so an unmeasured axis read as "no difference", i.e. at least as good. Measured before the
-    fix: a run whose impurity was never measured but whose yield was 96% dominated a clean
-    95%/0.5% run and `pareto_front` returned it *alone*. The chemist was shown a one-point
-    trade-off consisting solely of the condition whose assay failed.
-
-    `Observation.value` has refused a non-finite number since it was written, for exactly this
-    reason; `values` is the same field for every other objective and now says so. **A failed
-    measurement is an absent run, not a run with a NaN.**
+    `_dominates` compares with tolerances that are both False for NaN, so an unmeasured axis would
+    read as at least as good and could dominate the whole front. A failed measurement is an absent
+    run.
     """
     with pytest.raises(ValidationError, match="impurity"):
         _point(90.0, 96.0, float("nan"))
 
 
 def test_a_non_finite_value_smuggled_past_the_model_is_refused_where_it_is_read() -> None:
-    """The belt: `values` is a plain dict, so nothing revalidates a mutation after construction.
+    """A non-finite value smuggled past the model is refused where it is read.
 
-    `Observation` is not frozen and pydantic does not validate assignment, so
-    `observation.values[name] = nan` writes straight past the field above. `observed_value` is the
-    one function every reader goes through — `_dominates`, the plateau read, and the frame handed
-    to BoFire — so the refusal belongs there rather than at one of the three.
+    `Observation` is not frozen, so `values[name] = nan` bypasses validation. `observed_value` is
+    the one function every reader uses, so the refusal lives there.
     """
     problem = _two_objective_problem()
     smuggled = _point(90.0, 96.0, 0.5)
@@ -979,16 +861,10 @@ def test_a_non_finite_value_smuggled_past_the_model_is_refused_where_it_is_read(
 
 
 def test_a_campaign_over_a_space_its_objective_cannot_read_is_refused_at_launch() -> None:
-    """`reizman_suzuki` reads four named parameters; nothing checked the spec declares them.
+    """A campaign over a space its objective cannot read is refused at launch.
 
-    Measured before the fix: `require_campaign_startable` accepted a spec naming `reizman_suzuki`
-    over a decision space of one unrelated parameter, and the failure arrived at *evaluate* time as
-    a bare `KeyError: 'catalyst'` — hours into a durable run, after the seed rounds had been paid
-    for, and as a `KeyError` rather than anything `SurrogateFitError` or `_BAD_DATA_TYPES` reads.
-
-    A registered objective is a function over named parameters, so what it reads is a property of
-    the objective and belongs in the registry beside its direction — which is the argument
-    `RegisteredObjective.direction` already makes about the other half of the same mismatch.
+    `reizman_suzuki` reads four named parameters; without this the run fails hours in with a bare
+    `KeyError`. What an objective reads is declared in the registry beside its direction.
     """
     unrelated = OptimizationProblem(
         parameters=[ContinuousParameter(name="pressure", lower=1.0, upper=10.0)],
@@ -1001,11 +877,9 @@ def test_a_campaign_over_a_space_its_objective_cannot_read_is_refused_at_launch(
 
 
 def test_the_molecule_objective_declares_the_one_parameter_it_reads() -> None:
-    """`solubility_objective` reads `params[MOLECULE_KEY]`, so a spec without it is the same bug.
+    """`solubility_objective` reads `params[MOLECULE_KEY]`, so a spec without it is refused too.
 
-    Stated as a second case rather than left to the benchmark, because the check is only worth
-    having if every registered objective declares what it reads: an entry that declares nothing
-    would pass vacuously and reintroduce the `KeyError` for whatever is registered next.
+    Every registered objective must declare what it reads, or the check passes vacuously.
     """
     from chemclaw.science.bo.objectives import _REGISTRY
 

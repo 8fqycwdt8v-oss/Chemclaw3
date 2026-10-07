@@ -1,18 +1,10 @@
-"""The reachability sweep, and the half of it that has no socket to open.
+"""The reachability sweep, including bundles that have no socket to open.
 
-`connectors/health.py` derived every target from `health_url(manifest)`, which is None for a bundle
-that declares `jobs:` and no `endpoint:` — so `results` reported `unprobed` with its worker fleet at
-two replicas and with it at zero, `chemclaw_connectors_unhealthy` counted neither, and
-`connectors_required` — the posture whose whole point is refusing to serve degraded — could not see
-the failure with the largest blast radius. These tests drive the real sweep through the real
-registry (tmp bundles, real `connector.yaml`, real `ConnectorManifest`) with only the Temporal
-client replaced, because the manifest → queue → verdict path is the thing being fixed.
-
-The client stand-in answers with the SDK's **own** `DescribeTaskQueueResponse` and fails with its
-own `RPCError`, rather than with a hand-shaped object: the two verdicts this change turns on are
-"the poller list is empty" and "the call raised", and both are properties of that wire type. The
-time-skipping test server cannot stand in here — measured, it answers `DescribeTaskQueue` with
-`UNIMPLEMENTED`, which is precisely the "cannot tell" case rather than a poller count.
+A bundle declaring `jobs:` and no `endpoint:` is probed by its task queue's pollers, so a worker
+fleet at zero replicas is visible to the gauge and to `connectors_required`. These drive the real
+sweep through the real registry with only the Temporal client replaced. The stand-in answers with
+the SDK's own `DescribeTaskQueueResponse` and `RPCError`; the time-skipping test server answers
+`UNIMPLEMENTED`, which is the "cannot tell" case.
 """
 
 import asyncio
@@ -168,12 +160,10 @@ def _states(health_list: list[ConnectorHealth]) -> dict[str, str]:
 
 
 def test_the_probe_asks_the_rpc_the_sdk_actually_offers() -> None:
-    """The call shape is upstream's, checked against upstream's own signature rather than believed.
+    """The probe's call matches the SDK's own `describe_task_queue` signature.
 
-    `describe_task_queue` is reached through `workflow_service`, which is generated: mypy sees the
-    argument types and nothing sees a renamed keyword. Binding the real signature to the call this
-    module makes turns an SDK rename into a failure here instead of into every durable bundle
-    reporting `unknown` forever, which is the shape this change is least able to notice.
+    `workflow_service` is generated, so a renamed keyword would otherwise leave every durable bundle
+    reporting `unknown`.
     """
     signature = inspect.signature(WorkflowService.describe_task_queue)
     signature.bind(
@@ -228,11 +218,9 @@ def test_a_jobs_only_bundle_whose_queue_has_no_poller_is_unpolled_and_counts_as_
 def test_an_unpolled_queue_trips_the_fail_fast_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`connectors_required` refuses to serve on it, and says which bundle and why.
+    """An unpolled queue trips the fail-fast gate, naming the bundle and why.
 
-    The posture is "prefer death to degradation", and a bundle whose jobs nothing will run is the
-    degradation it was opted into for: the job is accepted, the chemist is told "running", and the
-    answer arrives when `connector_job_timeout_seconds` expires a day later.
+    A bundle whose jobs nothing will run is the degradation `connectors_required` exists to refuse.
     """
     _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"))
     _broker(monkeypatch, pollers=0)
@@ -257,12 +245,11 @@ def test_a_polled_queue_clears_the_same_gate(
 def test_a_bundle_with_no_durable_work_and_no_health_route_stays_unprobed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing to ask is still not an error, and the strictest posture must not invent one.
+    """A bundle with no durable work and no health route stays unprobed.
 
-    A manifest with neither an endpoint nor a job cannot exist — `_contributes_capability` refuses
-    it — so the realizable form of "nothing to probe" is an endpoint that declares no health route
-    and owns no durable work. It is `unprobed`, it is not counted, and it does not gate: guessing a
-    path on a third-party MCP server would manufacture the false alarm this state exists to avoid.
+    It is not counted and does not gate; guessing a path on a third-party MCP server would invent
+    false alarms. (A manifest with neither endpoint nor jobs is refused by
+    `_contributes_capability`.)
     """
     _bundles(tmp_path, monkeypatch, quiet=_http("quiet", health_route=False))
     client = _broker(monkeypatch, pollers=0)
@@ -279,12 +266,10 @@ def test_a_bundle_with_no_durable_work_and_no_health_route_stays_unprobed(
 def test_a_broker_outage_does_not_masquerade_as_a_queue_with_no_poller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Temporal being down is a different fact from "nobody is polling", and is reported as one.
+    """A broker outage does not masquerade as a queue with no poller.
 
-    Conflating them would make every broker restart a boot failure under `connectors_required`,
-    which is the outage-as-a-different-fact defect D-2026-08-08 catalogued. `unknown` is also not
-    `healthy`: the gate is not cleared by a check that did not run — it is told, in a WARNING of its
-    own, that there is nothing to clear it with.
+    Otherwise every broker restart is a boot failure under `connectors_required`. `unknown` is not
+    `healthy` either; the gate is warned that it has nothing to clear it with.
     """
     _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"))
     _broker(monkeypatch, connect_error=SubsystemUnavailableError("Temporal is unreachable"))
@@ -301,11 +286,9 @@ def test_a_broker_outage_does_not_masquerade_as_a_queue_with_no_poller(
 def test_a_failed_describe_is_unknown_rather_than_a_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reachable broker that refuses the call is still "we could not measure".
+    """A failed describe is `unknown`, not a verdict.
 
-    UNIMPLEMENTED is not hypothetical: the time-skipping test server answers `DescribeTaskQueue`
-    with it, and a namespace that does not exist answers NOT_FOUND. Neither is evidence about a
-    poller, and only a successful response carries any.
+    UNIMPLEMENTED and NOT_FOUND carry no evidence about pollers; only a successful response does.
     """
     _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"))
     _broker(monkeypatch, rpc_error=RPCError("unimplemented", RPCStatusCode.UNIMPLEMENTED, b""))
@@ -319,11 +302,9 @@ def test_a_failed_describe_is_unknown_rather_than_a_verdict(
 def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through the real front door, because the gauge is a binding and bindings drift.
+    """The unhealthy gauge counts an unpolled bundle and not an unknown one.
 
-    `chemclaw_connectors_unhealthy` is the alerting half of this signal, and it read
-    `state == "unreachable"` at a second site: a new down-state that the gate honoured and the gauge
-    did not would be two definitions of "down" in one deployment.
+    Driven through the real front door, so the gauge and the gate share one definition of "down".
     """
     from fastapi.testclient import TestClient
 
@@ -345,26 +326,19 @@ def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
     with TestClient(service_app.create_app(connector_factory=_no_connectors)) as client:
         exposition = client.get("/metrics").text
 
-    # Exactly one: `unpolled` counts, and `healthy`, `unprobed` and `unknown` do not.
-    # `1.0` rather than `1` because a gauge holds a float and the exposition renders it with
-    # `repr` — the same text `prometheus_client.floatToGoString` produces for 1.0. The old
-    # `:g` spelling printed `1` and lost the counted digits past a million, which is why it
-    # went (`D-2026-09-16-six-significant-digits-is-not-the-number-that-was-counted`).
+    # Exactly one: `unpolled` counts; `healthy`, `unprobed` and `unknown` do not. `1.0` because the
+    # exposition renders gauge floats with `repr`, as `prometheus_client.floatToGoString` does.
     assert "\nchemclaw_connectors_unhealthy 1.0\n" in exposition, exposition
 
 
 def test_the_queue_half_spends_one_budget_rather_than_one_per_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`/readyz` runs this sweep, and a kubelet probe's default timeout is one second.
+    """The queue half spends one budget rather than one per step.
 
-    The connect and the RPC each used to carry `connector_health_timeout_seconds`, so a broker
-    reachable enough to accept a connection and then blackhole the call cost *twice* the number the
-    deployment's `timeoutSeconds` is derived from. Measured here rather than reasoned about: both
-    steps hang, and the sweep still has to come back inside one budget with every bundle `unknown`.
-
-    The budget is squeezed to a tenth of a second so the assertion is about the bound rather than
-    about how fast this machine is; the fakes hang for ten times it, in both places at once.
+    `/readyz` runs this sweep inside a kubelet probe whose timeout is derived from
+    `connector_health_timeout_seconds`, so the connect and the RPC share it. Both fakes hang for ten
+    times a 0.1 s budget, so the assertion is about the bound, not machine speed.
     """
     _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"), other=_jobs_only("other"))
     budget = 0.1
@@ -413,9 +387,8 @@ def _http_serving(name: str, port: int) -> str:
 async def _trickle(interval: float, reader: Any, writer: Any) -> None:
     """A `/healthz` that answers, slowly, forever: one byte of the body every `interval`.
 
-    The pathology this exists to reproduce, and it is a realistic one — an overloaded pod behind an
-    ingress that flushes as it goes. Every individual read lands well inside a per-read timeout, so
-    httpx's `timeout=` never fires: the deadline it enforces restarts on each byte.
+    Each read lands inside a per-read timeout, so httpx's `timeout=` (which restarts per read) never
+    fires.
     """
     try:
         await reader.readuntil(b"\r\n\r\n")
@@ -432,27 +405,17 @@ async def _trickle(interval: float, reader: Any, writer: Any) -> None:
 def test_the_http_half_bounds_the_answer_rather_than_each_socket_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The endpoint half had the defect the queue half was fixed for, one layer down.
+    """The HTTP half bounds the whole answer rather than each socket read.
 
-    `httpx.AsyncClient(timeout=...)` is a **per-operation** timeout, not a budget: the read leg
-    restarts it on every socket read. Measured against the shipped 2 s number before this change, a
-    `/healthz` trickling one byte every 1.5 s held `_probe_endpoints` for **16.6 s** — and then
-    reported `healthy`, because the response did eventually arrive. `/readyz` runs this sweep
-    inside a kubelet probe whose `timeoutSeconds` the chart *derives* from that same number, so the
-    derivation was describing a bound that did not exist.
-
-    Two bundles rather than one, pointed at the same slow server: the per-endpoint bound is only a
-    sweep bound because the probes run concurrently, and a serialising regression (a connection
-    pool that queues them, a `gather` turned into a loop) would double the wall clock while every
-    single-endpoint assertion still passed.
+    `httpx.AsyncClient(timeout=...)` restarts per read, so a trickling `/healthz` could hold the
+    sweep far past the budget the chart's probe timeout is derived from. Two bundles on the same
+    slow server, because the sweep bound holds only if probes run concurrently.
     """
     budget = 0.2
 
     async def _measure() -> tuple[list[ConnectorHealth], float]:
-        # Half the budget: every read lands comfortably inside a per-read timeout of `budget`,
-        # so httpx's own deadline never fires while the response takes 64 x 0.1 s to complete —
-        # which is exactly the case the old bound could not see. An interval *longer* than the
-        # per-read timeout is caught by either form and would prove nothing.
+        # Half the budget: each read is inside a per-read timeout of `budget`, while the whole
+        # response takes far longer; an interval longer than the timeout would be caught either way.
         server = await asyncio.start_server(
             lambda r, w: _trickle(budget * 0.5, r, w), "127.0.0.1", 0
         )
@@ -484,13 +447,11 @@ def test_the_http_half_bounds_the_answer_rather_than_each_socket_read(
 def test_a_trickling_health_route_is_not_reported_healthy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The half of the defect that was not about latency: the verdict was wrong too.
+    """A trickling health route is not reported healthy.
 
-    The old form waited out the whole trickle and then read a 200, so a connector nobody could get
-    an answer from inside a turn was published as `healthy` — counted healthy by the gauge, cleared
-    by `connectors_required`, and readmitted by the breaker. Asserted separately from the timing
-    above because a fix that bounded the wait and then reported `unprobed`, or `unknown`, would
-    satisfy that test while leaving the gauge as wrong as it was.
+    A connector that cannot answer within a turn must not be counted healthy by the gauge, the gate
+    or the breaker. Asserted separately from the timing, which a fix reporting `unknown` would also
+    pass.
     """
     budget = 0.2
 
@@ -513,18 +474,12 @@ def test_a_trickling_health_route_is_not_reported_healthy(
 def test_the_startup_sweep_gets_its_own_budget_so_a_cold_connect_cannot_hide_an_empty_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cost of sharing one budget across the connect and the RPC, paid where it is worst.
+    """The startup sweep gets its own budget, so a cold connect cannot hide an empty queue.
 
-    Sharing is right on the hot path — `/readyz` every 10 s per pod, off a cached client. The
-    *first* check after process start has no cached client: it parses PEM files and does an mTLS
-    handshake, and whatever that costs comes out of the same budget the `DescribeTaskQueue` needs
-    to answer in. Run out of it and the sweep reports `unknown`, which neither counts in the gauge
-    nor trips the gate — so a worker fleet at zero replicas clears `connectors_required`, the one
-    posture that exists to refuse it, and the verdict is final for that boot.
-
-    Both directions in one test, against one broker: at the poll's budget the cold connect leaves
-    nothing and the answer is `unknown`; at the startup budget the same broker answers and the same
-    empty poller list is `unpolled` — and the gate refuses.
+    The first check parses PEM files and does an mTLS handshake from the same budget; running out
+    yields `unknown`, which neither counts nor gates, so a zero-replica worker fleet would pass
+    `connectors_required`. One broker: `unknown` at the poll budget, `unpolled` (and refused) at the
+    startup budget.
     """
     _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"))
     poll, cold, boot = 0.1, 0.3, 2.0
@@ -553,12 +508,10 @@ def test_the_startup_sweep_gets_its_own_budget_so_a_cold_connect_cannot_hide_an_
 
 
 def test_the_startup_budget_is_materially_larger_than_the_polls() -> None:
-    """The two numbers are only worth having apart if they are apart, so the defaults are pinned.
+    """The startup budget is materially larger than the poll's; the defaults are pinned.
 
-    Not an arbitrary ratio: the poll's budget is what a kubelet waits for and the chart derives its
-    `timeoutSeconds` from, while the startup budget is paid once and bounded by a startup probe
-    already granting 300 s. A deployment that sets them equal has re-created the defect — a cold
-    connect charged to the RPC that decides `unpolled` — and this is where that shows up.
+    The poll budget bounds a kubelet probe; the startup budget is paid once under a startup probe
+    already granting 300 s.
     """
     assert (
         settings.connector_startup_health_timeout_seconds
@@ -594,14 +547,10 @@ def _http_and_jobs(name: str, port: int) -> str:
 def test_a_bundle_that_serves_an_endpoint_and_owns_jobs_has_its_queue_probed_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two questions are additive, and the worse answer is the verdict.
+    """A bundle that serves an endpoint and owns jobs has its queue probed too.
 
-    They used to be an `elif` on the health route, so a bundle with both halves was judged on its
-    endpoint alone and its queue was asked about by nobody — `connector-worker-calc` at zero
-    replicas behind a live MCP pod read as `healthy`, the gauge stayed at 0, and
-    `connectors_required` started a service whose every launched job would sit in a queue until the
-    job ceiling expired. The endpoint here answers 200 on a real socket, so the old code has a
-    verdict to report and reports the wrong one.
+    The two questions are additive and the worse answer is the verdict, so a live MCP pod in front
+    of a zero-replica worker fleet is not `healthy`.
     """
 
     async def _measure() -> tuple[list[ConnectorHealth], _FakeClient]:
@@ -648,13 +597,10 @@ def test_a_dark_endpoint_still_decides_when_the_queue_half_is_the_healthy_one(
 
 
 def test_the_severity_order_names_every_state_a_connector_can_be_in() -> None:
-    """`_SEVERITY` is a hand-written restatement of `ConnectorState`, and nothing pinned it.
+    """`_SEVERITY` names every state in `ConnectorState`.
 
-    The fold ranked a state by looking it up in that tuple, so a sixth member added to the `Literal`
-    would have raised `ValueError` out of `probe_connectors` — a function whose docstring promises
-    it never raises, called by the boot gate (`api/app.py`) and `/readyz`. The consequence of the
-    drift was not "one connector reported oddly"; it was the front door refusing to come up, for a
-    change to an unrelated enum.
+    A state missing from the ordering would raise out of `probe_connectors`, which must never raise
+    (it backs the boot gate and `/readyz`).
     """
     assert set(_SEVERITY) == set(get_args(ConnectorState))
 
@@ -662,12 +608,10 @@ def test_the_severity_order_names_every_state_a_connector_can_be_in() -> None:
 def test_a_state_the_severity_order_has_not_been_taught_still_folds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The runtime half of the same guard: ranking is total, so the promise holds through a drift.
+    """A state the severity order has not been taught still folds.
 
-    The test above catches the drift in CI; this one says what happens in the window before someone
-    runs CI. The rank map is emptied of everything but `unknown` — exactly the shape of a `Literal`
-    that has gained members this ordering has not — and the fold must still produce its one row
-    rather than take the process's readiness route with it.
+    The runtime half: ranking is total, so with only `unknown` ranked the fold still produces its
+    row.
     """
     monkeypatch.setattr("chemclaw.connectors.health._SEVERITY_RANK", {"unknown": 0})
 
@@ -757,13 +701,10 @@ def _turn_open(name: str, port: int) -> tuple[int, list[str]]:
     return asyncio.run(_open())
 
 
-#: How `/mcp` is broken, and the words the WARNING must carry for it. Two shapes, because they
-#: reach the log line by different routes and only one of them has a status code to report: a `500`
-#: raises `httpx.HTTPStatusError` inside the handshake's `TaskGroup`, while a `200` carrying
-#: `text/html` — an ingress error page, which is what a real cluster serves — leaves the MCP client
-#: waiting for a stream that never becomes one, so the open times out. Both used to render as
-#: `ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)`, and the timeout then
-#: rendered as `TimeoutError: ` — the type with the reason missing.
+#: How `/mcp` is broken, and the words the WARNING must carry for it. A `500` raises
+#: `httpx.HTTPStatusError` inside the handshake's `TaskGroup`; a `200` with `text/html` (an ingress
+#: error page) leaves the client waiting until the open times out. Neither may render as a bare
+#: `ExceptionGroup` or an empty `TimeoutError`.
 _BROKEN_MCP: dict[str, tuple[str, ...]] = {
     "500": ("HTTPStatusError", "500"),
     "garbage": ("TimeoutError", "handshake did not complete"),
@@ -777,37 +718,16 @@ def test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_tur
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The sweep calls it healthy; the *turn* is what names it — so the turn's series must carry it.
+    """A connector healthy on `/healthz` and broken on `/mcp` is reported by the turn.
 
-    **Driven against a real listener on a real socket, because the gap is between two probes and no
-    stub of either one has it.** Measured on 2026-09-19 against exactly this handler:
-    `/readyz` answered `{"status":"ready","connectors_unhealthy":0}`, the startup line said
-    `molfp=healthy`, and `chemclaw_connectors_unhealthy` held **0** while every MCP call failed —
-    so `ChemclawConnectorsUnhealthy` (`max(chemclaw_connectors_unhealthy) > 0`) could not fire on a
-    connector that was contributing nothing.
+    Driven against a real listener. The sweep's `healthy` verdict is asserted, not changed:
+    `/healthz` stays the whole probe because a full MCP handshake costs over ten times more on a
+    route the kubelet runs every 10 s (no-traffic detection is a `docs/planning/BACKLOG.md` row).
+    The turn must:
 
-    The sweep's verdict is asserted rather than fixed, and that is the decision this test records:
-    `GET /healthz` stays the whole probe. Measured against the four connector apps this repository
-    serves, on loopback with no TLS, `GET /healthz` costs 3.6–4.2 ms and a full MCP
-    handshake + `tools/list` + teardown costs 50–71 ms — **12–19x** — on a route the kubelet runs
-    every 10 s with a 5 s timeout derived from a 2 s per-endpoint budget. And it would buy *less*
-    speed, not more: `ChemclawConnectorsDegradingTurns` fires at `for: 0m` on the first degraded
-    turn, where a sweep-based gauge sits behind `for: 10m`. What a `tools/list` probe would buy is
-    detection with **no traffic**, which is a real gap and is a `docs/planning/BACKLOG.md` row with
-    its own trigger rather than a change made here.
-
-    So what had to change is the *turn's* report, and the three things asserted here are the three
-    that were missing:
-
-    - the connector is in `unreachable`, so the turn degrades and says so (this already held);
-    - `chemclaw_connectors_unreachable_total` carries `connector`, which it did not — it was one
-      bulk increment of an unlabelled series, so neither the new alert nor a dashboard could name
-      which connector had gone dark while its sibling gauge `chemclaw_connector_unhealthy` could;
-    - the WARNING names the leaf. It printed the enclosing `ExceptionGroup` —
-      `unhandled errors in a TaskGroup (1 sub-exception)` — which reads as a network fault whatever
-      happened, while `/healthz` said the pod was fine. The status code was inside the group all
-      along; see `_BROKEN_MCP` for why the `garbage` arm has no status code to name and what it
-      names instead.
+    - put the connector in `unreachable`, so the turn degrades and says so;
+    - label `chemclaw_connectors_unreachable_total` with `connector`;
+    - log the leaf error, not the enclosing `ExceptionGroup` (see `_BROKEN_MCP`).
     """
     metrics = Metrics()
     with _serving(mode) as port:
@@ -857,18 +777,11 @@ def test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_tur
 def test_a_connector_whose_token_is_unset_names_the_variable_rather_than_the_group(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other leaf this path reaches, and the one where nothing about the pod is wrong.
+    """A connector whose token is unset names the variable rather than the exception group.
 
-    A manifest declaring `auth: {mode: bearer, token_env: …}` whose variable is unset fails the
-    open before a byte is sent. Driven on 2026-09-19 it produced the *identical* line to the
-    broken-`/mcp` case — `connector … is unreachable (ExceptionGroup: unhandled errors in a
-    TaskGroup (1 sub-exception))` — so two faults with opposite remedies were one sentence, and
-    the sweep called the pod healthy in both.
-
-    Asserted separately from the test above rather than as a third parametrization, because it is
-    the part of the boundary a fix that special-cased `httpx` would have left behind: the leaf here
-    is first-party (`connectors/identity.MissingConnectorCredential`) and reaches the same line
-    through the same group.
+    The open fails before a byte is sent; its remedy is the opposite of a broken pod's. Tested apart
+    from the `httpx` cases because the leaf is first-party
+    (`connectors/identity.MissingConnectorCredential`).
     """
     monkeypatch.delenv("CHEMCLAW_PROBE_MCP_TOKEN", raising=False)
     with _serving("500") as port:
@@ -936,11 +849,10 @@ def _sweep_queued_bundle(
 def test_a_queued_tools_interactive_queue_with_no_poller_is_unpolled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The live lane started no interactive worker, and this sweep called every bundle healthy.
+    """A queued tool's interactive queue with no poller is `unpolled`.
 
-    Every `predict_pka`, `compute_xtb_energy` and prediction call then waited its 45 s, became a
-    job nothing polled, and read `running` forever — with the endpoint answering and the jobs
-    worker polling, which were the only two questions asked. The interactive queue is the third.
+    Otherwise queued calls become jobs nothing polls while the endpoint and the jobs worker both
+    look healthy; the interactive queue is the third question.
     """
     result, client = _sweep_queued_bundle(
         tmp_path,

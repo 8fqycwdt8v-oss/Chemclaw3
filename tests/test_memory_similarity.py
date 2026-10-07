@@ -1,23 +1,11 @@
-"""`memory/similarity.cluster_by_similarity` against the pairwise loop it replaced.
+"""`memory/similarity.cluster_by_similarity` against a pairwise reference.
 
-The clustering used to be n²/2 Python-level `tanimoto_bits` calls feeding a NetworkX graph. It is
-now a sparse bit-matrix product feeding `scipy.sparse.csgraph.connected_components` — same
-comparisons, same asymptotics, a few times faster per comparison. **A speed change to a function
-whose output is a grouping is only safe if the grouping is identical**, because nothing downstream
-would notice a quietly different one: a playbook is distilled from whatever cluster it is handed,
-and `stable_id` anchors on the cluster's smallest member, so a single moved reaction mints a
-different note with no error anywhere.
-
-So the readable pairwise form is kept here as a **differential oracle**, exactly as
-`InMemoryFingerprintStore` is kept for the SQL ranker
-(`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`): it is the definition of
-the answer, and the fast path is checked against it on a real corpus rather than against a
-hand-written expectation that would encode whatever the fast path happens to do.
-
-The corpus is real DRFP fingerprints of real reaction SMILES rather than random bitstrings, because
-the two things that decide whether the vectorised form agrees — how many bits a row sets, and how
-many pairs share at least one bit — are properties of the chemistry, not of the code. Random rows
-at 50% density would exercise a regime this function never sees.
+The clustering is a sparse bit-matrix product feeding
+`scipy.sparse.csgraph.connected_components`. Its output must equal the pairwise definition
+exactly: playbooks are distilled from whatever cluster they get, and `stable_id` anchors on the
+smallest member, so one moved reaction silently mints a different note. The readable pairwise form
+is kept as a differential oracle. The corpus is real DRFP fingerprints, because bit density and the
+share of overlapping pairs are properties of the chemistry that decide whether the forms agree.
 """
 
 import tracemalloc
@@ -33,12 +21,10 @@ _SUBSTITUENTS = ["", "C", "CC", "Cl", "F", "OC", "C(F)(F)F", "N(C)C", "C#N"]
 
 
 def _reference_clusters(fingerprints: dict[str, str], threshold: float) -> list[list[str]]:
-    """The pairwise single-linkage grouping, written for readability rather than for speed.
+    """The pairwise single-linkage grouping, written for readability rather than speed.
 
-    Deliberately the *simplest* thing that can be right: every pair, the shared `tanimoto` helper,
-    and a union-find over the links. It is not the code that was deleted — it is a third statement
-    of what single linkage means, so agreement is evidence about the definition rather than about
-    one transcription of it.
+    Every pair, the shared `tanimoto` helper, and a union-find over the links: the simplest
+    statement of single linkage.
     """
     ids = list(fingerprints)
     parent = {key: key for key in ids}
@@ -85,27 +71,21 @@ def corpus() -> dict[str, str]:
 def test_the_vectorised_clustering_is_the_pairwise_one(
     corpus: dict[str, str], threshold: float
 ) -> None:
-    """The grouping is *identical* to the pairwise definition, not merely similar.
+    """The vectorised grouping is identical to the pairwise definition, not merely similar.
 
-    Five thresholds because the interesting failures are at the boundaries rather than in the
-    middle: a float that rounds differently only matters for a pair sitting exactly on the
-    threshold, and the low end is where one wrong link merges two large components into one. At
-    0.1 this corpus is nearly one cluster and at 0.9 it is nearly all singletons, so both
-    degenerate shapes are covered as well.
-
-    This is what the `shared / union` arithmetic has to hold: integer counts divided as float64,
-    which is bit-for-bit what `tanimoto_bits` computes in Python. Comparing at a rounded similarity
-    — or thresholding a float32 matmul's output — would pass most of these and fail a pair.
+    Five thresholds cover the boundaries: a pair exactly on the threshold, the low end where one
+    wrong link merges large components, and the near-one-cluster and near-all-singleton extremes.
+    `shared / union` must be integer counts divided as float64, bit-for-bit what `tanimoto_bits`
+    computes; a float32 matmul would fail on a pair.
     """
     assert cluster_by_similarity(corpus, threshold) == _reference_clusters(corpus, threshold)
 
 
 def test_every_reaction_appears_exactly_once(corpus: dict[str, str]) -> None:
-    """A partition, which the reference's union-find guarantees and the sparse path must too.
+    """Every reaction appears in exactly one cluster.
 
-    `connected_components` labels every row, including one with no edges, so a reaction that shares
-    no bits with anything is its own cluster rather than missing. Asserted separately because the
-    equality above would also pass if *both* implementations dropped the same id.
+    `connected_components` labels edgeless rows too. Asserted separately because the equality above
+    would pass if both implementations dropped the same id.
     """
     clusters = cluster_by_similarity(corpus, 0.5)
     flat = [key for cluster in clusters for key in cluster]
@@ -114,12 +94,10 @@ def test_every_reaction_appears_exactly_once(corpus: dict[str, str]) -> None:
 
 
 def test_an_all_zero_fingerprint_clusters_alone() -> None:
-    """Two fingerprints sharing nothing are 0.0 similar, which is the `union == 0` guard's case.
+    """An all-zero fingerprint clusters alone.
 
-    `tanimoto_bits` defines two all-zero fingerprints as 0.0 rather than as NaN or 1.0, and the
-    sparse product expresses the same thing by never storing an entry for them. This pins the
-    agreement, because it is the one place where "no shared bits" and "no data" have to mean the
-    same thing.
+    `tanimoto_bits` defines two all-zero fingerprints as 0.0, and the sparse product stores no entry
+    for them; this pins that "no shared bits" and "no data" agree.
     """
     zero = "0" * 16
     fingerprints = {"empty-a": zero, "empty-b": zero, "set": "1" * 16}
@@ -127,13 +105,10 @@ def test_an_all_zero_fingerprint_clusters_alone() -> None:
 
 
 def test_a_non_positive_threshold_still_links_everything() -> None:
-    """`>= 0.0` is true of every pair, including the ones that share no bits at all.
+    """A non-positive threshold still links everything.
 
-    The old loop got this for free: it compared every pair and 0.0 reaches a threshold of 0.0. The
-    sparse product never *visits* a pair that shares nothing, so this case is answered before it —
-    and it is asserted rather than assumed, because a misconfigured threshold of zero silently
-    turning a corpus into singletons is the opposite of what it used to do, in the direction where
-    every downstream note changes.
+    `>= 0.0` holds for every pair, but the sparse product never visits pairs sharing no bits, so
+    this case is answered before it rather than collapsing the corpus into singletons.
     """
     fingerprints = {"a": "1000", "b": "0100", "c": "0000"}
     assert cluster_by_similarity(fingerprints, 0.0) == [["a", "b", "c"]]
@@ -146,22 +121,19 @@ def test_an_empty_corpus_is_no_clusters() -> None:
 
 
 def test_fingerprints_of_different_widths_are_refused() -> None:
-    """The corpus-wide width check, which is the only place an int-parsed corpus can still make it.
+    """Fingerprints of different widths are refused with `FingerprintError`.
 
-    `FingerprintError` rather than its `FingerprintInputError` subclass, deliberately: a mixed-width
-    index is an outage, not a bad query, and a caller that reports it as "nothing found" tells a
-    chemist the company has no precedent.
+    Not the `FingerprintInputError` subclass: a mixed-width index is an outage, not a bad query, and
+    reporting it as "nothing found" would tell a chemist there is no precedent.
     """
     with pytest.raises(FingerprintError, match="different widths"):
         cluster_by_similarity({"a": "1010", "b": "10101010"}, 0.5)
 
 
 def test_a_bitstring_that_is_not_bits_is_refused() -> None:
-    """What `int(bits, 2)` used to catch per fingerprint, now caught once for the matrix.
+    """A bitstring that is not bits is refused once for the matrix, with this module's error class.
 
-    It used to surface as a bare `ValueError` from the parse; it is this module's own error class
-    now, beside the width check, because both say the same thing to a caller — the stored index is
-    corrupt.
+    Like the width check, it tells the caller the stored index is corrupt.
     """
     with pytest.raises(FingerprintError, match="not a bit"):
         cluster_by_similarity({"a": "1010", "b": "10x0"}, 0.5)
@@ -171,16 +143,11 @@ def test_a_bitstring_that_is_not_bits_is_refused() -> None:
 def test_taking_the_product_a_block_at_a_time_is_the_same_grouping(
     corpus: dict[str, str], threshold: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The blocking must be invisible in the answer, including when nearly every block is one row.
+    """Taking the product a block at a time gives the same grouping.
 
-    The product is taken in row blocks sized from `memory_similarity_block_bytes`, and each block is
-    folded into a running partition rather than into an edge list — so a link found in block 40
-    between a node in block 3 and one in block 12 has to merge the components those blocks had
-    already built. That is the part a single-block corpus never exercises: at the shipped budget
-    this fixture is one block, so every test above it would pass with the fold broken.
-
-    One byte of budget forces one row per block — ~250 blocks over this corpus — which is the most
-    adversarial arrangement of the same arithmetic.
+    Each block folds into a running partition, so a link between nodes in earlier blocks must merge
+    components those blocks already built. One byte of budget forces one row per block, the most
+    adversarial arrangement; at the shipped budget this fixture is a single block.
     """
     monkeypatch.setattr(settings, "memory_similarity_block_bytes", 1)
     assert cluster_by_similarity(corpus, threshold) == _reference_clusters(corpus, threshold)
@@ -189,25 +156,13 @@ def test_taking_the_product_a_block_at_a_time_is_the_same_grouping(
 def test_the_peak_memory_of_clustering_grows_with_the_corpus_and_not_with_its_square(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bound the shipped corpus cap was calibrated on, which the sparse product had removed.
+    """Peak clustering memory grows with the corpus, not with its square.
 
-    `cluster_by_similarity`'s own docstring argued the sparse product against "an n² float64 matrix,
-    which at 10⁴ reactions is 800 MB" — but 36% of synthetic DRFP pairs and ~55% of real ones share
-    at least one bit, so it stored more than the matrix it was contrasted with. Driven at
-    threshold 0.3 on the whole-corpus form: **130 MB of traced allocation at n=3,000 and 1,339 MB at
-    n=10,000**, while `memory_corpus_max_reactions` defaults to 100,000 and all three miners cluster
-    the whole capped corpus — so the ~40 kB-per-reaction figure that cap was sized on had stopped
-    bounding the job.
-
-    Asserted as a *doubling ratio* rather than as a byte count, because a byte count is a fact about
-    this interpreter on this box and would be re-baselined the first time it moved, which is how a
-    resource guard stops guarding. Quadratic growth doubles the corpus and quadruples the peak;
-    measured on this worst case, where every pair shares every bit, the whole-corpus form went
-    139.3 MB → 544.1 MB (3.91x) and the blocked form goes 10.7 MB → 17.3 MB (1.61x). The ceiling
-    below sits between the two and well clear of both.
-
-    The budget is set small so the bound bites at a corpus size this suite can afford; it is the
-    same code path the default exercises at ~25x the size.
+    Many real DRFP pairs share at least one bit, so an unblocked sparse product can store more than
+    a dense matrix, while `memory_corpus_max_reactions` allows large corpora. Asserted as a doubling
+    ratio rather than a byte count, which would be re-baselined the first time it moved: quadratic
+    growth quadruples the peak when the corpus doubles. The budget is small so the bound bites at a
+    size this suite can afford, on the same code path the default uses.
     """
     monkeypatch.setattr(settings, "memory_similarity_block_bytes", 4 * 1024 * 1024)
     one_fingerprint = "1" * 30 + "0" * 2018

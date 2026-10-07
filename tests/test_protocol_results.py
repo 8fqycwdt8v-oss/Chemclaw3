@@ -1,12 +1,8 @@
 """The plate-results loop: attaching outcomes to designed arms, and reading them back as a campaign.
 
-Both real backends, parametrized rather than compared in one test so a failure names which one —
-`tests/test_protocol_store.py`'s convention, and the in-memory one is a real backend for a
-deployment without Postgres rather than a double.
-
-Most of this file is about the three things the numbers alone do not say: which arms have **no**
-result, which wells were measured twice and disagree, and that an unmeasured arm is omitted from a
-campaign's observations rather than defaulted to zero.
+Both real backends, parametrized so a failure names which one. Most tests cover what the numbers
+alone do not say: which arms have no result, which wells were measured twice and disagree, and
+that an unmeasured arm is omitted from observations rather than zeroed.
 """
 
 import asyncio
@@ -118,11 +114,10 @@ def test_unmeasured_arms_are_named_rather_than_counted() -> None:
 
 
 def test_two_measurements_of_one_well_that_disagree_stay_visible() -> None:
-    """The reason the table is append-only rather than upserted.
+    """Two measurements of one well that disagree stay visible.
 
-    A re-measured well is a second observation, not a correction: an assay repeated on a degraded
-    sample is data about the sample, and overwriting would delete the evidence that the two
-    disagree.
+    The table is append-only: a re-measurement is a second observation, and overwriting would delete
+    the evidence of disagreement.
     """
     newest = StoredArmResult(**_result("A1", 58.0).model_dump(), revision=1, result_id=2)
     oldest = StoredArmResult(**_result("A1", 61.0).model_dump(), revision=1, result_id=1)
@@ -161,11 +156,10 @@ def test_two_outcomes_on_one_arm_are_separate_keys() -> None:
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), "NaN", "-inf"])
 def test_a_non_finite_value_is_refused_before_it_can_land(value: object) -> None:
-    """The store is append-only, so what the model accepts is permanent.
+    """A non-finite value is refused before it can land in the append-only store.
 
-    A `NaN` read as a disagreement with itself (`nan != nan`) and reached a surrogate through
-    `observations_for` as a measured value; the tool-call strings "NaN" and "inf" parse to exactly
-    that.
+    `NaN` would disagree with itself and reach a surrogate as a measured value; "NaN" and "inf"
+    strings parse to exactly that.
     """
     with pytest.raises(ValueError, match="finite"):
         ArmResult.model_validate({"arm_id": "A1", "outcome": "yield_pct", "value": value})
@@ -203,11 +197,9 @@ def test_observations_carry_each_measured_arms_factor_levels() -> None:
 
 
 def test_an_unmeasured_arm_is_omitted_from_observations_rather_than_zeroed() -> None:
-    """A missing well is not a zero.
+    """An unmeasured arm is omitted from observations rather than zeroed.
 
-    The most damaging thing this module could do is hand a surrogate a fabricated zero for a well
-    nobody ran: the fit would then be confidently wrong in the direction of that arm's conditions,
-    and nothing downstream could see why.
+    A fabricated zero would bias the fit toward that arm's conditions invisibly.
     """
     rows = [StoredArmResult(**_result("A1", 61.0).model_dump(), revision=1, result_id=1)]
     observations = observations_for(_design(), "yield_pct", rows)
@@ -304,12 +296,10 @@ async def _stored_design(prefix: str) -> str:
 
 @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
 def test_the_table_refuses_a_non_finite_value_the_model_would_have(value: str) -> None:
-    """The database refuses what `ArmResult` refuses, for a writer that is not `ArmResult`.
+    """The database refuses what `ArmResult` refuses, for writers that bypass the model.
 
-    A manual `INSERT`, a restore from another system, or a second writer added later.
-
-    Written as raw SQL on purpose: through the store the model refuses first, and this would pass
-    without the constraint existing at all.
+    Raw SQL on purpose: through the store the model would refuse first and hide a missing
+    constraint.
     """
 
     async def body() -> None:
@@ -323,12 +313,10 @@ def test_the_table_refuses_a_non_finite_value_the_model_would_have(value: str) -
 
 
 def test_the_finite_check_replays_and_validates_only_rows_that_satisfy_it() -> None:
-    """Both arms of 108, and its replay — inside one transaction that is rolled back.
+    """Migration 108's finite check, both arms and its replay, in one rolled-back transaction.
 
-    A database written by an image from before `ArmResult` refused `NaN` may hold one: there the
-    constraint must still land (refusing new writes) and stay `NOT VALID` rather than abort the
-    whole migration run. Once the row is gone a replay validates it, and a replay over a validated
-    constraint leaves it validated — the property a drop-then-add would lose.
+    With an existing `NaN` row the constraint still lands `NOT VALID` instead of aborting the
+    migration; once the row is gone a replay validates it, and a replay keeps it validated.
     """
 
     async def body() -> None:

@@ -1,10 +1,8 @@
 """The tournament workflow, driven end to end against the real compiled workflow.
 
-The activities are replaced with deterministic stubs — the point of these tests is the workflow's
-own orchestration (the screen, the rounds, the rating, what it does when a stage fails), not the
-model calls. Every one drives `HypothesisTournamentWorkflow.run` through a real Temporal worker
-rather than calling its private helpers, because the defects worth catching here are the ones that
-only appear once Temporal is sequencing the activities.
+Activities are deterministic stubs; what is tested is the workflow's orchestration (screen,
+rounds, rating, stage failures), through a real Temporal worker, since those defects appear only
+once Temporal sequences the activities.
 """
 
 from datetime import timedelta
@@ -28,10 +26,8 @@ from chemclaw.hypotheses.models import CheckCall, CheckOutcome, DiscriminatingCh
 from chemclaw.templates.registry import discovered
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
-# The real background queue, not a test-local one. `publish_note_best_effort` pins its activity
-# to `settings.background_task_queue` by design, so a worker on any other queue leaves the note
-# write scheduled and unpolled and the workflow waits out its schedule-to-start timeout — measured,
-# 13 activities scheduled and 12 started. Every other Temporal test in this suite does the same.
+# The real background queue: `publish_note_best_effort` pins its activity there, so a worker on any
+# other queue leaves the note write unpolled.
 _QUEUE = settings.background_task_queue
 
 
@@ -59,12 +55,9 @@ def _stubs(
 ) -> list[Any]:
     """Deterministic stand-ins for every activity, registered under the real activity names.
 
-    `recorded_jobs` collects what the run persists, so the durable-record path is driven rather
-    than swallowed — without a `record_job` stub the workflow's own `except ActivityError` turns a
-    missing activity into a warning and the test passes without exercising anything.
-
-    `prefer` names the hypothesis the judge always picks, which is what makes an assertion about
-    the resulting order meaningful rather than incidental.
+    `recorded_jobs` collects what the run persists; without a `record_job` stub the workflow would
+    turn the missing activity into a warning. `prefer` names the hypothesis the judge always picks,
+    so order assertions are meaningful.
     """
 
     @activity.defn(name="resolve_field_limits")
@@ -117,10 +110,8 @@ def _stubs(
             return ht._ComparisonVerdict(better="left", rationale="it came first")
         if not prefer:
             return ht._ComparisonVerdict(better="tie", rationale="indistinguishable")
-        # Order-independent by construction: the winner is decided from the two ids alone, then
-        # translated into a side. An earlier version answered "right" whenever neither side was
-        # `prefer`, which is a right-biased judge — it made the position-bias control fail for a
-        # real reason, in the stub rather than in the code.
+        # Order-independent: the winner is decided from the two ids alone, then translated into a
+        # side, so the stub is not position-biased.
         winner = (
             prefer
             if prefer in {request.left.id, request.right.id}
@@ -306,11 +297,10 @@ async def test_a_position_biased_judge_is_measured_rather_than_believed() -> Non
 
 
 async def test_a_judge_that_ignores_order_shows_no_position_bias() -> None:
-    """The control, and the case a reversal rate gets wrong.
+    """A judge that ignores order shows no position bias.
 
-    This judge is perfectly consistent *and* order-independent. A reversal-rate statistic scores it
-    0.0 while scoring a merely noisy order-independent judge 0.5, even though both have zero bias —
-    which is why the figure is built on first-position win rate instead.
+    A reversal rate would score a noisy order-independent judge 0.5; the figure uses first-position
+    win rate instead.
     """
     result = await _run(_stubs(field=_wide_field(), prefer="h3"), _request("q-unbiased"))
 
@@ -319,11 +309,10 @@ async def test_a_judge_that_ignores_order_shows_no_position_bias() -> None:
 
 
 async def test_bias_is_absent_rather_than_zero_when_too_few_comparisons_ran() -> None:
-    """`None` and `0.0` are different claims about position bias.
+    """Position bias is absent rather than zero when too few comparisons ran.
 
-    At one decisive comparison `|2p - 1|` is identically 1.0 whichever side won, so a
-    two-hypothesis tournament would otherwise announce total position bias from a single
-    judgement. Below the floor the honest answer is "not measured".
+    At one decisive comparison `|2p - 1|` is always 1.0; below the floor the answer is "not
+    measured".
     """
     field = [
         _hypothesis("a", "the first explanation"),
@@ -336,13 +325,11 @@ async def test_bias_is_absent_rather_than_zero_when_too_few_comparisons_ran() ->
 
 
 async def test_the_workflow_enters_the_field_in_a_question_derived_order() -> None:
-    """The permutation the bracket's fairness depends on is applied here, not assumed.
+    """The workflow enters the field in a question-derived order.
 
-    `pairing.py` breaks a score tie by input position, so the order this workflow hands it decides
-    the whole bracket. `tests/test_hypotheses.py` proves a *fixed* entry order costs over a hundred
-    Elo of artefact under a null judge; this proves the workflow does not hand it one. Two
-    different questions over the same hypotheses must produce different first pairings, and the
-    same question must reproduce its own.
+    `pairing.py` breaks ties by input position, so the entry order decides the bracket. Two
+    questions over the same hypotheses produce different orders, and one question reproduces its
+    own.
     """
     field = _wide_field(6)
     seen: dict[str, list[tuple[str, str]]] = {}
@@ -381,22 +368,16 @@ async def test_the_workflow_enters_the_field_in_a_question_derived_order() -> No
     # a round's comparisons run concurrently, so the order they are *recorded* in is completion
     # order and carries no meaning; the pairs and their orientation are what this is about.
     assert sorted(first) == sorted(repeat)
-    # And a different question seeds a different bracket, so no hypothesis holds a favoured slot
-    # across runs. Asserted on the entry order rather than on the resulting pairs: three pairs over
-    # six hypotheses can coincide between two brackets by chance, which would make this flaky for a
-    # reason that has nothing to do with the property.
+    # Asserted on the entry order rather than the pairs, which can coincide by chance.
     assert _entry_order(yield_question, field) != _entry_order(impurity_question, field)
     assert other
 
 
 async def test_the_run_is_persisted_so_its_id_outlives_temporal_retention() -> None:
-    """A tournament's artifact is its envelope, so the record is the only queryable copy.
+    """The run is persisted, so its id outlives Temporal retention.
 
-    Without this row `get_durable_job_status` raises `no durable job with id …` once the broker's
-    retention passes — contradicting its own docstring — and the run is invisible to
-    `find_past_jobs` and to `operations/`. `D-157` exempted `request_development_report` on the
-    ground that its artifact is a self-describing note; the ratings, the intervals and what lost
-    live nowhere but here.
+    The ratings, intervals and losers live only in the envelope; without the record row
+    `get_durable_job_status` fails after retention and `find_past_jobs` cannot see the run.
     """
     recorded: list[JobRecord] = []
     field = [
@@ -440,9 +421,8 @@ async def _run_with(
 ) -> Any:
     """Drive the workflow with extra activity stubs replacing the defaults of the same name.
 
-    `children` registers stand-in child workflows on the same queue, which a check that actually
-    launches one needs — a child nothing registered never starts, so a test without this asserts
-    only that grounding refused.
+    `children` registers stand-in child workflows on the same queue; a child nothing registered
+    never starts.
     """
     names = {a.__temporal_activity_definition.name for a in extra}
     kept = [a for a in stubs if a.__temporal_activity_definition.name not in names]
@@ -495,15 +475,10 @@ async def test_a_job_check_that_cannot_be_grounded_is_reported_not_dropped() -> 
 
 
 async def test_the_calculation_budget_bounds_how_many_jobs_one_tournament_starts() -> None:
-    """These jobs are `expensive: true`; a tournament must not spend a budget nobody agreed to.
+    """The calculation budget bounds how many jobs one tournament starts.
 
-    The checks past the cap are reported as not run *for budget* rather than dropped — a reader
-    who cannot see that the budget bound the answer would read a thin result as a complete one.
-
-    **And the refusal says what is true of a check that was never started.** It used to say a
-    calculation "had already been started", which is a claim about the allowed checks that nothing
-    verified: the one check inside the budget can itself refuse at grounding, so zero child
-    workflows start and the other three are still told the budget was spent.
+    These jobs are `expensive: true`. Checks past the cap are reported as not run for budget rather
+    than dropped, and the refusal claims nothing about whether the allowed checks actually started.
     """
     grounded_for: list[str] = []
 
@@ -573,12 +548,10 @@ async def test_a_tool_check_and_a_job_check_are_settled_in_one_run() -> None:
 
 
 async def test_the_budget_is_spent_on_the_best_placed_checks_not_the_first_generated() -> None:
-    """The ranking decides which checks the compute buys, which is what the ranking is for.
+    """The budget is spent on the best-placed checks, not the first generated.
 
-    Spent in generation order, a tournament could refuse the *leader's* check for budget while
-    running one that placed last — inverting the only thing the fit is used for. `_propose` has
-    always taken its own budget off `outcome.ranked`; this is the same rule for the more expensive
-    resource. The judge here always prefers `"wet"`, which is generated second.
+    Spending in generation order could refuse the leader's check while running the last-placed one.
+    The judge always prefers `"wet"`, which is generated second.
     """
     grounded_for: list[str] = []
 
@@ -617,11 +590,9 @@ async def test_the_budget_is_spent_on_the_best_placed_checks_not_the_first_gener
 
 
 async def test_the_budget_covers_tool_checks_too() -> None:
-    """One budget over both halves, because a tool check is a calculation as much as a job is.
+    """The budget covers tool checks too.
 
-    Bounding only the jobs left the cheaper-*looking* half unbounded: a ten-hypothesis field could
-    start ten `run_computable_check` activities, each a real semiempirical calculation on a cache
-    miss and each opening every connector session, beside two carefully counted child workflows.
+    A tool check is a real calculation on a cache miss and opens every connector session.
     """
     ran_for: list[str] = []
 
@@ -651,12 +622,10 @@ async def test_the_budget_covers_tool_checks_too() -> None:
 
 
 async def test_the_requesters_roles_reach_the_activities_that_authorize() -> None:
-    """Every calc job is `expensive: true`, so an actor with no roles is refused under Entra.
+    """The requester's roles reach the activities that authorize.
 
-    Measured before this: `set_current_identity(requested_by, frozenset())` in both activities, so
-    `authorize_trigger` decided against an actor holding nothing and the whole durable half of the
-    feature was dead in any deployment that runs identity — reported as an ordinary grounding
-    refusal, which is the shape that hides it.
+    Calc jobs are `expensive: true`, so an actor with no roles is refused under Entra, and the
+    refusal would look like an ordinary grounding refusal.
     """
     seen: list[list[str]] = []
 
@@ -705,12 +674,10 @@ class _StubTemplateWorkflow:
 
 
 async def test_a_template_check_runs_the_reviewed_procedure_and_reports_it() -> None:
-    """The shape that answers a question about structures nobody wrote down.
+    """A template check runs the reviewed procedure and reports it.
 
-    `tautomer-resolution` enumerates a molecule's tautomers and ranks them, so the subject of the
-    calculation is a set the corpus does not contain — which is exactly what neither the tool half
-    nor the job half can express. The check names the template and a note; everything else is the
-    template's own.
+    `tautomer-resolution` enumerates tautomers and ranks them, a subject the corpus does not
+    contain. The check names the template and a note; everything else is the template's own.
     """
     _TEMPLATE_RUNS.clear()
 
@@ -778,12 +745,10 @@ async def test_a_template_check_that_cannot_be_grounded_is_reported_not_dropped(
 async def test_a_template_a_deployment_turned_off_is_not_reachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The deployment's own switch has to reach this path too, and once it did not.
+    """A template a deployment turned off is not reachable.
 
-    `discovered()` is every YAML on disk; `enabled()` is the set `templates_enabled` allows, and it
-    is what the `run_<template>` launchers and therefore `authz.side_effecting_tools()` are built
-    from. Grounding against the wider one let a tournament start a procedure whose launcher is on
-    no agent surface, in no `tool_role_gates` entry an operator wrote and behind no plan gate.
+    Grounding uses `enabled()`, the set `templates_enabled` allows and the `run_<template>`
+    launchers (and so `authz.side_effecting_tools()`) are built from, not every YAML `discovered()`.
     """
     monkeypatch.setattr(settings, "templates_enabled", "hazard-briefing")
     plan = await ht.ground_check_template(
@@ -829,11 +794,9 @@ def _grounding_corpus(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Discrim
 async def test_a_template_check_is_authorized_as_the_launcher_a_chat_turn_would_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """An operator's gate on `run_<template>` binds a tournament exactly as it binds chat.
+    """A template check is authorized as the launcher a chat turn would call.
 
-    Before this, grounding resolved the template and started the child with no authorization and
-    no audit row, so a chemist refused `run_tautomer_resolution` in a conversation reached the
-    same procedure by asking for a ranking.
+    An operator's gate on `run_<template>` binds a tournament as it binds chat, with an audit row.
     """
     check = _grounding_corpus(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "entra_required", True)
@@ -851,11 +814,10 @@ async def test_a_template_check_is_authorized_as_the_launcher_a_chat_turn_would_
 
 
 async def test_a_failed_evidence_sweep_costs_its_evidence_and_not_the_run() -> None:
-    """A Temporal-level sweep failure (timeout, lost worker) ranks on prose, as the docstring says.
+    """A failed evidence sweep costs its evidence and not the run.
 
-    `gather_hypothesis_evidence` swallows in-process failures itself; a timeout arrives as an
-    `ActivityError` instead, and before this it failed a tournament whose angles and generation
-    were already paid for.
+    A Temporal-level failure (timeout, lost worker) arrives as `ActivityError`; the tournament ranks
+    on prose rather than discarding paid-for angles and generation.
     """
     from temporalio.exceptions import ApplicationError
 
@@ -955,13 +917,10 @@ async def test_a_tool_check_temporal_could_not_complete_is_reported_not_dropped(
 
 
 async def test_a_tool_check_is_bounded_as_a_calculation_not_as_a_model_call() -> None:
-    """`run_computable_check` gets `hypothesis_check_timeout_seconds`, not the model-call bound.
+    """A tool check is bounded as a calculation, not as a model call.
 
-    It ran under `hypothesis_call_timeout_seconds` (120 s), which is sized for one structured
-    completion. The activity opens connectors and calls a tool that on a cache miss is a
-    semiempirical calculation, and it runs one attempt — so the model bound reported a check as
-    failed while the calculation it started was still being computed. Read off the activity's own
-    `info()`, which is the option the workflow actually scheduled rather than the setting's value.
+    `run_computable_check` gets `hypothesis_check_timeout_seconds`, since it runs one attempt of a
+    possibly long calculation. Read off the activity's own `info()`, the option actually scheduled.
     """
     seen: list[timedelta | None] = []
 
@@ -987,15 +946,12 @@ async def test_a_tool_check_is_bounded_as_a_calculation_not_as_a_model_call() ->
 
 
 def test_the_check_bound_outlasts_the_connector_it_waits_on() -> None:
-    """The activity's bound sits above every wait inside it, so a connector decides a call's fate.
+    """The check bound outlasts every wait inside it.
 
-    Inside one check: the connectors open concurrently (one `connector_open_timeout_seconds`), then
-    one tool call waits at most its connector's `request_timeout`, and on a `calc` cache miss the
-    backend is allowed `calc_server_timeout_seconds` for the primitive. A bound under any of those
-    would have Temporal abandon a call its connector was still entitled to finish — with one
-    attempt, that is the calculation's result discarded. Derived from the shipped manifests rather
-    than from `calc`'s 600 written here, so a bundle that raises its own `request_timeout` fails
-    this until the setting follows.
+    Connectors open concurrently (`connector_open_timeout_seconds`), a tool call waits its
+    connector's `request_timeout`, and a `calc` miss may take `calc_server_timeout_seconds`; a
+    shorter bound would discard a result its connector was entitled to finish. Derived from the
+    shipped manifests.
     """
     from chemclaw.connectors.registry import discovered, request_timeout_seconds
 

@@ -1,21 +1,10 @@
-"""Who may write to a design — the question nothing asked.
+"""Who may write to a design.
 
-A design is a shared scientific artifact: anyone in the deployment may read one, and `opened_by` is
-kept through offboarding because the person who opened it is part of its provenance. Writing to one
-is a different question, and neither surface put it. Measured before this file existed:
-
-- A second chemist's *turn* reached the first chemist's design, because `design_id_for` hashed the
-  title, goal, transformation and mode and nothing about who was asking. He restructured her ask,
-  demoted her `approved` header to `draft`, and replaced her two-arm plate with his own — while
-  `status_history` still recorded her sign-off at revision 2.
-- An unrelated principal with **no role at all** wrote `executed` into the status trail of somebody
-  else's design over HTTP, and then landed a revision on it as its author.
-
-Both halves are needed and neither works alone: owner-scoped ids stop the ordinary collision, and
-the ownership gate stops an explicit `design_id` from reaching another chemist's design.
-
-The gates degrade open in dev (`entra_required` off), exactly as `_is_reviewer` and every other
-route does, so these tests run the **enforced** posture — which is the one a deployment has.
+Anyone may read a design and `opened_by` is kept as provenance, but writing is gated by ownership.
+Both halves are needed: owner-scoped `design_id_for` stops two chemists' turns colliding on one
+design, and the ownership gate stops an explicit `design_id` reaching another chemist's design
+over a turn or HTTP. The gates degrade open in dev (`entra_required` off), so these tests run the
+enforced posture a deployment has.
 """
 
 from __future__ import annotations
@@ -169,11 +158,10 @@ def test_the_owner_can_still_draft_onto_their_own_design(
 def test_a_turn_cannot_attach_results_to_another_chemists_design(
     monkeypatch: pytest.MonkeyPatch, enforced: None
 ) -> None:
-    """The results table is append-only and this tool is its only writer.
+    """A turn cannot attach results to another chemist's design.
 
-    `draft_experiment_protocol` and the HTTP routes refused this actor while
-    `attach_plate_results` did not, so a stranger's numbers landed on a plate for good and
-    `suggest_next_experiment` then fitted on them.
+    The results table is append-only and `attach_plate_results` its only writer; a stranger's
+    numbers would stay there and be fitted by `suggest_next_experiment`.
     """
     store = InMemoryDesignStore()
     results = InMemoryArmResultStore()
@@ -307,9 +295,7 @@ def test_a_reviewer_reaches_another_chemists_design(
 def _refusal_records() -> Iterator[list[logging.LogRecord]]:
     """Every `authz.refused` record `deps` emits, collected off that logger directly.
 
-    Not `caplog`: `create_app()` configures logging on startup and replaces the handler pytest
-    installs, so the fixture comes back empty while the WARNING is plainly on stderr. Attaching to
-    the named logger is the reading that survives whatever the app does to the root.
+    Not `caplog`: `create_app()` replaces the handler pytest installs.
     """
     collected: list[logging.LogRecord] = []
 
@@ -331,12 +317,9 @@ def _refusal_records() -> Iterator[list[logging.LogRecord]]:
 def test_a_refused_design_write_is_recorded_on_the_server_side(
     store: InMemoryDesignStore, enforced: None, path: str
 ) -> None:
-    """The 403 discloses that the design exists; only the server can say **who tried**.
+    """A refused design write is recorded server-side with a metric and a WARNING.
 
-    `deps._refuse` writes a metric and a WARNING for every session and proposal refusal, and this
-    gate raised inline: no log line, no metric, on both write routes. A scan of design ids was
-    therefore indistinguishable from ordinary traffic on the one surface where the distinction
-    between "no such design" and "not yours" survives at all.
+    The 403 reveals the design exists; only the server log can show who is scanning design ids.
     """
     body: dict[str, Any] = (
         {

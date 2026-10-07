@@ -1,32 +1,11 @@
-"""Every metric name a call site uses is declared — checked statically, because nothing else can.
+"""Every metric name a call site uses is declared, checked statically.
 
-`core/metrics.py` is deliberately strict: `increment`, `observe` and `bind_gauge` raise `KeyError`
-on an undeclared name, and `increment` raises again if the label set does not match the
-declaration. `core/metrics_bridge.py` then wraps that in the repository's **only** `except: pass`,
-on the correct argument that a metric typo must not fail the operation being counted.
-
-The two together mean a mistyped counter name is invisible at *every* level, DEBUG included: the
-`KeyError` is swallowed, no log line is emitted, and the metric simply never appears. The bridge's
-docstring is right about what it protects; what nothing protected was the precondition that makes
-the swallow harmless — that no call site names an undeclared metric. That held when measured, and
-held only by luck.
-
-So this file converts the one invisible swallow into a build-time failure. It reads the *source*
-rather than importing and calling, because the defect it guards against is a name that is never
-executed on the path a test happens to take.
-
-**Two directions, and the second is not decoration.** Forward: a literal at a call site must be
-declared in the matching registry. Backward: a declared metric must appear as a literal somewhere
-in `src/` — which is what covers the **two** call sites whose name is a variable: `api/runner.py`
-loops over a tuple of the four priced token counters, and `core/metrics_bridge.py` increments
-`_DEGRADED_COUNTER`, a module constant. Typo either and the forward check sees nothing, while the
-backward check sees the real name lose its last mention.
-
-The second of those was added by the same commit as this file, which is worth saying plainly: the
-counter this diff introduced sits in the blind spot of the test this diff introduced. It is not a
-live risk — `_DEGRADED_COUNTER`'s value is still a literal in that module, so the backward check
-holds it, and `tests/test_degraded.py` drives `degraded()` against the real registry — but "the one
-variable call site" was true for about as long as it took to write it down.
+`core/metrics.py` raises `KeyError` on an undeclared name, and `core/metrics_bridge.py` swallows
+it so a metric typo cannot fail the operation; together a mistyped name is silent. This file
+turns that into a build-time failure by reading the source, since the bad name may never run on a
+tested path. Forward: a literal at a call site is declared. Backward: a declared metric appears as
+a literal in `src/`, which covers call sites using a variable (`api/runner.py`'s token counters,
+`metrics_bridge`'s `_DEGRADED_COUNTER`).
 """
 
 from __future__ import annotations
@@ -82,9 +61,8 @@ def _label_keys(node: ast.Call) -> frozenset[str] | None:
 def _collect_calls() -> list[_Call]:
     """Every `<something>.increment/observe/bind_gauge(...)` written under `src/chemclaw`.
 
-    Matched on the attribute name alone, which is deliberately loose: the receiver is `METRICS` at
-    some sites and the lambda parameter of `record_metric` at others (`m`, `metrics`), and pinning
-    the receiver would have quietly stopped covering whichever form a new call site chose.
+    Matched on the attribute name alone because receivers vary (`METRICS`, or a `record_metric`
+    lambda parameter).
     """
     calls: list[_Call] = []
     for f in sorted(_SRC_ROOT.rglob("*.py")):
@@ -110,12 +88,9 @@ def _collect_calls() -> list[_Call]:
 
 
 def _metric_name_literals() -> dict[str, list[str]]:
-    """Declared metric names appearing as a string literal under `src/`, outside `core/metrics.py`.
+    """Declared metric names appearing as string literals under `src/`, outside `core/metrics.py`.
 
-    Restricted to names that are *already declared* on purpose. `chemclaw_` is also the prefix of
-    twelve `ContextVar` names (`chemclaw_current_actor`, `chemclaw_dry_run`, …), so "every
-    `chemclaw_*` literal is a metric" is simply false, and a test that assumed it would fail on
-    correct code.
+    Restricted to declared names, because many `ContextVar` names also start with `chemclaw_`.
     """
     declared = set(_COUNTERS) | set(_GAUGES) | set(_HISTOGRAMS)
     found: dict[str, list[str]] = {}
@@ -130,12 +105,10 @@ def _metric_name_literals() -> dict[str, list[str]]:
     return found
 
 
-# The metrics the registry emits about *itself*, and so the only names the scan below cannot see:
-# `core/metrics.py` is excluded from it (that is where every name is declared), and these two have
-# no call site outside it by construction — one is incremented when a bound gauge source raises
-# during `render`, the other when a sample is refused at the per-metric label-set cap. Both are
-# held to a producer by `test_the_registry_really_does_emit_the_metrics_it_is_exempted_for`, so
-# this is a redirected check rather than a waiver.
+# Metrics the registry emits about itself, which the scan cannot see because `core/metrics.py` is
+# excluded from it: one counts a raising gauge source during `render`, the other a sample refused at
+# the label-set cap. `test_the_registry_really_does_emit_the_metrics_it_is_exempted_for` holds them
+# to a producer.
 _SELF_EMITTED = frozenset(
     {"chemclaw_gauge_read_failures_total", "chemclaw_metric_series_dropped_total"}
 )
@@ -157,12 +130,10 @@ def test_every_metric_name_at_a_call_site_is_declared() -> None:
 
 
 def test_every_declared_metric_is_named_somewhere_in_the_source() -> None:
-    """The backward direction: a declaration nothing names emits nothing, and hides a typo.
+    """Every declared metric is named somewhere in the source.
 
-    This is what covers the two call sites whose name is not a literal — `api/runner.py` increments
-    the four priced token counters from a loop variable, and `core/metrics_bridge.py` increments
-    the `_DEGRADED_COUNTER` constant. Misspelling either is invisible to the forward check above
-    and shows up here as the correct name losing its last mention in the tree.
+    A declaration nothing names emits nothing and hides a typo at a variable call site, which shows
+    up here as the correct name losing its last mention.
     """
     literals = _metric_name_literals()
     declared = set(_COUNTERS) | set(_GAUGES) | set(_HISTOGRAMS)
@@ -174,18 +145,10 @@ def test_every_declared_metric_is_named_somewhere_in_the_source() -> None:
 
 
 def test_the_registry_really_does_emit_the_metrics_it_is_exempted_for() -> None:
-    """`_SELF_EMITTED` is an exemption from the scan, so it needs its own producer check.
+    """The registry really emits the metrics exempted as `_SELF_EMITTED`.
 
-    The scan above skips `core/metrics.py`, because that is where every name is *declared* and
-    counting a declaration as a mention would make the backward direction vacuous. That exclusion
-    is right for every metric an ordinary call site emits and wrong for the two the registry emits
-    about *itself* — a gauge whose source raised, and a sample dropped at the cardinality cap —
-    which have no call site anywhere else by construction.
-
-    Exempting them without checking anything would hand the next self-emitted metric a free pass,
-    which is the shape of hole this whole file exists to close. So the exemption is paid for here:
-    each name must appear as a literal inside `core/metrics.py` at a line that is not part of a
-    declaration table, i.e. somewhere the module actually records it.
+    Each must appear as a literal inside `core/metrics.py` outside a declaration table, i.e. where
+    the module records it, so the exemption cannot become a free pass.
     """
     tree = ast.parse(_METRICS_MODULE.read_text(encoding="utf-8"), filename=str(_METRICS_MODULE))
     # The declaration tables are dict literals mapping a name to help text or to labels. A name
@@ -227,21 +190,11 @@ def test_every_literal_label_set_matches_its_counter_declaration() -> None:
 
 
 def test_the_durable_counter_counts_only_the_durable_probe() -> None:
-    """`chemclaw_durable_unreachable_total` is incremented from its one declared population.
+    """`chemclaw_durable_unreachable_total` is incremented only by the durable health probe.
 
-    **The one thing in this file that checks a meaning**, and it is here because everything else
-    here checks a name. The counter is declared "turns whose durable-subsystem health probe failed
-    (Temporal did not answer)" and `ChemclawDurableUnreachable` alerts on it with the summary
-    "Temporal is not answering its health probe". A later lane added a second increment in
-    `api/middleware._subsystem_unavailable`, which fires per **HTTP request** for the whole
-    `SubsystemUnavailableError` family — `DocumentIndexError`, a pgvector failure with no Temporal
-    in it, included. Nothing failed: the name was declared and took no labels, so both checks above
-    were satisfied while the series carried two populations with two different denominators and the
-    alert summed them under a sentence true of only one.
-
-    Pinned to the module rather than the line so ordinary edits do not fail the build. The
-    request-path population is `chemclaw_subsystem_unavailable_total`, the sibling of
-    `chemclaw_db_unavailable_total`; a handler that sheds requests counts the requests it sheds.
+    It is declared as failed Temporal probes and alerted on as such, so an increment from the HTTP
+    request path (whose errors include non-Temporal subsystems) would mix two populations. That
+    population is `chemclaw_subsystem_unavailable_total`. Pinned to the module, not the line.
     """
     sites = sorted(
         f"{c.path}:{c.lineno}" for c in _CALLS if c.name == "chemclaw_durable_unreachable_total"

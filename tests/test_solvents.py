@@ -1,13 +1,8 @@
-"""The ALPB solvent set, re-derived rather than trusted, and the launch-time refusal built on it.
+"""The ALPB solvent set, re-derived from the installed tblite, and the launch-time refusal on it.
 
-The whole value of `chemclaw.science.calc.solvents` is that its constant is *true of the installed
-tblite*. A hand-maintained list that has drifted is worse than no list: it refuses a solvent the
-method supports, and there is no error to trace back to it. So the first test here does not read the
-constant and nod — it asks tblite about every name in it, and asks tblite about a set of names that
-must not be in it.
-
-The rest is the behaviour the constant exists for: `require_supported_solvents` refusing a durable
-calc job at launch, in both the shapes a calc job carries a solvent.
+Every name in the constant is checked against tblite, and so is a set of names that must not be
+in it. `require_supported_solvents` refuses a durable calc job at launch in both of a job's
+solvent shapes.
 """
 
 import pytest
@@ -54,9 +49,7 @@ def _tblite_accepts(name: str) -> bool:
 def test_every_name_in_the_set_is_one_tblite_accepts() -> None:
     """The constant may not advertise a solvent the installed method cannot run.
 
-    This is the direction that produces a *wrong answer* rather than a wrong refusal: a name that
-    passes the precondition and then dies inside the durable job is precisely the failure the
-    precondition was added to remove, and it would be back with the check apparently in place.
+    Such a name would pass the precondition and fail inside the durable job.
     """
     rejected = sorted(name for name in ALPB_SOLVENTS if not _tblite_accepts(name))
     assert not rejected, (
@@ -66,11 +59,9 @@ def test_every_name_in_the_set_is_one_tblite_accepts() -> None:
 
 
 def test_no_solvent_tblite_accepts_is_missing_from_the_set() -> None:
-    """The constant may not omit a solvent the method supports, which is the wrong-refusal half.
+    """The constant may not omit a solvent the method supports.
 
-    Probed against the *dielectric* database compiled into tblite rather than a list written here,
-    so this fails when an upgrade adds Born parameters for a solvent — which is the event that would
-    otherwise leave the system refusing a perfectly good calculation with no way to notice.
+    Probed against tblite's compiled dielectric database, so an upgrade adding a solvent fails here.
     """
     import re
     from pathlib import Path
@@ -101,24 +92,13 @@ def test_no_solvent_tblite_accepts_is_missing_from_the_set() -> None:
 
 
 def test_the_suggested_shortlist_only_names_supported_solvents() -> None:
-    """The list a refusal quotes must be a subset of the set — it used to be neither.
-
-    `xtb_engine.COMMON_SOLVENTS` was a hand-written tuple that omitted `dmf`, `dioxane`, `benzene`
-    and `nitromethane` while calling itself "the solvents process chemistry actually asks about".
-    Being a strict subset of a measured set is what makes that class of drift impossible.
-    """
+    """The shortlist a refusal quotes is a subset of the supported set."""
     assert set(SUGGESTED_SOLVENTS) <= ALPB_SOLVENTS
     assert len(set(SUGGESTED_SOLVENTS)) == len(SUGGESTED_SOLVENTS), "a duplicate in the shortlist"
 
 
 def test_a_name_is_matched_case_insensitively_and_trimmed() -> None:
-    """Matching is tblite's way, so a stricter check here would refuse a name the method takes.
-
-    Asserted through `unsupported`, which is the path a launch precondition takes. It used to be
-    asserted through `is_supported`, a one-line public wrapper over the same membership test whose
-    only caller was this test — `unsupported` spelled the test inline rather than calling it — so
-    the function was dead and duplicated at once, and the property it stood for is `_normalize`'s.
-    """
+    """Matching is case-insensitive and trimmed, as tblite's is, asserted through `unsupported`."""
     assert unsupported(["THF", " Water "]) == []
     assert unsupported(["2-MeTHF"]) == ["2-MeTHF"]
 
@@ -174,22 +154,11 @@ def test_the_bad_names_keep_the_order_they_were_given_in() -> None:
 
 
 def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> None:
-    """The rule is only worth anything on the jobs that can violate it — all eleven of them.
+    """Every declared job that takes a solvent declares the precondition.
 
-    Derived from the manifests and their params models rather than a written-down list, so a new
-    solvent-taking job — in this bundle or a new one — fails here rather than in a live run. It
-    sweeps every *discovered* bundle, not just the enabled ones, because enablement is a
-    deployment's choice and the guard is not.
-
-    The count is pinned deliberately and updating it is the point: the four multi-step jobs added by
-    `D-2026-08-25-the-loop-is-a-composite-not-a-template` each take a solvent, and so do
-    `profile_rotation` (`D-2026-08-26-a-torsion-is-named-not-indexed`) and
-    `rank_species_across_solvents` (`D-2026-08-26-a-solvent-is-an-argument-not-a-job`), the latter
-    taking `solvents`, plural. Every one of them came through this assertion to get here — two of
-    them on branches that did not know about each other, which is exactly when a sweep that adapted
-    silently would let the next one arrive with no precondition and fail thirty seconds into a
-    durable run with tblite's own "String value for epsilon was not found among database of
-    solvents".
+    Derived from every discovered bundle's manifests and params models, since enablement is a
+    deployment choice. The count is pinned deliberately, so a new solvent-taking job must pass
+    through this assertion.
     """
     from chemclaw.connectors.jobs import _params_model
     from chemclaw.connectors.registry import discovered
@@ -207,12 +176,10 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
 
 
 def test_the_launcher_refuses_the_screen_before_it_starts_any_durable_work() -> None:
-    """End to end through the real seam — a declaration nothing calls would guard nothing.
+    """The launcher refuses the screen before starting any durable work.
 
-    `prepare_job_launch` is the single place both launchers (the generated agent tool and the
-    template workflow's job step, D-168) validate, authorize and run the precondition, and it is
-    reached before any workflow is started. Driving it here is what proves the manifest line above
-    is wired rather than merely present.
+    `prepare_job_launch` is the single place both launchers run the precondition, so driving it
+    proves the manifest line is wired.
     """
     from chemclaw.connectors.jobs import prepare_job_launch
     from chemclaw.connectors.registry import discovered

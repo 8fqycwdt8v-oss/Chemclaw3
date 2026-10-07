@@ -1,10 +1,7 @@
-"""The bench document, which nothing asserted.
+"""The bench document: what a chemist carries to the fume hood.
 
-`render_markdown`, `run_sheet_rows` and `summarise` were imported by no test in the suite: the whole
-assertion surface over 472 lines was two lines elsewhere checking that the page starts with a title
-and contains the string `## Evidence`. This is the form a chemist actually carries to a fume hood,
-so what it drops or garbles is not a cosmetic defect — every property below was false, and the first
-one put a chemist at a hydrogenation they had not read about.
+`render_markdown`, `run_sheet_rows` and `summarise` are checked for what they drop or garble,
+because on this page that is a safety defect, not a cosmetic one.
 """
 
 from __future__ import annotations
@@ -58,11 +55,10 @@ def _design(**overrides: object) -> ExperimentDesign:
 
 
 def test_an_arm_that_overrides_the_atmosphere_says_so_on_the_page() -> None:
-    """The one that matters most: a page that told a chemist 1 bar N2 for a 50 bar H2 arm.
+    """An arm that overrides the atmosphere says so on the page.
 
-    `## Conditions` renders the shared body whenever there is more than one arm, and the run sheet
-    carried only temperature, time and solvent — so the overriding arm rendered byte for byte like
-    the one that did not, with `H2` and `50` appearing nowhere and no check firing.
+    With several arms `## Conditions` shows the shared body, so an overriding arm (50 bar H2 over a
+    1 bar N2 body) needs its own run-sheet columns.
     """
     design = _design(
         arms=[
@@ -126,11 +122,10 @@ def test_six_significant_figures_survive_the_fix() -> None:
 
 
 def test_a_replicate_says_it_is_one() -> None:
-    """Three identical rows with nothing saying they are a deliberate triplicate.
+    """A replicate says it is one.
 
-    `arms_are_distinct` *skips* arms carrying `replicate_of`, so no check flags them either — the
-    one field that makes those rows legitimate was the one field the document dropped, and a chemist
-    reads a copy-paste error.
+    `arms_are_distinct` skips replicates, so without the marker identical rows read as a copy-paste
+    error.
     """
     design = _design(
         arms=[
@@ -285,12 +280,10 @@ def _charged(*lines: ChargeLine) -> ExperimentDesign:
 
 
 def test_an_edit_to_a_repeated_charge_line_is_attributed_to_the_line_it_was_made_on() -> None:
-    """`_labelled`'s disambiguation, which nothing exercised with a duplicate key.
+    """An edit to a repeated charge line is attributed to the line it was made on.
 
-    `base.charge` is keyed by `component`, and a solvent charged in two portions — an addition and
-    a rinse — is entirely ordinary. Without the disambiguation the second line overwrites the first,
-    so a chemist editing the *first* toluene charge from 5 mL to 9 mL diffs to nothing at all: the
-    edit vanishes from the one table this system keeps in order to learn from those edits.
+    `base.charge` is keyed by `component`, and a solvent charged twice (addition and rinse) is
+    ordinary; `_labelled` disambiguates so an edit to the first line is not lost from the diff.
     """
     before = _charged(
         ChargeLine(component="toluene", limiting=True, volume_ml=5.0),
@@ -323,12 +316,10 @@ def test_deleting_an_unrelated_line_is_not_an_edit_to_the_repeated_one() -> None
 
 
 def test_conditions_show_what_the_arms_run_at_when_they_all_override_the_body() -> None:
-    """A value every arm overrode to the same thing fell through both halves of the page.
+    """Conditions show what the arms run at when they all override the body.
 
-    `## Conditions` rendered the body's own setpoints and the run sheet carries a column only when
-    the arms *disagree*, so three arms all set to `N2` over a body reading `air` produced a page
-    saying "Atmosphere: air" with no atmosphere column anywhere — the atmosphere the design is
-    actually run under stated nowhere, and a wrong one stated as fact.
+    A value every arm overrides identically gets no run-sheet column, so `## Conditions` must show
+    the arms' value rather than the body's.
     """
     design = _design(
         base=ProtocolBody(setpoints=Setpoints(temperature_c=80, atmosphere="air", solvent="THF")),
@@ -383,13 +374,10 @@ def test_the_shared_conditions_of_a_single_arm_are_that_arms_own() -> None:
 
 
 def test_no_free_text_field_on_the_page_can_open_a_block() -> None:
-    r"""`_text` guarded the steps, the hazards and the waste — and nothing above them.
+    r"""No free-text field on the page can open a block.
 
-    The title, the goal, the objectives, the exclusions, the solvent, the atmosphere, an arm's note
-    and what a citation says it supports are all browser-supplied strings placed straight into the
-    block flow. Measured, a title reading `T\\n\\n## Forged` put a second `## Forged` section on the
-    page, and the goal, the solvent and the arm note each did it again — four forged sections on the
-    half of the document a chemist reads first.
+    Title, goal, objectives, exclusions, solvent, atmosphere, arm notes and citation text are
+    browser-supplied, so a value containing `\n\n## ...` must not forge a section.
     """
     forge = "\n\n## Forged"
     design = _design(
@@ -420,11 +408,9 @@ def test_no_free_text_field_on_the_page_can_open_a_block() -> None:
 
 
 def test_a_leading_fence_or_html_or_list_marker_cannot_open_a_block_either() -> None:
-    """Four openers the first marker set left out, three of them worse than the heading it caught.
+    """A leading fence, HTML or list marker cannot open a block either.
 
-    A leading `` ` `` or `~` opens a fenced code block, which swallows every following line until it
-    closes — so a hazard line starting with one takes the procedure, the charge table and the
-    evidence with it.
+    A leading `` ` `` or `~` opens a fenced code block that swallows everything until it closes.
     """
     for opener in ("```python", "~~~", "<script>alert(1)</script>", "1. not a step"):
         page = render_markdown(
@@ -440,12 +426,10 @@ def test_a_leading_fence_or_html_or_list_marker_cannot_open_a_block_either() -> 
 
 
 def test_a_citation_carrying_two_backticks_still_renders_as_one_span() -> None:
-    """A doubled fence closes on a doubled run inside it — the fence has to be longer than that.
+    """A citation carrying two backticks still renders as one span.
 
-    CommonMark ends a code span at the next run of *exactly* the opening length, so `` a``b ``
-    between two doubled fences rendered `a` as code and `b` beside it as prose: the rest of the
-    citation escaped the span, which is the defect the doubled fence was introduced to fix, one
-    backtick along.
+    CommonMark closes a code span at the next run of exactly the opening length, so the fence must
+    be longer than any run inside the value.
     """
     page = render_markdown(
         _design(evidence=[EvidenceRef(kind="precedent", ref="rxn``42", summary="s")])
@@ -454,12 +438,10 @@ def test_a_citation_carrying_two_backticks_still_renders_as_one_span() -> None:
 
 
 def test_one_experiment_run_in_triplicate_is_one_experiment_and_three_runs() -> None:
-    """A replicate is the same experiment again, and the count was over every arm.
+    """One experiment run in triplicate is one experiment and three runs.
 
-    So a triplicate came out a screen: `controls_present` warned that "a screen with nothing to
-    compare against cannot tell a flat result from a failed run" over three arms the model validator
-    guarantees are the same conditions, and `layout_fits` asked a single experiment for a plate.
-    The runs are still named, because one experiment and three of them are different facts.
+    Replicates are the same conditions, so `controls_present` and `layout_fits` must not treat a
+    triplicate as a screen; the run count is still stated.
     """
     design = _design(
         request=ExperimentRequest(title="T", goal="G", mode="single"),
@@ -475,13 +457,10 @@ def test_one_experiment_run_in_triplicate_is_one_experiment_and_three_runs() -> 
 
 
 def test_a_body_with_no_arms_declared_is_not_summarised_as_one_experiment() -> None:
-    """Zero arms is a count nobody wrote, and it reads as one on the sentence built to be quoted.
+    """A body with no arms declared is not summarised as one experiment.
 
-    `summarise` decided this with `== 1` until the four hand-written copies of the condition were
-    consolidated onto `is_single_experiment`, which is `<= 1` — right for the check exemptions it
-    also drives, and wrong for a number being reported. A charge table and a procedure with no arm
-    declared came back as "1 experiment", to the chemist and to a model quoting
-    `ProtocolReceipt.summary` without re-reading the design.
+    `is_single_experiment` (`<= 1`) is right for check exemptions but a reported count must say
+    zero.
     """
     design = _design(
         arms=[],
@@ -513,11 +492,10 @@ def test_a_one_arm_design_that_declares_a_factor_is_still_a_screen() -> None:
 
 
 def test_a_number_is_written_out_rather_than_rounded_into_a_collision() -> None:
-    """Two different weigh-outs must not print as one number, and `%.6g` prints them as one.
+    """A number is written out rather than rounded into a collision.
 
-    The docstring claimed six significant figures throughout, which is true below 1e6 and false
-    above it — `1234567.8` comes back with eight. Pinning both halves here is what keeps the prose
-    and the behaviour from drifting apart again.
+    `%.6g` would print two different weigh-outs as one number; both halves of the documented
+    formatting are pinned.
     """
     assert _number(1 / 6) == "0.166667"
     assert _number(200 / 3) == "66.6667"
@@ -529,12 +507,11 @@ def test_a_number_is_written_out_rather_than_rounded_into_a_collision() -> None:
 
 
 def test_a_receipt_says_whether_its_checks_were_graded_against_a_procedure() -> None:
-    """`status` is a proxy for that and the two are decided independently.
+    """A receipt says whether its checks were graded against a procedure.
 
-    `advanced()` decides the status and `has_protocol` decides the check stage, so a `draft` design
-    edited back down to the bare ask keeps a non-`requested` status while every protocol-only check
-    comes back a *passing* note — and a reader counting passes reports a clearance nobody issued.
-    Only the receipt can carry the value the stage was actually chosen by.
+    `status` and the check stage are decided independently (`advanced()` vs `has_protocol`), so
+    status cannot stand in for it; a reader counting passing notes would report a clearance nobody
+    issued.
     """
     ask = ExperimentDesign(request=ExperimentRequest(title="T", goal="G"))
     assert not receipt(ask, [], design_id="d", revision=2, status="draft").has_protocol
@@ -543,12 +520,10 @@ def test_a_receipt_says_whether_its_checks_were_graded_against_a_procedure() -> 
 
 
 def test_an_expected_yield_cannot_travel_without_the_basis_it_rests_on() -> None:
-    """`ExpectedOutcome`'s own claim, which nothing checked.
+    """An expected yield cannot travel without the basis it rests on.
 
-    Its comment says `basis` "is rendered beside the number everywhere so a figure cannot travel
-    without the reason it was believed" — a present-tense claim about a control. A chemist who
-    reads "85% yield" and carries it into a report is making a different decision depending on
-    whether that number came from a run like this one, from a tool, or from nobody at all.
+    `ExpectedOutcome.basis` is rendered beside the number everywhere, because where a figure came
+    from changes what a chemist may do with it.
     """
     design = _design(
         base=ProtocolBody(
@@ -629,11 +604,9 @@ def test_an_analytic_carries_its_timing_method_and_what_it_measures() -> None:
 
 
 def test_a_backtick_in_a_reaction_smiles_cannot_spill_the_rest_of_the_line() -> None:
-    """The reason `_code` exists, on the one field whose branch no test reached.
+    """A backtick in a reaction SMILES cannot spill the rest of the line.
 
-    `render_markdown`'s own comment says a backtick in a SMILES closes the span and spills the
-    rest — and a SMILES is free text arriving from a request, so it is not this system's to
-    trust. The fence has to be longer than the longest run inside the value.
+    A SMILES is free text from a request; `_code` uses a fence longer than the longest backtick run.
     """
     design = _design(
         request=ExperimentRequest(

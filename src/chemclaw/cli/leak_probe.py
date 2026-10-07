@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trace", action="store_true", help="also take tracemalloc snapshots (slower)"
     )
-    parser.add_argument("--report", type=Path, default=Path("tasks/live-test/leak-probe.md"))
+    parser.add_argument("--report", type=Path, default=Path(".live/leak-probe.md"))
     args = parser.parse_args(argv)
 
     # The configured logging path, so this probe's output is redacted and context-stamped like any

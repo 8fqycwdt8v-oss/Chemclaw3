@@ -265,9 +265,9 @@ questions that have mechanical answers — the workflow's terminal state from Te
 and the `job_records` row from Postgres, whether a duplicate launch rejoins rather than recomputes,
 whether a job whose worker is wedged comes back *pending* rather than hanging or crashing. Nothing
 is scored from prose. It prints how many checks passed and exits non-zero if any failed. The
-report lands in `tasks/live-test/transcripts/durable/<utc-stamp>/durable-smoke.md` — a new
-directory per run, so a run never overwrites the committed record; promoting a run into the record
-is a deliberate copy, and `--report` (and `make live-probes ARGS='--transcript-dir …'`) put output
+report lands in `.live/transcripts/durable/<utc-stamp>/durable-smoke.md` — a new directory per
+run, gitignored, so nothing a run writes is committed; keeping a run is a deliberate copy, and
+`--report` (and `make live-probes ARGS='--transcript-dir …'`) put output
 exactly where you say.
 
 **Two prerequisites the corpus layer needs, or the probes measure an empty database.** `make

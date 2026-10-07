@@ -5,7 +5,7 @@ whether a commit is allowed to exist (`make lint type cov`, every validator the 
 a chart render);
 `image.yml` proves the image builds and every component imports as a non-root UID. Neither can push
 to a registry or reach a cluster, and that gap is what these pipelines close — it is the
-`docs/planning/BACKLOG.md` row "Push-to-registry + `helm upgrade` rollout".
+`docs/planning/BACKLOG.md` row "Push-to-registry + `helm upgrade` rollout, run".
 
 Nothing here re-runs the gate by default. A second implementation of `make ci` in Groovy would be a
 second answer to the same question, and the repository has a name for that failure.

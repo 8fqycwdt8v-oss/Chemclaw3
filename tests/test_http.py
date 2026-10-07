@@ -1,15 +1,7 @@
 """The shared HTTP primitive, existing to stop a second copy appearing.
 
-`is_loopback_url` is the one answer the front door's bind rule and the connector manifest's
-credential rule both ask for.
-
-**`error_detail` was the other one, and it is gone.** It bounded an upstream error body (SEC-6) for
-"several modules (the Nextflow launcher, the Entra token/OBO exchanges)" — its module docstring's
-own words, in the present tense, about three call sites that had all been deleted. Nothing in
-`src/` called it; only the two tests that used to stand here did, which is the shape
-`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` names. The bound was never
-wrong — it simply had nothing to bound, and a body cap is worth exactly as much as the caller that
-applies it, so it comes back with one or not at all.
+`is_loopback_url` answers both the front door's bind rule and the connector manifest's credential
+rule.
 """
 
 import pytest
@@ -53,10 +45,9 @@ def test_a_networked_address_is_not_loopback(url: str) -> None:
 
 @pytest.mark.parametrize("url", ["", "not a url", "/mcp", "http://[oops/mcp"])
 def test_an_unparseable_address_falls_on_the_side_that_demands_a_credential(url: str) -> None:
-    """Every caller asks this to decide whether a credential is required.
+    """An unparseable address falls on the side that demands a credential.
 
-    So the answer for "I cannot tell" has to be "not loopback" — the side that demands one. The
-    malformed-IPv6 case is the one that raises rather than returning None, which is why the
-    implementation catches `ValueError` instead of trusting `urlsplit` to be total.
+    "Cannot tell" must mean "not loopback". Malformed IPv6 raises rather than returning None, so the
+    implementation catches `ValueError`.
     """
     assert not is_loopback_url(url)

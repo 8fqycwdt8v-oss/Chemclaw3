@@ -1,16 +1,9 @@
 """A backfill lands many notes in one commit; the conversational path still lands one at a time.
 
-**The two paths want different write shapes, and until now they had one.** One commit and one push
-per note is what bounds a backfill — measured here against a real bare remote: **140.9 ms per note**
-unbatched against **15.8 ms** at ten to a commit and **4.8 ms** at fifty, a 29.4x difference at the
-shipped default. `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` measured the same curve at a
-10,000-note corpus (327.3 / 31.6 / 8.5 ms) and declined batching for the *conversational* path on
-the product rather than the cost: a queued note is one a chemist cannot read yet, which is what
-deleting the PR-gate bought. That argument does not reach an operator command over a directory of
-existing documents, and this file is where the split is held.
-
-Real git against a real bare remote, because what is being asserted is a commit count, and a fake
-writer that counted calls would assert the wrapper's arithmetic rather than git's.
+One commit and push per note is what bounds a backfill, so the backfill batches (an order of
+magnitude faster). The conversational path does not, because a queued note is one a chemist cannot
+read yet (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`). Real git against a real bare
+remote, because the assertions are about commits.
 """
 
 import ast
@@ -166,16 +159,9 @@ _BATCHER = "BatchingNoteWriter"
 def _names_the_batcher(path: Path) -> bool:
     """Whether this module can reach `BatchingNoteWriter` at all, parsed rather than grepped.
 
-    **The scan this replaces looked for the literal `BatchingNoteWriter(`**, which is one spelling
-    of one way to construct it. Driven: a second module doing
-    `__import__("chemclaw.kg.git_writer", fromlist=["x"]).BatchingNoteWriter(...)` left the check
-    **green**, and `cls = BatchingNoteWriter` followed by `cls(...)` evades it the same way — a
-    control that matches a comment rather than a construction.
-
-    So the question asked is not "does this module call it" but "can this module *name* it", which
-    is the property a caller cannot route around: to construct a class you must first bind it. Three
-    arms, because there are three ways to bind one and all three are visible without running
-    anything — an `import`, an attribute access on the module, and a string handed to `getattr`.
+    To construct a class a module must first bind it, so the question is whether it can name it: an
+    `import`, an attribute access on the module, or a string handed to `getattr`. A literal-call
+    scan is evaded by `__import__` or an alias.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
@@ -191,17 +177,10 @@ def _names_the_batcher(path: Path) -> bool:
 def test_the_shipped_backfill_batches_and_nothing_else_does() -> None:
     """The split, asserted where it can be: exactly one module can reach the batching writer.
 
-    A `BatchingNoteWriter` on the conversational path would be the thing
-    `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` declined, arriving by import rather than
-    by decision — and it would be invisible, because every test of that path injects its own writer.
-
-    `kg/git_writer.py` is absent from the list and does not need an exemption: it *defines* the
-    class, which is a `ClassDef` rather than any of the three bindings above — so the allowlist
-    stays one entry and says exactly what it means.
-
-    What this still cannot see is a module that receives an already-constructed one as an argument.
-    That is not the failure mode the rule is about: such a writer is the caller's decision, and the
-    caller is in this scan.
+    A `BatchingNoteWriter` on the conversational path would be invisible, since its tests inject
+    their own writer. `kg/git_writer.py` defines the class (a `ClassDef`, not a binding), so the
+    allowlist stays one entry. A writer received as an argument is the caller's decision, and the
+    caller is scanned.
     """
     root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     users = sorted(
@@ -218,23 +197,9 @@ def test_the_counter_counts_notes_and_not_commits(
 ) -> None:
     """`chemclaw_notes_recorded_total` must move by the notes, not by the commits carrying them.
 
-    **Measured before this test existed: fifty notes moved it by 1.0.** `record_note` incremented
-    on `outcome.written`, and under batching every note but the one that fills a batch returns
-    `written=False` — so the counter became a count of *commits*, and the operator reading "how
-    much has this backfill written" was reading a number fifty times too small at the shipped
-    batch size. The whole point of the metric is that a write path failing every note cannot
-    report healthy; a write path succeeding on fifty and reporting 1 fails the same sentence from
-    the other end.
-
-    Driven on real git against a real bare remote, like the rest of this file: the count has to be
-    true of what landed, and a fake writer would assert the wrapper's arithmetic.
-
-    **And driven through `backfill()` rather than through a hand-assembled writer**, which is the
-    half this test was missing. `cli/backfill_corpus.py` books the final partial batch itself,
-    because that commit lands on a `flush()` call `record_note` never sees — and a test that calls
-    `count_notes_recorded(await writer.flush())` in its own body asserts that arithmetic while
-    leaving the production call uncovered. Measured: deleting that one line left every test naming
-    this counter green, including this one.
+    Under batching only the note that fills a batch returns `written=True`, so counting outcomes
+    would count commits. Driven through `backfill()` on real git, because `cli/backfill_corpus.py`
+    books the final partial batch itself on a `flush()` that `record_note` never sees.
     """
     clone = _notes_repo(tmp_path)
     monkeypatch.setattr(settings, "note_repo_dir", str(clone))
@@ -265,12 +230,10 @@ def test_the_counter_counts_notes_and_not_commits(
 def test_a_batch_that_changed_nothing_counts_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other direction, which a plain `len(batch)` would get wrong.
+    """A batch that changed nothing counts nothing.
 
-    Re-running a backfill over documents already in the corpus is the frequent, legitimate case,
-    and the inner writer answers it with a no-op — nothing committed. A batch reporting its size
-    regardless would turn "notes recorded" into "notes offered", which is the attempt-counting the
-    metric was declared to avoid.
+    Re-running over documents already in the corpus is the common case; counting `len(batch)` would
+    count notes offered, not recorded.
     """
     clone = _notes_repo(tmp_path)
     monkeypatch.setattr(settings, "note_repo_dir", str(clone))
@@ -294,15 +257,9 @@ def test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted(
 ) -> None:
     """The trailing flush is in a `finally`, because the pending batch is already reported written.
 
-    `cli/backfill_corpus` logs each note as written "(pending a batch)" and increments its own
-    `written` total *before* the batch commits, so a failure the loop's own `except
-    (AttachmentError, OSError)` does not catch — a git error, a psycopg error, a `KeyboardInterrupt`
-    on a long run — used to discard up to `batch_size - 1` notes that the operator had already been
-    told were written. An operator running this over a decade of documents cannot recover from a
-    silent tail.
-
-    Driven through the CLI's own `backfill` with a reader that raises a type it does not catch, so
-    the assertion is about the real control flow rather than `BatchingNoteWriter` in isolation.
+    The CLI counts each note as written before its batch commits, so a failure the loop does not
+    catch (a git or psycopg error, `KeyboardInterrupt`) must still flush the pending notes. Driven
+    through the CLI's own `backfill` with a reader raising an uncaught type.
     """
     import chemclaw.cli.backfill_corpus as module
 
@@ -336,18 +293,12 @@ def test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted(
 async def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earlier_in_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Batching must reproduce the sequence it replaces, and it did not.
+    """A dependency in a batch does not overwrite a subject written earlier in it.
 
-    `GitNoteWriter._write_and_commit` resolves every path and evaluates `if not file.overwrite and
-    note_path.exists()` in **one plan pass before any byte is written** — its own comment says
-    "every path is resolved and checked before any byte is written" — so merging N writes evaluates
-    all of them against the *pre-batch* tree, where N commits would each have seen the previous one.
-    The class docstring claimed the opposite ("applying them in order is exactly the sequence the
-    unbatched path would apply").
-
-    Driven both ways against a real remote: a subject note written first, then named as a stale
-    dependency by a later note in the same batch. Unbatched the subject's own body survives;
-    batched, before the fix, the dependency's copy won.
+    `GitNoteWriter._write_and_commit` checks every path against the tree before writing, so a merged
+    batch must reproduce the sequence N separate commits would apply. Driven both ways against a
+    real
+    remote: a subject written first, then named as a stale dependency later in the same batch.
     """
     from chemclaw.kg.record import NoteFile, NoteWrite
 
@@ -383,16 +334,11 @@ async def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earl
 def test_a_batch_whose_commit_fails_counts_nothing_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The inverse of the defect the counter fix closed, and the worse one of the two.
+    """A batch whose commit fails counts nothing and says so.
 
-    `chemclaw_notes_recorded_total` is declared as "Notes written into the knowledge graph" and
-    `record_note` gates it "so the number means 'a note reached the graph' rather than 'we tried'".
-    The first repair had `BatchingNoteWriter.write` return `written=True` at *accept* time — driven
-    with an inner writer that raises on commit, nine accepted notes moved the counter by 9 with
-    **zero** notes in git. Counting where the answer exists (after the inner write returns) is what
-    this holds.
-
-    Both arms: the counter does not move, and the failure is not swallowed into a success.
+    `chemclaw_notes_recorded_total` means "a note reached the graph", so it is counted after the
+    inner write returns, never at accept time. Both arms: the counter does not move, and the failure
+    is not swallowed.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -425,18 +371,12 @@ def test_a_batch_whose_commit_fails_counts_nothing_and_says_so(
 def test_a_flush_that_fails_after_a_complete_loop_fails_the_backfill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A run that reports `wrote N note(s)` and exits 0 with nothing in git is the worst outcome.
+    """A flush that fails after a complete loop fails the backfill.
 
-    The trailing flush was first repaired into a `finally` with a blanket `except`, which produced
-    exactly that: driven through the real CLI with a failing writer, the loop completed, the flush
-    raised, the exception was logged and swallowed, and `main` printed `wrote 4 note(s)` and
-    returned **0**. Pre-fix that case at least exited non-zero, so the repair was strictly worse on
-    the *common* failure — a push rejection, an auth failure, a pre-commit hook.
-
-    The two exits are separated now: a flush after a completed loop is the last thing that can
-    fail and its failure is the run's failure. `test_a_backfill_that_dies_mid_run_still_commits_
-    what_it_already_counted` holds the other exit, where the flush is best-effort because the
-    original cause is the one an operator needs.
+    Reporting `wrote N note(s)` and exiting 0 with nothing in git is the worst outcome. After a
+    completed loop the flush is the last thing that can fail, so its failure is the run's. The
+    mid-run exit, where the flush is best-effort behind the original cause, is
+    `test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted`.
     """
     import chemclaw.cli.backfill_corpus as module
 
@@ -461,25 +401,11 @@ def test_a_flush_that_fails_after_a_complete_loop_fails_the_backfill(
 def test_a_batch_that_changed_some_of_its_notes_counts_only_those(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The middle of the range, which neither existing test reaches and both are satisfied by.
+    """A batch that changed some of its notes counts only those.
 
-    **The two tests above sit on the two ends.** One writes seven brand-new documents and asserts 7;
-    the other re-runs over an unchanged corpus and asserts 0. `len(batch) if outcome.written else 0`
-    is correct at both, so a *partially* identical batch — the ordinary shape of a re-run backfill
-    that picked up one new document — was covered by neither. Measured against a real bare remote at
-    the shipped `backfill_commit_batch_size` of 50: 49 byte-identical notes plus one new one
-    committed
-    once, touched one file, and moved `chemclaw_notes_recorded_total` by **50**.
-
-    That is the same magnitude as the undercount `D-2026-09-14` fixed, in the other direction, and
-    it
-    fails that ADR's own guard sentence: a count that ignores what the tree already held turns
-    "notes
-    recorded" into "notes offered".
-
-    Asserted against `git diff-tree --name-only` as well as against the metric, because the metric
-    alone cannot distinguish "counted the right number" from "counted a number that happens to
-    match".
+    The two tests above cover all-new and all-unchanged batches, where `len(batch) if written else
+    0` is right at both ends; a re-run that picked up one new document is the ordinary middle case.
+    Asserted against `git diff-tree --name-only` as well as the metric.
     """
     clone = _notes_repo(tmp_path)
     monkeypatch.setattr(settings, "note_repo_dir", str(clone))
@@ -519,22 +445,12 @@ def test_a_batch_that_changed_some_of_its_notes_counts_only_those(
 def test_a_dependency_and_a_retirement_in_a_batch_are_not_counted_as_notes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The row behind this believed they could not be separated, and they can.
+    """A dependency and a retirement in a batch are not counted as notes.
 
-    It said the changed-file count "counts *dependency* notes and retirement rewrites too, which is
-    a third meaning of the field". `record._build_write` tags a dependency `overwrite=False` and a
-    retirement `amendment=True`, and emits exactly one subject per write, so the partition is a
-    filter on two flags.
-
-    **This test builds one subject, one dependency and one retirement — three files, all three newly
-    changed — and requires the count to be 1.** An earlier version of this docstring described a
-    scenario the body does not build (four subjects, a changed-file count of two), and a review
-    caught that none of those numbers corresponded to what runs. Three files is the minimal shape
-    that separates the flags from the file count: git sees three, the flags see one subject, and the
-    honest answer is the subject.
-
-    Driven on the writer rather than through the CLI, because the CLI has no way to ask for a
-    dependency — which is also why this is the test that pins the distinction rather than a comment.
+    `record._build_write` tags a dependency `overwrite=False` and a retirement `amendment=True`,
+    with one subject per write, so the count filters on those flags. One subject, one dependency and
+    one retirement change three files; the count must be 1. Driven on the writer, since the CLI
+    cannot ask for a dependency.
     """
     from chemclaw.kg.record import NoteFile, NoteWrite
 

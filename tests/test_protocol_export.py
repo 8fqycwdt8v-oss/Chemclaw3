@@ -1,14 +1,7 @@
-"""The run sheet as CSV — the artefact three files claimed and none produced.
+"""The run sheet as CSV.
 
-`protocols/README.md`, `protocols/models.py` and `ProtocolArm.arm_id`'s own comment each name "the
-CSV export"; measured before `protocols/export.py`, `grep -rn "csv" src/chemclaw/protocols/`
-returned those three prose hits and no executable line. This file is what makes the claim true, and
-what keeps it true.
-
-The property worth testing is not that a CSV comes out — that is satisfied by joining commas, which
-is exactly the implementation that ruins a run sheet the first time a chemist names a reagent
-"toluene, anhydrous". So the cases here are the ones a naive writer gets wrong: a comma, a quote,
-a newline, an absent number, and a column order a chemist reads down.
+The cases are the ones a naive comma-joining writer gets wrong: a comma, a quote, a newline, an
+absent number, and a column order a chemist reads down.
 """
 
 import csv
@@ -53,11 +46,9 @@ def test_a_run_sheet_has_a_header_and_one_row_per_arm_in_run_order() -> None:
 
 
 def test_a_reagent_with_a_comma_in_its_name_does_not_shift_every_column() -> None:
-    """The defect a hand-joined CSV has, and the reason this goes through `csv.writer`.
+    """A reagent with a comma in its name does not shift every column.
 
-    "toluene, anhydrous" is an ordinary way to name a solvent. Joined with commas it becomes two
-    cells, every column after it moves one to the left, and a chemist reads the pressure out of the
-    atmosphere column — silently, because the file still opens.
+    "toluene, anhydrous" must stay one cell, which is why export goes through `csv.writer`.
     """
     design = ExperimentDesign(
         request=_request(),
@@ -179,16 +170,11 @@ def test_a_saved_sheet_names_the_revision_it_is_of() -> None:
 
 
 def test_a_free_text_cell_cannot_reach_a_spreadsheet_as_a_formula() -> None:
-    """The hazard neither this file nor `run_sheet_csv` enumerated, and the one that executes.
+    """A free-text cell cannot reach a spreadsheet as a formula.
 
-    Excel, LibreOffice and Google Sheets evaluate a cell opening with `=`, `+`, `-`, `@`, a tab or
-    a CR, and `QUOTE_MINIMAL` does not stop it — quoting is stripped at import and the text is then
-    parsed. `solvent` and `note` are free text on a design drafted from tool results and edited over
-    `POST /protocols/{id}/revisions`.
-
-    Both arms matter. A prefixed formula is inert; an unprefixed number is what makes the mitigation
-    usable, because `-40` is a temperature and prefixing it would corrupt the LIMS import this
-    export feeds.
+    Spreadsheets evaluate a cell opening with `=`, `+`, `-`, `@`, a tab or a CR, and quoting does
+    not prevent it; `solvent` and `note` are free text. An unprefixed number such as `-40` must stay
+    a number for LIMS import.
     """
     design = ExperimentDesign(
         request=_request(),
@@ -213,15 +199,10 @@ def test_a_free_text_cell_cannot_reach_a_spreadsheet_as_a_formula() -> None:
 
 
 def test_a_factor_named_like_a_fixed_column_does_not_produce_two_columns_of_that_name() -> None:
-    """A solvent screen is the canonical design here, and `solvent` is also a fixed column.
+    """A factor named like a fixed column does not produce two columns of that name.
 
-    Shipped, the header carried `solvent` twice: the fixed one (empty, because the value varies)
-    and the factor. Readers disagree about which is real — `header.index` and `pandas.read_csv`
-    take the first, `dict(zip(...))` takes the last — so a LIMS import keyed by name got blanks for
-    the factor that is the point of the plate.
-
-    Asserted as header uniqueness rather than as the suffix's spelling, because the property is
-    that a reader cannot be ambiguous, not what the disambiguation looks like.
+    Readers disagree about which duplicate header is real, so a solvent screen would import blanks.
+    Asserted as header uniqueness, not as the disambiguation's spelling.
     """
     factors = [
         Factor(

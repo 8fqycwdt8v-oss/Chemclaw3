@@ -42,14 +42,10 @@ def test_factorial_design_enumerates_every_combination() -> None:
 
 
 def test_a_continuous_factor_is_screened_at_its_two_bounds_and_said_to_be() -> None:
-    """The refusal this test used to assert is gone, and what replaced it is the disclosure (W2).
+    """A continuous factor is screened at its two bounds, and the design says so.
 
-    A continuous factor used to raise, because BoFire silently fractionates one to its two bounds
-    and a design that looks complete while quietly reshaping a factor is worse than a refusal
-    (D-092). That held while nothing in the return could say what had been done. It now can, so the
-    factor is admitted — at exactly its two bounds, with nothing in between — and both the field and
-    the summary name it. A design that collapsed a range *without* saying so would be the original
-    defect; this test is the guard against re-introducing it.
+    BoFire fractionates a continuous factor to its bounds; the result's field and summary disclose
+    it. A design that collapsed a range without saying so is the defect this guards against.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -89,10 +85,8 @@ def _seven_two_level_factors() -> OptimizationProblem:
 def test_a_generator_actually_halves_the_design() -> None:
     """The capability itself: 128 runs do not fit 96 wells, 64 do.
 
-    Deliberately not asserted as "n_generators was passed through": BoFire's
-    `FractionalFactorialStrategy` fractionates only the *continuous* half of a domain and always
-    crosses the categorical half in full, so forwarding `n_generators` to an all-categorical domain
-    returns all 128 rows and changes nothing. Only the run count can tell the two apart.
+    Asserted on the run count, because BoFire's `FractionalFactorialStrategy` crosses categorical
+    factors in full, so forwarding `n_generators` alone would change nothing.
     """
     problem = _seven_two_level_factors()
     assert len(factorial_design(problem).runs) == 128
@@ -113,9 +107,8 @@ def test_a_reduced_design_still_uses_the_real_levels_and_every_factor() -> None:
 def test_the_stated_resolution_matches_the_textbook_designs() -> None:
     """Resolution is the claim the chemist acts on, so it is pinned against known designs.
 
-    2^(7-1) is resolution VII, 2^(7-3) is IV and 2^(7-4) is III — standard results. Getting this
-    wrong is worse than not reporting it: a design claimed resolution IV but really III has main
-    effects confounded with two-factor interactions, and every conclusion drawn from it is unsafe.
+    2^(7-1) is resolution VII, 2^(7-3) IV and 2^(7-4) III. A design claimed IV but really III
+    confounds main effects with two-factor interactions.
     """
     problem = _seven_two_level_factors()
     assert factorial_design(problem, n_generators=1).resolution == 7
@@ -214,11 +207,9 @@ def test_centre_runs_sit_at_the_midpoint_of_every_continuous_factor() -> None:
 
 
 def test_centre_runs_are_added_per_categorical_combination_not_once() -> None:
-    """The count trap M-5 found, pinned: the total is not `corners + n_center`.
+    """Centre runs are added per categorical combination, not once.
 
-    Measured shape is `4·2^k + n_center·2^k` over k categorical factors. With two continuous
-    factors and one two-level categorical that is 8 corners plus 2x2 = 12, not 8 + 2 = 10. A
-    chemist handed "10 runs" for a design that is 12 cannot plan a plate from it.
+    The total is `4·2^k + n_center·2^k` over k categorical factors: 12 runs here, not 10.
     """
     corners = factorial_design(_mixed_problem(), n_center=0)
     with_centres = factorial_design(_mixed_problem(), n_center=2)
@@ -229,9 +220,7 @@ def test_centre_runs_are_added_per_categorical_combination_not_once() -> None:
 def test_the_default_is_no_centre_runs_although_bofire_defaults_to_one() -> None:
     """BoFire's own `n_center` default is 1; leaving it unset would emit midpoints unasked.
 
-    This is the second trap in the same class as `n_generators`: a default that is not ours, on a
-    parameter we now pass, silently changing what a chemist is handed. Every construction site sets
-    it explicitly, and this is what proves it.
+    Every construction site sets it explicitly.
     """
     design = factorial_design(_mixed_problem())
     assert design.n_center == 0
@@ -270,11 +259,10 @@ def test_centre_runs_are_refused_on_a_reduced_design_that_still_has_categoricals
 
 
 def test_a_reduced_design_fractionates_the_continuous_and_categorical_halves_together() -> None:
-    """M-8: the union is one factor set, so the stated resolution describes the whole design.
+    """A reduced design fractionates the continuous and categorical halves together.
 
-    The alternative — fractionating only part of the factors while reporting a resolution derived
-    from all of them — is exactly the "looks complete while omitting a factor" failure the
-    two-level refusal exists to prevent, and it is why this was measured before being built.
+    Otherwise the stated resolution, derived from all factors, would describe a design that left
+    part of them unfractionated.
     """
     full = factorial_design(_mixed_problem())
     reduced = factorial_design(_mixed_problem(), n_generators=1)
@@ -340,18 +328,11 @@ def _crossed_problem(n_categorical: int, n_continuous: int) -> OptimizationProbl
 def test_a_mixed_full_factorial_is_the_whole_cross_product(
     n_categorical: int, n_continuous: int
 ) -> None:
-    """A "full factorial" must contain every combination — the mixed case did not.
+    """A mixed full factorial is the whole cross product.
 
-    `test_factorial_design_enumerates_every_combination` above covers a categorical-only problem,
-    where there is nothing to cross, so it could not see this. BoFire's combining step tiles both
-    its continuous and its categorical frame where a cross product repeats one and tiles the other,
-    so row *i* paired `continuous[i % N]` with `categorical[i % C]` — the product only when
-    `gcd(N, C) == 1`, which no all-two-level problem satisfies.
-
-    Measured before the fix: 2 distinct rows of 4 at 1x1, and **4 of 16** at 2x2 — three quarters of
-    the design absent, the survivors duplicated, and one factor perfectly confounded with another,
-    while `summary` said "every combination of them is run". A screening design exists to attribute
-    an effect to a factor; an aliased one cannot.
+    BoFire's combining step tiles both frames, which is a cross product only when `gcd(N, C) == 1`,
+    so a mixed design lost rows, duplicated others and aliased factors. The categorical-only test
+    above cannot see this.
     """
     problem = _crossed_problem(n_categorical, n_continuous)
     expected = 2 ** (n_categorical + n_continuous)
@@ -377,17 +358,11 @@ def test_a_mixed_factorial_crosses_categories_against_both_bounds() -> None:
 
 
 def test_a_screen_beyond_the_run_ceiling_is_refused_before_it_is_built() -> None:
-    """The unbounded-model-input guard on this surface, and why it counts instead of measuring.
+    """A screen beyond the run ceiling is refused before it is built.
 
-    A full factorial's size is the product of every factor's level count, and every one of those
-    counts comes from a category list the *model* wrote. Twenty two-level factors is 1 048 576 rows
-    of twenty-entry dicts, materialized as a Python list before anything downstream sees it — not
-    an adversarial input, just one over-broad problem statement, and the pod dies building the
-    answer to it. `fingerprint_max_top_k` is the same guard on the search side; this surface had
-    none.
-
-    The refusal has to happen on the *count*, not on the built design: a bound that trips once the
-    list exists has already paid the memory it exists to protect.
+    A full factorial's size is the product of model-written level counts, so twenty two-level
+    factors would materialize a million rows. The refusal must use the count, before the list
+    exists.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -417,16 +392,8 @@ def test_a_screen_inside_the_ceiling_still_builds() -> None:
 def test_a_reduced_design_is_measured_after_the_reduction_not_before() -> None:
     """The ceiling counts the design that would actually be built, in both directions.
 
-    A reduced design is the corner count halved per generator, so the two errors available here
-    point opposite ways and both matter. Refusing on the *unreduced* count would refuse a design
-    that fits — 40 two-level factors at 30 generators is 1 024 runs, which is a real screen.
-
-    The other direction is the one this test was written for, because the first version of the
-    guard had it: it stopped multiplying once the running product passed the ceiling, and a
-    partial product is smaller than the true one, so shifting it right by `n_generators` landed
-    back under the ceiling. Measured then — 40 factors at one generator passed a 4 096 ceiling on
-    a partial product of 8 192, against a true reduced size of 2^39 rows. A guard that reproduces
-    the defect it was written to prevent is worth a test naming the number.
+    Refusing on the unreduced count would refuse designs that fit; stopping the multiplication early
+    and then shifting by `n_generators` would admit designs far over the ceiling. Both are asserted.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -442,12 +409,8 @@ def test_a_reduced_design_is_measured_after_the_reduction_not_before() -> None:
 def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> None:
     """The size guard must not answer ahead of the error that actually applies.
 
-    `_require_design_fits_the_ceiling` runs before `_fractional_design`'s two-level check, and its
-    arithmetic (`corners >> n_generators`) models a design that cannot be built at all. On five
-    ten-level factors at three generators it therefore reported "this screen would generate 12500
-    runs" — a fictional number — and offered two remedies that were both wrong for the input:
-    "screen fewer factors", and "ask for a reduced design with `n_generators`", to a caller who
-    had already asked for one.
+    A reduced design over a non-two-level factor cannot be built at all, so the two-level refusal
+    must win over a fictional run count.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -463,12 +426,12 @@ def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> 
 
 
 def test_a_criterion_other_than_factorial_honours_a_constraint_the_grid_refuses() -> None:
-    """The fold, from the tool's side: one problem schema, two design families.
+    """One problem schema, two design families: a non-factorial criterion honours a constraint the
+    grid
+    refuses.
 
-    A separate `generate_optimal_design` tool was built first and measured **1,435 tokens** against
-    a 900-token per-tool cap whose own message forbids adding to the debt list — and 1,367 of that
-    was a second copy of the `OptimizationProblem` schema this tool already pays for. Folding the
-    criterion in costs almost nothing, which is what decided it.
+    Folded into this tool rather than a separate one, which would have duplicated the
+    `OptimizationProblem` schema in the prompt.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -502,11 +465,10 @@ def test_the_default_criterion_still_returns_a_factorial_screen() -> None:
 
 
 def test_a_budget_is_refused_by_the_factorial_rather_than_ignored() -> None:
-    """The rule this tool already applies to `n_center` and `n_repetitions`.
+    """A budget is refused by the factorial rather than ignored.
 
-    A factorial's run count is the product of its level counts, so a caller who passed a budget is
-    asking for something this criterion cannot give. Being handed 128 rows after asking for 24 is
-    the failure, and it is silent.
+    A factorial's size is fixed by its level counts; returning 128 rows after a request for 24 would
+    be silent.
     """
     problem = OptimizationProblem(
         parameters=[CategoricalParameter(name="ligand", categories=["XPhos", "SPhos"])],

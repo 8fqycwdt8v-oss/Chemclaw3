@@ -1,15 +1,11 @@
 """The Databricks SQL driver and its vector dialect, against a fake client module.
 
-The driver is the module in `chemclaw.ingest.eln.warehouse` that knows this vendor exists, and what
-is worth pinning here is what only it can be wrong about — the places where a mistake surfaces as an
-empty result rather than as an error:
+Pins what only this driver can get wrong, where a mistake surfaces as an empty result:
 
-* rows come back as tuple-like `Row` objects, so `dict(row)` keys by *position*, not by column;
-* the query vector cannot be bound as a list — there is no array parameter type — so it goes as one
-  JSON scalar parsed server-side; and
-* its constructor signature *is* the `connection:` block's schema
-  (`D-2026-08-26-the-driver-s-signature-is-the-schema`), so what a binding may say is exactly what
-  these parameters are called, and a compute target that is neither given nor derivable is refused
+* rows are tuple-like `Row` objects, so `dict(row)` keys by *position*;
+* the query vector cannot be bound as a list, so it goes as one JSON scalar parsed server-side;
+* the constructor signature *is* the `connection:` block's schema
+  (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and a missing compute target is refused
   here rather than by the server.
 """
 
@@ -183,12 +179,10 @@ def test_the_fields_with_no_default_are_refused_when_absent(missing: str) -> Non
 
 @pytest.mark.parametrize("compute", [{"warehouse_id": ""}, {"http_path": "/sql/1.0/warehouses/x"}])
 def test_exactly_one_compute_target_is_required(compute: dict[str, str]) -> None:
-    """Neither is a warehouse that does not exist; both is a question the reader cannot answer.
+    """Exactly one compute target: neither is unusable, both is ambiguous.
 
-    There is no default compute to fall back on, so an absent one has to fail here rather than as a
-    connection error minutes into a sync. Naming *both* is refused for the opposite reason: it would
-    resolve silently to whichever the driver happened to prefer, and a binding whose meaning depends
-    on that is a binding nobody can review.
+    There is no default compute, so an absent one must fail here rather than minutes into a sync;
+    naming both would resolve to whichever the driver prefers.
     """
     with pytest.raises(BindingError, match="exactly one"):
         _warehouse(**compute)
@@ -198,35 +192,27 @@ def test_exactly_one_compute_target_is_required(compute: dict[str, str]) -> None
 def test_a_timeout_outside_the_bound_is_refused(seconds: int) -> None:
     """`0` is the worst value the field can take, so it cannot be the one that slips through.
 
-    The bound used to live on the shared connection model, typed `int` with `ge=1, le=3600`. That
-    model no longer knows any driver's vocabulary, so the range moved to the driver whose keyword it
-    is — and it has to exist somewhere, because a SQL warehouse reads `statement_timeout=0` as *no*
-    timeout: the one setting standing between a runaway scan and a shared warehouse's bill, turned
-    off by the value a reader would assume means "none allowed".
+    A SQL warehouse reads `statement_timeout=0` as *no* timeout, removing the bound on a runaway
+    scan's bill. The range lives on the driver whose keyword it is.
     """
     with pytest.raises(BindingError, match="between 1 and 3600"):
         _warehouse(query_timeout_seconds=seconds)
 
 
 def test_a_path_written_into_warehouse_id_is_refused_rather_than_interpolated() -> None:
-    """One field used to take either form; two fields do not get to be lenient about it.
+    """A full path written into `warehouse_id` is refused rather than interpolated.
 
-    A binding whose author pasted the full path into `warehouse_id` would otherwise build
-    `/sql/1.0/warehouses//sql/1.0/warehouses/<id>` and fail at connect time with a message about the
-    workspace — a defect in the binding, reported as a defect somewhere else.
+    Otherwise it builds a doubled path and fails at connect time with a misleading message.
     """
     with pytest.raises(BindingError, match="http_path"):
         _warehouse(warehouse_id="/sql/1.0/warehouses/abc123")
 
 
 def test_a_key_this_driver_does_not_take_is_a_typeerror_naming_it() -> None:
-    """The offline check for "the driver's signature is the schema", at the driver's own door.
+    """A key this driver does not take is a `TypeError` naming it.
 
-    A binding copied from another vendor's — `role:`, `private_key_env:`, `account_env:` — used to
-    be refused by a hand-written list inside this driver, because the shared connection model
-    accepted those keys from anyone. There is no such model now, so the refusal is Python's, it
-    names the offending keyword, and it cannot fall out of step with the signature.
-    `make datasource-validate` runs exactly this bind offline, before anything connects.
+    The driver's signature is the schema, so another vendor's keys (`role:`, `private_key_env:`) are
+    refused by Python with the keyword named. `make datasource-validate` runs this bind offline.
     """
     with pytest.raises(TypeError, match="role"):
         DatabricksWarehouse(  # type: ignore[call-arg]
@@ -312,14 +298,9 @@ def test_a_rejected_statement_is_not_retryable_and_quotes_nothing(
 ) -> None:
     """The site's table and column names must not reach a chemist's transcript or the model.
 
-    A `WarehouseQueryError` raised inside a durable job is marked non-retryable by class name
-    (`durable/publish.py`), so its *message* reaches the session — and a driver's own text quotes
-    the failing statement. That is a schema disclosure through an error path, and it reads as
-    ordinary diagnostics right up until someone asks where the transcript went.
-
-    What replaces it is not "less information" but information an operator can act on: a pointer to
-    this pod's log, where the whole thing is. The last two assertions are what make that true rather
-    than claimed — nothing is lost, only moved.
+    A non-retryable `WarehouseQueryError`'s message reaches the session, and a driver's text quotes
+    the failing statement. The message points to this pod's log instead, and the last assertions
+    show the detail is moved there, not lost.
     """
     client = _FakeClientModule()
     secret = "[TABLE_OR_VIEW_NOT_FOUND] eln_prod.reactions.V_SECRET"
@@ -346,11 +327,10 @@ def test_a_rejected_statement_is_not_retryable_and_quotes_nothing(
 
 
 def test_the_query_vector_is_bound_as_one_json_scalar() -> None:
-    """There is no array parameter type, so a 1536-float list cannot be bound as a list.
+    """The query vector is bound as one JSON scalar.
 
-    It still has to be a *bound value* rather than statement text — `sql.py`'s whole invariant — so
-    it goes as one JSON string that the server parses. `ARRAY<FLOAT>` and not `ARRAY<DOUBLE>`,
-    because `vector_cosine_similarity` accepts only the first.
+    There is no array parameter type, and it must still be a bound value rather than statement text.
+    `ARRAY<FLOAT>`, because `vector_cosine_similarity` accepts only that.
     """
     expression, bound = DatabricksVectorDialect().query_vector("?", [0.1, 0.2, 0.3], 3)
     assert expression == "from_json(?, 'ARRAY<FLOAT>')"
@@ -375,15 +355,11 @@ def test_an_unverified_metric_is_refused_here_rather_than_by_the_server(metric: 
 def test_a_dead_session_is_dropped_so_the_next_call_reconnects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The connection is opened once and memoized; nothing ever cleared it.
+    """A dead session is dropped, so the next call reconnects.
 
-    A Databricks SQL session expires, and the warehouse behind it auto-stops overnight. After that
-    every statement failed against the same dead handle — *for the life of the process*, because
-    there is no reset path anywhere and the seam has no lifecycle hook to call one from. In the
-    retriever that leg then returned `[]` to every question with the pod reporting healthy; in the
-    sync it failed every attempt and every retry. Dropping the handle costs one reconnect and turns
-    a permanent outage into the transient failure it actually is — which is what `ConnectionError`
-    already promises the caller, and what Temporal's retry already knows how to ride out.
+    The connection is memoized and sessions expire (warehouses auto-stop), so without eviction every
+    statement would fail against the dead handle for the life of the process. Dropping it turns a
+    permanent outage into the transient `ConnectionError` Temporal's retry handles.
     """
     client = _FakeClientModule()
     _bind(monkeypatch, client)
@@ -413,12 +389,9 @@ def test_a_dead_session_is_dropped_so_the_next_call_reconnects(
 def test_concurrent_callers_share_one_connection_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two overlapping `cursor()` calls on one warehouse must open exactly one session.
 
-    `open_warehouse` caches one `DatabricksWarehouse` per `connection:` block for the life of the
-    process precisely so overlapping chat turns/tool calls share a live session instead of each
-    opening a fresh one. Before the lock in `_connect`, two coroutines racing in from that shared
-    cache both saw `self._connection is None` — real concurrency, since `client.connect` runs in a
-    worker thread via `asyncio.to_thread` — and both connected, silently orphaning one (this driver
-    has no `close`, so the orphan lives until its own idle timeout).
+    `open_warehouse` caches one warehouse per `connection:` block so turns share a session, and
+    `client.connect` runs in a thread, so without the lock in `_connect` two callers would both
+    connect and orphan one (this driver has no `close`).
     """
     client = _FakeClientModule(connect_delay=0.05)
     _bind(monkeypatch, client)
@@ -439,11 +412,9 @@ def test_concurrent_callers_share_one_connection_attempt(monkeypatch: pytest.Mon
 def test_a_transient_statement_failure_also_drops_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`OperationalError` is "the session is gone", so keeping the session makes the retry futile.
+    """`OperationalError` means the session is gone, so the handle is dropped with the error.
 
-    The translation to `ConnectionError` was already right and already retried by Temporal; what
-    made the retry useless is that every attempt reached the same dead handle. The error and the
-    eviction are one decision, so they are made in one place.
+    Otherwise every Temporal retry would hit the same dead handle.
     """
     client = _FakeClientModule()
     client.raise_on_execute = client.OperationalError("socket closed")
@@ -464,12 +435,11 @@ def test_a_transient_statement_failure_also_drops_the_handle(
 
 
 def test_a_rejected_statement_keeps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A relation the binding names and the warehouse does not have says nothing about the session.
+    """A rejected statement keeps the session.
 
-    The eviction is scoped to the transient arm on purpose: reconnecting on a `WarehouseQueryError`
-    would pay a handshake per bad statement and would hide nothing, since the next statement fails
-    identically. `_WAREHOUSES` and the adapter's own handle keep the same object either way — what
-    is dropped is the session under it, never the configured warehouse.
+    Eviction is scoped to the transient arm: reconnecting on a `WarehouseQueryError` would pay a
+    handshake per bad statement and fix nothing. Only the session is ever dropped, never the
+    configured warehouse.
     """
     client = _FakeClientModule()
     client.raise_on_execute = client.Error("[TABLE_OR_VIEW_NOT_FOUND]")

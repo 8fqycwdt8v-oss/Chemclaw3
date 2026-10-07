@@ -1,9 +1,8 @@
-"""Behavioral tests for the memory layers (plan Phase 5), runnable without a server.
+"""Behavioral tests for the memory layers, runnable without a server.
 
-Proves the CHECKMATE 5 acceptance: chained experiments become a `campaign` note that cites
-each member reaction, and reactions recurring across >=2 projects become a `playbook`
-candidate + note with mandatory evidence — all from existing pieces (fingerprint identity,
-the reaction schema, the note model), no new infrastructure.
+Chained experiments become a `campaign` note citing each member reaction, and reactions recurring
+across >=2 projects become a `playbook` note with mandatory evidence, built from existing pieces
+(fingerprint identity, the reaction schema, the note model).
 """
 
 import asyncio
@@ -49,11 +48,8 @@ def _reaction(
 ) -> OrdReaction:
     """A minimal reaction from reactant/product SMILES lists.
 
-    Successful unless a test says otherwise, and *explicitly* so: since
-    `D-2026-08-26-silence-is-not-a-successful-run` an unstated outcome is no longer read as a
-    success, and `find_playbook_candidates` distils only from stated ones — so a fixture that leaves
-    this unset is a fixture no playbook can be built from, which is the correct rule and would make
-    every distillation test here vacuous.
+    Explicitly successful unless a test says otherwise: an unstated outcome is not read as success,
+    and `find_playbook_candidates` distils only from stated ones.
     """
     return OrdReaction(
         reaction_id=rid,
@@ -160,9 +156,8 @@ def test_campaign_id_is_stable() -> None:
 def test_growing_cluster_keeps_its_note_id() -> None:
     """A cluster that gains a member keeps its note id, so re-synthesis supersedes in place.
 
-    A member-set-derived id would mint a fresh note on every corpus growth, accumulating
-    stale siblings in the graph; anchoring on the smallest member keeps the `note/<id>`
-    PR-gate branch (and the merged file path) stable while the note's body grows.
+    Anchoring the id on the smallest member keeps the note's path stable as it grows; an id over the
+    member set would mint a stale sibling on every growth.
     """
     assert stable_id("optimization", ["r2", "r1"]) == stable_id("optimization", ["r1", "r2", "r3"])
     assert stable_id("optimization", ["r1", "r2"]) != stable_id("optimization", ["r4", "r5"])
@@ -180,13 +175,11 @@ def _memory_note(
     valid_from: date | None = None,
     valid_to: date | None = None,
 ) -> Note:
-    """A merged campaign-style note citing its members, as the corpus would hold it.
+    """A recorded campaign-style note citing its members, as the corpus would hold it.
 
-    The id is derived the way the builders derive it (`stable_id` over the cited members), because
-    that derivation is now what marks a note as this synthesis's own — a hand-picked id like
-    "campaign-aaa" is a note no memory job could have written, and the retirement pass must (and
-    now does) leave those alone. `note_id` overrides it only where a test needs a note *outside*
-    the lineage.
+    The id is derived as the builders derive it (`stable_id` over the cited members), which is what
+    marks a note as this synthesis's own; `note_id` overrides it only for a note outside the
+    lineage.
     """
     citations = "\n".join(f"- [[reaction-{rid}]]" for rid in member_ids)
     return Note(
@@ -253,19 +246,12 @@ def test_unrelated_and_already_retired_notes_are_left_alone() -> None:
 
 
 def test_a_note_this_synthesis_never_minted_is_not_retired() -> None:
-    """The lineage rule (D-161 fallout): a `playbook` id nothing here mints is left alone.
+    """A `playbook` id this synthesis never mints is not retired.
 
-    The observations tier promotes an observation into `playbook-<observation hash>`, an id
-    anchored on the observation's *scope* rather than on the cluster's smallest member — so
-    `distill_playbooks` can never re-mint it, and "same type, overlapping members, id I no longer
-    mint" matched it on every single run. The retirement it proposed carried the body line "this
-    cluster's membership changed (merge or shrink)", which is untrue of a note that was never a
-    cluster's; through the PR-gate that is a misleading PR inviting a rubber-stamp, and merging one
-    drops a human-approved playbook out of every current-evidence sweep (`Note.is_current`).
-
-    The human-authored variant of the same match is covered here too: it used to reach
-    `record_note`, which refuses a `human` note — loud, but still a synthesis run crashing on a
-    note it had no business touching.
+    A promoted observation's playbook is anchored on the observation's scope, not a cluster member,
+    so `distill_playbooks` can never re-mint it; retiring it would remove a judged playbook from
+    every current-evidence sweep. A human-authored note with an overlapping match is left alone too,
+    rather than reaching `record_note`, which refuses `human` notes.
     """
     fresh = _memory_note(["r1", "r2"], note_type="playbook")
     # Exactly how `observation_jobs.promote_observations_activity` names a promoted playbook.
@@ -292,11 +278,10 @@ def test_retiring_a_not_yet_valid_note_keeps_a_legal_window() -> None:
 def test_synthesis_publishes_supersedes_alongside_new_notes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End to end: a merge in the corpus makes the builder emit the retirement note too.
+    """A merge in the corpus makes the builder emit the retirement note alongside new notes.
 
-    Proves the retirement travels the *same* PR-gate path as every other memory note — no second
-    write path — and that both the in-process job and the durable activity get it, since both go
-    through this builder.
+    The retirement travels the same write path as every memory note, for both the in-process job and
+    the durable activity.
     """
     knowledge = tmp_path / "knowledge" / "campaign"
     knowledge.mkdir(parents=True)
@@ -337,15 +322,10 @@ def test_playbook_candidate_needs_two_projects() -> None:
 
 
 def test_a_note_from_an_incomplete_read_says_so_in_the_body_a_chemist_reads() -> None:
-    """`memory_corpus_max_reactions` is justified by "partial knowledge that says it is partial".
+    """A note from an incomplete corpus read says so in its body.
 
-    It did not. `corpus_complete=False` skipped the retirement pass and logged a WARNING into a
-    worker's log, and the note landing in `knowledge/` was byte-identical to one distilled from
-    the whole record — so the only statement that the evidence might be a subset was in a place
-    nobody reading the note would look.
-
-    Both halves are asserted in one test on purpose: skipping the retirement pass without marking
-    the note, or marking it without skipping, each looks like the fix and is half of it.
+    Both halves are asserted together: skipping the retirement pass without marking the note, or
+    marking it without skipping, each looks like the fix and is half of it.
     """
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
@@ -362,15 +342,11 @@ def test_a_note_from_an_incomplete_read_says_so_in_the_body_a_chemist_reads() ->
 
 
 def test_the_caveat_names_the_id_risk_the_skipped_retirement_pass_leaves_open() -> None:
-    """The second-order consequence, which the flag's other half is what exposes.
+    """The caveat names the id risk the skipped retirement pass leaves open.
 
-    `stable_id` anchors on the cluster's *smallest* member, so a truncated read that drops that
-    member mints a **different id for the same cluster** — the case
-    `test_shrunk_cluster_retires_the_pre_shrink_note` exists for, and which the retirement pass
-    normally resolves by superseding the predecessor. An incomplete read is precisely the run whose
-    retirement pass is skipped, so the two notes coexist with nothing linking them, and the caveat
-    is the only thing a reader has. Asserted on the id derivation as well as on the words, because
-    the sentence is only worth having while the mechanism behind it is real.
+    `stable_id` anchors on the smallest member, so a truncated read that drops it mints a different
+    id for the same cluster, and with retirement skipped the two notes coexist unlinked. Asserted on
+    the id derivation as well as the words.
     """
     whole = stable_id("playbook", ["r-001", "r-002", "r-003"])
     truncated = stable_id("playbook", ["r-002", "r-003"])
@@ -404,10 +380,8 @@ def test_playbook_note_requires_evidence() -> None:
     )
     assert note.type == "playbook"
     assert note.id == "playbook-ester"  # the full note id is passed in, not re-prefixed
-    # Evidence is cited verbatim. It used to be bare reaction ids that this function prefixed,
-    # which quietly required every caller's evidence to be a reaction — and the observations tier
-    # promotes findings evidenced partly by an `interaction` note, which the prefixing turned into
-    # a link to a note that cannot exist.
+    # Evidence is cited verbatim, not prefixed as reactions: promoted findings may cite an
+    # `interaction` note.
     assert note.outgoing_links() == ["reaction-x", "reaction-y"]
     assert playbook_note("p", "s", ["interaction-42"]).outgoing_links() == ["interaction-42"]
     with pytest.raises(PlaybookError, match="no evidence"):
@@ -415,18 +389,11 @@ def test_playbook_note_requires_evidence() -> None:
 
 
 def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
-    """`playbook` has two provenances, and a reader of the merged file has to be able to tell.
+    """A playbook states which of its two producers wrote it.
 
-    Cluster distillation ("this transformation recurs across projects") and a promoted observation
-    ("enough merged notes backed this reading that a human was asked to judge it") are different
-    kinds of claim, and both used to stamp `memory:cross-project-distillation` — so the graph said
-    the second was the first.
-
-    Derived from the id, never asserted by the caller: distillation anchors on the cluster's
-    smallest member, promotion on the observation's scope. A `source` a caller passes could
-    disagree with the id, which is why `supersede._is_synthesis_minted` cannot trust one — and
-    deriving both from `is_cluster_anchored` is what keeps the note's own statement and the
-    retirement rule from ever answering differently.
+    Cluster distillation and a promoted observation are different kinds of claim. The source is
+    derived from the id via `is_cluster_anchored`, never passed by the caller, so the note's
+    statement and `supersede._is_synthesis_minted` cannot disagree.
     """
     evidence = ["reaction-r1", "reaction-r2"]
     distilled = playbook_note(stable_id("playbook", ["r1", "r2"]), "recurs", evidence)
@@ -448,13 +415,10 @@ def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
 
 
 async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeWriter) -> list[str]:
-    """Publish built notes the way the durable job does: one PR-gate proposal each.
+    """Record built notes the way the durable job does: build, then one write per note.
 
-    These three tests used to call `synthesize_campaigns` / `distill_playbooks`, which built and
-    published in one pass and which nothing in `src/` has run since F10-D2 split the jobs — the
-    durable workflow imports the builders and fans each note out to its own child. They are gone, so
-    the tests take the same two steps the live path takes rather than a convenience wrapper that
-    only tests had.
+    The tests take the same two steps the live path takes, which builds notes in one activity and
+    writes each in its own child.
     """
     return [await record_note(unit.note, submitter, superseded=unit.retirements) for unit in units]
 
@@ -481,12 +445,10 @@ def test_playbook_distillation_proposes_evidence_backed_notes() -> None:
 
 
 def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
-    """What the builder yields is what the gate receives — ids, order and type (F10-D2).
+    """Every built campaign note is written, with ids, order and type preserved.
 
-    The fan-out workflow builds notes in one activity and publishes each in its own child, so the
-    property worth pinning is that nothing is dropped or reordered between the two halves. This
-    assertion used to be a *parity* between the builder and a publisher nothing ran, which would
-    have gone on passing while the live path broke.
+    The fan-out builds in one activity and writes in children, so nothing may be dropped or
+    reordered between the two halves.
     """
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
@@ -516,13 +478,10 @@ def test_interaction_note_captures_confirmed_answer() -> None:
 
 
 def test_a_correction_is_recorded_as_a_correction_not_as_agreement() -> None:
-    """The one case where the system was demonstrably wrong must not be stored as it agreeing.
+    """A correction is recorded as a correction, not as agreement.
 
-    The body was rendered `A (confirmed):` unconditionally, while this module's docstring, the
-    tool's docstring and the system prompt all said "confirmed **or corrected**". So a chemist
-    correcting an answer — the highest-value thing they ever hand this system, and the only place
-    that fact exists — went into the record as a confirmation, and a later reader could not tell
-    the two apart.
+    A chemist correcting an answer is the most valuable feedback the system receives; a later reader
+    must be able to tell it from a confirmation.
     """
     note = note_from_confirmed_answer(
         "q-43",
@@ -566,16 +525,11 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> None:
-    """The date has to be a function of the members, and this is why.
+    """A synthesized note is dated by its evidence, not by the clock.
 
-    Every synthesized note is keyed by `stable_id(kind, reaction_ids)`, so a miner re-run over the
-    same members mints the same id. A `date.today()` would then rewrite that note with a new
-    `valid_from` on every run — the content changes, `record_note` commits, and the digest reports
-    it as new again the next day. That is the storm
-    `D-2026-09-14-an-undated-note-is-not-news-every-hour` closed, in a new dress.
-
-    Asserted as *stability*, not as a literal: two runs over the same evidence agree, which is the
-    property that matters and the one a fixture reworded with different dates cannot fake.
+    Notes are keyed by `stable_id(kind, reaction_ids)`, so a clock date would rewrite the same note
+    with a new `valid_from` on every run and the digest would re-announce it. Asserted as stability
+    across two runs rather than as a literal.
     """
     runs = {
         "r1": _dated("r1", date(2026, 7, 1)),
@@ -589,21 +543,11 @@ def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> N
 
 
 def test_a_cluster_that_gains_a_member_keeps_both_its_id_and_its_date() -> None:
-    """The one assertion that would have caught the defect this function shipped with.
+    """A cluster that gains a member keeps both its id and its date.
 
-    `supported_from` was `max(performed_at)` over the members, and its docstring justified that
-    with "when a member joins, the id changes too, so the identity and the date move together or
-    not at all". `memory/ids.stable_id` hashes `min(member_ids)` *deliberately* — its own docstring
-    says hashing the set would mint a new id on every cluster growth — so the premise was false and
-    nothing asserted it either way.
-
-    What that cost: a nightly ELN sync adds a member, the id does not move, `valid_from` rises, and
-    `digest._is_new` reports a note the subscriber already holds as news. The silent direction is
-    worse — a member dropping out, or a `corpus_complete=False` partial read, lowers `valid_from`
-    under one id, and `_is_new` then answers `False` forever for a note whose content just changed.
-
-    So the property is asserted as the docstring states it: over a *growing* cluster, id and date
-    are both invariant. `max` fails this; the anchor does not.
+    `stable_id` hashes `min(member_ids)`, so the date must be derived from the same anchor. A date
+    over the member set would move under a fixed id: growth would re-announce a held note, and
+    shrinkage could hide a changed one from the digest forever.
     """
     runs = {
         "r1": _dated("r1", date(2026, 7, 1)),
@@ -617,15 +561,10 @@ def test_a_cluster_that_gains_a_member_keeps_both_its_id_and_its_date() -> None:
 
 
 def test_the_date_is_the_anchor_run_rather_than_the_newest_or_the_oldest() -> None:
-    """Keyed on `min(reaction_ids)` — the same single input the note's id is keyed on.
+    """The date is the anchor run's, keyed on `min(reaction_ids)` like the id.
 
-    Not the earliest date and not the latest: either is a function of the member *set*, and a
-    function of the set moves under an id that is a function of one member. The anchor's own date
-    is the only reading that makes the two move together, which is what the id's stability rule
-    already promised and what `supported_from` claimed and did not deliver.
-
-    Ordered so the anchor is neither the newest nor the oldest run, because a fixture where it
-    happens to be both cannot tell the three rules apart.
+    Earliest or latest are functions of the member set and move under a fixed id. The anchor is
+    placed neither newest nor oldest, so the fixture distinguishes the three rules.
     """
     runs = {
         "r2": _dated("r2", date(2026, 7, 15)),
@@ -649,14 +588,10 @@ def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
 
 
 def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> None:
-    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it.
+    """A member the corpus does not hold is skipped rather than raising.
 
-    Three cases, because the two-tier rule answers each differently and the differences are the
-    whole design: a missing *non-anchor* is invisible (the point — the date does not move as the
-    cluster changes around a dated anchor); a missing or undated *anchor* falls to the earliest
-    dated member rather than leaving the note open-ended, which is the coverage the first version
-    of this fix lost; and a corpus that dates nothing at all is still `None`, because that is the
-    truthful answer rather than a fallback to today.
+    A missing non-anchor is invisible; a missing or undated anchor falls back to the earliest dated
+    member; a corpus that dates nothing yields `None`, not today.
     """
     runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 8, 20))}
 
@@ -667,18 +602,11 @@ def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> N
 
 
 def test_an_undated_anchor_falls_to_the_earliest_dated_member_rather_than_to_nothing() -> None:
-    """The coverage this fix lost on its first attempt, asserted so it cannot be lost again.
+    """An undated anchor falls back to the earliest dated member rather than to nothing.
 
-    Anchoring the date on `min(reaction_ids)` made the note open-ended whenever *the anchor* was
-    undated, however many members carried dates — `None` went from meaning "no member is dated" to
-    "one particular member is not", which for a per-member dating probability `p` over `n` members
-    takes the undated rate from `(1-p)^n` to `(1-p)`. An undated note reaches no subscriber holding
-    a watermark, so that is a regression in the metric this whole wave exists to improve, and the
-    first version stated it as a residual without measuring it.
-
-    Tier 2 is `min` rather than `max` for the reason tier 1 exists at all: a cluster growing
-    forward in time does not move its earliest member, where `max(performed_at)` moved on every
-    arrival.
+    Otherwise one undated member would leave the note undated and unreachable by any subscriber with
+    a watermark. The fallback is `min` because a cluster growing forward in time keeps its earliest
+    member.
     """
     runs = {
         "r1": _reaction("r1", ["CC"], ["CCO"]),  # the anchor, undated
@@ -700,25 +628,11 @@ def _dated(rid: str, performed_at: date) -> OrdReaction:
 
 
 def test_every_miner_dates_the_note_it_mints() -> None:
-    """Three builders, one defect — fixing one would leave the other two silently unreachable.
+    """Every miner dates the note it mints from the members its id is anchored on.
 
-    `D-2026-09-14-an-undated-note-is-not-news-every-hour` named only the playbook producer and left
-    the rest "for the pass that touches it". The argument does not distinguish them: a mined note
-    became knowledge the day its evidence did.
-
-    **This assertion has been wrong twice, each time one notch less wrong, and the third version is
-    the first that drives anything.** It shipped asserting `"minted_on" in kwargs`, and all three
-    builders re-broken to `minted_on=None` left 38 passing — an AST guard reading the call's
-    *shape*. It was then "fixed" to assert `ast.unparse(value).startswith("supported_from(")`,
-    which is the callee's *name*: `minted_on=supported_from([], by_id)` (always `None`) and
-    `minted_on=supported_from(sorted(ids)[1:], by_id)` — the original defect in a new dress, a date
-    keyed on something other than the id's own input — both passed, 33 green. The list of builders
-    was hardcoded besides, so a fourth miner minting undated notes was invisible.
-
-    So it drives the builders and reads the result. The property is the one the whole fix rests on:
-    **a note's `valid_from` is the date `supported_from` derives from the members its own id is
-    anchored on**, recomputed here from the note's citations rather than from the builder's
-    arguments, so a date wired to a different member set fails.
+    Drives the builders and recomputes the expected `valid_from` from each note's own citations via
+    `supported_from`, so a date wired to a different member set, or to nothing, fails. Shape checks
+    on the call cannot catch that.
     """
     from chemclaw.memory.ids import MEMBER_PREFIX
     from chemclaw.memory.jobs import (
@@ -778,17 +692,11 @@ def test_every_miner_dates_the_note_it_mints() -> None:
 
 
 def test_no_miner_mints_a_note_without_passing_the_corpus_derived_date() -> None:
-    """The builder list is derived from the calls, not written down beside them.
+    """No miner mints a note without passing the corpus-derived date.
 
-    The driving test above proves the three miners that exist are wired correctly; this one is what
-    notices a *fourth*. Its predecessor hardcoded `["campaign_note_from_chain", "playbook_note",
-    "optimization_campaign_note"]` while holding every `ast.Call` in the module, so a new miner
-    minting undated notes passed — cause (f) in `tasks/lessons.md`, a universe that is a strict
-    subset of the surface at risk.
-
-    Every call in `memory/jobs.py` to a `*_note*` builder must pass `minted_on`, and the argument
-    must name `supported_from`. That is deliberately the weaker of the two assertions — the strong
-    one is above — because its job is coverage rather than correctness.
+    The builder list is derived from the calls in `memory/jobs.py`: every `*_note*` builder call
+    must pass `minted_on` naming `supported_from`, so a new miner is covered. This is the coverage
+    check; the driving test above is the correctness check.
     """
     import ast
     from pathlib import Path
@@ -817,19 +725,11 @@ def test_no_miner_mints_a_note_without_passing_the_corpus_derived_date() -> None
 
 
 def test_a_mined_playbook_states_a_finding_and_asks_the_reader_for_nothing() -> None:
-    """The body went into `knowledge/` carrying a to-do, and `knowledge/` is what retrieval cites.
+    """A mined playbook states a finding and asks the reader for nothing.
 
-    `_summary` used to end "Distil the transferable rule and conditions from the cited evidence",
-    and nothing in this repository ever did: `skills/playbook-distillation/SKILL.md` is loaded only
-    in a chat turn and no durable path invokes it. Measured on this fixture before the change, the
-    excerpt a chemist is shown for the term "recurring" carried that sentence verbatim, and
-    `Note.headline()` — which a digest now uses to announce new knowledge — rendered as
-    "Transformation recurring across 2 projects … Distil the…".
-
-    Asserted as the *absence of an instruction* rather than against the new wording, so the
-    sentence can be improved without this test having an opinion about prose. The imperatives are
-    the ones a to-do actually uses; a body that told a reader to go and do something would match
-    one of them.
+    The body lands in `knowledge/`, which retrieval cites and `Note.headline()` announces, and no
+    durable path performs a to-do. Asserted as the absence of an instruction, not against the
+    wording.
     """
     units = build_playbook_notes(
         [
@@ -849,12 +749,10 @@ def test_a_mined_playbook_states_a_finding_and_asks_the_reader_for_nothing() -> 
 
 
 def test_a_mined_playbook_is_findable_as_undistilled_and_a_promoted_one_is_not() -> None:
-    """The epistemic status is a label the system can count, not prose in the body.
+    """A mined playbook is findable as undistilled, and a promoted one is not.
 
-    Both halves matter and only together. A tag on every playbook would say nothing; a tag on none
-    would leave the recurrence indistinguishable from a rule somebody wrote. The cluster miner
-    finds that a transformation recurs — real, deterministic, and not a transferable rule — while
-    `durable/observation_jobs.py` promotes an observation whose `statement` *is* a claim.
+    The cluster miner finds a recurrence, not a transferable rule, while a promoted observation's
+    `statement` is a claim; the tag lets the system count the difference.
     """
     from chemclaw.kg.note import UNDISTILLED_TAG
     from chemclaw.memory.playbook import playbook_note
@@ -877,22 +775,11 @@ def test_a_mined_playbook_is_findable_as_undistilled_and_a_promoted_one_is_not()
 
 
 def test_no_producer_claims_a_skill_layers_onto_its_note_automatically() -> None:
-    """Three docstrings said a skill refines these notes, and nothing invokes one.
+    """No producer claims a skill layers onto its note automatically.
 
-    All four skills named across `memory/` exist — this is not a dangling reference — but they are
-    loaded on demand in a chat turn and no durable path reaches any of them. Stated as "layered on
-    top" and "on top", that read as a pipeline: the same shape as
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`, where three docstrings
-    described a trail naming the agent while the column was empty on every row ever written.
-
-    An absence test, because the correction is prose and prose is what regresses. It fails whoever
-    re-asserts the layering without building it — and building it would be an ADR, not a sentence.
-
-    **The phrase is banned outright, including in prose explaining why it is banned**, and this
-    test caught its own first correction doing exactly that. A scan that exempted quotations would
-    be a scan an author defeats by adding quotation marks, and the next reader cannot tell a
-    retired claim being explained from a live one being made — which is the whole failure. So the
-    corrections describe the retired wording instead of reproducing it.
+    The skills are loaded on demand in a chat turn and no durable path invokes them. The phrase is
+    banned outright, including in prose explaining the ban, since exempting quotations would be
+    defeated by quotation marks; corrections describe the retired wording instead.
     """
     import re
     from pathlib import Path

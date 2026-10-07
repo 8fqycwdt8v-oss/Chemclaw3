@@ -1,8 +1,7 @@
 """`protocols.rescale`: the charges move, the ratios do not, and the refusals are the deliverable.
 
-The arithmetic here is four lines and is not what these tests are about. What a 1 g procedure taken
-to 2 kg gets wrong is the quantities that do *not* follow the factor, so most of this file asserts
-that they were named rather than scaled.
+What goes wrong scaling 1 g to 2 kg is the quantities that do not follow the factor, so most tests
+assert those are named rather than scaled.
 """
 
 import pytest
@@ -64,11 +63,10 @@ def test_the_original_design_is_not_mutated() -> None:
 
 
 def test_an_addition_and_a_filtration_are_named_rather_than_scaled() -> None:
-    """The two steps whose duration is least linear in the charge, and most consequential.
+    """An addition and a filtration are named rather than scaled.
 
-    A dose time multiplied by 2000 is absurd and a dose time carried across unchanged is dangerous,
-    so this module does neither: it says the number is untouched and why, and names the tools that
-    decide it from measurements.
+    Their durations are least linear in the charge; the number is left untouched with the reason,
+    and the tools that decide it from measurements are named.
     """
     design = _design(
         steps=[
@@ -111,11 +109,10 @@ def test_the_reaction_time_is_carried_across_and_said_to_be() -> None:
 
 
 def test_a_target_in_a_dimension_the_protocol_cannot_convert_is_refused() -> None:
-    """Rather than assuming a molar mass, which is how a scaled protocol gains an invented number.
+    """A target in a dimension the protocol cannot convert is refused rather than assuming a molar
+    mass.
 
-    The limiting line states milligrams; turning "5 mol" into milligrams needs a molar mass this
-    design does not carry. The refusal names the unit to restate the target in, so the caller has
-    somewhere to go.
+    The refusal names the unit to restate the target in.
     """
     with pytest.raises(RescaleError, match="molar mass or a density"):
         rescale(_design(), target="5 mol")
@@ -179,11 +176,10 @@ def test_a_line_stating_mass_and_amount_scales_by_either() -> None:
 
 
 def test_a_rescaled_design_declares_its_new_scale_and_passes_the_plausibility_band() -> None:
-    """`quantities_are_plausible` sizes its ceilings off `request.scale`, so it has to move too.
+    """A rescaled design declares its new scale and passes the plausibility band.
 
-    Before, a 1 g protocol taken to 20 kg kept the old (here: empty) scale, and the kilo charges
-    tripped the default ceilings — the false unit-slip warning the scale-aware band exists to
-    remove. The new value is `inferred`: the chemist's text never said it.
+    `quantities_are_plausible` sizes its ceilings off `request.scale`, so the scale moves with the
+    charges, marked `inferred`.
     """
     from chemclaw.protocols.checks import quantities_are_plausible
 
@@ -194,11 +190,10 @@ def test_a_rescaled_design_declares_its_new_scale_and_passes_the_plausibility_ba
 
 
 def test_a_molar_target_still_declares_a_scale_the_plausibility_band_can_read() -> None:
-    """A rescale by amount records a mass or volume scale, never the raw "6000 mmol".
+    """A rescale by amount records a mass or volume scale, never the raw molar target.
 
-    `checks._plausibility_bands` reads only a mass or a volume, so recording the molar target
-    dropped a kilo batch back to the bench ceilings and warned a unit slip on the charges the
-    rescale itself produced. The chemist's declared unit is kept, moved by the factor.
+    `checks._plausibility_bands` reads only mass or volume; the chemist's declared unit is kept,
+    moved by the factor.
     """
     from chemclaw.protocols.checks import quantities_are_plausible
     from chemclaw.protocols.models import RequestField

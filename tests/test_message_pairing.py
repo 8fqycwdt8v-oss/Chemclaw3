@@ -1,9 +1,8 @@
-"""The stored-history invariant: no tool call without its result (offline).
+"""The stored-history invariant: no tool call without its result.
 
-Deleting one half of a `tool_use`/`tool_result` pair leaves a thread the model rejects outright,
-and nothing repairs it — the read-time repair that used to heal one direction went with the MAF
-thread that needed it. So the rule is enforced where rows are *deleted*, and these pin the pure
-form of it; `test_retention.py` pins the sweep that applies it.
+Deleting half of a `tool_use`/`tool_result` pair leaves a thread the model rejects, and nothing
+repairs it, so the rule is enforced where rows are deleted. These pin the pure form;
+`test_retention.py` pins the sweep that applies it.
 """
 
 import ast
@@ -38,17 +37,11 @@ def _answer(call_id: str, result: str = "ok") -> ToolMessage:
 
 
 def test_either_half_left_alone_is_reported_and_neither_is_repaired() -> None:
-    """Both directions are asked, and both stop at reporting — the reason `droppable_rows` exists.
+    """Either half left alone is reported, and neither is repaired.
 
-    The rest of this module answers "may I delete this?". These two answer "did somebody already
-    delete the wrong thing?", and deliberately stop there: healing either half would destroy
-    evidence and mask the bug that stranded it. That makes them a test's instruments rather than
-    production calls, so this is the test that says out loud what they are for — and that the
-    module offers no way to make either problem disappear quietly.
-
-    The symmetry is worth pinning because it did not always hold. A read-time repair used to strip
-    an unanswered call, so that direction self-healed and only the stranded result was permanent;
-    the repair went with the MAF thread it served, and now nothing heals either.
+    These checks answer "did somebody already delete the wrong thing?" and stop at reporting:
+    healing would destroy evidence and mask the bug. They are a test's instruments, not production
+    calls.
     """
     stranded_result = [_answer("c1")]
     assert unmatched_result_ids(stranded_result) == {"c1"}
@@ -86,9 +79,8 @@ def test_the_closure_is_transitive_across_parallel_calls() -> None:
 def test_the_closure_is_order_independent() -> None:
     """A result stored before its call is still one component.
 
-    A provider's own grouping is positional; storage order is not guaranteed to match it once
-    retention has removed an interleaving row. `unmatched_call_ids` is already order-independent
-    for the same reason, and the closure has to match it or the two would disagree about a group.
+    Storage order need not match the provider's positional grouping once retention removes a row;
+    `unmatched_call_ids` is order-independent, and the closure must match it.
     """
     rows = [(1, frozenset({"c1"})), (2, frozenset({"c1"}))]
     assert droppable_rows(rows, {1}) == set()
@@ -96,11 +88,10 @@ def test_the_closure_is_order_independent() -> None:
 
 
 def test_the_closure_contracts_rather_than_expanding() -> None:
-    """The safety direction: never return a row the caller did not ask to delete.
+    """The closure contracts: it never returns a row the caller did not ask to delete.
 
-    Expanding would let an age cutoff reach *forward* and delete a live tool result from a recent
-    turn. Contracting can only return a subset, so the worst case is a straddling group surviving
-    one more pass — harmless, and self-correcting once the partner also ages out.
+    Expanding could reach forward and delete a live result from a recent turn; contracting at worst
+    keeps a straddling group one more pass.
     """
     rows = [(1, frozenset({"c1"})), (2, frozenset({"c1"}))]
     assert droppable_rows(rows, {1}) <= {1}
@@ -108,13 +99,10 @@ def test_the_closure_contracts_rather_than_expanding() -> None:
 
 
 def test_a_row_mentioning_no_call_id_is_its_own_component() -> None:
-    """An ordinary user or answer row is droppable on its own terms, and that is not free.
+    """A row mentioning no call id is its own component.
 
-    The grouping is built by joining rows that share a call id, so a row sharing none is never an
-    argument to a `union` call: it exists as a component only because every row seeds the
-    structure before any joining happens. Seeding from the joins alone would leave plain
-    conversation rows — which are most of a thread — in no component at all and therefore
-    permanently undroppable, and retention would quietly stop reclaiming anything but tool traffic.
+    Every row seeds the structure before joining; seeding only from joins would leave plain
+    conversation rows in no component, so retention would reclaim only tool traffic.
     """
     rows = [(1, frozenset()), (2, frozenset({"c1"})), (3, frozenset({"c1"}))]
     assert droppable_rows(rows, {1}) == {1}
@@ -123,12 +111,10 @@ def test_a_row_mentioning_no_call_id_is_its_own_component() -> None:
 
 
 def test_the_closure_joins_across_more_than_one_hop() -> None:
-    """Four rows chained by three different ids are one component, not three pairs.
+    """Four rows chained by three ids are one component, not three pairs.
 
-    The two-call test above is one row linking two partners — a star, which a single round of
-    joining resolves. This is a path: 1–2 share `c1`, 2–3 share `c2`, 3–4 share `c3`, and no row
-    is adjacent to all of them. Nothing in the thread's order helps, either, since the rows are
-    fed in an order that joins the far end first.
+    A path rather than a star, fed in an order that joins the far end first, so one round of joining
+    is not enough.
     """
     rows = [
         (4, frozenset({"c3"})),
@@ -145,18 +131,12 @@ def test_the_closure_joins_across_more_than_one_hop() -> None:
 
 
 def test_a_legacy_row_is_read_by_the_shape_maf_actually_wrote() -> None:
-    """The MAF discriminators still decide which *stored* rows a sweep may delete.
+    """Legacy rows are read by the shape MAF actually wrote.
 
-    Every `session_messages` row written before the M6 conversion is a `Message.to_dict()`, and the
-    conversion pass is resumable — so the sweep reads them whether or not it has run. A rename in
-    those two strings would not raise: it would change what a nightly sweep destroys, silently.
-
-    The payloads are frozen literals (`tests/legacy_rows.py`), captured from the real constructors
-    and verified byte-for-byte against them. They used to be *built* through MAF, which was right
-    while it was installed — the assertion is about what MAF wrote, so hand-writing the payload
-    would only prove this file agrees with itself. That inverts once the dependency is gone: these
-    bytes are historical data a production table still holds, and a fixture that needs the library
-    re-installed to exist is a fixture that cannot outlive it.
+    Rows written before the conversion are `Message.to_dict()` output, and the pass is resumable, so
+    the sweep reads them either way; a rename in the discriminators would silently change what is
+    deleted. The payloads are frozen literals from `tests/legacy_rows.py`, historical data a table
+    still holds.
     """
     assert stored_call_ids(legacy_call("c1", "t")) == frozenset({"c1"})
     assert stored_call_ids(legacy_result("c1")) == frozenset({"c1"})
@@ -164,13 +144,10 @@ def test_a_legacy_row_is_read_by_the_shape_maf_actually_wrote() -> None:
 
 
 def test_a_converted_row_is_read_by_the_shape_langchain_writes() -> None:
-    """The other half of the same obligation: a row the conversion has already rewritten.
+    """A converted row is read by the shape LangChain writes.
 
-    Both shapes live in one table during a rollout, which is the whole reason `message_shape`
-    exists. The previous reader used MAF's `Message.from_dict` for every row and **raised**
-    `TypeError` on one of these — so the sweep crashed on any session that had taken a turn since
-    the conversion, Temporal retried it to exhaustion, and retention silently stopped for exactly
-    the sessions still in use.
+    Both shapes coexist during a rollout; reading every row as MAF would raise on converted rows and
+    stop retention for exactly the sessions in use.
     """
     call = message_to_dict(_calls("c1"))
     assert stored_call_ids(call) == frozenset({"c1"})
@@ -179,29 +156,21 @@ def test_a_converted_row_is_read_by_the_shape_langchain_writes() -> None:
 
 
 def test_a_row_in_neither_shape_is_unreadable_rather_than_pairing_free() -> None:
-    """`None`, not an empty set — and the difference is what stops a sweep stranding a partner.
+    """A row in neither shape is unreadable (`None`), not pairing-free (empty set).
 
-    Empty means "in no pairing, so disposable on its own". An unreadable row is not that: nothing
-    can be concluded about what it is paired with. Collapsing the two would make it look
-    pairing-free and therefore droppable, which is the one direction this module exists to prevent.
+    An empty set means disposable on its own; collapsing the two would make an unreadable row
+    droppable and could strand its partner.
     """
     assert stored_call_ids({"something": "else"}) is None
     assert stored_call_ids({"contents": "not a list"}) is None
 
 
 def test_a_payload_that_is_not_a_mapping_is_unreadable_rather_than_a_crash() -> None:
-    """`message` is a bare `jsonb` column, and the annotation that says `Mapping` decides nothing.
+    """A payload that is not a mapping is unreadable rather than a crash.
 
-    Measured against the unguarded function, all five of these raised `AttributeError: 'str' object
-    has no attribute 'get'` — two lines *before* `_prune_session_messages`'s per-session
-    `unreadable_rows` skip, so one bad row took the whole `session_messages` pass down and every
-    session stopped being pruned. `session_store.message_from_row` guards the same column the same
-    way; the defect was that the two readers of one column disagreed, and the one that disagreed
-    was the one that deletes.
-
-    The string case is the one worth naming: `"contents" in payload` is a *substring* test on a
-    string, so a row whose text happens to contain the word took the MAF branch and raised there
-    instead.
+    `message` is bare `jsonb`, and a raise here precedes the per-session skip, taking down the whole
+    pass. `session_store.message_from_row` guards the same column the same way. For a string,
+    `"contents" in payload` is a substring test, so such a row must not take the MAF branch.
     """
     for payload in ("contents of a corrupted row", "plain prose", [1, 2, 3], 42, True):
         assert stored_call_ids(payload, LANGCHAIN_SHAPE) is None, (  # type: ignore[arg-type]
@@ -213,12 +182,10 @@ def test_a_payload_that_is_not_a_mapping_is_unreadable_rather_than_a_crash() -> 
 
 
 def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
-    """Refusing the row is not enough, and that is the subtle half.
+    """An unreadable row takes its whole session out of the sweep.
 
-    An unreadable row links to nothing, so leaving it merely undroppable would let a partner it
-    *would* have protected stay eligible — the sweep then strands exactly the pairing this rule
-    exists to protect, reached by being careful about the wrong row. So the session is refused
-    whole, and the caller is told which rows to look at.
+    It links to nothing, so merely skipping it would leave a partner it protects eligible for
+    deletion. The session is refused whole and the caller told which rows to inspect.
     """
     rows = [(1, frozenset({"c1"})), (2, None), (3, frozenset({"c1"}))]
     assert unreadable_rows(rows) == [2]
@@ -226,15 +193,10 @@ def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
 
 
 def test_a_complete_parallel_batch_is_not_flagged_as_unadjacent() -> None:
-    """A complete parallel batch must pass the adjacency rule; a split one must not.
+    """A complete parallel batch passes the adjacency rule; a split one does not.
 
-    "Immediately after" is a wire rule about the following *message*, which on the wire holds
-    every result of the batch — here that is several consecutive `ToolMessage`s.
-
-    The single-slot reading (`messages[index + 1]` only) flagged every legitimate parallel batch
-    past its first result: three calls answered by three adjacent results reported two of them
-    missing, so any consumer of this checker would have "repaired" or refused a thread the
-    provider accepts as-is. The answering window is the contiguous run of tool messages.
+    "Immediately after" refers to the following wire message, which holds every result of the batch:
+    the answering window is the contiguous run of tool messages, not one slot.
     """
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -270,18 +232,11 @@ def test_a_complete_parallel_batch_is_not_flagged_as_unadjacent() -> None:
 
 
 def test_every_unanswered_call_in_a_thread_is_reported_not_only_the_last() -> None:
-    """The set accumulates across assistant messages, and one `|=` is what makes that true.
+    """Every unanswered call in a thread is reported, not only the last message's.
 
-    Every fixture in this file put its unanswered calls in a *single* assistant message, so the
-    accumulation was never exercised: replacing `missing |= called - answered` with `missing =`
-    keeps all 21 tests in the repository that execute this function green while reporting only the
-    newest message's half-pairs. Measured on the shipped source, the thread below returns both ids
-    and under that mutation returns one.
-
-    That is not a cosmetic under-report. This is one half of what `durable/retention.py` checks
-    before it deletes `session_messages` rows, so a thread whose *earlier* half-pair is invisible
-    reads as complete and becomes deletable — the precise failure the guard exists to prevent, in
-    the destructive direction.
+    `missing |= called - answered` must accumulate across assistant messages. This feeds
+    `durable/retention.py`'s pre-delete check, so a hidden earlier half-pair would make the thread
+    deletable.
     """
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -300,16 +255,10 @@ def test_every_unanswered_call_in_a_thread_is_reported_not_only_the_last() -> No
 
 
 def test_a_legacy_row_whose_contents_hold_a_non_dict_is_read_rather_than_raising() -> None:
-    """`message` is bare `jsonb`, so a MAF row's `contents` list is not obliged to hold only dicts.
+    """A legacy row whose `contents` holds a non-dict is read rather than raising.
 
-    The `isinstance(item, dict)` in front of the two `.get`s is what makes that safe, and nothing
-    asked it to be: relaxed to an `or`, a stray scalar in `contents` raises `AttributeError` two
-    lines before `_prune_session_messages`'s per-session skip, which is exactly how one unreadable
-    row took the whole `session_messages` pass down and stopped retention for every session — the
-    failure the non-mapping guard above it already records as having happened once.
-
-    The row is *read*, not skipped: the call it does mention is still reported, because the rest of
-    the payload is intact and a component this row joins must not be silently forgotten either.
+    The `isinstance(item, dict)` guard keeps one bad element from raising before the per-session
+    skip. The row is read, not skipped, so the call it does mention is still reported.
     """
     payload = {
         "contents": [
@@ -322,18 +271,11 @@ def test_a_legacy_row_whose_contents_hold_a_non_dict_is_read_rather_than_raising
 
 
 def test_each_stored_shape_stamp_is_defined_exactly_once_in_the_tree() -> None:
-    """Two modules read the stamp; only one may *say* what it is.
+    """Each stored shape stamp is defined exactly once in the tree.
 
-    `message_pairing` carried its own `_LANGCHAIN_SHAPE = "langchain"` under a comment claiming it
-    was "named from that module so the two cannot drift" — but taking a *name* from a module is not
-    importing its *value*, and two independent literals that happen to agree are two literals that
-    can stop agreeing. The direction that matters is destructive: `stored_call_ids` decides what
-    `droppable_rows` may delete, so a stamp the migration writes and this module does not recognise
-    turns a protected pairing into a droppable row, silently.
-
-    Written as a uniqueness scan over the package rather than as an equality assertion between the
-    two names, because equal string literals are interned — `is` would pass on the copy this test
-    exists to reject. It also catches the *next* copy, wherever it is made.
+    `stored_call_ids` decides what `droppable_rows` may delete, so a second literal that drifted
+    would make protected pairings droppable. A uniqueness scan over the package, since equal string
+    literals are interned and an `is` check would pass on a copy; it also catches the next copy.
     """
     stamps = {MAF_SHAPE, LANGCHAIN_SHAPE}
     package = Path(chemclaw.__file__).parent

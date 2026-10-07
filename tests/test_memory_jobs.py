@@ -1,11 +1,8 @@
-"""The durable memory-synthesis corpus reader honors the data-source config (DUP-1).
+"""The durable memory-synthesis corpus reader honours the data-source config.
 
-`chemclaw.durable.memory_jobs.read_corpus` is the corpus every memory job reasons over. After
-the F7
-seam it must read the *configured* active ingest sources (`settings.data_sources`), not a hardcoded
-union of every ELN adapter — so toggling `CHEMCLAW_DATA_SOURCES` actually changes what memory sees,
-the same guarantee the durable ELN sync already honors. Uses the committed sample exports that the
-default config points at (`data/eln-exports` + `data/eln-exports/ord`); no server needed.
+`read_corpus` reads the configured active ingest sources (`settings.data_sources`), not every ELN
+adapter, so `CHEMCLAW_DATA_SOURCES` changes what memory sees. Uses the committed sample exports
+the default config points at; no server needed.
 """
 
 import asyncio
@@ -68,12 +65,10 @@ class _PartialSource:
 def test_a_corpus_read_that_skipped_an_entry_reports_itself_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The signal `record(complete=…)` rests on, proved at the place it is produced.
+    """A corpus read that skipped an entry reports itself incomplete.
 
-    Nothing downstream can tell a shrunken corpus from a shrinking one, so the read has to say
-    which it was. Without this the observation upsert would keep replacing evidence on a pass that
-    saw part of the record — a partial reading written down as the complete one, which is the
-    defect this lane is named for.
+    Downstream cannot tell a shrunken corpus from a partial read, so the read must say which;
+    otherwise an observation upsert would replace evidence from a partial pass.
     """
     monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [_PartialSource(bad=1)])
     partial = asyncio.run(memory_jobs.read_corpus())
@@ -85,12 +80,10 @@ def test_a_corpus_read_that_skipped_an_entry_reports_itself_incomplete(
 
 
 class _OnePageSource:
-    """An ingest half that returns its whole corpus as one page — a drop directory, minimally.
+    """An ingest half that returns its whole corpus as one page, like a drop directory.
 
-    The shape is not incidental: `OrdJsonAdapter.fetch_new_entries` accepts `limit` and **ignores
-    it** deliberately (its own docstring says an unsorted scan would return an arbitrary subset and
-    advance the cursor past what it skipped), so for a drop directory the page *is* the corpus.
-    That is what makes where the cap is checked decide whether it bounds anything.
+    `OrdJsonAdapter.fetch_new_entries` deliberately ignores `limit`, so the page is the corpus; that
+    is what makes where the cap is checked decide whether it bounds anything.
     """
 
     def __init__(self, count: int) -> None:
@@ -114,22 +107,12 @@ class _OnePageSource:
 def test_the_corpus_read_stops_at_its_bound_and_says_the_pass_was_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`memory_corpus_max_reactions` bounds what one activity holds, and marks the read partial.
+    """The corpus read stops at `memory_corpus_max_reactions` and marks the pass partial.
 
-    **Measured, this is a memory bound and not a time bound**: 10,000 ORD records read in 6.8 s and
-    397 MB of traced peak, about 25 kB of resident `OrdReaction` per entry on top of the adapter's
-    own page. The miners are whole-corpus algorithms over a `list`, so a deployment's decade of
-    entries is tens of GB in one activity's process — the pod is killed rather than slow.
-
-    Incomplete rather than raised, because `CorpusRead.complete` already exists and every miner
-    already honours it: a pass that saw part of the corpus must not be written down as the whole
-    record. A bounded partial pass beats a worker that dies with no note at all.
-
-    **The assertion is on the count, and the count is what the first version of this bound got
-    wrong.** Checked between pages it let a one-page source through entirely — driven on a 10,000
-    record corpus at a cap of 2,500, the read returned all 10,000 and marked itself incomplete
-    about a corpus it had already materialised, which is a bound that reports itself and bounds
-    nothing.
+    This is a memory bound: miners hold the whole corpus in a list, and an unbounded read can
+    exhaust the activity's pod. The read is marked incomplete rather than raised, since every miner
+    honours `CorpusRead.complete`. The count is asserted, so a check between pages cannot let a
+    one-page source through entirely.
     """
     monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [_OnePageSource(50)])
 
@@ -174,20 +157,11 @@ def test_background_worker_registers_memory_fan_out() -> None:
 def test_the_memory_corpus_is_the_whole_source_and_not_its_first_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A source that pages is read to the end, and a read that cannot be is not called complete.
+    """A paging source is read to the end, and a read that cannot finish is not called complete.
 
-    `read_corpus` fetched once, from `datetime.min`, and took whatever came back. That is the whole
-    corpus for a drop directory, which reads its directory in one go — and it is **one page** for a
-    source that pages. Measured against the warehouse adapter over a 12-row corpus at
-    `fetch_limit: 5`: `read_corpus` saw **5 of 12** and returned `complete=True`, so the three
-    memory miners distilled campaign, playbook and optimization notes from the oldest 500 rows of
-    an ELN at the shipped binding default and nothing said so. The register had this recorded as a
-    *cost* — a full table scan per activity — and the shipped behaviour was the opposite failure:
-    not too much read, but far too little, silently.
-
-    So the fetch is a loop, on the adapter's own truncation signal, and `complete` carries the case
-    the loop cannot finish — a source stuck on a block of rows sharing one watermark reports itself
-    truncated forever, and the second arm below is that.
+    A single fetch from `datetime.min` is one page for a warehouse source, so the read loops on the
+    adapter's truncation signal. A source stuck on rows sharing one watermark reports itself
+    truncated, which the second arm covers.
     """
     from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
     from tests import warehouse_fake
