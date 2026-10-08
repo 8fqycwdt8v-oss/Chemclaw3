@@ -137,7 +137,6 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A durable digest of a named protocol set** — `condense_protocols` refuses past its bounds · *Revisit:* `chemclaw_protocol_digests_total` shows the refusal in real use.
 - **CREST's other run types** (`--qcg`, `--msreact`, `--entropy`, `--mecp`) — one flag away, no question asks for them · *Revisit:* a chemist asks; `--qcg` first.
 - **Better-sampled or free-energy-refined ensemble pKa** — neither refinement moves the class error · *Revisit:* explicit solvent lands, or the residual decides something real.
-- **Cross-process in-flight dedup in the calculation store** — in-process half done (`science/calc/store.py::_IN_FLIGHT`) · *Revisit:* duplicate CREST runs across workers become a measured cost.
 - **Live reattachment to a detached turn's stream** — a detached turn completes unseen · *Revisit:* a deployment shows watching it matters.
 - **Pruning unconsumed `session_events` rows** — an undelivered completion must survive · *Revisit:* the unconsumed count is a measured cost.
 - **A bounded per-round campaign record** — rounds store cumulative observations · *Revisit:* the first deployment running durable campaigns.

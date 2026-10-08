@@ -24,7 +24,8 @@ middleware without compiling a graph, `signals.py` captures what code publishes 
 writer, `surface.py` reads what one profile advertises without building an agent, `bo_harness.py`
 is the BO ask/tell loop `src/` deliberately does not ship, `calc_server_fake.py` and
 `warehouse_fake.py` stand in for the calculation server and a warehouse, `document_fixtures.py`,
-`parse_stalls.py` and `egress_probe.py` serve the document-parsing tests, `recorded_tool_results.py`
+`parse_stalls.py` and `egress_probe.py` serve the document-parsing tests, `calc_flight_worker.py`
+is the second process of the calculation single-flight tests, `recorded_tool_results.py`
 and `recorded_workflow_histories.py` hold recorded payloads and the Temporal replay check, and
 `siblings.py` locates the companion checkouts.
 

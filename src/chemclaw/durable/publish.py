@@ -86,6 +86,9 @@ _BAD_DATA_TYPES = [
     "ConnectorJobError",
     "GitWriteError",
     "CalculationDomainError",
+    # A waiter on another pod's calculation, told that the holder was refused (`science/calc/
+    # flight.py`); the holder's own retry class, carried across.
+    "PeerCalculationRefused",
     "ConnectorError",
     # The manifest and the server disagree about a MAJOR of the contract; the same two versions are
     # found on every attempt, so a retry is the same refusal.
