@@ -248,9 +248,9 @@ _UNBOUNDED_BY_DESIGN = {
     # (upstream's `setup()`, with `CREATE INDEX CONCURRENTLY`) under an advisory lock held across
     # it, so it cannot use the saver's own pool without deadlocking a small one.
     "chemclaw/agent/checkpointer.py",
-    # `core/job_lock.exclusive_job` holds one dedicated autocommit connection for as long as it holds
-    # the advisory lock: a pooled connection would be returned to the pool still locked, and the
-    # lock lives with the session. It runs one statement to take and one to release the lock.
+    # `core/job_lock.exclusive_job` holds one dedicated autocommit connection for as long as it
+    # holds the advisory lock: a pooled connection would be returned to the pool still locked, and
+    # the lock lives with the session. It runs one statement to take and one to release the lock.
     "chemclaw/core/job_lock.py",
 }
 _DEFINITION_SITE = "chemclaw/core/db.py"
