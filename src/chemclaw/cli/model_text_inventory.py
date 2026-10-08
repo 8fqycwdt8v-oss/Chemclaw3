@@ -60,12 +60,17 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.text_overlay import block_text
-from chemclaw.connectors.registry import discovered, enabled, server_tools_module
+from chemclaw.connectors.registry import (
+    discovered,
+    enabled,
+    server_tools_module,
+    withheld_job_names,
+)
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.registry import discovered as templates
-from chemclaw.templates.registry import tool_name
+from chemclaw.templates.registry import template_tool_names, tool_name
 
 _ROOT = Path(__file__).resolve().parents[3]
 INVENTORY_PATH = _ROOT / "schema" / "model-text" / "inventory.json"
@@ -167,8 +172,15 @@ def model_facing_descriptions() -> dict[str, str]:
     `core/model_prose.ModelProse`. Unmarked prompt text built inline in a function body is outside.
     `tests/test_prose_contract.py` asserts that each class contributes, and how much.
     """
+    # The registry only grows, so it still holds a launcher an earlier build bound under another
+    # configuration; the graph never binds a withheld tool, and neither does this reading.
+    withheld = (set(template_tool_names(declared=True)) - set(template_tool_names())) | set(
+        withheld_job_names()
+    )
     described: dict[str, str] = {
-        getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or "" for fn in registered_tools()
+        getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or ""
+        for fn in registered_tools()
+        if getattr(fn, "__name__", str(fn)) not in withheld
     }
     bundles = sorted(Path(chemclaw.__file__).parent.glob("connectors/*/server/tools.py"))
     if not bundles:
