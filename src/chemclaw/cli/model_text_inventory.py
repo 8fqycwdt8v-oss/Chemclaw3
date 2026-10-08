@@ -808,7 +808,12 @@ def diff(committed: dict[str, Any], current: dict[str, Any]) -> list[str]:
     ]
     for name in sorted(old.keys() & new.keys()):
         if old[name] != new[name]:
-            lines.append(f"~ {name}: {old[name]['tokens']} -> {new[name]['tokens']} tokens")
+            moved = (
+                "text changed" if old[name]["sha256"] != new[name]["sha256"] else "metadata changed"
+            )
+            lines.append(
+                f"~ {name}: {old[name]['tokens']} -> {new[name]['tokens']} tokens, {moved}"
+            )
     if committed.get("prefix") != current["prefix"]:
         lines.append(f"~ prefix: {committed.get('prefix')} -> {current['prefix']}")
     return lines
