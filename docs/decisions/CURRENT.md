@@ -86,7 +86,8 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - One rootless image, one config source, a Helm chart on OpenShift — [D-049](D-049-f6-openshift-delivery-one-image-one-config-source.md); a release names its own Temporal namespace — [D-2026-09-09-a-temporal-namespace-is-a-releases-boundary-not-a-constant](D-2026-09-09-a-temporal-namespace-is-a-releases-boundary-not-a-constant.md).
 - The schema only goes forward; rollback is not a schema step — [D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md), [D-2026-08-08-a-rollback-that-is-not-a-schema-step](D-2026-08-08-a-rollback-that-is-not-a-schema-step.md); the app is its own migrator — [D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns](D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns.md).
 - The connection budget is a fleet number — [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md).
-- The suite gate is serial; parallel workers are an opt-in — [D-2026-09-13-a-stable-failure-set-is-not-two-green-runs](D-2026-09-13-a-stable-failure-set-is-not-two-green-runs.md).
+- The suite gate goes parallel; a parallel-only failure is a defect to root-cause, and until W3.12 flips the default the gate stays serial — [D-2026-10-08-the-test-gate-runs-in-parallel](D-2026-10-08-the-test-gate-runs-in-parallel.md).
+- Model-facing text changes one batch at a time, behind an offline and a live A/B eval — [D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation](D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation.md).
 
 ## Record and process
 

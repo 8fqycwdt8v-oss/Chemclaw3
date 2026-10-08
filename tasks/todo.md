@@ -15,6 +15,17 @@ The previous task (deep documentation pass, 2026-10-04) shipped and its record i
   standard is that deepagents covers everything a self-built builder would.
 - **Tenancy: `tenant_id` + Postgres row-level security** in one deployment.
 
+**Decided 2026-10-08, on the W1 open points:**
+- **The test gate goes parallel** (`D-2026-10-08-the-test-gate-runs-in-parallel`, superseding
+  `D-2026-09-13`). A failure seen only in parallel is a concurrency defect to root-cause, never a
+  test to quarantine. Lands in W3, whose subject is exactly that class of defect.
+- **Model-facing text is changed, behind an evaluation**
+  (`D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation`). Tool docstrings, schema
+  descriptions and prompt blocks get the same diet as the prose, one batch at a time, and a batch
+  ships only if the eval says it is not worse. Lands in W2, because the text is part of each
+  connector's contract.
+- **The git-safety hook is changed explicitly**, on the owner's authorisation. Lands in W2.
+
 Scope: all three repos (`Chemclaw3_mock` only where a contract it serves changes). Each repo's change
 is its own branch and PR, as the repo's rules require.
 
@@ -39,8 +50,8 @@ is its own branch and PR, as the repo's rules require.
 | --- | --- | --- | --- | --- | --- |
 | W0 | Baselines, guard rails, programme setup | all | none | S | — |
 | W1 | Docs and process diet | all | low | M | W0 |
-| W2 | One owner per contract (manifests, events, API types) | all | low–med | M | W0 |
-| W3 | Horizontal scale foundations (no per-process truth) | core | med | M | W0 |
+| W2 | One owner per contract (manifests, events, API types); model-facing text behind an eval; git-safety hook | all | low–med | M | W0 |
+| W3 | Horizontal scale foundations (no per-process truth); parallel test gate | core | med | M | W0 |
 | W4 | Knowledge graph in Postgres | core (+ui read paths) | high | L | W3 (shared locks), W1 |
 | W5 | Agent core: deepagents via public seams, one mechanism per concern | core | high | L | W0 baselines, W2 (event schema) |
 | W6 | Backend RPC, fleet Helm, release unit, CI | mcp, core, ui | med | M | W2 |
@@ -160,10 +171,8 @@ Entry: W0.3 agreed.
 - [x] **W1.19** Collapse the 79 Make targets: keep the gate (`lint type test check cov`), `ci`,
       the validators, `up/down/chat/connectors/db-migrate`, and move the live/bench/storm harnesses
       behind one `make live-<x>` family. `make help` grouped by section.
-- [ ] **W1.20** Fix the parallel-only flaky tests named in
-      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`, then make `PYTEST_WORKERS=4` the gate
-      default (measured 18:13 → 09:30). Give each xdist worker a small Postgres pool instead of
-      declining `-n auto`.
+- [x] **W1.20** Moved to **W3.10–W3.12** (owner decision 2026-10-08: the gate goes parallel). W1
+      delivered the private database for the retention test and the per-worker pool cap.
 
 Exit (measured against W0):
 - CLAUDE.md ≤150 lines in each repo.
@@ -229,13 +238,67 @@ Entry: W0.
       `connectors/calc/compose.py` and `remote.py` into typed models in `chemclaw_contracts`. Core
       imports them, and the fake in `tests/calc_server_fake.py` is built from the same models.
 
+### Track D — Model-facing text, behind an evaluation (owner decision 2026-10-08)
+
+What the model reads is a prompt, so W1 left it untouched: agent-tool docstrings, pydantic/
+TypedDict/Enum descriptions that reach a tool or response schema, the fleet's `@server.tool`
+descriptions and output schemas, `ModelProse` constants, the system prompt's instruction blocks
+and `SKILL.md` bodies. Much of it still carries history. It gets the same diet, but **a batch ships
+only when the evaluation says it is not worse** (`D-2026-10-08-model-facing-text-changes-ship-
+behind-an-evaluation`).
+
+- [ ] **W2.13 Inventory and measurement.** Add a `make model-text` dump: every model-facing string
+      in both repos, with its owner (file:symbol), its token count, and whether it is in every
+      request's prefix (tool schemas and prompt blocks) or loaded on demand (skills, results). Commit
+      it as `schema/model-text/inventory.json`. This also gives `tests/test_context_floor.py`
+      measured inputs rather than a hand-kept ceiling.
+- [ ] **W2.14 Evaluation protocol, fixed before any edit.**
+      - **Offline, every batch, in CI:** `make eval-strict` and `make eval-baseline-check` (scripted
+        model, deterministic), plus `test_prose_contract` (the text names only tools that exist).
+      - **Live, every batch:** `make live-ab` with the current text as the control arm and the
+        rewrite as the candidate. Use the same probe corpus, a real gateway, and at least 3 runs per
+        arm. The noise floor is the control arm's own run-to-run spread, measured first, as
+        `D-2026-09-27` did.
+      - **Metrics:** tool-selection accuracy, argument validity (first-call schema errors),
+        refusal correctness (the probes that must refuse), task success as graded by the probe
+        rubric, tokens per turn, and turn cost.
+      - **Ship rule:** no metric worse than the control by more than its noise floor, and the
+        prefix shrinks. Otherwise the batch is reverted, or reworded and re-run.
+      - **Entry condition:** a gateway credential (`CHEMCLAW_LLM_BASE_URL`, `CHEMCLAW_LLM_MODEL`,
+        `CHEMCLAW_LLM_API_KEY`) in the environment running the live arm. Without it, no batch ships.
+- [ ] **W2.15 Rewrite in batches.** One batch = one tool family: one fleet server, or one core
+      `*_tools.py` module, plus its schema classes. Same standard as the W1 docstrings: units, what
+      the tool does and is **not**, what it refuses, and when to use it rather than a neighbour. No
+      history. A fleet batch bumps that connector's `contract_version` minor (W2.2), because
+      descriptions are part of the contract. Prompt blocks and `SKILL.md` bodies are the last batch,
+      each block on its own.
+- [ ] **W2.16 Ratchet.** After each shipped batch, lower `CEILINGS`/`PREFIX_BOUND`
+      (`tests/test_context_floor.py`) to the measured prefix, so the saving goes to the thread
+      budget rather than disappearing. The derived defaults in `core/config/agent.py` follow
+      automatically.
+- [ ] **W2.17 Record the results.** For each batch, the eval table (control and candidate, mean and
+      spread per metric) goes in the PR description, and a one-line summary goes in this file.
+
+### Track E — Guard rails (owner decision 2026-10-08)
+- [ ] **W2.18 Git-safety hook** (`.claude/hooks/block_destructive_git.py`; the owner authorised
+      the change explicitly):
+      - Block `git checkout -f`/`--force`, `git switch --discard-changes`/`-f`, and destructive
+        verbs wrapped in `bash -c`/`sh -c` (recurse into the quoted string).
+      - Stop over-blocking: allow `git stash pop`/`apply`, resolve paths against `git -C <dir>`,
+        and do not split heredoc bodies.
+      - Add `tests/test_destructive_git_hook.py`, which drives the script through subprocess with
+        JSON payloads: one case per blocked verb and per allowed look-alike.
+
 Exit:
 - `grep -r "connector.yaml" Chemclaw3/src/chemclaw/connectors` finds only the bundles core serves
   (`bo calc molfp rxnfp results`).
 - The UI has zero hand-written backend types.
 - A deliberate breaking change in either repo fails the other's CI on the PR, never later.
+- Every model-facing text batch that shipped has an eval table showing it is not worse than the
+  control on any metric, and the per-request prefix is smaller than at W0 (73,450-token ceiling).
+- The hook's test file covers every blocked verb and every allowed look-alike.
 
-Rollback: W2.4 is a revert of one PR. The contracts package stays (additive).
+Rollback: a text batch is one PR per family, reverted on its own. W2.4 is a revert of one PR. The contracts package stays (additive).
 
 ---
 
@@ -245,7 +308,8 @@ Rollback: W2.4 is a revert of one PR. The contracts package stays (additive).
 concurrent-turn cap, calc single-flight, `Session.state`, several fire-and-forget writes and the
 background worker are all per-process or singleton.
 
-Entry: W0. Can run in parallel with W1 and W2.
+Entry: W0. Can run in parallel with W2. W3.10 starts after W3.2–W3.7, because those change the
+shared state the parallel failures come from.
 
 - [ ] **W3.1 ADR** (in W0.5): the shared coordination substrate is **Postgres only (decided)** —
       advisory locks, `SKIP LOCKED`, a small counters table; no Redis. It is already required, already pooled and already backed up, and the rates involved
@@ -284,12 +348,29 @@ Entry: W0. Can run in parallel with W1 and W2.
 - [ ] **W3.9 Multi-replica test lane.** A `make live-replicas` (or a kind lane) that runs 3 service
       replicas plus 2 background workers and asserts: limits hold globally, a killed pod's turn
       resumes, and one calc miss computes once.
+- [ ] **W3.10 Parallel gate: collect the failure set.** Run `make cov PYTEST_WORKERS=4` 10 times
+      on an otherwise idle runner (CI's runner class), after the W3.2–W3.7 changes have landed.
+      Record every test that fails in any run, with its failure. Each one is a concurrency defect:
+      shared state between xdist workers, timing assumptions, or a shared database horizon (the
+      retention VACUUM case is the worked example). Among them is
+      `test_context_budget::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`.
+- [ ] **W3.11 Root-cause each one.** Isolate the state per worker: schema, database, Temporal
+      namespace and task queue, temp directories, ports. Replace wall-clock sleeps with events, or
+      fix the product code when the defect is real. **Never skip, retry-decorate or quarantine.** A
+      test that is in principle about global state (one Postgres server's settings) gets an
+      `xdist_group` so it runs on one worker, and the test file argues why.
+- [ ] **W3.12 Flip the gate.** Make `PYTEST_WORKERS ?= 4` the default for `test` and `cov`, and run
+      CI the same way. Keep a nightly serial `make cov` as a cross-check, which reports a failure that
+      only shows up serially. Write `D-2026-10-08-the-test-gate-runs-in-parallel`'s measurement into
+      its PR. Update CLAUDE.md's command line and `CURRENT.md`.
 
 Exit:
 - `grep` finds no module-level mutable dict, set or LRU that holds a limit or correctness state,
   except caches that can be recomputed.
 - The W3.9 lane passes.
 - The background worker runs with 2 replicas.
+- 10 consecutive parallel `make cov` runs are green, and the gate's wall time is ≤10 min (it was
+  18:13 serial).
 
 Rollback: each item is behind a setting (`*_backend: memory|postgres`) for one release; the default
 flips once the lane is green.
@@ -657,7 +738,8 @@ reported no code change, and their findings were fixed.
 The Fleet's prose share went from 47.0% to 32.1%; CLAUDE.md there went from 671 to 150 lines. In the UI, Markdown went
 from 6,008 to 934 lines and the comment share from 39.3% to 23.6%.
 
-**Left open, on purpose.**
+**Left open, on purpose. All three were decided by the owner on 2026-10-08 and are now planned:**
+the parallel gate is W3.10–W3.12, the model-facing text is W2.13–W2.17, and the hook is W2.18.
 - **W1.20.** The parallel-only flake in `test_context_budget` did not reproduce under load, so it
   was not fixed. The retention one is isolated in a private database. The gate stays serial, as
   `D-2026-09-13` says, until a parallel run is shown stable.

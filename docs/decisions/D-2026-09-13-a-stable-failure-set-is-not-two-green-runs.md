@@ -1,5 +1,7 @@
 # D-2026-09-13-a-stable-failure-set-is-not-two-green-runs — xdist is 2x and stays opt-in, because the gate's answer has to mean one thing
 
+**Superseded-by:** [D-2026-10-08-the-test-gate-runs-in-parallel](D-2026-10-08-the-test-gate-runs-in-parallel.md)
+
 A `BACKLOG.md` row has held `pytest-xdist` open since
 `D-2026-08-26-a-cancelled-run-on-main-is-a-missing-answer-not-a-superseded-one` took the free half of
 the CI-duration problem. Its closing condition was one experiment — add the plugin, run it, and compare
