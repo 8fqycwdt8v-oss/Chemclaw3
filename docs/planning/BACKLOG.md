@@ -107,6 +107,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A worker whose broker is down never opens its probe port** — `durable/background_worker.py::main` connects first · *Revisit:* a second dependency joins `connect()` or an operator misdiagnoses an outage.
 - **Readiness cannot see a connector that is up and broken** — `connectors/health.py::_probe` only reads `/healthz` · *Revisit:* `connectors_required` becomes a runtime gate, or a long-broken connector is reported.
 - **A template step's roles cross the durable boundary unsigned** — `durable/template_activities.py::_acting_as` trusts the payload · *Revisit:* a broker other teams can write to, or one without mTLS.
+- **`chemclaw-contracts` is a git dependency pinned by commit** — `uv.lock` holds a commit, not a content hash, `make deps-audit` skips it ("URL requirements cannot be pinned"), the build backend is unpinned and Dependabot cannot bump it; accepted because the package is pydantic and pyyaml plus data the fleet owns and the tag `contracts-v1.0.0` could not be pushed (`pyproject.toml`, `D-2026-10-08-a-connector-name-has-one-owner`) · *Revisit:* the tag can be pushed or the fleet publishes a release wheel; pin that by URL and hash.
 
 ### Gated on an upstream fix
 

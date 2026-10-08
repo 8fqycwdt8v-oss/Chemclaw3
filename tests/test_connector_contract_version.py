@@ -187,3 +187,60 @@ def test_a_manifest_that_declares_no_version_is_used_without_asking_the_server(
     assert "/healthz" not in stub.paths
     unknown = [r for r in caplog.records if "contract version unknown" in r.getMessage()]
     assert len(unknown) == 1, [record.getMessage() for record in caplog.records]
+
+
+def test_the_servers_answer_is_remembered_so_a_turn_does_not_probe_every_open() -> None:
+    """The fleet's `/healthz` runs a readiness check, so it is asked once per window."""
+    stub = _Stub({"contract_version": "1.5.0"})
+    port = _free_port()
+    with _Server(stub.app, port):
+        for _ in range(3):
+            assert _open(stub.manifest(port, "1.4.0")) == (["echo"], [])
+
+    assert stub.paths.count("/healthz") == 1, stub.paths
+
+
+def test_a_refusal_for_the_contract_does_not_trip_the_reachability_breaker() -> None:
+    """The server answered, so the next turn still dials it once the versions agree."""
+    from chemclaw.connectors.reachability import recently_unreachable
+
+    stub = _Stub({"contract_version": "2.0.0"})
+    port = _free_port()
+    with _Server(stub.app, port):
+        assert _open(stub.manifest(port, "1.4.0")) == ([], [_NAME])
+        assert not recently_unreachable(_NAME)
+
+
+def test_a_flaky_healthz_does_not_flip_a_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the window, a probe that says nothing keeps the version already learned.
+
+    Otherwise a refused connector would be admitted exactly when its `/healthz` is struggling. A
+    later answer that does name a version replaces it, so a redeployed server is picked up.
+    """
+    from chemclaw.connectors import contract
+
+    clock = [1000.0]
+    monkeypatch.setattr(contract, "_now", lambda: clock[0])
+    stub = _Stub({"contract_version": "2.0.0"})
+    port = _free_port()
+    with _Server(stub.app, port):
+        manifest = stub.manifest(port, "1.4.0")
+        assert _open(manifest) == ([], [_NAME])
+
+        clock[0] += 3600
+        stub.healthz = {"status": "degraded"}  # answers, but names no version
+        assert _open(manifest) == ([], [_NAME])
+        assert stub.paths.count("/healthz") == 2, "the window passed, so it was asked again"
+
+        clock[0] += 3600
+        stub.healthz = {"contract_version": "1.4.2"}
+        assert _open(manifest) == (["echo"], [])
+
+
+def test_what_is_logged_is_bounded_by_connectors_not_by_values() -> None:
+    """A server that reports a new value every time cannot grow the process's memory."""
+    from chemclaw.connectors import contract
+
+    for number in range(500):
+        contract._once("stub", "served", f"1.0.0:9.{number}.0")
+    assert len(contract._LOGGED) == 1

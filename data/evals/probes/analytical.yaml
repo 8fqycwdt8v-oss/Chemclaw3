@@ -38,10 +38,10 @@
 # arithmetic rather than by a model.
 #
 # **What neither server changes is whether this repository can reach them.** This
-# tree declares no `thermalsafety` and no `suitability` bundle, so
-# `build_langgraph_agent` binds neither — only a deployment pointing
-# `CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory does, which
-# `infra/live/e2e-full-stack/up.sh` does and no chart deployment does. So re-bucket
+# tree's `thermalsafety` and `suitability` manifests come from the fleet's package and
+# declare `default_enabled: false`, so `build_langgraph_agent` binds neither by
+# silence — only a deployment naming them in `CHEMCLAW_CONNECTORS_ENABLED` does,
+# which `infra/live/e2e-full-stack/up.sh` does and no chart deployment does. So re-bucket
 # a probe from C only for the lane it is being run in, and say which. The prose
 # contract validator makes the same point structurally: it refused a prompt clause
 # keyed on `adiabatic_temperature_rise` because nothing here binds that name.

@@ -5116,6 +5116,49 @@ def test_the_fleet_manifest_path_is_the_path_the_image_has() -> None:
     )
 
 
+def test_the_image_bundle_names_are_the_names_the_image_declares() -> None:
+    """`extraConnectors.imageBundles` is every connector name the image already declares.
+
+    The render refuses a mounted bundle with one of these names (a collision is a startup error in
+    every pod). Derived from the installed package and this tree's own bundles, so a connector
+    either side adds is refused the day it ships.
+    """
+    import chemclaw_contracts
+
+    import chemclaw.connectors
+
+    root = Path(chemclaw.connectors.__file__).resolve().parent
+    declared = set(chemclaw_contracts.manifest_names()) | {
+        path.parent.name for path in root.glob("*/connector.yaml")
+    }
+    assert set(_values()["extraConnectors"]["imageBundles"]) == declared
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_mounting_a_bundle_the_image_already_ships_is_refused_at_render() -> None:
+    """The upgrade trap: a release that mounted `pyexec` (it was not shipped then) fails at render.
+
+    Without the guard every pod crash-loops at boot on the collision. The message names the way
+    out. A bundle with a name the image does not declare still renders.
+    """
+    refused = _render(
+        "--set",
+        "extraConnectors.bundles[0].name=pyexec",
+        "--set",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-pyexec",
+    )
+    assert refused.returncode != 0
+    assert "pyexec" in refused.stderr
+    assert "connectors.pyexec.enabled" in refused.stderr
+    accepted = _render(
+        "--set",
+        "extraConnectors.bundles[0].name=our-eln",
+        "--set",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-our-eln",
+    )
+    assert accepted.returncode == 0, accepted.stderr[-500:]
+
+
 def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:
     """`image.yml` derives the smoke list by grepping `entrypoint.sh`, and a grep reads prose.
 

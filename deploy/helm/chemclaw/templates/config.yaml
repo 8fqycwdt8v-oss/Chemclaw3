@@ -267,6 +267,11 @@
          fleet's. A connector's `skills/` and `profiles/` are found by directory name in any of the
          three (`registry._bundle_content_dirs`), so the judgment in the shipped directory still
          loads beside a manifest the fleet owns. */}}
+  {{- range .Values.extraConnectors.bundles }}
+  {{- if has .name $.Values.extraConnectors.imageBundles }}
+  {{- fail (printf "extraConnectors.bundles[]: %q is a connector this image already ships, and a name declared in two directories is a startup error in every pod. Remove the mount and set connectors.%s.enabled instead; to dial it at another server set connectors.%s.url." .name .name .name) }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.extraConnectors.bundles }}
   CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.contractsPath .Values.extraConnectors.shippedPath | quote }}
   {{- end }}

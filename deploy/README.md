@@ -455,6 +455,13 @@ Two things worth knowing before you write that:
   `CHEMCLAW_CALC_SERVER_URL` / `CHEMCLAW_RXNLABEL_SERVER_URL`, and mounting them is refused at
   startup.
 
+**Upgrading a release that mounted a fleet bundle.** Until the fleet's manifests shipped in the image,
+`pyexec` had to be mounted through `extraConnectors.bundles`. That mount is now a collision, and
+`helm template`/`helm upgrade` fails on it, naming the bundle (`extraConnectors.imageBundles` lists
+every name the image declares). Before upgrading: delete the `pyexec` entry from
+`extraConnectors.bundles` (and its ConfigMap), keep `connectors.pyexec` (`enabled`, `url`), and
+leave `networkPolicy.egressPorts.pyexec` and `secrets.optionalKeys.pyexecToken` as they are.
+
 The addresses above are the Services `Chemclaw3-mcp` creates in **this** namespace: its servers'
 NetworkPolicies admit their caller with a bare `podSelector`, which is same-namespace only, so a
 namespace-qualified address resolves and is then dropped on the far side.

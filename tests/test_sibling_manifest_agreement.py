@@ -97,6 +97,33 @@ def test_every_connector_the_package_declares_is_discovered_from_the_package(
         assert manifest.contract_version == contracts.contract_version(name)
 
 
+#: The packaged connectors this tree relies on being off until a deployment names them: their
+#: schemas ride on every model call (`tests/test_context_floor.py`), and `pyexec` runs model-written
+#: code. Their `default_enabled: false` is the fleet's to keep, and this tree's to notice losing.
+_OPT_IN = ("kinetics", "props", "pyexec", "suitability", "thermalsafety", "unitops")
+
+
+@pytest.mark.parametrize("name", _OPT_IN)
+def test_the_packaged_manifest_still_declares_the_bundle_off_by_default(name: str) -> None:
+    """Read from the installed package, so a fleet release that flips one fails here."""
+    declared = yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))
+    assert declared.get("default_enabled", True) is False, (
+        f"the installed chemclaw-contracts declares {name} on by default, so an empty "
+        "CHEMCLAW_CONNECTORS_ENABLED would bind its schemas on every model call"
+    )
+
+
+def test_an_empty_enable_list_binds_none_of_the_opt_in_bundles_or_their_tools(
+    default_path: str,
+) -> None:
+    """With nothing named, none of them is bound, and `run_python` is not on the agent's surface."""
+    del default_path
+    from chemclaw.connectors.registry import connector_tool_names, enabled
+
+    assert set(_OPT_IN).isdisjoint({manifest.name for manifest in enabled()})
+    assert "run_python" not in connector_tool_names()
+
+
 def test_the_connector_validators_pass_against_the_installed_package(default_path: str) -> None:
     """`connector-validate`, `skill-validate` and `template-validate`, over the default path.
 

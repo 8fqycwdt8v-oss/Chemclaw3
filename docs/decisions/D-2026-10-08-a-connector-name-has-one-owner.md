@@ -56,7 +56,12 @@ pushed; `uv.lock` records the resolved commit either way. The image build needs 
 Revisit when: a deployment shows a need to replace a fleet manifest that `CHEMCLAW_CONNECTOR_URLS`
 and a narrowed `CHEMCLAW_CONNECTORS_DIR` cannot meet.
 
-Held by `tests/test_connector_registry.py::test_a_name_declared_in_two_directories_is_refused_naming_both`,
+Held by, for the name-owner rule: `tests/test_connector_registry.py::test_a_name_declared_in_two_directories_is_refused_naming_both`,
 `::test_a_connectors_judgment_is_found_beside_a_manifest_it_does_not_hold`,
 `tests/test_sibling_manifest_agreement.py` (the installed package is the only source of the
-fleet's manifests) and `tests/test_connector_contract_version.py`.
+fleet's manifests, and `pyexec` and the process bundles stay off by default),
+`tests/test_deploy_chart.py::test_mounting_a_bundle_the_image_already_ships_is_refused_at_render`
+and `::test_the_image_bundle_names_are_the_names_the_image_declares`; for the contract-version
+handshake: `tests/test_connector_contract_version.py` (all three outcomes through a stub server, the
+answer remembered per window, a refusal that does not trip the reachability breaker, a flaky
+`/healthz` that cannot flip a verdict).

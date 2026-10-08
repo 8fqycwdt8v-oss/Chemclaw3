@@ -654,6 +654,11 @@ image — is mounted rather than built in: put its folder in a ConfigMap and lis
 give it a `connectors.<name>` entry (`enabled: true`, `server: true`, `url:`) and do the three
 steps below.
 
+**Upgrading a release that mounted `pyexec`.** `pyexec`'s manifest now ships in the image, so
+the old `extraConnectors.bundles` entry for it is a name declared twice: the chart refuses to
+render and names the bundle. Remove that entry and its ConfigMap, keep `connectors.pyexec`, and
+upgrade (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
+
 **A server somebody else runs** — a platform team's model endpoint, a vendor's FastAPI/MCP service.
 Everything above is unchanged (the manifest says what the capability *is*, and that does not depend
 on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-do-not-run:

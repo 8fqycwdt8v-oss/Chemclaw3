@@ -366,8 +366,8 @@ connectors:
     # the manifest's loopback default. `test_a_connector_url_is_only_declared_beside_a_server`
     # exists for exactly that mistake, and caught it here.
     #
-    # The capability moved to `Chemclaw3-mcp`; the manifest stayed, because four validators resolve
-    # tool names through it (`connectors/chem/connector.yaml` says why).
+    # The capability and its manifest are `Chemclaw3-mcp`'s; the manifest arrives with the installed
+    # `chemclaw-contracts` package, which four validators resolve tool names through.
     #
     # Two things an operator must still do, per the note above: add this host to
     # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CHEM_TOKEN` — the server enforces a
@@ -394,7 +394,7 @@ connectors:
     enabled: true
     server: true
     url: http://chemclaw-mcp-rxnpredict:8857/mcp
-    # Its four predictions are queued (`connectors/rxnpredict/connector.yaml` `queued:`), so this
+    # Its four predictions are queued (the manifest's `queued:` block), so this
     # release runs their interactive worker even though the server is hosted elsewhere. 2 x 2 in
     # flight is the server's floor (2 pods x 2 admission slots); `maxReplicas` follows its HPA ceiling.
     interactive:
@@ -582,6 +582,27 @@ extraConnectors:
   # `tests/test_deploy_chart.py::test_the_fleet_manifest_path_is_the_path_the_image_has` derives it
   # from the Containerfile and the installed package's own layout.
   contractsPath: /app/.venv/lib/python3.11/site-packages/chemclaw_contracts/manifests
+  # Every connector name the image already declares: the fleet's (`chemclaw-contracts`) and this
+  # tree's own. A mounted bundle with one of these names is a startup error in every pod
+  # (`registry._bundle_dirs`), so the render refuses it first and names the way out. A release that
+  # used to mount `pyexec` here (it was not shipped then) hits this on upgrade: drop the mount and
+  # set `connectors.pyexec.enabled: true`. Derived and checked by
+  # `tests/test_deploy_chart.py::test_the_image_bundle_names_are_the_names_the_image_declares`.
+  imageBundles:
+    - bo
+    - calc
+    - chem
+    - kinetics
+    - molfp
+    - props
+    - pyexec
+    - results
+    - rxnfp
+    - rxnpredict
+    - safety
+    - suitability
+    - thermalsafety
+    - unitops
   # Where the image keeps the bundles it *does* ship (`calc`, `bo`, `molfp`, `rxnfp`, `results`, and
   # the skills that go with the fleet's connectors), named again for the same reason.
   #
@@ -1444,8 +1465,8 @@ secrets:
     # variable, so a face deployed without this answers 401 rather than serving anonymously.
     mcpFaceToken: "CHEMCLAW_MCP_FACE_TOKEN"
     # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
-    # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s
-    # `token_env`) and `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They
+    # per request (the `token_env` of the `chem` and `safety` manifests in `chemclaw-contracts`) and
+    # `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They
     # land here for the *upgrade* reason `framingEnvelopeSecret` does, not the capability one:
     # `chemclaw.env` renders `secrets.keys` as a **required** `secretKeyRef` included by every
     # Deployment in the chart, so a required entry would take the front door and every worker into

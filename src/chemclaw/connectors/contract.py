@@ -6,14 +6,20 @@ different MAJOR means the advertised arguments and the served ones no longer agr
 is refused by name for the turn (the caller reports it as `capability_degraded`); a different MINOR
 is additive and logged; a value missing on either side is unknown and never refuses.
 
+The server's answer is remembered per connector for `connector_breaker_window_seconds`, because
+the fleet's `/healthz` runs a readiness check and a probe on every turn would add that to every
+open. The MCP handshake cannot carry it: `serverInfo.version` is the build's revision.
+
 Invariants: nothing here raises except `ContractMismatch`; an unanswered or unreadable `/healthz` is
-"unknown" (the MCP open is the arbiter of reachability); each distinct finding is logged once per
-process, so a per-turn check does not repeat itself.
+"unknown" and never replaces a version already learned (a flaky probe cannot flip a verdict); a
+refusal is not a reachability verdict (the server answered); a finding is logged again only when
+its value changes, and the memory is bounded by connectors, not by values.
 """
 
 import asyncio
 import logging
 import re
+import time
 from typing import Literal
 
 import httpx
@@ -28,8 +34,17 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.\d+$")
 
 Agreement = Literal["same", "minor", "major", "unknown"]
 
-#: Findings already logged by this process, so a check made on every connector open speaks once.
-_LOGGED: set[tuple[str, str]] = set()
+#: The last value logged per `(connector, kind)`, so a check made on every open speaks once per
+#: change. Bounded by connectors times kinds.
+_LOGGED: dict[tuple[str, str], str] = {}
+
+#: What each connector's server last said, and when: `(url, monotonic seconds, version or None)`.
+_SERVED: dict[str, tuple[str, float, str | None]] = {}
+
+
+def _now() -> float:
+    """Monotonic seconds, a function so a test can move the clock."""
+    return time.monotonic()
 
 
 class ContractMismatch(ChemclawError):
@@ -69,13 +84,29 @@ async def served_version(url: str, budget: float) -> str | None:
     return reported if isinstance(reported, str) else None
 
 
-def _once(connector: str, finding: str) -> bool:
-    """Whether this finding about `connector` is new to the process (and mark it seen)."""
-    key = (connector, finding)
-    if key in _LOGGED:
+def _once(connector: str, kind: str, value: str) -> bool:
+    """Whether `value` is new for this `(connector, kind)` (and mark it seen)."""
+    if _LOGGED.get((connector, kind)) == value:
         return False
-    _LOGGED.add(key)
+    _LOGGED[(connector, kind)] = value
     return True
+
+
+async def _served(connector: str, url: str) -> str | None:
+    """The server's `contract_version`, from memory while it is fresh, else asked.
+
+    A failed or silent probe keeps what was learned before and is itself remembered for the same
+    window, so a dark `/healthz` is not asked again every turn and cannot switch the check off.
+    """
+    window = settings.connector_breaker_window_seconds
+    remembered = _SERVED.get(connector)
+    if remembered is not None and remembered[0] == url and _now() - remembered[1] < window:
+        return remembered[2]
+    asked = await served_version(url, settings.connector_health_timeout_seconds)
+    if asked is None and remembered is not None and remembered[0] == url:
+        asked = remembered[2]
+    _SERVED[connector] = (url, _now(), asked)
+    return asked
 
 
 async def check_contract(connector: str, declared: str | None, health_url: str | None) -> None:
@@ -85,17 +116,17 @@ async def check_contract(connector: str, declared: str | None, health_url: str |
         ContractMismatch: the two differ in MAJOR; the message names the connector and both values.
     """
     if declared is None or health_url is None:
-        if _once(connector, "manifest"):
+        if _once(connector, "manifest", str(declared)):
             logger.info(
                 "connector %s: contract version unknown, its manifest declares %s; not checked",
                 connector,
                 "no contract_version" if declared is None else "no health route to ask",
             )
         return
-    served = await served_version(health_url, settings.connector_health_timeout_seconds)
+    served = await _served(connector, health_url)
     agreement = compare(declared, served)
     if agreement == "unknown":
-        if _once(connector, f"served:{served}"):
+        if _once(connector, "served", f"{declared}:{served}"):
             logger.warning(
                 "connector %s: contract version unknown, its manifest declares %s and its server "
                 "reported %s on /healthz; not checked",
@@ -104,7 +135,7 @@ async def check_contract(connector: str, declared: str | None, health_url: str |
                 served or "none",
             )
     elif agreement == "minor":
-        if _once(connector, f"minor:{declared}:{served}"):
+        if _once(connector, "minor", f"{declared}:{served}"):
             logger.warning(
                 "connector %s: the manifest declares contract_version %s and the server reports "
                 "%s; the surfaces differ additively, so the connector is used",
@@ -122,5 +153,6 @@ async def check_contract(connector: str, declared: str | None, health_url: str |
 
 
 def forget_contract_findings() -> None:
-    """Drop what has been logged, so a test sees a finding again. Nothing else is remembered."""
+    """Drop what has been logged and what servers said, so a test starts from nothing."""
     _LOGGED.clear()
+    _SERVED.clear()

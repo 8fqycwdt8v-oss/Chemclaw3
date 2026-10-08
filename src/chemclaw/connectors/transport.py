@@ -25,7 +25,7 @@ from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.exceptions import McpError
 
-from chemclaw.connectors.contract import check_contract
+from chemclaw.connectors.contract import ContractMismatch, check_contract
 from chemclaw.connectors.manifest import QueuedDispatch
 from chemclaw.connectors.queued import queued_interceptor
 from chemclaw.connectors.reachability import recently_unreachable, record_reachability
@@ -95,6 +95,9 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     """
     if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
         raise exc
+    if isinstance(exc, ContractMismatch):
+        logger.warning("%s; its tools are unavailable this turn", exc)
+        return
     logger.warning(
         "connector %s is unreachable (%s); its tools are unavailable this turn",
         connector,
@@ -209,7 +212,10 @@ class HeldConnectorSession:
             raise
         # Both outcomes are recorded, and the healthy one is not an optimisation: it is what lets a
         # connector that recovered be readmitted in a process whose readiness route never runs.
-        record_reachability(self._spec.name, reachable=self._failure is None, dialled=True)
+        # A refusal for its contract is not a reachability verdict: the server answered, and the
+        # breaker would otherwise stop the next turns dialling a host that is up.
+        if not isinstance(self._failure, ContractMismatch):
+            record_reachability(self._spec.name, reachable=self._failure is None, dialled=True)
         if self._failure is not None:
             absorb_connect_failure(self._spec.name, self._failure)
         return self._tools
