@@ -13,6 +13,7 @@ import os
 import typing
 from pathlib import Path
 
+from chemclaw.api.contract import build_document
 from chemclaw.api.events import TURN_EVENT_REF, ErrorCode, Event
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "turn_events_contract.json"
@@ -131,17 +132,5 @@ def test_both_streaming_routes_point_at_the_union_they_stream() -> None:
 
 
 def _published_document() -> dict[str, typing.Any]:
-    """The OpenAPI document `create_app()` actually serves, built once per call.
-
-    The startup refusals are satisfied (loopback bind, loopback-gateway acknowledgement, as `make
-    chat` does) rather than patched out.
-    """
-    from chemclaw.api.app import create_app
-    from chemclaw.core.config import settings
-
-    previous = (settings.service_host, settings.llm_allow_loopback_gateway)
-    settings.service_host, settings.llm_allow_loopback_gateway = "127.0.0.1", True
-    try:
-        return dict(create_app().openapi())
-    finally:
-        settings.service_host, settings.llm_allow_loopback_gateway = previous
+    """The OpenAPI document `create_app()` actually serves (`api.contract.build_document`)."""
+    return build_document()

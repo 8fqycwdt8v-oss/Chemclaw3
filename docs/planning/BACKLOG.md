@@ -33,6 +33,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
+- [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
+  clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised
@@ -100,7 +102,6 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **Push-to-registry + `helm upgrade` rollout, run** — written, never run · *Revisit:* a registry, namespace and the Jenkins credential ids in `deploy/jenkins/README.md`.
 - **A chart for `Chemclaw3_ui` and the `Chemclaw3-mcp` servers** — neither repo is deployable as a chart yet · *Revisit:* the rollout row above closes.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
-- **Two background workers on one `background-jobs` queue** — `workers.background.replicas` is 1 because nobody has driven two · *Revisit:* a live broker with two workers.
 - **A live target for the results store** — the publish path is built, no real sink exists · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
 - **Backup and restore tooling for Postgres and Temporal** — no owner of those stores is named · *Revisit:* an owner exists to run and verify a restore.
 - **A worker whose broker is down never opens its probe port** — `durable/background_worker.py::main` connects first · *Revisit:* a second dependency joins `connect()` or an operator misdiagnoses an outage.

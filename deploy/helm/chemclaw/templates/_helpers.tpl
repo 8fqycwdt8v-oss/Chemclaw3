@@ -736,8 +736,16 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
+{{- /* The claim is the operator's, so the chart cannot read its access mode; it asks to be told.
+       A `ReadWriteOnce` claim attaches to one node: with two background workers spread across
+       nodes the second sits `Pending` on the attach, and with `minAvailable: 1` that leaves no
+       disruption allowed, so a node drain blocks. Refused at render rather than discovered there.
+       One replica keeps working with any claim. */ -}}
 {{- define "chemclaw.documentShareVolume" -}}
 {{- if .Values.documentShare.enabled }}
+{{- if and (gt (int .Values.workers.background.replicas) 1) (not (has .Values.documentShare.accessMode (list "ReadWriteMany" "ReadOnlyMany"))) }}
+{{- fail (printf "documentShare is mounted on every background worker, and workers.background.replicas is %v: state documentShare.accessMode as ReadWriteMany or ReadOnlyMany (the access mode of the claim %q). A ReadWriteOnce claim attaches to one node, so the second worker would stay Pending and the PodDisruptionBudget would block node drains. Use a shareable volume, or set workers.background.replicas to 1." .Values.workers.background.replicas .Values.documentShare.claimName) }}
+{{- end }}
 - name: document-share
   persistentVolumeClaim:
     claimName: {{ .Values.documentShare.claimName }}

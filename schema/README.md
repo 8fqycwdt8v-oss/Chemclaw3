@@ -1,14 +1,23 @@
-# `schema/` — the schemas ChemClaw3 ships for databases it does not own
+# `schema/` — the contracts ChemClaw3 publishes
+
+Two kinds, one per subdirectory: `api/` is the HTTP and event contract the browser front end is
+generated from; `result-store/` is the database schema for a store somebody else runs.
+
+## `api/`
+
+`openapi.json`, generated from the running app by `make openapi` and held current by a test.
+`api/README.md` has the version rules.
+
+## `result-store/` — schemas for databases it does not own
 
 Everything under `infra/sql/` is *this* system's own database, applied by `make db-migrate`.
-Everything here is a schema for a store **somebody else runs**, published so a DBA can apply it.
+Everything in `result-store/` is a schema for a store **somebody else runs**, published so a DBA can
+apply it.
 
 The distinction is the reason the two are not in one directory: this system never holds DDL
 privileges on the databases here, and its runtime principal is deliberately not the principal that
 can define their tables — the same split `postgres_migration_dsn` and `postgres_dsn` already make
 one level in.
-
-## `result-store/`
 
 The canonical schema for a computed-results database: every calculation this system performs, as a
 queryable scientific record. `src/chemclaw/publish/README.md` explains what is written and why;

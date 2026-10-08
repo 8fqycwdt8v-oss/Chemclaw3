@@ -127,8 +127,8 @@ publicly-trusted certificates none of this is needed (`sslmode=require` verifies
 `verify-full` needs the CA file).
 
 Other objects you create yourself, when you turn on what needs them: one ConfigMap per
-`extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim
-for an SMB/CIFS share, and the image pull secrets.
+`extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim (state its `documentShare.accessMode`;
+ReadWriteMany or ReadOnlyMany with more than one background worker) for an SMB/CIFS share, and the image pull secrets.
 
 ### 5. Wire the MCP tool fleet
 
@@ -483,6 +483,74 @@ pod and prepended to `CHEMCLAW_RESULT_SINKS_DIR`, so a folder named `postgres` r
   because Helm waits for a hook and a retrying Job would otherwise hold the release in
   `pending-upgrade`. Recovery: `docs/guides/runbook.md` §(xi).
 
+## PgBouncer in front of Postgres (the default above three replicas)
+
+Every pooled process opens up to `CHEMCLAW_PG_POOL_MAX_SIZE` connections per pool, and
+`postgres.maxConnections` has to cover the sum over the whole fleet at a rollout's peak
+(`ChemclawFleetNearItsConnectionCeiling` warns at 80% of it, `ChemclawFleetAboveItsConnectionCeiling`
+at 100%). That sum is a *declared* ceiling, and a process holds far fewer than it declares, as
+measured on one process of each role against a scratch database (`pg_stat_activity`, 16-wide pools):
+
+| Role | Pools | Declared | Backends at rest | Peak measured |
+| --- | --- | --- | --- | --- |
+| Front door | 3: the stores' (2 to 16), `/readyz`'s own (1), the checkpointer's (0 to 16) | 33 | 5 | 18 under 32 concurrent queries |
+| Background or connector worker | 1 (opened on first use) | 16 | 0 before the first query, 3 after | 8 at 8 concurrent activities |
+
+Above three replicas, put PgBouncer between the pods and the server so the database sees the
+pooler's server-side connections rather than the declared sum. Below that, direct connections are
+simpler and the 80% alert is the signal to move.
+
+**Two aliases for one database, because not every connection survives transaction pooling.**
+
+| Setting | Points at | Pool mode |
+| --- | --- | --- |
+| `CHEMCLAW_POSTGRES_DSN` | the pooler, alias `chemclaw` | `transaction` |
+| `CHEMCLAW_SESSION_STORE_DSN` | the pooler, alias `chemclaw-session`, or the server itself | `session` (or direct) |
+| `CHEMCLAW_POSTGRES_MIGRATION_DSN` | the server itself | direct |
+
+The same `host:port` for both aliases is one server to the chart's accounting; a different port (the
+server directly) is a split session store, and `postgres.sessionStoreMaxConnections` then bounds it.
+Declare `postgres.maxConnections` as the pooler's `max_client_conn` for the transaction alias, since
+that is what the fleet's pools are checked against, and size `default_pool_size` and the session
+alias so that all server-side connections plus Temporal's and any hand-run `psql` fit the server's
+`max_connections`.
+
+**Connections that must bypass a transaction pooler** (they hold session state across statements, or
+need a statement a pooled transaction cannot run), and where each dials:
+
+| Connection | Why | Dials |
+| --- | --- | --- |
+| LangGraph checkpointer pool (`agent/checkpointer.py`) | autocommit, `setup()` runs `CREATE INDEX CONCURRENTLY` | `session_store_dsn` |
+| Checkpoint-table setup lock (`_setup_once`) | session-level `pg_try_advisory_lock` held across `setup()` | `session_store_dsn` |
+| Git note submission lock (`kg/git_writer.py`) | session-level `pg_advisory_lock` held across fetch, commit and push | `session_store_dsn` |
+| Single-instance job locks (`core/job_lock.py`) | session-level `pg_try_advisory_lock` held for the pass | `session_store_dsn` |
+| Migrations and grants (`postgres_migration_dsn`) | DDL, `CREATE INDEX CONCURRENTLY`, no statement timeout | the server |
+| Session-layer tables (`session_*`, turn claims, pending requests) | resolved through `session_store_dsn` already; coordination built on locks or `LISTEN/NOTIFY` belongs here | `session_store_dsn` |
+
+A transaction pooler hands a session-level lock to whichever server connection ran the statement and
+the next transaction may land on another, so the lock is leaked or never held; a `LISTEN` is lost the
+same way. Nothing in `src/` uses `LISTEN/NOTIFY` today. Code that adds a session-level advisory lock,
+`LISTEN`, a plain `SET`, or a held cursor must dial `settings.session_store_dsn or
+settings.postgres_dsn` on a dedicated connection, as `core/job_lock.py` does. These are safe in
+transaction mode: `pg_advisory_xact_lock` (the session queue, attachments, exhibits, skill store,
+behaviour proposals, migrations), `FOR UPDATE SKIP LOCKED` inside one transaction, and
+`set_config(..., true)` (the pgvector recall settings).
+
+**Also check, through the pooler, before relying on it.**
+
+- Statement bounds. Pools connect with libpq `options` carrying `statement_timeout` and
+  `plan_cache_mode=force_custom_plan`. PgBouncer either refuses that startup parameter or, with
+  `ignore_startup_parameters = options`, drops it without saying so, and then no statement is
+  bounded. Set the same values on the role (`ALTER ROLE chemclaw SET statement_timeout =
+  '<pg_statement_timeout_seconds>s'`, and `plan_cache_mode`) and confirm `SHOW statement_timeout`
+  through each alias.
+- Prepared statements. psycopg prepares a statement after five uses. Transaction pooling needs a
+  PgBouncer that tracks prepared statements (1.21 or later, with `max_prepared_statements` above
+  zero), or those pools fail with "prepared statement does not exist".
+- `server_idle_timeout`, `idle_transaction_timeout` and `query_wait_timeout` stay above
+  `pg_pool_timeout_seconds` and `pg_statement_timeout_seconds`, or the pooler cuts the connection
+  a pod believes it still holds.
+
 ## Where the knowledge graph lives in a pod
 
 One directory, not two. `Settings.knowledge_path` is `note_repo_dir / knowledge_dir` and every
@@ -614,11 +682,12 @@ the pod stops accepting. A grace period is a ceiling, not a wait: an idle pod ex
 cancelled and re-run by Temporal; holding a node drain open for ten minutes to avoid using that is
 the wrong trade. The front door is the opposite case — there is no retry for a chemist's turn.
 
-A `policy/v1` PodDisruptionBudget covers the front door only (`maxUnavailable: 1`, its own toggle
-`service.disruptionBudget.enabled` in case a PDB ever wedges a cluster upgrade). The workers get
-none: `workers.background.replicas` is 1 (two have never been driven — `values.yaml` says what is
-left to measure), and over a singleton `minAvailable: 1` would make the pod un-evictable and block
-every drain in the cluster, while `maxUnavailable: 1` permits exactly what no PDB permits.
+A `policy/v1` PodDisruptionBudget covers the front door (`maxUnavailable: 1`, its own toggle
+`service.disruptionBudget.enabled` in case a PDB ever wedges a cluster upgrade) and the background
+worker (`minAvailable: 1` of its two replicas, `workers.background.disruptionBudget`). The worker's
+is rendered only from two replicas: over a singleton `minAvailable: 1` would make the pod
+un-evictable and block every drain in the cluster. It covers drains, not a chart rollout, which is
+`Recreate` for the worker. Connector workers and servers have none.
 
 ## Upgrading a release installed before this chart
 

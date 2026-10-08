@@ -713,6 +713,11 @@ _COUNTERS: dict[str, str] = {
         "Pooled database operations that failed, by kind (unavailable / cancelled / deadlock / "
         "error) — statement timeouts and serialization failures had no handler and no counter."
     ),
+    "chemclaw_job_lock_skipped_total": (
+        "Runs of a single-instance job that did nothing because another worker held its "
+        "cluster-wide lock (`core/job_lock.py`), by job. Steady skips beside a job that never "
+        "completes mean the holder is wedged, not that the work is being shared."
+    ),
     "chemclaw_results_dead_lettered_total": (
         "Result publications retired to `failed` after exhausting their attempts. Distinct from "
         "`chemclaw_result_publish_failures_total`, which counts one row per *attempt*, so a "
@@ -982,6 +987,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_evidence_source_kept_total": ("source",),
     "chemclaw_embedding_calls_total": ("outcome",),
     "chemclaw_db_query_failures_total": ("kind",),
+    "chemclaw_job_lock_skipped_total": ("job",),
 }
 
 # The most label sets one counter may hold. Label values come from configuration and possibly

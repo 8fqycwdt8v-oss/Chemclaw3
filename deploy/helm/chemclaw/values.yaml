@@ -15,9 +15,9 @@
 #
 # Not 0. Every connector here is a single-replica Deployment, so a zero surge means the capability
 # is *down* during its own upgrade — an availability property traded for connections that are
-# already provisioned. The background worker is the one role that surges to nothing, and
-# `deployment-workers.yaml` says why: two of it race on a host-local knowledge checkout, which is a
-# correctness problem rather than a budget one.
+# already provisioned. The background worker is the one role that surges to nothing: it is
+# `Recreate`, so no second generation polls `background-jobs` while histories written by the first
+# are replayed (`deployment-workers.yaml`).
 #
 # What it costs is checked rather than argued: `Settings` refuses a fleet whose *peak* exceeds
 # `postgres.maxConnections`, and `tests/test_deploy_chart.py` prints both sides.
@@ -187,40 +187,23 @@ mcpFace:
   # deliberately unauthenticated `/healthz` and `/metrics`.
   ingressNamespaces: []
 
-# Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
-# below, each sized for its own work on its own queue (D-118).
+# Core's own Temporal worker. Every expensive workflow belongs to a connector bundle below, each
+# sized for its own work on its own queue (D-118).
 workers:
   background:
-    # Keep at 1 — and **the reason is now that nobody has driven two, not that two are known to
-    # break.** Saying which of those it is matters, because the two read identically in a values
-    # file and only one of them is a defect somebody can go and close.
-    #
-    # Both reasons this comment used to give are closed. The D-069 checkout lock: submissions to one
-    # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` only guards this pod's own
-    # worktree sweep, which is per-pod by construction. And `NoteReindexWorkflow`'s disagreement
-    # about the corpus (`D-2026-08-27-what-a-second-background-worker-would-race-on`), in both its
-    # halves: a prune is bounded by the corpus revision a row was built from
-    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and a note's fingerprint is
-    # a hash of its bytes rather than the mtime its own checkout wrote
-    # (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
-    # pods holding one commit now agree about every note — driven over two real clones against one
-    # index, where every note was re-embedded on every pass before and none is now. The rate was
-    # one endpoint call per note per pass, so what it cost a release was that release's own corpus
-    # size; the probe's corpus is this repository's 40 notes and is not a figure to read as yours.
-    #
-    # What is left is an *unmeasured* claim rather than a known race. The rest of this queue —
-    # periodic jobs as Temporal Schedules under `SKIP` (server-enforced, so worker count cannot
-    # reach them), one writer on the ELN cursor, retention re-checking every predicate inside its
-    # own DELETE, the result outbox claiming rows with `FOR UPDATE SKIP LOCKED` — is an argument
-    # that has never been run with two workers polling. It is a good argument and it is not
-    # evidence, which is the distinction this repository keeps having to relearn. `BACKLOG.md`
-    # carries what to drive before this becomes a 2.
-    #
-    # Note that `strategy: Recreate` in `deployment-workers.yaml` does **not** relax with this: its
-    # second justification — one code version replays any unfinished history — is independent of
-    # the replica count and still live.
-    replicas: 1
+    # Two, so a node drain, an eviction or a crashed pod leaves `background-jobs` polled. Any
+    # number works: the periodic jobs are Schedules under SKIP (the server allows one run), the
+    # other activities are idempotent or claim-based, and the one pass that must not overlap
+    # itself, the note reindex, takes a cluster-wide Postgres advisory lock
+    # (`core/job_lock.py`). The inventory is in `docs/guides/runbook.md`. Each replica opens one
+    # pool of `CHEMCLAW_PG_POOL_MAX_SIZE`, which `chemclaw.fleetPools` counts. A chart rollout
+    # still replaces both pods at once (`deployment-workers.yaml`, `Recreate`).
+    replicas: 2
+    # `minAvailable: 1` over the pods above, so a drain cannot take the last poller. Rendered only
+    # from two replicas; a PDB over one pod would block every node drain.
+    disruptionBudget:
+      enabled: true
+      minAvailable: 1
     # What one document parse may allocate **on this pod**, as an explicit
     # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` on this Deployment.
     #
@@ -274,6 +257,10 @@ workers:
 documentShare:
   enabled: false
   claimName: "chemclaw-sharedrive"
+  # The access mode of the claim above, as you created it. The chart cannot read it, so it asks:
+  # with more than one background worker it must be ReadWriteMany or ReadOnlyMany, because every
+  # worker mounts the share and a ReadWriteOnce claim attaches to one node. Unchecked at one worker.
+  accessMode: ""
   mountPath: "/mnt/sharedrive"
 
 # The knowledge graph is a Git-backed Markdown tree that every reader resolves as a plain local
@@ -1665,6 +1652,12 @@ monitoring:
     # this is the only signal that covers a slow burn across pods. Deliberately generous —
     # tune it to the deployment's real baseline rather than treating the default as meaningful.
     tokensPerHourWarning: 2000000
+    # The share of a declared Postgres ceiling (`postgres.maxConnections`, and
+    # `sessionStoreMaxConnections` for a split session store) that the fleet's pools may reach
+    # before `ChemclawFleetNearItsConnectionCeiling` warns. Below 1 on purpose: the sum counts
+    # pools, and a migration Job, a hand-run `psql`, a job-lock connection and a rolling update's
+    # second generation all connect outside it.
+    connectionsWarningFraction: 0.8
     # The alert whose intent is "sustained", not "it happened once". A `for:` cannot express that
     # over an `increase(...) > 0`: the expression keeps returning a sample for the whole range
     # window after a single increment, so a `for:` shorter than the window is satisfied by one blip
