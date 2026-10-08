@@ -60,6 +60,8 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.text_overlay import block_text
+from chemclaw.agent.turn_ambient import turn_caps
+from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.connectors.registry import (
     discovered,
     enabled,
@@ -369,7 +371,7 @@ def _bound_surface() -> tuple[list[BaseTool], dict[str, str], dict[str, list[Any
         for tool in _allowed(_served_in_process(spec.name)[0], spec.allowed_tools):
             connectors.append(tool)
             origin[tool.name] = spec.name
-    with _as_a_deployment_runs():
+    with _as_a_deployment_runs(), turn_caps(TurnUsage()):
         graph = build_langgraph_agent(
             model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
             profile=profile,
