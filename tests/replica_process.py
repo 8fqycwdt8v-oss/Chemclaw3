@@ -69,7 +69,12 @@ def _delay_writes(seconds: float) -> None:
         return await book(actor, tokens)
 
     PostgresTurnCostSink.record = slow_record  # type: ignore[method-assign]
-    budget_store.book = slow_book  # type: ignore[assignment]
+    budget_store.book = slow_book
+
+
+def _no_connectors(_profile: str | None = None) -> list[Any]:
+    """No connectors: the turn is the scripted model's."""
+    return []
 
 
 def main() -> None:
@@ -77,9 +82,7 @@ def main() -> None:
     delay = float(os.environ.get("REPLICA_WRITE_DELAY", "0"))
     if delay:
         _delay_writes(delay)
-    app = create_app(
-        graph_factory=_Replica().graph_factory, connector_factory=lambda _profile=None: []
-    )
+    app = create_app(graph_factory=_Replica().graph_factory, connector_factory=_no_connectors)
     app.dependency_overrides[require_principal] = _as_header_user
     uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")
 
