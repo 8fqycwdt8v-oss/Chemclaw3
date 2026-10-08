@@ -12,7 +12,9 @@ Under `session_store=postgres` the bucket is one row per principal (`api/rate_li
 the rate is the deployment's however many replicas run. A principal just refused is remembered
 locally until its next token, which is correct because only this principal's own spends drain its
 bucket, and saves a round trip per refused request. If the database cannot be reached the
-in-process bucket answers instead, so the limit degrades to per-replica rather than to none.
+in-process bucket answers instead, so the limit degrades to per-replica rather than to none; after
+one failure the database is not asked again for `service_readiness_cache_seconds`, so an outage
+costs one pool timeout per window, not one per request.
 Under the in-memory store the in-process bucket is the only one.
 """
 
@@ -95,9 +97,9 @@ _limiter: RequestLimiter | None = None
 # losing an entry costs one round trip.
 _refused_until: BoundedLru[str, float] | None = None
 
-# Whether the last shared spend failed, so an outage is logged when it starts and when it ends and
-# not once per request.
-_shared_unreachable = False
+# Monotonic moment before which the shared bucket is not asked after a failure (0: reachable). Also
+# says when to log: an outage is logged when it starts and when it ends, not once per request.
+_shared_retry_at = 0.0
 
 
 def limiter() -> RequestLimiter:
@@ -117,10 +119,10 @@ def limiter() -> RequestLimiter:
 
 def reset_limiter() -> None:
     """Discard the process limiter so the next call rebuilds it from current config."""
-    global _limiter, _refused_until, _shared_unreachable
+    global _limiter, _refused_until, _shared_retry_at
     _limiter = None
     _refused_until = None
-    _shared_unreachable = False
+    _shared_retry_at = 0.0
 
 
 async def _check_shared(principal_id: str) -> None:
@@ -128,7 +130,7 @@ async def _check_shared(principal_id: str) -> None:
 
     Falls back to the in-process bucket when the database cannot be reached.
     """
-    global _refused_until, _shared_unreachable
+    global _refused_until, _shared_retry_at
     if _refused_until is None:
         _refused_until = BoundedLru(settings.service_rate_limit_max_principals)
     now = time.monotonic()
@@ -137,22 +139,32 @@ async def _check_shared(principal_id: str) -> None:
         if wait_until > now:
             raise RateLimited(wait_until - now)
     per_minute = settings.service_rate_limit_per_minute
+    backoff = settings.service_readiness_cache_seconds
+    if now < _shared_retry_at:
+        record_metric(lambda m: m.increment("chemclaw_rate_limit_shared_unavailable_total"))
+        limiter().check(principal_id)
+        return
+    if _shared_retry_at:
+        # The first request after the window is the probe; the window restarts so that requests
+        # arriving while it is in flight do not each wait on the database too.
+        _shared_retry_at = now + backoff
     try:
         spent = await rate_limit_store.spend(
             principal_id, per_minute=per_minute, burst=settings.service_rate_limit_burst
         )
     except (ConnectionError, OSError, psycopg.Error):
         record_metric(lambda m: m.increment("chemclaw_rate_limit_shared_unavailable_total"))
-        if not _shared_unreachable:
-            _shared_unreachable = True
+        if not _shared_retry_at:
             logger.warning(
                 "the shared request budget is unreachable; limiting per replica until it returns",
                 exc_info=True,
             )
+        # A zero window means "ask every time", which is also "never remember an outage".
+        _shared_retry_at = time.monotonic() + backoff if backoff else 0.0
         limiter().check(principal_id)
         return
-    if _shared_unreachable:
-        _shared_unreachable = False
+    if _shared_retry_at:
+        _shared_retry_at = 0.0
         logger.info("the shared request budget is reachable again")
     if not spent.allowed:
         wait = spent.retry_after(per_minute / 60.0)

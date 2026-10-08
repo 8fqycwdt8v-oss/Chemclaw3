@@ -17,7 +17,7 @@ from collections.abc import Coroutine, Iterable
 from typing import Any
 
 from chemclaw.core.config import settings
-from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.metrics_bridge import degraded, record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,8 @@ async def drain() -> None:
     """Wait up to the bookkeeping bound for every write in flight, for an orderly shutdown.
 
     Called from the front door's lifespan after the turns drain; bounded because the pod is inside
-    its termination grace.
+    its termination grace. The bound is the one a turn waits (a write is one statement, milliseconds
+    on a healthy database), so a write still running here is a database in trouble, and is counted.
     """
     writes = pending()
     if not writes:
@@ -89,6 +90,11 @@ async def drain() -> None:
     bound = settings.service_turn_bookkeeping_timeout_seconds
     _, unfinished = await asyncio.wait(writes, timeout=bound)
     if unfinished:
-        logger.warning(
-            "%d bookkeeping write(s) did not land within %.1fs of shutdown", len(unfinished), bound
+        degraded(
+            logger,
+            "bookkeeping",
+            "%d bookkeeping write(s) did not land within %.1fs of shutdown; they are lost",
+            len(unfinished),
+            bound,
+            exc_info=False,
         )

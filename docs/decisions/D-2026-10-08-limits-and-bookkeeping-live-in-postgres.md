@@ -62,7 +62,10 @@ admitted turns against `service_max_concurrent_turns_per_actor`; the slot is the
 killed mid-turn frees it when the lease lapses and no second lease exists. The process's own permit
 stays as the CPU bound and the fast path. A person who has just been refused is remembered locally
 until their next token (only their own spends drain their bucket). An unreachable database leaves the
-replica's own bucket, so the limit degrades to per replica and never to none. The status codes and
+replica's own bucket, so the limit degrades to per replica and never to none; after one failed spend
+the database is not asked again for `service_readiness_cache_seconds` (5 s), so an outage costs
+each replica one pool timeout per window rather than one per request (requests already in flight
+when it starts each wait their own). The status codes and
 headers are unchanged: 429 + `Retry-After` for the request budget and the early per-person check; the
 `at_capacity` frame for a turn that finds no slot within the admission timeout.
 
@@ -90,9 +93,23 @@ other's turns. Deleting it is declined for now.
   requests to a memory-store and a Postgres-store replica); one decision is 1.3 ms p50 / 2.0 ms p95.
   A saturated process makes about 1.1k decisions/s. The bookkeeping writes take 3.6 ms p50 / 7 ms p95
   together; time to the answer frame did not move beyond noise (263–270 ms against 266–270 ms).
-- A slow database delays an answer by at most the bookkeeping bound. A turn killed before its end
-  still has no cost row of its own; the next toucher books it `interrupted`
+- A slow database delays a finished turn's terminal frame by at most the bookkeeping bound: the cost
+  row, the budget booking and the spent approval share it. A timed-out turn waits the same bound for
+  the writes in flight before its `turn_timeout` frame; a Stop sends no frame. A turn killed before
+  its end still has no cost row of its own; the next toucher books it `interrupted`
   (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`).
+- The turn slot is a lease, so its bound is the lease's. A holder whose refresh lands after the
+  lease lapsed (the database was unreachable for longer than `service_turn_claim_lease_seconds`)
+  keeps its session claim but comes back unadmitted: the slot was free meanwhile, and re-asserting
+  it would push the count past the ceiling for the rest of the turn. The overshoot is bounded by the
+  number of turns in flight during an outage longer than a lease, each finishing uncounted;
+  `chemclaw_turn_claim_refresh_failures_total` shows the outage. A turn waiting for a slot holds its
+  process permit while it polls, so it can wait up to `service_turn_admission_timeout_seconds` for
+  the permit and again for the slot.
+- Rolling update: a pod still on the previous image never sets `admitted`, so its running turns are
+  not counted against the ceilings until it is replaced, and its upsert does not clear `admitted`
+  when it re-claims a lapsed row, which can leave one phantom slot until that turn ends. The
+  ceilings are exact once every pod runs the new image; the window is one rollout.
 - A spent approval for a turn killed mid-turn after acting is not written until the turn ends; moving
   the spend to the first state-changing call is a plan-gate change this record does not make.
 - `service_uvicorn_workers>1` stays refused; its message is pinned by a test and still lists the

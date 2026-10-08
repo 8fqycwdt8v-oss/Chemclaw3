@@ -47,6 +47,8 @@ _EXPECTED_SUBSYSTEMS = {
     # pod's own counters, so the cap silently binds per process again
     # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`).
     "budget_window",
+    # `core/bookkeeping.drain`: writes a turn owed the record that a shutdown could not wait for.
+    "bookkeeping",
     # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
     # database cannot answer — the load that follows reads the same database. Silent otherwise: the
     # memory bound it enforces would simply stop binding.

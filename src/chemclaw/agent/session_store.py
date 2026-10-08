@@ -364,7 +364,9 @@ _TURN_CLAIM = (
 )
 # Serialises admissions across replicas; released with the transaction, so no connection holds it
 # between turns.
-_ADMISSION_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('turn_admission', 0))"
+_ADMISSION_LOCK = (
+    "SELECT pg_advisory_xact_lock(hashtextextended('turn_admission:' || current_schema(), 0))"
+)
 # Take one of the deployment's concurrent-turn slots (`SessionTurnClaims.admit`). Run after
 # `_ADMISSION_LOCK` in the same transaction: this statement's snapshot is taken after the lock is
 # granted, so it counts every admission committed before it. A claim that is no longer this
@@ -387,9 +389,13 @@ _ACTOR_TURNS = (
     "WHERE actor = %s AND session_id <> %s AND expires_at > now()"
 )
 # Guarded by `holder` so a worker whose lease already lapsed and was taken by someone else cannot
-# extend — or delete — the new owner's claim.
+# extend — or delete — the new owner's claim. A lease that lapsed before this refresh (the database
+# was unreachable for longer than the lease) is extended, so the session stays ours, but it comes
+# back without its turn slot: while it was lapsed the slot was free and others may have taken it, so
+# re-asserting `admitted` would put the count over the ceiling. The turn finishes unadmitted.
 _TURN_REFRESH = (
-    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s) "
+    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s), "
+    "admitted = admitted AND expires_at > now() "
     "WHERE session_id = %s AND holder = %s"
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"

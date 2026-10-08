@@ -61,6 +61,7 @@ from chemclaw.api.state import (
     claim_holder,
     state,
 )
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
@@ -452,6 +453,10 @@ async def post_message(
         """Take a deployment-wide turn slot, polling until the admission timeout; sets `fleet_slot`.
 
         Yields one `queued` frame if the turn has to wait and none was sent for the process permit.
+        The process permit stays held while it polls, so a turn can wait up to the admission
+        timeout for the permit and again for the slot: a bound of twice
+        `service_turn_admission_timeout_seconds`, and the permit is the cheaper thing to hold (a
+        turn that has not started occupies no model capacity).
         Inert (the slot is taken) when no shared limit is configured or the claim store cannot
         share one. A database that cannot answer is not a full deployment: it raises, and the
         stream ends on the failure frame like any other store error.
@@ -590,6 +595,10 @@ async def post_message(
                     retryable=False,
                     correlation_id=correlation_id,
                 )
+                # The timed-out turn booked itself on tracked tasks while it was cancelled; wait
+                # for them (and, harmlessly, for any other write in flight on this loop) before
+                # the terminal frame, as an answered or failed turn does. Bounded.
+                await bookkeeping.settle(bookkeeping.pending())
                 yield sse_frame(timeout_event)
         except Exception as exc:
             # The stream's catch-all for failures above `run_turn`'s own guard (the factories) or

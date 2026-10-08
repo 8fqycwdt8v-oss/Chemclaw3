@@ -568,11 +568,12 @@ async def _finish_turn(
     the turn used its authorization, so the next request needs its own. Called before the terminal
     event is yielded, so the client never holds an answer whose bookkeeping a kill could still
     lose. A write that fails is logged and counted by its own site and never fails the turn; one
-    that outlasts `service_turn_bookkeeping_timeout_seconds` finishes in the background.
+    that outlasts `service_turn_bookkeeping_timeout_seconds` finishes in the background. The
+    approval is spent on a tracked task beside the others, so the one bound covers all of them.
     """
     tasks = _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
     if plan_gated:
-        await consume_turn_approval(session.session_id)
+        tasks.append(bookkeeping.schedule(consume_turn_approval(session.session_id)))
     await bookkeeping.settle(tasks)
 
 

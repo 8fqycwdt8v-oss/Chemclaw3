@@ -8,7 +8,7 @@ control that shows the second is not passing for a reason unrelated to sharing.
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +22,48 @@ from tests.replicas import marks, replica_env, replicas
 pytestmark = pytest.mark.filterwarnings("ignore::ResourceWarning")
 
 
+async def _clear_leases() -> None:
+    """Forget every turn lease in the test schema.
+
+    The ceilings count admitted leases schema-wide, so a lease an earlier test left (60 s) would
+    otherwise be counted by the next one.
+    """
+    from chemclaw.core.config import settings
+
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM session_turns")
+
+
+async def _expire(session_id: str) -> None:
+    """Lapse a lease at once, as if its holder had not refreshed it for a whole lease."""
+    from chemclaw.core.config import settings
+
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        await conn.execute(
+            "UPDATE session_turns SET expires_at = now() - interval '1 second' "
+            "WHERE session_id = %s",
+            (session_id,),
+        )
+
+
+async def _admitted(session_id: str) -> bool | None:
+    """Whether the session's lease row is admitted; `None` when there is no row."""
+    from chemclaw.core.config import settings
+
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT admitted FROM session_turns WHERE session_id = %s", (session_id,)
+        )
+        row = await cursor.fetchone()
+    return None if row is None else bool(row[0])
+
+
 @pytest.fixture
 def work(tmp_path: Path) -> Iterator[Path]:
     """A scratch directory for the replicas' marks and gate, over a migrated schema."""
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
+    asyncio.run(_clear_leases())
     yield tmp_path
 
 
@@ -212,6 +249,7 @@ async def test_simultaneous_admissions_never_exceed_the_ceiling() -> None:
     from chemclaw.agent.session_store import SessionTurnClaims
 
     await migrated_db_or_skip()
+    await _clear_leases()
     claims = SessionTurnClaims()
     async with db.pooling():  # as a replica runs: connections are the pool's, not one per request
         for _ in range(3):
@@ -231,6 +269,7 @@ async def test_simultaneous_admissions_never_exceed_one_persons_cap() -> None:
     from chemclaw.agent.session_store import SessionTurnClaims
 
     await migrated_db_or_skip()
+    await _clear_leases()
     claims = SessionTurnClaims()
     async with db.pooling():
         ids = await _claimed(12, actor="ana-race")
@@ -249,20 +288,69 @@ async def test_a_slot_is_freed_by_release_and_by_a_lapsed_lease() -> None:
     from chemclaw.agent.session_store import SessionTurnClaims
 
     await migrated_db_or_skip()
+    await _clear_leases()
     claims = SessionTurnClaims()
-    (first,) = await _claimed(1, lease=60.0)
-    (doomed,) = await _claimed(1, lease=0.6)
-    assert await claims.admit(first, f"h-{first}", fleet_cap=2, actor=None, actor_cap=0)
-    assert await claims.admit(doomed, f"h-{doomed}", fleet_cap=2, actor=None, actor_cap=0)
-    (third,) = await _claimed(1)
-    assert not await claims.admit(third, f"h-{third}", fleet_cap=2, actor=None, actor_cap=0)
+    (first, doomed, third, fourth) = await _claimed(4)
 
-    await asyncio.sleep(0.8)  # `doomed`'s pod never refreshed it
-    assert await claims.admit(third, f"h-{third}", fleet_cap=2, actor=None, actor_cap=0)
+    def admit(session_id: str) -> Awaitable[bool]:
+        return claims.admit(session_id, f"h-{session_id}", fleet_cap=2, actor=None, actor_cap=0)
+
+    assert await admit(first)
+    assert await admit(doomed)
+    assert not await admit(third)
+
+    await _expire(doomed)  # its pod never refreshed it
+    assert await admit(third)
     await claims.release(first, f"h-{first}")
-    (fourth,) = await _claimed(1)
-    assert await claims.admit(fourth, f"h-{fourth}", fleet_cap=2, actor=None, actor_cap=0)
+    assert await admit(fourth)
     await asyncio.gather(*(claims.release(s, f"h-{s}") for s in (third, fourth)))
+
+
+async def test_a_lease_that_lapsed_comes_back_without_its_slot() -> None:
+    """A holder whose refresh lands after its lease lapsed keeps the session but not the slot.
+
+    While the lease was lapsed the slot was free and another turn took it; if the late refresh
+    re-asserted `admitted`, the count would pass the ceiling and stay there until the turn ended.
+    """
+    from chemclaw.agent.session_store import SessionTurnClaims
+
+    await migrated_db_or_skip()
+    await _clear_leases()
+    claims = SessionTurnClaims()
+    (slow, other) = await _claimed(2)
+
+    def admit(session_id: str) -> Awaitable[bool]:
+        return claims.admit(session_id, f"h-{session_id}", fleet_cap=1, actor=None, actor_cap=0)
+
+    assert await admit(slow)
+
+    await _expire(slow)  # the database was unreachable for longer than a lease
+    assert await admit(other)
+    assert await claims.refresh(slow, f"h-{slow}", 60.0), "the session must stay the holder's"
+    assert await _admitted(slow) is False
+    assert await _admitted(other) is True
+    (third,) = await _claimed(1)
+    assert not await admit(third), "the ceiling of one was passed"
+
+    # A refresh inside the lease changes nothing.
+    assert await claims.refresh(other, f"h-{other}", 60.0)
+    assert await _admitted(other) is True
+
+
+async def test_taking_over_a_lapsed_lease_starts_unadmitted() -> None:
+    """A new claim on a lapsed, admitted row must not inherit the dead turn's slot."""
+    from chemclaw.agent.session_store import SessionTurnClaims
+
+    await migrated_db_or_skip()
+    await _clear_leases()
+    claims = SessionTurnClaims()
+    (session,) = await _claimed(1)
+    assert await claims.admit(session, f"h-{session}", fleet_cap=0, actor=None, actor_cap=0)
+    assert await _admitted(session) is True
+    await _expire(session)
+
+    assert await claims.claim(session, "successor", 60.0, actor="ana")
+    assert await _admitted(session) is False
 
 
 async def test_a_claim_that_is_no_longer_ours_is_not_admitted() -> None:
@@ -346,4 +434,45 @@ async def test_a_database_that_cannot_answer_leaves_the_replicas_own_bucket(
     await rate_limit.enforce_request_budget("ana")
     with pytest.raises(rate_limit.RateLimited):
         await rate_limit.enforce_request_budget("ana")
+    rate_limit.reset_limiter()
+
+
+async def test_an_outage_costs_one_wait_not_one_per_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the shared bucket is down, requests after the first skip the database altogether.
+
+    Each failed spend takes its pool timeout; without a backoff every authenticated request would
+    wait that long before falling back. Five requests against a spend that takes 0.3 s to fail cost
+    one wait, and the database is asked once; after the window it is asked again (the probe).
+    """
+    import time
+
+    from chemclaw.api import rate_limit, rate_limit_store
+    from chemclaw.core.config import settings
+
+    asked: list[str] = []
+
+    async def _slow_failure(principal: str, **_kwargs: Any) -> Any:
+        asked.append(principal)
+        await asyncio.sleep(0.3)
+        raise ConnectionError("Postgres unreachable")
+
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_rate_limit_per_minute", 600.0)
+    monkeypatch.setattr(settings, "service_rate_limit_burst", 100.0)
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 1.0)
+    monkeypatch.setattr(rate_limit_store, "spend", _slow_failure)
+    rate_limit.reset_limiter()
+
+    started = time.perf_counter()
+    for _ in range(5):
+        await rate_limit.enforce_request_budget("ana")
+    elapsed = time.perf_counter() - started
+    assert asked == ["ana"], "later requests asked the unreachable database again"
+    assert elapsed < 0.9, f"five requests took {elapsed:.2f}s against one 0.3s wait"
+
+    await asyncio.sleep(1.1)  # past the window: the next request is the probe
+    await rate_limit.enforce_request_budget("ana")
+    assert asked == ["ana", "ana"]
     rate_limit.reset_limiter()

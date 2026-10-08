@@ -29,7 +29,7 @@ _SPEND = """
                         THEN 1 ELSE 0 END,
         allowed = LEAST(%(burst)s, b.tokens
                        + GREATEST(0, EXTRACT(EPOCH FROM now() - b.refilled_at)) * %(rate)s) >= 1,
-        refilled_at = now()
+        refilled_at = GREATEST(b.refilled_at, now())
     RETURNING allowed, tokens
 """
 

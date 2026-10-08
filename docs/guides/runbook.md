@@ -2411,6 +2411,11 @@ Two properties worth knowing before you tune it:
   `require_principal`, which is the only place the budget is spent. If a probe ever starts getting
   429s, the gate has been moved somewhere it should not be.
 
+**During a rolling update the turn ceilings are approximate.** Pods still on the previous image do
+not mark their running turns as holding a slot, so `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` and
+the per-actor cap under-count until the last old pod is gone. A holder whose lease lapsed during a
+database outage finishes its turn uncounted. Neither outlasts a rollout or a turn.
+
 **429, `Retry-After: N`, on `POST /sessions/{id}/messages` only — and this is a *different* refusal
 with the same shape.** The per-actor concurrent-turn cap
 (`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`). It answers when one principal already holds

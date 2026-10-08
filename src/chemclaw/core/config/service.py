@@ -100,6 +100,8 @@ class ServiceSettings(BaseSettings):
     # waiting on the model). The fleet ceiling below is where the endpoint's real capacity is
     # stated.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
+    # Under `postgres` it also bounds the wait for a deployment-wide slot, taken after the permit
+    # and with the permit held, so a turn can wait up to twice this before it is shed.
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
     # Per-actor cap on simultaneous turns across their sessions, so one principal cannot hold every
     # permit (the rate limit meters rate, not concurrency). 0 disables, the code default, so

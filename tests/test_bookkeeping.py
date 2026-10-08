@@ -14,6 +14,7 @@ import pytest
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.turn_cost import TurnCost
+from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api import budget_store
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
@@ -199,3 +200,35 @@ async def test_there_is_nothing_to_wait_for_without_a_loop_or_a_database() -> No
     await done
     await bookkeeping.settle([done])
     assert time.perf_counter() - started < 0.2
+
+
+async def test_a_hung_approval_write_delays_the_terminal_frame_by_the_bound_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spent approval is bookkeeping like the cost row: bounded, and left running behind it."""
+    from chemclaw.api import runner
+
+    async def _hangs_for_ever(_session_id: str) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(runner, "consume_turn_approval", _hangs_for_ever)
+    monkeypatch.setattr(settings, "service_turn_bookkeeping_timeout_seconds", 0.3)
+    ledger = runner._TurnLedger(correlation_id="approval-hang", usage=TurnUsage())
+
+    started = time.perf_counter()
+    try:
+        await runner._finish_turn(
+            TurnSession(session_id="approval-hang-s"),
+            ledger,
+            actor="bookkeeping-ana",
+            profile=None,
+            budget=None,
+            plan_gated=True,
+        )
+        elapsed = time.perf_counter() - started
+        assert 0.25 < elapsed < 3.0, f"the terminal frame waited {elapsed:.2f}s on a 0.3s bound"
+        assert bookkeeping.pending(), "the hung approval write was abandoned, not left running"
+    finally:
+        for task in bookkeeping.pending():
+            task.cancel()
+        await asyncio.gather(*bookkeeping.pending(), return_exceptions=True)
