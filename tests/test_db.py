@@ -248,6 +248,10 @@ _UNBOUNDED_BY_DESIGN = {
     # (upstream's `setup()`, with `CREATE INDEX CONCURRENTLY`) under an advisory lock held across
     # it, so it cannot use the saver's own pool without deadlocking a small one.
     "chemclaw/agent/checkpointer.py",
+    # `core/job_lock.exclusive_job` holds one dedicated autocommit connection for as long as it holds
+    # the advisory lock: a pooled connection would be returned to the pool still locked, and the
+    # lock lives with the session. It runs one statement to take and one to release the lock.
+    "chemclaw/core/job_lock.py",
 }
 _DEFINITION_SITE = "chemclaw/core/db.py"
 
@@ -292,9 +296,9 @@ def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> Non
     """`connect()` is the escape hatch from the default bound, so its callers are enumerable.
 
     It defaults to no statement timeout because a migration's index build runs long. Every caller
-    must be in `_UNBOUNDED_BY_DESIGN` with its reason; what they share is running a schema migration
-    under an advisory lock on a connection nobody else is handed. Any other caller is a store
-    running unbounded.
+    must be in `_UNBOUNDED_BY_DESIGN` with its reason; what they share is a connection nobody else
+    is handed that must outlive a pool borrow (a migration under an advisory lock, a session lock).
+    Any other caller is a store running unbounded.
     """
     assert _modules_calling_db_connect() == _UNBOUNDED_BY_DESIGN
 
