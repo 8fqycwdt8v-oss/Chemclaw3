@@ -1061,6 +1061,30 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 25,
+      "type": "graph",
+      "title": "Calculation misses across pods",
+      "description": "What happened to a cache miss on a key another pod might also be computing. `won` computed it here, `awaited` waited for the pod that held the claim instead of duplicating its work, `taken_over` computed after the previous holder's lease lapsed or its attempt failed, `peer_failed` received the holder's failure, `wait_timed_out` ran out of its budget while the holder was still working, `lost` is a holder whose claim was taken from under it by a stall longer than the lease. Sustained `taken_over` is a pod dying mid-calculation; the second series is the 95th percentile of how long waiters waited, which is mostly the computation itself.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_calc_claims_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_calc_claim_wait_seconds_bucket[1h])))",
+          "legendFormat": "p95 wait (s)",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

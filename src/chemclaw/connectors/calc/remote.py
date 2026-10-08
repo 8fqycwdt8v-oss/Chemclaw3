@@ -387,4 +387,11 @@ async def cached_remote(
         async def _compute() -> ResultPayload:
             return await remote_compute(session, tool, arguments)
 
-        return await cached_compute(store, keyed.key, _compute, structure_id=keyed.structure_id)
+        # A waiter on another process's computation gets the budget a computer would: this call's.
+        return await cached_compute(
+            store,
+            keyed.key,
+            _compute,
+            structure_id=keyed.structure_id,
+            wait_seconds=timeout_seconds,
+        )
