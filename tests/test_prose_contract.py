@@ -9,9 +9,9 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 import chemclaw
+import chemclaw.cli.model_text_inventory as inventory
 import chemclaw.cli.validate_prose_contract as prose
 from chemclaw.agent.chemclaw_agent import (
     _INSTRUCTION_BLOCKS,
@@ -26,6 +26,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import get_profile
+from chemclaw.cli.model_text_inventory import _marked_prose, model_facing_descriptions
 from chemclaw.cli.validate_prose_contract import (
     _ALLOWED_NON_TOOLS,
     check_instruction_blocks,
@@ -40,151 +41,6 @@ from chemclaw.kg.note import KNOWN_NOTE_TYPES
 def test_shipped_prose_names_only_real_tools() -> None:
     """The committed skills + instructions pass — the regression guard itself."""
     assert check_prose_contract() == []
-
-
-def _model_facing_descriptions() -> dict[str, str]:
-    """Every text this system ships to a model, by name.
-
-    Seven classes: in-process tool docstrings, connector bundles' served tool docstrings (read with
-    `ast`, so no bundle's dependencies are imported), durable-job docstrings as assembled, every
-    loadable `SKILL.md`, the system prompt's blocks (both `_INSTRUCTION_BLOCKS` and the
-    `_SAFETY_BLOCKS` appended to every profile), deployment profiles' `instructions:` and
-    `description:`, template launchers' docstrings, and module constants marked
-    `core/model_prose.ModelProse`. Unmarked prompt text built inline in a function body is outside.
-    `test_the_universe_reaches_every_class_the_model_reads` asserts each class contributes, and how
-    much. Shipped prose that correctly names the removed tier or gate is handled by
-    `_TRUE_ABOUT_WHAT_IS_GONE`.
-    """
-    import ast
-    import inspect
-    from pathlib import Path
-
-    import chemclaw
-    from chemclaw.core.tool_registry import registered_tools
-
-    described: dict[str, str] = {
-        getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or "" for fn in registered_tools()
-    }
-    bundles = sorted(Path(chemclaw.__file__).parent.glob("connectors/*/server/tools.py"))
-    assert bundles, "no connector bundle tool modules found; this test is reading the wrong tree"
-    for module in bundles:
-        tree = ast.parse(module.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-                continue
-            served = any(
-                isinstance(one, ast.Call)
-                and isinstance(one.func, ast.Attribute)
-                and one.func.attr == "tool"
-                for one in node.decorator_list
-            )
-            if served:
-                where = f"{module.parent.parent.name}:{node.name}"
-                described[where] = ast.get_docstring(node) or ""
-    described.update(_job_tool_docstrings())
-    described.update(_shipped_skill_bodies())
-    described.update(_instruction_block_texts())
-    described.update(_profile_prose())
-    described.update(_template_launcher_docstrings())
-    described.update(_marked_prose())
-    return described
-
-
-def _job_tool_docstrings() -> dict[str, str]:
-    """The durable-job tools' descriptions, assembled as `connectors/jobs.py::_docstring` does.
-
-    The summary, the `description:` and one line per declared parameter; the `results` bundle's
-    whole model-facing surface is these entries.
-    """
-    from chemclaw.connectors.jobs import _docstring
-    from chemclaw.connectors.registry import discovered
-
-    found: dict[str, str] = {}
-    for connector, (_, manifest) in discovered().items():
-        for job in manifest.jobs:
-            found[f"job:{connector}:{job.name}"] = _docstring(job)
-    assert found, "no connector jobs discovered; this test is reading the wrong tree"
-    return found
-
-
-def _shipped_skill_bodies() -> dict[str, str]:
-    """Every `SKILL.md` a turn can load, bundle-local and the repository's own.
-
-    Bundle skills reach a turn through `registry.skills_dirs`.
-    """
-    import chemclaw
-
-    package = Path(chemclaw.__file__).parent
-    repository = Path(__file__).resolve().parents[1]
-    found = {
-        f"bundleskill:{path.parent.parent.parent.name}:{path.parent.name}": path.read_text(
-            encoding="utf-8"
-        )
-        for path in sorted(package.glob("connectors/*/skills/*/SKILL.md"))
-    }
-    found.update(
-        {
-            f"skill:{path.parent.name}": path.read_text(encoding="utf-8")
-            for path in sorted((repository / "skills").glob("*/SKILL.md"))
-        }
-    )
-    assert found, "no SKILL.md files found; this test is reading the wrong tree"
-    return found
-
-
-def _instruction_block_texts() -> dict[str, str]:
-    """The system prompt's own blocks, sent on every turn.
-
-    Both groups: `_SAFETY_BLOCKS` is appended to every profile, including those that replace
-    `_INSTRUCTION_BLOCKS`. Indexed by position because a `PromptBlock` has no name.
-    """
-    found = {f"block:{index}": block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
-    found.update({f"safety:{index}": block.text for index, block in enumerate(_SAFETY_BLOCKS)})
-    return found
-
-
-def _profile_prose() -> dict[str, str]:
-    """Every deployment profile's `instructions:` and `description:`.
-
-    The first is the system prompt; the second goes into the `task` helper's description. Read off
-    `data/profiles/` directly so a profile that fails to load is still scanned.
-    """
-    root = Path(__file__).resolve().parents[1] / "data" / "profiles"
-    found: dict[str, str] = {}
-    for path in sorted(root.glob("*.yaml")):
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        found[f"profile:{path.stem}:instructions"] = str(loaded.get("instructions") or "")
-        found[f"profile:{path.stem}:description"] = str(loaded.get("description") or "")
-    assert found, "no deployment profiles found; this test is reading the wrong tree"
-    return found
-
-
-def _template_launcher_docstrings() -> dict[str, str]:
-    """The fixed-procedure launchers' docstrings, as `templates/registry.py` assembles them.
-
-    Every enabled launcher, bound or withheld: a withheld launcher is bound the day a deployment
-    turns its capability on.
-    """
-    import inspect
-
-    from chemclaw.templates.registry import template_tools
-
-    found = {
-        f"template:{fn.__name__}": inspect.getdoc(fn) or "" for fn in template_tools(declared=True)
-    }
-    assert found, "no template launchers found; this test is reading the wrong tree"
-    return found
-
-
-def _marked_prose() -> dict[str, str]:
-    """Every module-level constant marked `ModelProse`: prompt text outside the agent module.
-
-    `core/model_prose.py` is the declaration and `validate_prose_contract.marked_prose` the one
-    loader, shared with `make prose-validate`.
-    """
-    found = prose.marked_prose()
-    assert found, "no marked prose found; this test is reading the wrong tree"
-    return found
 
 
 #: The tier `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, by the names it went under.
@@ -302,7 +158,7 @@ def test_the_universe_reaches_every_class_the_model_reads() -> None:
     `results` is the case worth naming: it serves no tool module, so its durable job's
     assembled docstring is its *entire* model-facing surface and the old universe held none of it.
     """
-    names = set(_model_facing_descriptions())
+    names = set(model_facing_descriptions())
     for prefix in (
         "job:",
         "bundleskill:",
@@ -359,14 +215,14 @@ def test_a_forbidden_sentence_in_any_of_them_is_caught(
 
     Poisoning each loader in turn means a class that silently stops being scanned fails here.
     """
-    real = globals()[loader]
+    real = getattr(inventory, loader)
     guard = (
         test_no_tool_description_tells_the_model_about_a_tier_that_is_gone
         if _A_REMOVED_TIER.search(poison)
         else test_no_tool_description_tells_the_model_to_expect_a_review_gate
     )
     guard()  # the control: green before the poison, so the failure below is the poison's.
-    monkeypatch.setitem(globals(), loader, lambda: dict(real(), poisoned=poison))
+    monkeypatch.setattr(inventory, loader, lambda: dict(real(), poisoned=poison))
     with pytest.raises(AssertionError) as caught:
         guard()
     assert str(caught.value).startswith("{'poisoned':"), (
@@ -422,7 +278,7 @@ def test_every_exemption_still_quotes_shipped_prose() -> None:
     A stale exemption could later match some other sentence; checking the owner stops one surviving
     a renamed text.
     """
-    texts = {name: " ".join(text.split()) for name, text in _model_facing_descriptions().items()}
+    texts = {name: " ".join(text.split()) for name, text in model_facing_descriptions().items()}
     orphaned = sorted(
         f"{owner}: {phrase!r}"
         for owner, phrase in _TRUE_ABOUT_WHAT_IS_GONE
@@ -439,7 +295,7 @@ def test_every_exemption_is_needed() -> None:
 
     An exemption that guards nothing is noise with authority.
     """
-    texts = _model_facing_descriptions()
+    texts = model_facing_descriptions()
     assert texts, "no model-facing text found; this test is reading the wrong tree"
     for (owner, phrase), reason in _TRUE_ABOUT_WHAT_IS_GONE.items():
         assert reason.strip(), f"{phrase!r} is exempted without a reason"
@@ -486,7 +342,7 @@ def test_an_exemption_cannot_form_across_a_line_break() -> None:
     )
     assert _first_offence(control, _A_REMOVED_TIER, owner) == "DFT"
     # And the shipped sentence it is written for is still exempt, line wrapping and all.
-    assert _first_offence(_model_facing_descriptions()[owner], _A_REMOVED_TIER, owner) is None
+    assert _first_offence(model_facing_descriptions()[owner], _A_REMOVED_TIER, owner) is None
 
 
 def test_an_exemption_reaches_only_the_text_it_names() -> None:
@@ -505,7 +361,7 @@ def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None
     """
     offenders = {
         name: found
-        for name, text in _model_facing_descriptions().items()
+        for name, text in model_facing_descriptions().items()
         if (found := _first_offence(text, _A_REMOVED_TIER, name))
     }
     assert not offenders, (
@@ -524,7 +380,7 @@ def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
     the chemist, and `_A_REVIEW_PROMISE` requires the deleted review object, so it does not match.
     """
     offenders: dict[str, str] = {}
-    for name, text in _model_facing_descriptions().items():
+    for name, text in model_facing_descriptions().items():
         if found := _first_offence(text, _REVIEW_MACHINERY, name):
             offenders[name] = found
         elif found := _first_offence(text, _A_REVIEW_PROMISE, name):

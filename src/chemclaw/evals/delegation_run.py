@@ -23,8 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple, TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -48,6 +49,8 @@ from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.evals.tool_utility import VERDICT_SCORES
 
 logger = logging.getLogger(__name__)
+
+_Booked = TypeVar("_Booked")
 
 #: The corpus this suite asks, inside `settings.live_probe_dir`, so a missing file fails at a
 #: searchable name.
@@ -215,19 +218,28 @@ _TURN_COST = """
 """
 
 
-async def billed_by_session(session_ids: Sequence[str]) -> dict[str, int]:
-    """What the ledger says each session's turns cost, in billed token-equivalents.
+class SessionSpend(NamedTuple):
+    """What a session's booked turns cost: raw tokens of every kind, and the weighted bill."""
 
-    Summed over the session's rows, since a retried repeat books two. Weighted by
-    `evals/autonomy.billed_tokens`, the one definition of this arithmetic.
+    tokens: int
+    billed: int
+
+
+async def spend_by_session(session_ids: Sequence[str]) -> dict[str, SessionSpend]:
+    """What the ledger says each session's turns cost, summed over the session's rows.
+
+    A retried repeat books two rows, hence the sum. `tokens` is input, output and both cache
+    counters unweighted; `billed` weights them by `evals/autonomy.billed_tokens`, the one definition
+    of that arithmetic.
 
     Returns:
-        Session id → its bill. A session with no row is absent, never zero: an unwritten row is a
+        Session id → its spend. A session with no row is absent, never zero: an unwritten row is a
         hole in the data, not a free turn.
     """
     if not session_ids:
         return {}
-    totals: dict[str, float] = {}
+    raw: dict[str, int] = {}
+    billed: dict[str, float] = {}
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_TURN_COST, (list(session_ids),))
@@ -240,23 +252,35 @@ async def billed_by_session(session_ids: Sequence[str]) -> dict[str, int]:
             cache_read_tokens=int(cache_read),
             cache_write_tokens=int(cache_write),
         )
-        totals[str(session_id)] = totals.get(str(session_id), 0.0) + billed_tokens(cost)
-    return {session_id: round(total) for session_id, total in totals.items()}
+        key = str(session_id)
+        raw[key] = raw.get(key, 0) + int(inp) + int(out) + int(cache_read) + int(cache_write)
+        billed[key] = billed.get(key, 0.0) + billed_tokens(cost)
+    return {key: SessionSpend(raw[key], round(billed[key])) for key in raw}
 
 
-async def billed_by_session_when_booked(session_ids: Sequence[str]) -> dict[str, int]:
-    """`billed_by_session`, waited for — the ledger write is booked off the turn's hot path.
+async def billed_by_session(session_ids: Sequence[str]) -> dict[str, int]:
+    """What the ledger says each session's turns cost, in billed token-equivalents.
 
-    `record_turn_cost` writes in its own task, so the row is eventually consistent with the stream
-    closing. Polled ten times within `eval_delegation_ledger_wait_seconds`; a row still missing
-    after that is a hole.
+    `spend_by_session`'s `billed` alone, which is all the delegation comparison reads.
+    """
+    return {key: spend.billed for key, spend in (await spend_by_session(session_ids)).items()}
+
+
+async def _when_booked(
+    read: Callable[[Sequence[str]], Awaitable[dict[str, _Booked]]], session_ids: Sequence[str]
+) -> dict[str, _Booked]:
+    """`read`, polled until every session has a row or the ledger wait is spent.
+
+    The ledger write is booked off the turn's hot path (`record_turn_cost` writes in its own task),
+    so the row is eventually consistent with the stream closing. Polled ten times within
+    `eval_delegation_ledger_wait_seconds`; a row still missing after that is a hole.
     """
     wanted = set(session_ids)
     attempts = 10
     interval = settings.eval_delegation_ledger_wait_seconds / attempts
-    booked: dict[str, int] = {}
+    booked: dict[str, _Booked] = {}
     for attempt in range(attempts):
-        booked = await billed_by_session(session_ids)
+        booked = await read(session_ids)
         if wanted <= set(booked):
             return booked
         if interval > 0 and attempt < attempts - 1:
@@ -271,6 +295,16 @@ async def billed_by_session_when_booked(session_ids: Sequence[str]) -> dict[str,
         missing,
     )
     return booked
+
+
+async def billed_by_session_when_booked(session_ids: Sequence[str]) -> dict[str, int]:
+    """`billed_by_session`, waited for (`_when_booked`)."""
+    return await _when_booked(billed_by_session, session_ids)
+
+
+async def spend_by_session_when_booked(session_ids: Sequence[str]) -> dict[str, SessionSpend]:
+    """`spend_by_session`, waited for (`_when_booked`)."""
+    return await _when_booked(spend_by_session, session_ids)
 
 
 class ArmRepeat(BaseModel):

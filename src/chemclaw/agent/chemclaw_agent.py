@@ -26,6 +26,7 @@ from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.handoff import handoff_tool_name
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.scratchpad import scratchpad_tools
+from chemclaw.agent.text_overlay import BlockGroup, block_text, check_applies
 from chemclaw.connectors.registry import (
     connector_tool_names,
     endpoint_tool_names,
@@ -438,7 +439,11 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
 
 
 def _assemble(
-    blocks: tuple[PromptBlock, ...], available: Collection[str] | None, *, durable_trail: bool
+    blocks: tuple[PromptBlock, ...],
+    available: Collection[str] | None,
+    *,
+    durable_trail: bool,
+    group: BlockGroup = "blocks",
 ) -> str:
     """Join the blocks this graph's surface makes true.
 
@@ -447,12 +452,13 @@ def _assemble(
         available: Every tool name the graph binds, or `None` for the maximal prompt (every block),
             which is what validators check. `None` is not "no tools".
         durable_trail: Whether the audit sink this graph was built with writes rows.
+        group: Which overlay directory (`agent/text_overlay.py`) replaces this group's blocks.
     """
     wanted = "durable" if durable_trail else "log-only"
     bound = None if available is None else set(available)
     return "".join(
-        block.text
-        for block in blocks
+        block_text(group, index, block.text)
+        for index, block in enumerate(blocks)
         if (block.trail is None or block.trail == wanted)
         and (bound is None or block.requires <= bound)
         and (bound is None or not (block.absent_unless & bound))
@@ -565,7 +571,7 @@ def instructions_for(
     """
     if profile.instructions is None:
         return _assemble(_INSTRUCTION_BLOCKS, available, durable_trail=durable_trail)
-    floor = _assemble(_SAFETY_BLOCKS, available, durable_trail=durable_trail)
+    floor = _assemble(_SAFETY_BLOCKS, available, durable_trail=durable_trail, group="safety")
     return f"{profile.instructions}\n{floor}"
 
 
@@ -667,6 +673,18 @@ def available_tool_names() -> set[str]:
         *subagent_tool_names(),
         *handoff_tool_names(),
     }
+
+
+def refuse_a_misapplied_overlay() -> None:
+    """Fail startup when the model-text overlay names a tool or block this deployment lacks.
+
+    A no-op without `model_text_overlay_dir`. Checked against the whole surface rather than at the
+    graph build, which sees only one agent's slice of it.
+    """
+    check_applies(
+        sorted(available_tool_names()),
+        {"blocks": len(_INSTRUCTION_BLOCKS), "safety": len(_SAFETY_BLOCKS)},
+    )
 
 
 def declared_tool_names() -> set[str]:

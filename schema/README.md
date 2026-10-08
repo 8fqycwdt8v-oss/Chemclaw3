@@ -1,4 +1,4 @@
-# `schema/` — the schemas ChemClaw3 ships for databases it does not own
+# `schema/` — the schemas ChemClaw3 ships for databases it does not own, and the model-text inventory
 
 Everything under `infra/sql/` is *this* system's own database, applied by `make db-migrate`.
 Everything here is a schema for a store **somebody else runs**, published so a DBA can apply it.
@@ -7,6 +7,11 @@ The distinction is the reason the two are not in one directory: this system neve
 privileges on the databases here, and its runtime principal is deliberately not the principal that
 can define their tables — the same split `postgres_migration_dsn` and `postgres_dsn` already make
 one level in.
+
+## `model-text/`
+
+Not a database schema: `inventory.json`, the generated list of every string a model reads, with its
+owner and token cost. See `model-text/README.md`.
 
 ## `result-store/`
 

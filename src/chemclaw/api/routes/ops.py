@@ -16,6 +16,7 @@ import psycopg
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
+from chemclaw.agent import text_overlay
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.state import FrontDoorState, state
@@ -216,7 +217,8 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
     """Readiness: the agent can be built, Postgres answers, and how many connectors are down.
 
     The database gates (under `session_store="postgres"` a pod cannot serve a turn without it); the
-    connectors are reported, not gating — `connectors_required` fails startup instead. Reported as a
+    connectors are reported, not gating — `connectors_required` fails startup instead. A process
+    running a model-text overlay adds its digest, as `model_text_overlay`. Reported as a
     count, not names: this body is public, and names stay on `/metrics` and in logs. The database
     verdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay
     ready).
@@ -239,12 +241,18 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
             )
     if not ready:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-    return {
+    body: dict[str, str | int] = {
         "status": status,
         # `unhealthy`, the same predicate `/metrics` uses, so a jobs-only bundle with no poller
         # counts.
         "connectors_unhealthy": sum(1 for item in health if item.unhealthy),
     }
+    overlay = text_overlay.active()
+    if overlay is not None:
+        # Present only on a model-text candidate arm, so an evaluation can confirm the door it was
+        # pointed at runs the text it was told to (`cli/model_text_eval.check_arms`).
+        body["model_text_overlay"] = overlay.digest[: text_overlay.DIGEST_CHARS]
+    return body
 
 
 async def metrics() -> Response:

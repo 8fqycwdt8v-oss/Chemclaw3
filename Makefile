@@ -56,7 +56,7 @@ SHELL := bash
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe \
-  retrieval-arms hypothesis-recovery phoenix-publish explain
+  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval
 
 help:  ## List every target, grouped by section.
 	@awk 'BEGIN {FS = ":.*?## "} /^##@ / {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
@@ -164,6 +164,12 @@ template-validate:  ## Validate the step templates (steps, references, tools/job
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
 	uv run python -m chemclaw.cli.validate_prose_contract
+
+model-text:  ## Regenerate schema/model-text/inventory.json: every string a model reads, its owner and token cost.
+	uv run python -m chemclaw.cli.model_text_inventory
+
+model-text-eval:  ## Ship-or-not for a model-text batch: offline gate, then control vs candidate (ARGS=--dry-run for the plumbing).
+	uv run python -m chemclaw.cli.model_text_eval $(ARGS)
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
 	@# -ignore-missing-schemas: no schema exists for OpenShift's Route; tests/test_deploy_chart.py pins

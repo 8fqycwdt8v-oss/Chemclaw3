@@ -1,0 +1,5010 @@
+{
+  "estimator": "langchain_core count_tokens_approximately (chars/4 plus 3 per message), the counter tests/test_context_floor.py and agent/compaction.py use",
+  "python": "3.11",
+  "profile": "default",
+  "prefix": {
+    "tool_schemas": 64622,
+    "instructions": 3934,
+    "skill_descriptions": 3283,
+    "total": 71839
+  },
+  "totals": {
+    "every-request": {
+      "entries": 180,
+      "tokens": 72483
+    },
+    "conditional": {
+      "entries": 18,
+      "tokens": 3292
+    },
+    "on-demand": {
+      "entries": 114,
+      "tokens": 105390
+    }
+  },
+  "entries": [
+    {
+      "id": "block:0",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[0]",
+      "residence": "every-request",
+      "tokens": 95,
+      "chars": 361,
+      "sha256": "f878e47fc62d60ef"
+    },
+    {
+      "id": "block:1",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[1]",
+      "residence": "every-request",
+      "tokens": 153,
+      "chars": 595,
+      "sha256": "101f366b447fb39d"
+    },
+    {
+      "id": "block:10",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[10]",
+      "residence": "conditional",
+      "tokens": 77,
+      "chars": 290,
+      "sha256": "0894d48a936ef675"
+    },
+    {
+      "id": "block:11",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[11]",
+      "residence": "every-request",
+      "tokens": 106,
+      "chars": 408,
+      "sha256": "0ce082f3f7e90769"
+    },
+    {
+      "id": "block:12",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[12]",
+      "residence": "every-request",
+      "tokens": 71,
+      "chars": 265,
+      "sha256": "7e848a999b311d15"
+    },
+    {
+      "id": "block:13",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[13]",
+      "residence": "every-request",
+      "tokens": 134,
+      "chars": 517,
+      "sha256": "c972791b13897369"
+    },
+    {
+      "id": "block:14",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[14]",
+      "residence": "every-request",
+      "tokens": 177,
+      "chars": 692,
+      "sha256": "a9bd6c5fdccce6c1"
+    },
+    {
+      "id": "block:15",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[15]",
+      "residence": "conditional",
+      "tokens": 175,
+      "chars": 681,
+      "sha256": "5673c56b8d435966"
+    },
+    {
+      "id": "block:16",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[16]",
+      "residence": "every-request",
+      "tokens": 136,
+      "chars": 526,
+      "sha256": "c0e0e310080e775a"
+    },
+    {
+      "id": "block:17",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[17]",
+      "residence": "every-request",
+      "tokens": 183,
+      "chars": 713,
+      "sha256": "25e1381cfacea8ad"
+    },
+    {
+      "id": "block:18",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[18]",
+      "residence": "conditional",
+      "tokens": 105,
+      "chars": 404,
+      "sha256": "ac04c8f8ba560e23"
+    },
+    {
+      "id": "block:19",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[19]",
+      "residence": "every-request",
+      "tokens": 143,
+      "chars": 554,
+      "sha256": "3866fdc9c1385b27"
+    },
+    {
+      "id": "block:2",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[2]",
+      "residence": "every-request",
+      "tokens": 89,
+      "chars": 337,
+      "sha256": "f8c24814b7f08dec"
+    },
+    {
+      "id": "block:20",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[20]",
+      "residence": "every-request",
+      "tokens": 167,
+      "chars": 652,
+      "sha256": "3082fa0b200bd27c"
+    },
+    {
+      "id": "block:21",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[21]",
+      "residence": "every-request",
+      "tokens": 217,
+      "chars": 850,
+      "sha256": "6058ac604e010d3c"
+    },
+    {
+      "id": "block:22",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[22]",
+      "residence": "every-request",
+      "tokens": 95,
+      "chars": 363,
+      "sha256": "c855674f6126954f"
+    },
+    {
+      "id": "block:23",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[23]",
+      "residence": "every-request",
+      "tokens": 20,
+      "chars": 64,
+      "sha256": "9de42b4af305af85"
+    },
+    {
+      "id": "block:24",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[24]",
+      "residence": "every-request",
+      "tokens": 17,
+      "chars": 50,
+      "sha256": "1e9cb16d573912a4"
+    },
+    {
+      "id": "block:25",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[25]",
+      "residence": "every-request",
+      "tokens": 63,
+      "chars": 234,
+      "sha256": "23b2f85919774857"
+    },
+    {
+      "id": "block:26",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[26]",
+      "residence": "every-request",
+      "tokens": 284,
+      "chars": 1117,
+      "sha256": "ea37f1a5aaefcd6a"
+    },
+    {
+      "id": "block:27",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[27]",
+      "residence": "every-request",
+      "tokens": 146,
+      "chars": 568,
+      "sha256": "f57d19713fb00208"
+    },
+    {
+      "id": "block:28",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[28]",
+      "residence": "every-request",
+      "tokens": 233,
+      "chars": 914,
+      "sha256": "5945cfac4778af2e"
+    },
+    {
+      "id": "block:29",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[29]",
+      "residence": "every-request",
+      "tokens": 38,
+      "chars": 134,
+      "sha256": "cb9b287ce77d7916"
+    },
+    {
+      "id": "block:3",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[3]",
+      "residence": "every-request",
+      "tokens": 28,
+      "chars": 95,
+      "sha256": "8ae954928fa76800"
+    },
+    {
+      "id": "block:30",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[30]",
+      "residence": "every-request",
+      "tokens": 360,
+      "chars": 1421,
+      "sha256": "4fcc9a9f17d4f090"
+    },
+    {
+      "id": "block:31",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[31]",
+      "residence": "every-request",
+      "tokens": 317,
+      "chars": 1250,
+      "sha256": "be3b8f3adce1aa88"
+    },
+    {
+      "id": "block:32",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[32]",
+      "residence": "every-request",
+      "tokens": 125,
+      "chars": 484,
+      "sha256": "4be9b62e6e0f6860"
+    },
+    {
+      "id": "block:4",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[4]",
+      "residence": "every-request",
+      "tokens": 83,
+      "chars": 313,
+      "sha256": "a3bcd05fddde6c5e"
+    },
+    {
+      "id": "block:5",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[5]",
+      "residence": "every-request",
+      "tokens": 41,
+      "chars": 145,
+      "sha256": "f2257719af5e1c18"
+    },
+    {
+      "id": "block:6",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[6]",
+      "residence": "every-request",
+      "tokens": 60,
+      "chars": 222,
+      "sha256": "cf9ed72aa44d2e5d"
+    },
+    {
+      "id": "block:7",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[7]",
+      "residence": "every-request",
+      "tokens": 150,
+      "chars": 583,
+      "sha256": "fba4c131eea442d9"
+    },
+    {
+      "id": "block:8",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[8]",
+      "residence": "every-request",
+      "tokens": 242,
+      "chars": 949,
+      "sha256": "49594c9a04b523b7"
+    },
+    {
+      "id": "block:9",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[9]",
+      "residence": "every-request",
+      "tokens": 90,
+      "chars": 344,
+      "sha256": "81bd44c0eac6fd7e"
+    },
+    {
+      "id": "doc:ask_clarifying_question",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/dialogue_tools.py:ask_clarifying_question",
+      "residence": "every-request",
+      "tokens": 301,
+      "chars": 1185,
+      "sha256": "12c86131740663ea",
+      "also_counted_in": [
+        "tool:ask_clarifying_question"
+      ]
+    },
+    {
+      "id": "doc:assemble_evidence_pack",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/evidence_tools.py:assemble_evidence_pack",
+      "residence": "every-request",
+      "tokens": 326,
+      "chars": 1288,
+      "sha256": "f6d0951752cf94e0",
+      "also_counted_in": [
+        "tool:assemble_evidence_pack"
+      ]
+    },
+    {
+      "id": "doc:attach_plate_results",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:attach_plate_results",
+      "residence": "every-request",
+      "tokens": 278,
+      "chars": 1093,
+      "sha256": "52beac58a0081363",
+      "also_counted_in": [
+        "tool:attach_plate_results"
+      ]
+    },
+    {
+      "id": "doc:bo:campaign_progress",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:campaign_progress",
+      "residence": "every-request",
+      "tokens": 683,
+      "chars": 2716,
+      "sha256": "d9585e8f17e9732a",
+      "also_counted_in": [
+        "tool:campaign_progress"
+      ]
+    },
+    {
+      "id": "doc:bo:generate_screening_design",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:generate_screening_design",
+      "residence": "every-request",
+      "tokens": 1414,
+      "chars": 5638,
+      "sha256": "fef2bbc8cea3257b",
+      "also_counted_in": [
+        "tool:generate_screening_design"
+      ]
+    },
+    {
+      "id": "doc:bo:predict_outcome",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:predict_outcome",
+      "residence": "every-request",
+      "tokens": 784,
+      "chars": 3120,
+      "sha256": "ac91176beedaec58",
+      "also_counted_in": [
+        "tool:predict_outcome"
+      ]
+    },
+    {
+      "id": "doc:bo:resume_campaign",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:resume_campaign",
+      "residence": "every-request",
+      "tokens": 364,
+      "chars": 1437,
+      "sha256": "2450372c2a95faf6",
+      "also_counted_in": [
+        "tool:resume_campaign"
+      ]
+    },
+    {
+      "id": "doc:bo:suggest_next_experiment",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:suggest_next_experiment",
+      "residence": "every-request",
+      "tokens": 1499,
+      "chars": 5977,
+      "sha256": "331f7e6a8913fc73",
+      "also_counted_in": [
+        "tool:suggest_next_experiment"
+      ]
+    },
+    {
+      "id": "doc:calc:calculator_outliers",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_outliers",
+      "residence": "every-request",
+      "tokens": 383,
+      "chars": 1516,
+      "sha256": "2ddcdad6c694e764",
+      "also_counted_in": [
+        "tool:calculator_outliers"
+      ]
+    },
+    {
+      "id": "doc:calc:calculator_trust",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_trust",
+      "residence": "every-request",
+      "tokens": 377,
+      "chars": 1492,
+      "sha256": "3ca0441bce22f318",
+      "also_counted_in": [
+        "tool:calculator_trust"
+      ]
+    },
+    {
+      "id": "doc:calc:compute_atomic_descriptors",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_atomic_descriptors",
+      "residence": "every-request",
+      "tokens": 346,
+      "chars": 1365,
+      "sha256": "17e719f70d9f76b6",
+      "also_counted_in": [
+        "tool:compute_atomic_descriptors"
+      ]
+    },
+    {
+      "id": "doc:calc:compute_electronic_properties",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_electronic_properties",
+      "residence": "every-request",
+      "tokens": 399,
+      "chars": 1580,
+      "sha256": "4138383e139bea57",
+      "also_counted_in": [
+        "tool:compute_electronic_properties"
+      ]
+    },
+    {
+      "id": "doc:calc:compute_surface_potential",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_surface_potential",
+      "residence": "every-request",
+      "tokens": 266,
+      "chars": 1046,
+      "sha256": "f493d4d74c94f0a1",
+      "also_counted_in": [
+        "tool:compute_surface_potential"
+      ]
+    },
+    {
+      "id": "doc:calc:compute_thermochemistry",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_thermochemistry",
+      "residence": "every-request",
+      "tokens": 511,
+      "chars": 2028,
+      "sha256": "eff14973069fb2b6",
+      "also_counted_in": [
+        "tool:compute_thermochemistry"
+      ]
+    },
+    {
+      "id": "doc:calc:compute_xtb_energy",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_xtb_energy",
+      "residence": "every-request",
+      "tokens": 113,
+      "chars": 435,
+      "sha256": "5ea4500654d8a849",
+      "also_counted_in": [
+        "tool:compute_xtb_energy"
+      ]
+    },
+    {
+      "id": "doc:calc:fetch_artifact",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:fetch_artifact",
+      "residence": "every-request",
+      "tokens": 430,
+      "chars": 1704,
+      "sha256": "511944053b8066a5",
+      "also_counted_in": [
+        "tool:fetch_artifact"
+      ]
+    },
+    {
+      "id": "doc:calc:find_calculations",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:find_calculations",
+      "residence": "every-request",
+      "tokens": 715,
+      "chars": 2843,
+      "sha256": "be1600e3fa91e1be",
+      "also_counted_in": [
+        "tool:find_calculations"
+      ]
+    },
+    {
+      "id": "doc:calc:list_artifacts",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:list_artifacts",
+      "residence": "every-request",
+      "tokens": 487,
+      "chars": 1932,
+      "sha256": "3a4daf2b6d9564c8",
+      "also_counted_in": [
+        "tool:list_artifacts"
+      ]
+    },
+    {
+      "id": "doc:calc:optimize_geometry",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:optimize_geometry",
+      "residence": "every-request",
+      "tokens": 420,
+      "chars": 1663,
+      "sha256": "da11403ae0d00663",
+      "also_counted_in": [
+        "tool:optimize_geometry"
+      ]
+    },
+    {
+      "id": "doc:calc:predict_developability_profile",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_developability_profile",
+      "residence": "every-request",
+      "tokens": 150,
+      "chars": 583,
+      "sha256": "d89d19ee74c19596",
+      "also_counted_in": [
+        "tool:predict_developability_profile"
+      ]
+    },
+    {
+      "id": "doc:calc:predict_logd",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_logd",
+      "residence": "every-request",
+      "tokens": 468,
+      "chars": 1855,
+      "sha256": "3aaca06744cdaf86",
+      "also_counted_in": [
+        "tool:predict_logd"
+      ]
+    },
+    {
+      "id": "doc:calc:predict_pka",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_pka",
+      "residence": "every-request",
+      "tokens": 290,
+      "chars": 1141,
+      "sha256": "61a1f1036b84603d",
+      "also_counted_in": [
+        "tool:predict_pka"
+      ]
+    },
+    {
+      "id": "doc:calc:predict_site_reactivity",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_site_reactivity",
+      "residence": "every-request",
+      "tokens": 706,
+      "chars": 2805,
+      "sha256": "ad53dac593cddf25",
+      "also_counted_in": [
+        "tool:predict_site_reactivity"
+      ]
+    },
+    {
+      "id": "doc:calc:predict_solubility",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_solubility",
+      "residence": "every-request",
+      "tokens": 98,
+      "chars": 376,
+      "sha256": "5ff2491d380dcd58",
+      "also_counted_in": [
+        "tool:predict_solubility"
+      ]
+    },
+    {
+      "id": "doc:calc:report_measurement",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:report_measurement",
+      "residence": "every-request",
+      "tokens": 498,
+      "chars": 1976,
+      "sha256": "92161f9858c9973f",
+      "also_counted_in": [
+        "tool:report_measurement"
+      ]
+    },
+    {
+      "id": "doc:check_against_specification",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/analytical_tools.py:check_against_specification",
+      "residence": "every-request",
+      "tokens": 203,
+      "chars": 795,
+      "sha256": "1a5c5d65d8e67098",
+      "also_counted_in": [
+        "tool:check_against_specification"
+      ]
+    },
+    {
+      "id": "doc:check_pending_requests",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/pending_tools.py:check_pending_requests",
+      "residence": "every-request",
+      "tokens": 252,
+      "chars": 992,
+      "sha256": "828d6e8071c52587",
+      "also_counted_in": [
+        "tool:check_pending_requests"
+      ]
+    },
+    {
+      "id": "doc:compare_solvents",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:compare_solvents",
+      "residence": "every-request",
+      "tokens": 446,
+      "chars": 1766,
+      "sha256": "93af3df6d82e7a08",
+      "also_counted_in": [
+        "tool:compare_solvents"
+      ]
+    },
+    {
+      "id": "doc:compose_workflow",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/workflow_tools.py:compose_workflow",
+      "residence": "every-request",
+      "tokens": 498,
+      "chars": 1975,
+      "sha256": "b8336e0e14eb7ef6",
+      "also_counted_in": [
+        "tool:compose_workflow"
+      ]
+    },
+    {
+      "id": "doc:compute_ensemble_property",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:compute_ensemble_property",
+      "residence": "every-request",
+      "tokens": 476,
+      "chars": 1887,
+      "sha256": "6f100690e6337c5a",
+      "also_counted_in": [
+        "tool:compute_ensemble_property"
+      ]
+    },
+    {
+      "id": "doc:compute_interaction_energy",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:compute_interaction_energy",
+      "residence": "every-request",
+      "tokens": 350,
+      "chars": 1383,
+      "sha256": "70b8ceb18a93a984",
+      "also_counted_in": [
+        "tool:compute_interaction_energy"
+      ]
+    },
+    {
+      "id": "doc:compute_reaction_energy",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:compute_reaction_energy",
+      "residence": "every-request",
+      "tokens": 633,
+      "chars": 2516,
+      "sha256": "a527232eeb5a4448",
+      "also_counted_in": [
+        "tool:compute_reaction_energy"
+      ]
+    },
+    {
+      "id": "doc:condense_protocols",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_tools.py:condense_protocols",
+      "residence": "every-request",
+      "tokens": 604,
+      "chars": 2400,
+      "sha256": "2dbb0a9ff56caea1",
+      "also_counted_in": [
+        "tool:condense_protocols"
+      ]
+    },
+    {
+      "id": "doc:create_exhibit",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:create_exhibit",
+      "residence": "every-request",
+      "tokens": 205,
+      "chars": 801,
+      "sha256": "58913313af7d3649",
+      "also_counted_in": [
+        "tool:create_exhibit"
+      ]
+    },
+    {
+      "id": "doc:draft_experiment_protocol",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:draft_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 732,
+      "chars": 2911,
+      "sha256": "238b865f2ec2a8a1",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "doc:estimate_stability_trend",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/analytical_tools.py:estimate_stability_trend",
+      "residence": "every-request",
+      "tokens": 294,
+      "chars": 1160,
+      "sha256": "f3412e788ddbf17c",
+      "also_counted_in": [
+        "tool:estimate_stability_trend"
+      ]
+    },
+    {
+      "id": "doc:expand_note",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/graph_tools.py:expand_note",
+      "residence": "every-request",
+      "tokens": 325,
+      "chars": 1282,
+      "sha256": "80925c1328d23326",
+      "also_counted_in": [
+        "tool:expand_note"
+      ]
+    },
+    {
+      "id": "doc:experiment_arms_from_campaign",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:experiment_arms_from_campaign",
+      "residence": "every-request",
+      "tokens": 339,
+      "chars": 1339,
+      "sha256": "0c6e0c43e41ba5a1",
+      "also_counted_in": [
+        "tool:experiment_arms_from_campaign"
+      ]
+    },
+    {
+      "id": "doc:find_experiment_protocols",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:find_experiment_protocols",
+      "residence": "every-request",
+      "tokens": 112,
+      "chars": 429,
+      "sha256": "6de44e794872f884",
+      "also_counted_in": [
+        "tool:find_experiment_protocols"
+      ]
+    },
+    {
+      "id": "doc:find_knowledge_gaps",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/graph_tools.py:find_knowledge_gaps",
+      "residence": "every-request",
+      "tokens": 349,
+      "chars": 1377,
+      "sha256": "84967e0b1c05bd20",
+      "also_counted_in": [
+        "tool:find_knowledge_gaps"
+      ]
+    },
+    {
+      "id": "doc:find_notes",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/graph_tools.py:find_notes",
+      "residence": "every-request",
+      "tokens": 241,
+      "chars": 948,
+      "sha256": "0680505eb0a59f2b",
+      "also_counted_in": [
+        "tool:find_notes"
+      ]
+    },
+    {
+      "id": "doc:find_past_jobs",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/durable_tools.py:find_past_jobs",
+      "residence": "every-request",
+      "tokens": 482,
+      "chars": 1909,
+      "sha256": "7c4c608044d308a3",
+      "also_counted_in": [
+        "tool:find_past_jobs"
+      ]
+    },
+    {
+      "id": "doc:forget_preference",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/preferences.py:forget_preference",
+      "residence": "every-request",
+      "tokens": 42,
+      "chars": 150,
+      "sha256": "0430b1fbc14eb1b5",
+      "also_counted_in": [
+        "tool:forget_preference"
+      ]
+    },
+    {
+      "id": "doc:gather_evidence",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/research_tools.py:gather_evidence",
+      "residence": "every-request",
+      "tokens": 690,
+      "chars": 2742,
+      "sha256": "f212f783075611b9",
+      "also_counted_in": [
+        "tool:gather_evidence"
+      ]
+    },
+    {
+      "id": "doc:get_durable_job_status",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/durable_tools.py:get_durable_job_status",
+      "residence": "every-request",
+      "tokens": 596,
+      "chars": 2366,
+      "sha256": "c44bc32afc9f9081",
+      "also_counted_in": [
+        "tool:get_durable_job_status"
+      ]
+    },
+    {
+      "id": "doc:job:bo:start_optimization_campaign",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/bo/connector.yaml:jobs.start_optimization_campaign",
+      "residence": "every-request",
+      "tokens": 326,
+      "chars": 1287,
+      "sha256": "51ce498629c8dfa2",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "doc:job:calc:compare_solvents",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compare_solvents",
+      "residence": "every-request",
+      "tokens": 446,
+      "chars": 1766,
+      "sha256": "93af3df6d82e7a08",
+      "also_counted_in": [
+        "tool:compare_solvents"
+      ]
+    },
+    {
+      "id": "doc:job:calc:compute_ensemble_property",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_ensemble_property",
+      "residence": "every-request",
+      "tokens": 476,
+      "chars": 1887,
+      "sha256": "6f100690e6337c5a",
+      "also_counted_in": [
+        "tool:compute_ensemble_property"
+      ]
+    },
+    {
+      "id": "doc:job:calc:compute_interaction_energy",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_interaction_energy",
+      "residence": "every-request",
+      "tokens": 350,
+      "chars": 1383,
+      "sha256": "70b8ceb18a93a984",
+      "also_counted_in": [
+        "tool:compute_interaction_energy"
+      ]
+    },
+    {
+      "id": "doc:job:calc:compute_reaction_energy",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_reaction_energy",
+      "residence": "every-request",
+      "tokens": 633,
+      "chars": 2516,
+      "sha256": "a527232eeb5a4448",
+      "also_counted_in": [
+        "tool:compute_reaction_energy"
+      ]
+    },
+    {
+      "id": "doc:job:calc:predict_pka_ensemble",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.predict_pka_ensemble",
+      "residence": "every-request",
+      "tokens": 486,
+      "chars": 1926,
+      "sha256": "8cd4f02759ec4fad",
+      "also_counted_in": [
+        "tool:predict_pka_ensemble"
+      ]
+    },
+    {
+      "id": "doc:job:calc:profile_rotation",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.profile_rotation",
+      "residence": "every-request",
+      "tokens": 504,
+      "chars": 1997,
+      "sha256": "f65eb1e3a88786bd",
+      "also_counted_in": [
+        "tool:profile_rotation"
+      ]
+    },
+    {
+      "id": "doc:job:calc:rank_species",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.rank_species",
+      "residence": "every-request",
+      "tokens": 612,
+      "chars": 2432,
+      "sha256": "bccade530f26c6a4",
+      "also_counted_in": [
+        "tool:rank_species"
+      ]
+    },
+    {
+      "id": "doc:job:calc:rank_species_across_solvents",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.rank_species_across_solvents",
+      "residence": "every-request",
+      "tokens": 571,
+      "chars": 2265,
+      "sha256": "ba99493a2681b9dd",
+      "also_counted_in": [
+        "tool:rank_species_across_solvents"
+      ]
+    },
+    {
+      "id": "doc:job:calc:refine_ensemble",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.refine_ensemble",
+      "residence": "every-request",
+      "tokens": 531,
+      "chars": 2105,
+      "sha256": "0b399e7688279683",
+      "also_counted_in": [
+        "tool:refine_ensemble"
+      ]
+    },
+    {
+      "id": "doc:job:calc:sample_conformers",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.sample_conformers",
+      "residence": "every-request",
+      "tokens": 428,
+      "chars": 1694,
+      "sha256": "fde3a04a50be8d71",
+      "also_counted_in": [
+        "tool:sample_conformers"
+      ]
+    },
+    {
+      "id": "doc:job:calc:scan_coordinate",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.scan_coordinate",
+      "residence": "every-request",
+      "tokens": 371,
+      "chars": 1465,
+      "sha256": "8b12e7c479e9e2ab",
+      "also_counted_in": [
+        "tool:scan_coordinate"
+      ]
+    },
+    {
+      "id": "doc:job:calc:survey_bond_strengths",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.survey_bond_strengths",
+      "residence": "every-request",
+      "tokens": 532,
+      "chars": 2111,
+      "sha256": "39f4e00daa3ed190",
+      "also_counted_in": [
+        "tool:survey_bond_strengths"
+      ]
+    },
+    {
+      "id": "doc:job:results:republish_calculations",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/results/connector.yaml:jobs.republish_calculations",
+      "residence": "conditional",
+      "tokens": 406,
+      "chars": 1605,
+      "sha256": "bcdecf1df2d3b39b"
+    },
+    {
+      "id": "doc:list_attachments",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/attachments.py:list_attachments",
+      "residence": "every-request",
+      "tokens": 165,
+      "chars": 641,
+      "sha256": "c297836acc76d890",
+      "also_counted_in": [
+        "tool:list_attachments"
+      ]
+    },
+    {
+      "id": "doc:list_watches",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/subscriptions.py:list_watches",
+      "residence": "every-request",
+      "tokens": 31,
+      "chars": 107,
+      "sha256": "90407db01df3bb69",
+      "also_counted_in": [
+        "tool:list_watches"
+      ]
+    },
+    {
+      "id": "doc:molfp:similar_molecules",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:similar_molecules",
+      "residence": "every-request",
+      "tokens": 234,
+      "chars": 917,
+      "sha256": "7071ab795a0543ea",
+      "also_counted_in": [
+        "tool:similar_molecules"
+      ]
+    },
+    {
+      "id": "doc:molfp:substructure_matches",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:substructure_matches",
+      "residence": "every-request",
+      "tokens": 136,
+      "chars": 527,
+      "sha256": "740b88943d6cf2e7",
+      "also_counted_in": [
+        "tool:substructure_matches"
+      ]
+    },
+    {
+      "id": "doc:predict_pka_ensemble",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:predict_pka_ensemble",
+      "residence": "every-request",
+      "tokens": 486,
+      "chars": 1926,
+      "sha256": "8cd4f02759ec4fad",
+      "also_counted_in": [
+        "tool:predict_pka_ensemble"
+      ]
+    },
+    {
+      "id": "doc:profile_rotation",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:profile_rotation",
+      "residence": "every-request",
+      "tokens": 504,
+      "chars": 1997,
+      "sha256": "f65eb1e3a88786bd",
+      "also_counted_in": [
+        "tool:profile_rotation"
+      ]
+    },
+    {
+      "id": "doc:propose_skill",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/proposal_tools.py:propose_skill",
+      "residence": "every-request",
+      "tokens": 368,
+      "chars": 1455,
+      "sha256": "5b3da3a2afcf950f",
+      "also_counted_in": [
+        "tool:propose_skill"
+      ]
+    },
+    {
+      "id": "doc:rank_competing_hypotheses",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/durable_tools.py:rank_competing_hypotheses",
+      "residence": "every-request",
+      "tokens": 395,
+      "chars": 1563,
+      "sha256": "a4168c6bb06d3cc2",
+      "also_counted_in": [
+        "tool:rank_competing_hypotheses"
+      ]
+    },
+    {
+      "id": "doc:rank_species",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:rank_species",
+      "residence": "every-request",
+      "tokens": 612,
+      "chars": 2432,
+      "sha256": "bccade530f26c6a4",
+      "also_counted_in": [
+        "tool:rank_species"
+      ]
+    },
+    {
+      "id": "doc:rank_species_across_solvents",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:rank_species_across_solvents",
+      "residence": "every-request",
+      "tokens": 571,
+      "chars": 2265,
+      "sha256": "ba99493a2681b9dd",
+      "also_counted_in": [
+        "tool:rank_species_across_solvents"
+      ]
+    },
+    {
+      "id": "doc:read_attachment",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/attachments.py:read_attachment",
+      "residence": "every-request",
+      "tokens": 125,
+      "chars": 484,
+      "sha256": "29c55e38de385eb3",
+      "also_counted_in": [
+        "tool:read_attachment"
+      ]
+    },
+    {
+      "id": "doc:read_exhibit",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:read_exhibit",
+      "residence": "every-request",
+      "tokens": 59,
+      "chars": 220,
+      "sha256": "4749e0ade01d89b2",
+      "also_counted_in": [
+        "tool:read_exhibit"
+      ]
+    },
+    {
+      "id": "doc:read_experiment_protocol",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:read_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 206,
+      "chars": 808,
+      "sha256": "56398faeebc97bb1",
+      "also_counted_in": [
+        "tool:read_experiment_protocol"
+      ]
+    },
+    {
+      "id": "doc:read_plate_results",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:read_plate_results",
+      "residence": "every-request",
+      "tokens": 196,
+      "chars": 767,
+      "sha256": "c52edaaea5516bf9",
+      "also_counted_in": [
+        "tool:read_plate_results"
+      ]
+    },
+    {
+      "id": "doc:recall_observations",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/memory_tools.py:recall_observations",
+      "residence": "every-request",
+      "tokens": 387,
+      "chars": 1530,
+      "sha256": "ad18c7d98a15456a",
+      "also_counted_in": [
+        "tool:recall_observations"
+      ]
+    },
+    {
+      "id": "doc:recall_preferences",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/preferences.py:recall_preferences",
+      "residence": "every-request",
+      "tokens": 127,
+      "chars": 489,
+      "sha256": "62c891c1634558b3",
+      "also_counted_in": [
+        "tool:recall_preferences"
+      ]
+    },
+    {
+      "id": "doc:record_confirmed_answer",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/memory_tools.py:record_confirmed_answer",
+      "residence": "every-request",
+      "tokens": 261,
+      "chars": 1025,
+      "sha256": "94a79732d9958ef3",
+      "also_counted_in": [
+        "tool:record_confirmed_answer"
+      ]
+    },
+    {
+      "id": "doc:record_failure",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/graph_tools.py:record_failure",
+      "residence": "every-request",
+      "tokens": 638,
+      "chars": 2534,
+      "sha256": "4150793eec8a8f6b",
+      "also_counted_in": [
+        "tool:record_failure"
+      ]
+    },
+    {
+      "id": "doc:record_knowledge_note",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/graph_tools.py:record_knowledge_note",
+      "residence": "every-request",
+      "tokens": 573,
+      "chars": 2274,
+      "sha256": "38f29d5b132d4fae",
+      "also_counted_in": [
+        "tool:record_knowledge_note"
+      ]
+    },
+    {
+      "id": "doc:refine_ensemble",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:refine_ensemble",
+      "residence": "every-request",
+      "tokens": 531,
+      "chars": 2105,
+      "sha256": "0b399e7688279683",
+      "also_counted_in": [
+        "tool:refine_ensemble"
+      ]
+    },
+    {
+      "id": "doc:remember_preference",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/preferences.py:remember_preference",
+      "residence": "every-request",
+      "tokens": 218,
+      "chars": 854,
+      "sha256": "154eebb63b192210",
+      "also_counted_in": [
+        "tool:remember_preference"
+      ]
+    },
+    {
+      "id": "doc:request_development_report",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/durable_tools.py:request_development_report",
+      "residence": "every-request",
+      "tokens": 254,
+      "chars": 997,
+      "sha256": "8357d6982b5036bf",
+      "also_counted_in": [
+        "tool:request_development_report"
+      ]
+    },
+    {
+      "id": "doc:request_external_input",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/pending_tools.py:request_external_input",
+      "residence": "every-request",
+      "tokens": 440,
+      "chars": 1744,
+      "sha256": "50445221cfee3b6c",
+      "also_counted_in": [
+        "tool:request_external_input"
+      ]
+    },
+    {
+      "id": "doc:rescale_experiment_protocol",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:rescale_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 213,
+      "chars": 834,
+      "sha256": "76380fbf04d0531f",
+      "also_counted_in": [
+        "tool:rescale_experiment_protocol"
+      ]
+    },
+    {
+      "id": "doc:review_activity",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/operations_tools.py:review_activity",
+      "residence": "every-request",
+      "tokens": 525,
+      "chars": 2081,
+      "sha256": "b606a626a291e7fe",
+      "also_counted_in": [
+        "tool:review_activity"
+      ]
+    },
+    {
+      "id": "doc:review_commitments",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/commitment_tools.py:review_commitments",
+      "residence": "every-request",
+      "tokens": 415,
+      "chars": 1641,
+      "sha256": "fb499e92ac287c61",
+      "also_counted_in": [
+        "tool:review_commitments"
+      ]
+    },
+    {
+      "id": "doc:revise_exhibit",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:revise_exhibit",
+      "residence": "every-request",
+      "tokens": 87,
+      "chars": 332,
+      "sha256": "f58b96dd125b1d17",
+      "also_counted_in": [
+        "tool:revise_exhibit"
+      ]
+    },
+    {
+      "id": "doc:run_bond_strength_survey",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_bond_strength_survey",
+      "residence": "every-request",
+      "tokens": 324,
+      "chars": 1279,
+      "sha256": "2f4a7f4ddee58061",
+      "also_counted_in": [
+        "tool:run_bond_strength_survey"
+      ]
+    },
+    {
+      "id": "doc:run_composed_workflow",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/workflow_tools.py:run_composed_workflow",
+      "residence": "every-request",
+      "tokens": 142,
+      "chars": 551,
+      "sha256": "9633724b5e192922",
+      "also_counted_in": [
+        "tool:run_composed_workflow"
+      ]
+    },
+    {
+      "id": "doc:run_conformer_refinement",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_conformer_refinement",
+      "residence": "every-request",
+      "tokens": 261,
+      "chars": 1028,
+      "sha256": "92dbff11120e6509",
+      "also_counted_in": [
+        "tool:run_conformer_refinement"
+      ]
+    },
+    {
+      "id": "doc:run_degradant_triage",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_degradant_triage",
+      "residence": "every-request",
+      "tokens": 455,
+      "chars": 1803,
+      "sha256": "c127883ed8ea638d",
+      "also_counted_in": [
+        "tool:run_degradant_triage"
+      ]
+    },
+    {
+      "id": "doc:run_ensemble_free_energy",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_ensemble_free_energy",
+      "residence": "every-request",
+      "tokens": 277,
+      "chars": 1089,
+      "sha256": "9222d33006760c77",
+      "also_counted_in": [
+        "tool:run_ensemble_free_energy"
+      ]
+    },
+    {
+      "id": "doc:run_hazard_briefing",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_hazard_briefing",
+      "residence": "every-request",
+      "tokens": 195,
+      "chars": 764,
+      "sha256": "ea2366e0b62ca084",
+      "also_counted_in": [
+        "tool:run_hazard_briefing"
+      ]
+    },
+    {
+      "id": "doc:run_microspecies_profile",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_microspecies_profile",
+      "residence": "every-request",
+      "tokens": 305,
+      "chars": 1202,
+      "sha256": "7cb6ff2890eaf182",
+      "also_counted_in": [
+        "tool:run_microspecies_profile"
+      ]
+    },
+    {
+      "id": "doc:run_regioselectivity_in_conformer",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_regioselectivity_in_conformer",
+      "residence": "every-request",
+      "tokens": 261,
+      "chars": 1028,
+      "sha256": "3933f189176c78ad",
+      "also_counted_in": [
+        "tool:run_regioselectivity_in_conformer"
+      ]
+    },
+    {
+      "id": "doc:run_stereoisomer_ranking",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_stereoisomer_ranking",
+      "residence": "every-request",
+      "tokens": 285,
+      "chars": 1122,
+      "sha256": "94e9cd493d4ba088",
+      "also_counted_in": [
+        "tool:run_stereoisomer_ranking"
+      ]
+    },
+    {
+      "id": "doc:run_substitution_series",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_substitution_series",
+      "residence": "every-request",
+      "tokens": 238,
+      "chars": 936,
+      "sha256": "2b533313110c3d1a",
+      "also_counted_in": [
+        "tool:run_substitution_series"
+      ]
+    },
+    {
+      "id": "doc:run_tautomer_resolution",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_tautomer_resolution",
+      "residence": "every-request",
+      "tokens": 301,
+      "chars": 1186,
+      "sha256": "162c56fb3cb76240",
+      "also_counted_in": [
+        "tool:run_tautomer_resolution"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:conditions_for_similar_product",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_product",
+      "residence": "every-request",
+      "tokens": 139,
+      "chars": 538,
+      "sha256": "1f5f3c26ec1f6120",
+      "also_counted_in": [
+        "tool:conditions_for_similar_product"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:conditions_for_similar_reaction",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_reaction",
+      "residence": "every-request",
+      "tokens": 430,
+      "chars": 1701,
+      "sha256": "b2dd714a4bbcd16e",
+      "also_counted_in": [
+        "tool:conditions_for_similar_reaction"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:reactions_making_substructure",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reactions_making_substructure",
+      "residence": "every-request",
+      "tokens": 106,
+      "chars": 405,
+      "sha256": "f6aabfaed8543a96",
+      "also_counted_in": [
+        "tool:reactions_making_substructure"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:reagent_frequency",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
+      "residence": "every-request",
+      "tokens": 196,
+      "chars": 766,
+      "sha256": "93684c711bc69bcb",
+      "also_counted_in": [
+        "tool:reagent_frequency"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:similar_reactions",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
+      "residence": "every-request",
+      "tokens": 237,
+      "chars": 929,
+      "sha256": "85c7cb4d00326847",
+      "also_counted_in": [
+        "tool:similar_reactions"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:substrate_precedent",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
+      "residence": "every-request",
+      "tokens": 172,
+      "chars": 671,
+      "sha256": "43ca2d243b8cb56b",
+      "also_counted_in": [
+        "tool:substrate_precedent"
+      ]
+    },
+    {
+      "id": "doc:rxnfp:workup_precedent",
+      "kind": "mcp-docstring",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:workup_precedent",
+      "residence": "every-request",
+      "tokens": 101,
+      "chars": 385,
+      "sha256": "9a334743273a4a7b",
+      "also_counted_in": [
+        "tool:workup_precedent"
+      ]
+    },
+    {
+      "id": "doc:sample_conformers",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:sample_conformers",
+      "residence": "every-request",
+      "tokens": 428,
+      "chars": 1694,
+      "sha256": "fde3a04a50be8d71",
+      "also_counted_in": [
+        "tool:sample_conformers"
+      ]
+    },
+    {
+      "id": "doc:scan_coordinate",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:scan_coordinate",
+      "residence": "every-request",
+      "tokens": 371,
+      "chars": 1465,
+      "sha256": "8b12e7c479e9e2ab",
+      "also_counted_in": [
+        "tool:scan_coordinate"
+      ]
+    },
+    {
+      "id": "doc:start_optimization_campaign",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:start_optimization_campaign",
+      "residence": "every-request",
+      "tokens": 326,
+      "chars": 1287,
+      "sha256": "51ce498629c8dfa2",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "doc:stop_watching",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/subscriptions.py:stop_watching",
+      "residence": "every-request",
+      "tokens": 47,
+      "chars": 172,
+      "sha256": "4ed03fb736f164f6",
+      "also_counted_in": [
+        "tool:stop_watching"
+      ]
+    },
+    {
+      "id": "doc:structure_experiment_request",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:structure_experiment_request",
+      "residence": "every-request",
+      "tokens": 330,
+      "chars": 1301,
+      "sha256": "eba74f96288139f3",
+      "also_counted_in": [
+        "tool:structure_experiment_request"
+      ]
+    },
+    {
+      "id": "doc:survey_bond_strengths",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/connectors/jobs.py:survey_bond_strengths",
+      "residence": "every-request",
+      "tokens": 532,
+      "chars": 2111,
+      "sha256": "39f4e00daa3ed190",
+      "also_counted_in": [
+        "tool:survey_bond_strengths"
+      ]
+    },
+    {
+      "id": "doc:synthesize_memory",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/durable_tools.py:synthesize_memory",
+      "residence": "every-request",
+      "tokens": 461,
+      "chars": 1825,
+      "sha256": "38be446292bb7987",
+      "also_counted_in": [
+        "tool:synthesize_memory"
+      ]
+    },
+    {
+      "id": "doc:template:run_bond_strength_survey",
+      "kind": "tool-docstring",
+      "owner": "data/templates/bond-strength-survey.yaml",
+      "residence": "every-request",
+      "tokens": 324,
+      "chars": 1279,
+      "sha256": "2f4a7f4ddee58061",
+      "also_counted_in": [
+        "tool:run_bond_strength_survey"
+      ]
+    },
+    {
+      "id": "doc:template:run_conformer_refinement",
+      "kind": "tool-docstring",
+      "owner": "data/templates/conformer-refinement.yaml",
+      "residence": "every-request",
+      "tokens": 261,
+      "chars": 1028,
+      "sha256": "92dbff11120e6509",
+      "also_counted_in": [
+        "tool:run_conformer_refinement"
+      ]
+    },
+    {
+      "id": "doc:template:run_degradant_triage",
+      "kind": "tool-docstring",
+      "owner": "data/templates/degradant-triage.yaml",
+      "residence": "every-request",
+      "tokens": 455,
+      "chars": 1803,
+      "sha256": "c127883ed8ea638d",
+      "also_counted_in": [
+        "tool:run_degradant_triage"
+      ]
+    },
+    {
+      "id": "doc:template:run_ensemble_free_energy",
+      "kind": "tool-docstring",
+      "owner": "data/templates/ensemble-free-energy.yaml",
+      "residence": "every-request",
+      "tokens": 277,
+      "chars": 1089,
+      "sha256": "9222d33006760c77",
+      "also_counted_in": [
+        "tool:run_ensemble_free_energy"
+      ]
+    },
+    {
+      "id": "doc:template:run_hazard_briefing",
+      "kind": "tool-docstring",
+      "owner": "data/templates/hazard-briefing.yaml",
+      "residence": "every-request",
+      "tokens": 195,
+      "chars": 764,
+      "sha256": "ea2366e0b62ca084",
+      "also_counted_in": [
+        "tool:run_hazard_briefing"
+      ]
+    },
+    {
+      "id": "doc:template:run_microspecies_profile",
+      "kind": "tool-docstring",
+      "owner": "data/templates/microspecies-profile.yaml",
+      "residence": "every-request",
+      "tokens": 305,
+      "chars": 1202,
+      "sha256": "7cb6ff2890eaf182",
+      "also_counted_in": [
+        "tool:run_microspecies_profile"
+      ]
+    },
+    {
+      "id": "doc:template:run_regioselectivity_in_conformer",
+      "kind": "tool-docstring",
+      "owner": "data/templates/regioselectivity-in-conformer.yaml",
+      "residence": "every-request",
+      "tokens": 261,
+      "chars": 1028,
+      "sha256": "3933f189176c78ad",
+      "also_counted_in": [
+        "tool:run_regioselectivity_in_conformer"
+      ]
+    },
+    {
+      "id": "doc:template:run_scale_up_thermal_envelope",
+      "kind": "tool-docstring",
+      "owner": "data/templates/scale-up-thermal-envelope.yaml",
+      "residence": "conditional",
+      "tokens": 383,
+      "chars": 1513,
+      "sha256": "8a243e8ef82cf8b0"
+    },
+    {
+      "id": "doc:template:run_stereoisomer_ranking",
+      "kind": "tool-docstring",
+      "owner": "data/templates/stereoisomer-ranking.yaml",
+      "residence": "every-request",
+      "tokens": 285,
+      "chars": 1122,
+      "sha256": "94e9cd493d4ba088",
+      "also_counted_in": [
+        "tool:run_stereoisomer_ranking"
+      ]
+    },
+    {
+      "id": "doc:template:run_substitution_series",
+      "kind": "tool-docstring",
+      "owner": "data/templates/substitution-series.yaml",
+      "residence": "every-request",
+      "tokens": 238,
+      "chars": 936,
+      "sha256": "2b533313110c3d1a",
+      "also_counted_in": [
+        "tool:run_substitution_series"
+      ]
+    },
+    {
+      "id": "doc:template:run_tautomer_resolution",
+      "kind": "tool-docstring",
+      "owner": "data/templates/tautomer-resolution.yaml",
+      "residence": "every-request",
+      "tokens": 301,
+      "chars": 1186,
+      "sha256": "162c56fb3cb76240",
+      "also_counted_in": [
+        "tool:run_tautomer_resolution"
+      ]
+    },
+    {
+      "id": "doc:watch_for",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/agent/subscriptions.py:watch_for",
+      "residence": "every-request",
+      "tokens": 446,
+      "chars": 1767,
+      "sha256": "30be3b402e5cce0e",
+      "also_counted_in": [
+        "tool:watch_for"
+      ]
+    },
+    {
+      "id": "mcp-output:bo:campaign_progress",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:campaign_progress",
+      "residence": "on-demand",
+      "tokens": 547,
+      "chars": 2172,
+      "sha256": "7bb2b2a9042c7863"
+    },
+    {
+      "id": "mcp-output:bo:generate_screening_design",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:generate_screening_design",
+      "residence": "on-demand",
+      "tokens": 1049,
+      "chars": 4180,
+      "sha256": "897e9f40a8e07d2e"
+    },
+    {
+      "id": "mcp-output:bo:predict_outcome",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:predict_outcome",
+      "residence": "on-demand",
+      "tokens": 1142,
+      "chars": 4552,
+      "sha256": "2565273addab9a12"
+    },
+    {
+      "id": "mcp-output:bo:resume_campaign",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:resume_campaign",
+      "residence": "on-demand",
+      "tokens": 2388,
+      "chars": 9534,
+      "sha256": "760ab20ae5f95737"
+    },
+    {
+      "id": "mcp-output:bo:suggest_next_experiment",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:suggest_next_experiment",
+      "residence": "on-demand",
+      "tokens": 1322,
+      "chars": 5270,
+      "sha256": "77b3bf63d1af32b2"
+    },
+    {
+      "id": "mcp-output:calc:calculator_outliers",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_outliers",
+      "residence": "on-demand",
+      "tokens": 492,
+      "chars": 1949,
+      "sha256": "4ad03eb23bbf1700"
+    },
+    {
+      "id": "mcp-output:calc:calculator_trust",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_trust",
+      "residence": "on-demand",
+      "tokens": 325,
+      "chars": 1281,
+      "sha256": "f3b15afbced4d0ad"
+    },
+    {
+      "id": "mcp-output:calc:compute_atomic_descriptors",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_atomic_descriptors",
+      "residence": "on-demand",
+      "tokens": 562,
+      "chars": 2230,
+      "sha256": "9592b787c47d890a"
+    },
+    {
+      "id": "mcp-output:calc:compute_electronic_properties",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_electronic_properties",
+      "residence": "on-demand",
+      "tokens": 702,
+      "chars": 2789,
+      "sha256": "b8aa5352eb68ca9c"
+    },
+    {
+      "id": "mcp-output:calc:compute_surface_potential",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_surface_potential",
+      "residence": "on-demand",
+      "tokens": 378,
+      "chars": 1493,
+      "sha256": "35660fab4ab4dfb3"
+    },
+    {
+      "id": "mcp-output:calc:compute_thermochemistry",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_thermochemistry",
+      "residence": "on-demand",
+      "tokens": 1373,
+      "chars": 5474,
+      "sha256": "c0ea4cf57b749d60"
+    },
+    {
+      "id": "mcp-output:calc:compute_xtb_energy",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_xtb_energy",
+      "residence": "on-demand",
+      "tokens": 108,
+      "chars": 413,
+      "sha256": "83512e7dd87c6e0d"
+    },
+    {
+      "id": "mcp-output:calc:fetch_artifact",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:fetch_artifact",
+      "residence": "on-demand",
+      "tokens": 182,
+      "chars": 712,
+      "sha256": "2905071dadd5a143"
+    },
+    {
+      "id": "mcp-output:calc:find_calculations",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:find_calculations",
+      "residence": "on-demand",
+      "tokens": 923,
+      "chars": 3673,
+      "sha256": "a3db5c5b94732a0f"
+    },
+    {
+      "id": "mcp-output:calc:list_artifacts",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:list_artifacts",
+      "residence": "on-demand",
+      "tokens": 214,
+      "chars": 840,
+      "sha256": "a604d66988d9c5d0"
+    },
+    {
+      "id": "mcp-output:calc:optimize_geometry",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:optimize_geometry",
+      "residence": "on-demand",
+      "tokens": 322,
+      "chars": 1270,
+      "sha256": "be5c60fa1df10f03"
+    },
+    {
+      "id": "mcp-output:calc:predict_developability_profile",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_developability_profile",
+      "residence": "on-demand",
+      "tokens": 366,
+      "chars": 1446,
+      "sha256": "64bbc06d0f913af0"
+    },
+    {
+      "id": "mcp-output:calc:predict_logd",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_logd",
+      "residence": "on-demand",
+      "tokens": 265,
+      "chars": 1044,
+      "sha256": "7942a5a44bf7bc08"
+    },
+    {
+      "id": "mcp-output:calc:predict_pka",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_pka",
+      "residence": "on-demand",
+      "tokens": 297,
+      "chars": 1171,
+      "sha256": "dba94c3abd17bf17"
+    },
+    {
+      "id": "mcp-output:calc:predict_site_reactivity",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_site_reactivity",
+      "residence": "on-demand",
+      "tokens": 1015,
+      "chars": 4041,
+      "sha256": "b915b004a4794257"
+    },
+    {
+      "id": "mcp-output:calc:predict_solubility",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_solubility",
+      "residence": "on-demand",
+      "tokens": 565,
+      "chars": 2241,
+      "sha256": "74b758b8bbddc29e"
+    },
+    {
+      "id": "mcp-output:calc:report_measurement",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:report_measurement",
+      "residence": "on-demand",
+      "tokens": 40,
+      "chars": 144,
+      "sha256": "119580d6d244e3cf"
+    },
+    {
+      "id": "mcp-output:molfp:similar_molecules",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:similar_molecules",
+      "residence": "on-demand",
+      "tokens": 1266,
+      "chars": 5045,
+      "sha256": "d32fdd9ce618d2da"
+    },
+    {
+      "id": "mcp-output:molfp:substructure_matches",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:substructure_matches",
+      "residence": "on-demand",
+      "tokens": 1266,
+      "chars": 5045,
+      "sha256": "d32fdd9ce618d2da"
+    },
+    {
+      "id": "mcp-output:rxnfp:conditions_for_similar_product",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_product",
+      "residence": "on-demand",
+      "tokens": 1400,
+      "chars": 5582,
+      "sha256": "f57eb38b379ad5f0"
+    },
+    {
+      "id": "mcp-output:rxnfp:conditions_for_similar_reaction",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_reaction",
+      "residence": "on-demand",
+      "tokens": 1400,
+      "chars": 5582,
+      "sha256": "f57eb38b379ad5f0"
+    },
+    {
+      "id": "mcp-output:rxnfp:reactions_making_substructure",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reactions_making_substructure",
+      "residence": "on-demand",
+      "tokens": 1400,
+      "chars": 5582,
+      "sha256": "f57eb38b379ad5f0"
+    },
+    {
+      "id": "mcp-output:rxnfp:reagent_frequency",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
+      "residence": "on-demand",
+      "tokens": 1506,
+      "chars": 6006,
+      "sha256": "3256e1e19cb2041e"
+    },
+    {
+      "id": "mcp-output:rxnfp:similar_reactions",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
+      "residence": "on-demand",
+      "tokens": 976,
+      "chars": 3887,
+      "sha256": "406b22c9f6b09c0c"
+    },
+    {
+      "id": "mcp-output:rxnfp:substrate_precedent",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
+      "residence": "on-demand",
+      "tokens": 1400,
+      "chars": 5582,
+      "sha256": "f57eb38b379ad5f0"
+    },
+    {
+      "id": "mcp-output:rxnfp:workup_precedent",
+      "kind": "mcp-output-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:workup_precedent",
+      "residence": "on-demand",
+      "tokens": 1400,
+      "chars": 5582,
+      "sha256": "f57eb38b379ad5f0"
+    },
+    {
+      "id": "profile:computation:description",
+      "kind": "profile-description",
+      "owner": "data/profiles/computation.yaml:description",
+      "residence": "conditional",
+      "tokens": 101,
+      "chars": 387,
+      "sha256": "7a395c4c0eeec598"
+    },
+    {
+      "id": "profile:computation:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/computation.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 568,
+      "chars": 2253,
+      "sha256": "68063bf6d5dfc739"
+    },
+    {
+      "id": "profile:design:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/design.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 122,
+      "chars": 472,
+      "sha256": "6a6a6d6b9f4bf4ea"
+    },
+    {
+      "id": "profile:evidence:description",
+      "kind": "profile-description",
+      "owner": "data/profiles/evidence.yaml:description",
+      "residence": "conditional",
+      "tokens": 100,
+      "chars": 384,
+      "sha256": "c59a80ba1c6ef67f"
+    },
+    {
+      "id": "profile:evidence:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/evidence.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 324,
+      "chars": 1279,
+      "sha256": "a9da24c9c5acccee"
+    },
+    {
+      "id": "profile:property-lookup:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/property-lookup.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 125,
+      "chars": 482,
+      "sha256": "c58dac7592804cdc"
+    },
+    {
+      "id": "profile:reporting:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/reporting.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 129,
+      "chars": 499,
+      "sha256": "8b12184011fa38b0"
+    },
+    {
+      "id": "profile:safety:description",
+      "kind": "profile-description",
+      "owner": "data/profiles/safety.yaml:description",
+      "residence": "conditional",
+      "tokens": 81,
+      "chars": 306,
+      "sha256": "269efffbeb174520"
+    },
+    {
+      "id": "profile:safety:instructions",
+      "kind": "profile-instructions",
+      "owner": "data/profiles/safety.yaml:instructions",
+      "residence": "conditional",
+      "tokens": 120,
+      "chars": 463,
+      "sha256": "ce25a3bc287698c8"
+    },
+    {
+      "id": "prose:chemclaw.agent.compaction:_PLACEHOLDER_SENTENCE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/compaction.py:_PLACEHOLDER_SENTENCE",
+      "residence": "on-demand",
+      "tokens": 23,
+      "chars": 73,
+      "sha256": "2d3cea3e1473be73"
+    },
+    {
+      "id": "prose:chemclaw.agent.condense:_CONDENSE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/condense.py:_CONDENSE",
+      "residence": "on-demand",
+      "tokens": 168,
+      "chars": 654,
+      "sha256": "2c3ae8bd8ada68c8"
+    },
+    {
+      "id": "prose:chemclaw.agent.exhibit_notes:CUT_REMEDY",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/exhibit_notes.py:CUT_REMEDY",
+      "residence": "on-demand",
+      "tokens": 14,
+      "chars": 40,
+      "sha256": "76c35c85f3417b6e"
+    },
+    {
+      "id": "prose:chemclaw.agent.exhibit_notes:EDITS_CUT",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/exhibit_notes.py:EDITS_CUT",
+      "residence": "on-demand",
+      "tokens": 24,
+      "chars": 78,
+      "sha256": "b8ad1ac49e7660d4"
+    },
+    {
+      "id": "prose:chemclaw.agent.exhibit_notes:EDITS_HEAD",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/exhibit_notes.py:EDITS_HEAD",
+      "residence": "on-demand",
+      "tokens": 51,
+      "chars": 187,
+      "sha256": "53b5db30c9396d26"
+    },
+    {
+      "id": "prose:chemclaw.agent.exhibit_notes:LISTING_HEAD",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/exhibit_notes.py:LISTING_HEAD",
+      "residence": "on-demand",
+      "tokens": 43,
+      "chars": 156,
+      "sha256": "0ba3941793397ab5"
+    },
+    {
+      "id": "prose:chemclaw.agent.exhibit_notes:REFS_HEAD",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/exhibit_notes.py:REFS_HEAD",
+      "residence": "on-demand",
+      "tokens": 30,
+      "chars": 104,
+      "sha256": "35230bbe8f55ed0a"
+    },
+    {
+      "id": "prose:chemclaw.agent.handoff:PEER_BRIEF",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/handoff.py:PEER_BRIEF",
+      "residence": "on-demand",
+      "tokens": 301,
+      "chars": 1185,
+      "sha256": "636172b0f700ab52"
+    },
+    {
+      "id": "prose:chemclaw.agent.langgraph_agent:NO_SKILLS",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/langgraph_agent.py:NO_SKILLS",
+      "residence": "on-demand",
+      "tokens": 97,
+      "chars": 371,
+      "sha256": "0af3e8d5c062f9ae"
+    },
+    {
+      "id": "prose:chemclaw.agent.loop_cap:WRAP_UP_NOTE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/loop_cap.py:WRAP_UP_NOTE",
+      "residence": "on-demand",
+      "tokens": 128,
+      "chars": 496,
+      "sha256": "130acc01718ae1dc"
+    },
+    {
+      "id": "prose:chemclaw.agent.plan_scope:_SCOPE_GUIDANCE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/plan_scope.py:_SCOPE_GUIDANCE",
+      "residence": "every-request",
+      "tokens": 152,
+      "chars": 589,
+      "sha256": "100ceba297cde162",
+      "also_counted_in": [
+        "tool:write_todos"
+      ]
+    },
+    {
+      "id": "prose:chemclaw.agent.skill_backend:REFUSED",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/skill_backend.py:REFUSED",
+      "residence": "on-demand",
+      "tokens": 18,
+      "chars": 53,
+      "sha256": "09114a813e0a169a"
+    },
+    {
+      "id": "prose:chemclaw.agent.subagents:HELPER_BRIEF",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/subagents.py:HELPER_BRIEF",
+      "residence": "on-demand",
+      "tokens": 414,
+      "chars": 1638,
+      "sha256": "2cd956259409b3c7"
+    },
+    {
+      "id": "prose:chemclaw.agent.tool_result_shape:EMPTY_TOOL_RESULT",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/tool_result_shape.py:EMPTY_TOOL_RESULT",
+      "residence": "on-demand",
+      "tokens": 72,
+      "chars": 271,
+      "sha256": "6584c40ac7f84a68"
+    },
+    {
+      "id": "prose:chemclaw.agent.tool_result_shape:HELPER_CUT_SHORT",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/tool_result_shape.py:HELPER_CUT_SHORT",
+      "residence": "on-demand",
+      "tokens": 108,
+      "chars": 416,
+      "sha256": "e713b52a81828f4b"
+    },
+    {
+      "id": "prose:chemclaw.agent.tool_result_size:STEP_REMEDY",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/tool_result_size.py:STEP_REMEDY",
+      "residence": "on-demand",
+      "tokens": 44,
+      "chars": 158,
+      "sha256": "60c318043f751ca7"
+    },
+    {
+      "id": "prose:chemclaw.agent.tool_result_size:TOOL_REMEDY",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/tool_result_size.py:TOOL_REMEDY",
+      "residence": "on-demand",
+      "tokens": 26,
+      "chars": 88,
+      "sha256": "78b2483d3120282c"
+    },
+    {
+      "id": "prose:chemclaw.agent.verifier:_VERIFIER",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/agent/verifier.py:_VERIFIER",
+      "residence": "on-demand",
+      "tokens": 127,
+      "chars": 489,
+      "sha256": "23f1ecc49a203b4b"
+    },
+    {
+      "id": "prose:chemclaw.api.runner:_REVISION_NOTE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/api/runner.py:_REVISION_NOTE",
+      "residence": "on-demand",
+      "tokens": 184,
+      "chars": 717,
+      "sha256": "7ea14fa7889e03bc"
+    },
+    {
+      "id": "prose:chemclaw.connectors.calc.specs:_STRUCTURE_ID_DESCRIPTION",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/connectors/calc/specs.py:_STRUCTURE_ID_DESCRIPTION",
+      "residence": "on-demand",
+      "tokens": 109,
+      "chars": 418,
+      "sha256": "45f9b87d744df87a"
+    },
+    {
+      "id": "prose:chemclaw.connectors.calc.specs:_SYMMETRY_NUMBERS_DESCRIPTION",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/connectors/calc/specs.py:_SYMMETRY_NUMBERS_DESCRIPTION",
+      "residence": "every-request",
+      "tokens": 155,
+      "chars": 602,
+      "sha256": "aabf8a88719d159c",
+      "also_counted_in": [
+        "tool:compare_solvents",
+        "tool:compute_reaction_energy"
+      ]
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_COMPARE_HYPOTHESES",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_COMPARE_HYPOTHESES",
+      "residence": "on-demand",
+      "tokens": 158,
+      "chars": 614,
+      "sha256": "e1a35334a70d9a53"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_CRITIQUE_HYPOTHESIS",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_CRITIQUE_HYPOTHESIS",
+      "residence": "on-demand",
+      "tokens": 146,
+      "chars": 566,
+      "sha256": "c89b2d4cf349008a"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_DERIVE_CHECK",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_DERIVE_CHECK",
+      "residence": "on-demand",
+      "tokens": 767,
+      "chars": 3049,
+      "sha256": "ee06d4472911bcc2"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_DRAFT_ANGLES",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_DRAFT_ANGLES",
+      "residence": "on-demand",
+      "tokens": 111,
+      "chars": 426,
+      "sha256": "3b2fb823de95583b"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_GENERATE_HYPOTHESES",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_GENERATE_HYPOTHESES",
+      "residence": "on-demand",
+      "tokens": 194,
+      "chars": 760,
+      "sha256": "edf8611f0bc80005"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_READ_CHECK_RESULT",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_READ_CHECK_RESULT",
+      "residence": "on-demand",
+      "tokens": 173,
+      "chars": 673,
+      "sha256": "ea0924f2e6033c01"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[bond-strength-survey]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[bond-strength-survey]",
+      "residence": "every-request",
+      "tokens": 10,
+      "chars": 23,
+      "sha256": "8297a78a58c059ad",
+      "also_counted_in": [
+        "tool:survey_bond_strengths"
+      ]
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[conformer-refinement]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[conformer-refinement]",
+      "residence": "on-demand",
+      "tokens": 17,
+      "chars": 50,
+      "sha256": "e8e913e8f7f1a188"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[ensemble-free-energy]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[ensemble-free-energy]",
+      "residence": "every-request",
+      "tokens": 12,
+      "chars": 32,
+      "sha256": "b14ca61a01d5f247",
+      "also_counted_in": [
+        "tool:run_ensemble_free_energy"
+      ]
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[microspecies-profile]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[microspecies-profile]",
+      "residence": "on-demand",
+      "tokens": 13,
+      "chars": 33,
+      "sha256": "0ffdabcceee7a9ed"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[regioselectivity-in-conformer]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[regioselectivity-in-conformer]",
+      "residence": "on-demand",
+      "tokens": 15,
+      "chars": 43,
+      "sha256": "57e4d32af4b6bd6e"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[stereoisomer-ranking]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[stereoisomer-ranking]",
+      "residence": "on-demand",
+      "tokens": 12,
+      "chars": 30,
+      "sha256": "e2aa97a280a58d25"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[substitution-series]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[substitution-series]",
+      "residence": "on-demand",
+      "tokens": 14,
+      "chars": 38,
+      "sha256": "4523692adc01851f"
+    },
+    {
+      "id": "prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[tautomer-resolution]",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_TEMPLATE_HINTS[tautomer-resolution]",
+      "residence": "every-request",
+      "tokens": 10,
+      "chars": 24,
+      "sha256": "3c2088d9536482a4",
+      "also_counted_in": [
+        "tool:rank_species",
+        "tool:rank_species_across_solvents"
+      ]
+    },
+    {
+      "id": "prose:chemclaw.evals.live_judge:_SYSTEM",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/evals/live_judge.py:_SYSTEM",
+      "residence": "on-demand",
+      "tokens": 298,
+      "chars": 1175,
+      "sha256": "5ab1556700c3fe65"
+    },
+    {
+      "id": "response-format:chemclaw.agent.condense._Extraction",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/agent/condense.py:_Extraction",
+      "residence": "on-demand",
+      "tokens": 525,
+      "chars": 2084,
+      "sha256": "e4d259d97beb8928"
+    },
+    {
+      "id": "response-format:chemclaw.agent.verifier.VerificationResult",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/agent/verifier.py:VerificationResult",
+      "residence": "on-demand",
+      "tokens": 277,
+      "chars": 1090,
+      "sha256": "32263cca78286a12"
+    },
+    {
+      "id": "response-format:chemclaw.durable.hypothesis_tournament._AngleSet",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_AngleSet",
+      "residence": "on-demand",
+      "tokens": 149,
+      "chars": 580,
+      "sha256": "c6c1cee4d41c698e"
+    },
+    {
+      "id": "response-format:chemclaw.durable.hypothesis_tournament._CheckVerdict",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_CheckVerdict",
+      "residence": "on-demand",
+      "tokens": 77,
+      "chars": 290,
+      "sha256": "8a8dd49a11c78c06"
+    },
+    {
+      "id": "response-format:chemclaw.durable.hypothesis_tournament._ComparisonVerdict",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_ComparisonVerdict",
+      "residence": "on-demand",
+      "tokens": 122,
+      "chars": 471,
+      "sha256": "99ae888a706fd721"
+    },
+    {
+      "id": "response-format:chemclaw.durable.hypothesis_tournament._HypothesisBatch",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_HypothesisBatch",
+      "residence": "on-demand",
+      "tokens": 326,
+      "chars": 1285,
+      "sha256": "d4a6af6984e0731d"
+    },
+    {
+      "id": "response-format:chemclaw.durable.hypothesis_tournament._ObjectionBatch",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/durable/hypothesis_tournament.py:_ObjectionBatch",
+      "residence": "on-demand",
+      "tokens": 238,
+      "chars": 936,
+      "sha256": "a4ea442bf69e00ea"
+    },
+    {
+      "id": "response-format:chemclaw.hypotheses.models.DiscriminatingCheck",
+      "kind": "response-format-schema",
+      "owner": "src/chemclaw/hypotheses/models.py:DiscriminatingCheck",
+      "residence": "on-demand",
+      "tokens": 686,
+      "chars": 2728,
+      "sha256": "f239eb72b2e5f99b"
+    },
+    {
+      "id": "safety:0",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_SAFETY_BLOCKS[0]",
+      "residence": "every-request",
+      "tokens": 96,
+      "chars": 366,
+      "sha256": "6094b46d97553eed"
+    },
+    {
+      "id": "safety:1",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_SAFETY_BLOCKS[1]",
+      "residence": "every-request",
+      "tokens": 48,
+      "chars": 176,
+      "sha256": "92040cdc34c61d82"
+    },
+    {
+      "id": "safety:2",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_SAFETY_BLOCKS[2]",
+      "residence": "every-request",
+      "tokens": 246,
+      "chars": 968,
+      "sha256": "1f8c207ad5730a75"
+    },
+    {
+      "id": "safety:3",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_SAFETY_BLOCKS[3]",
+      "residence": "every-request",
+      "tokens": 125,
+      "chars": 484,
+      "sha256": "4be9b62e6e0f6860"
+    },
+    {
+      "id": "schema:chemclaw.agent.verifier.ClaimCheck",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/agent/verifier.py:ClaimCheck",
+      "residence": "on-demand",
+      "tokens": 23,
+      "chars": 76,
+      "sha256": "2046400d271bd609",
+      "also_counted_in": [
+        "response-format:chemclaw.agent.verifier.VerificationResult"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.agent.workflow_tools.WorkflowInput",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/agent/workflow_tools.py:WorkflowInput",
+      "residence": "every-request",
+      "tokens": 26,
+      "chars": 87,
+      "sha256": "80b8bae6d6f2b652",
+      "also_counted_in": [
+        "tool:compose_workflow"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.agent.workflow_tools.WorkflowStep",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/agent/workflow_tools.py:WorkflowStep",
+      "residence": "every-request",
+      "tokens": 103,
+      "chars": 396,
+      "sha256": "c9430e95efa6a093",
+      "also_counted_in": [
+        "tool:compose_workflow"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.BondCleavageSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:BondCleavageSpec",
+      "residence": "every-request",
+      "tokens": 66,
+      "chars": 246,
+      "sha256": "5bb0c2583e65c829",
+      "also_counted_in": [
+        "tool:survey_bond_strengths"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.BondSurveyJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:BondSurveyJobSpec",
+      "residence": "every-request",
+      "tokens": 135,
+      "chars": 523,
+      "sha256": "ff78564d4a8e2164",
+      "also_counted_in": [
+        "tool:survey_bond_strengths"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.ComplexJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:ComplexJobSpec",
+      "residence": "every-request",
+      "tokens": 240,
+      "chars": 942,
+      "sha256": "47b1792852840ed6",
+      "also_counted_in": [
+        "tool:compute_interaction_energy"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.EnsembleJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:EnsembleJobSpec",
+      "residence": "every-request",
+      "tokens": 129,
+      "chars": 500,
+      "sha256": "328662872f0e3ecf",
+      "also_counted_in": [
+        "tool:sample_conformers"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.EnsemblePropertyJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:EnsemblePropertyJobSpec",
+      "residence": "every-request",
+      "tokens": 20,
+      "chars": 64,
+      "sha256": "0346eb79361d3410",
+      "also_counted_in": [
+        "tool:compute_ensemble_property"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.MicrostatePkaJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:MicrostatePkaJobSpec",
+      "residence": "every-request",
+      "tokens": 157,
+      "chars": 610,
+      "sha256": "572ec3a2aa045561",
+      "also_counted_in": [
+        "tool:predict_pka_ensemble"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.ReactionJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:ReactionJobSpec",
+      "residence": "every-request",
+      "tokens": 172,
+      "chars": 669,
+      "sha256": "3081a03038ba0c63",
+      "also_counted_in": [
+        "tool:compute_reaction_energy"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.RefinedEnsembleJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:RefinedEnsembleJobSpec",
+      "residence": "every-request",
+      "tokens": 247,
+      "chars": 971,
+      "sha256": "10e44bff81b31485",
+      "also_counted_in": [
+        "tool:refine_ensemble"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.RotationJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:RotationJobSpec",
+      "residence": "every-request",
+      "tokens": 38,
+      "chars": 136,
+      "sha256": "c8ffd64c2f9c1d7b",
+      "also_counted_in": [
+        "tool:profile_rotation"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.ScanJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:ScanJobSpec",
+      "residence": "every-request",
+      "tokens": 217,
+      "chars": 852,
+      "sha256": "c2755c4c0b33d30a",
+      "also_counted_in": [
+        "tool:scan_coordinate"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.SolventScreenJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:SolventScreenJobSpec",
+      "residence": "every-request",
+      "tokens": 177,
+      "chars": 690,
+      "sha256": "435910640a1addda",
+      "also_counted_in": [
+        "tool:compare_solvents"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.SpeciesRankingJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:SpeciesRankingJobSpec",
+      "residence": "every-request",
+      "tokens": 244,
+      "chars": 958,
+      "sha256": "32e888b03ca7ac67",
+      "also_counted_in": [
+        "tool:rank_species"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.SpeciesSolventScreenJobSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:SpeciesSolventScreenJobSpec",
+      "residence": "every-request",
+      "tokens": 197,
+      "chars": 769,
+      "sha256": "f45e665950c8584a",
+      "also_counted_in": [
+        "tool:rank_species_across_solvents"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.connectors.calc.specs.TorsionSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/connectors/calc/specs.py:TorsionSpec",
+      "residence": "every-request",
+      "tokens": 23,
+      "chars": 73,
+      "sha256": "01ab3600fcc97c2b",
+      "also_counted_in": [
+        "tool:profile_rotation"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.hypotheses.models.CheckCall",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/hypotheses/models.py:CheckCall",
+      "residence": "on-demand",
+      "tokens": 180,
+      "chars": 702,
+      "sha256": "5c4dd5d204e962ac",
+      "also_counted_in": [
+        "response-format:chemclaw.hypotheses.models.DiscriminatingCheck"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.hypotheses.models.Hypothesis",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/hypotheses/models.py:Hypothesis",
+      "residence": "on-demand",
+      "tokens": 79,
+      "chars": 297,
+      "sha256": "b4c22a0c0602aec0",
+      "also_counted_in": [
+        "response-format:chemclaw.durable.hypothesis_tournament._HypothesisBatch"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.hypotheses.models.Objection",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/hypotheses/models.py:Objection",
+      "residence": "on-demand",
+      "tokens": 74,
+      "chars": 277,
+      "sha256": "09d428616af9e26e",
+      "also_counted_in": [
+        "response-format:chemclaw.durable.hypothesis_tournament._ObjectionBatch"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.kg.note.Relation",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/kg/note.py:Relation",
+      "residence": "every-request",
+      "tokens": 192,
+      "chars": 752,
+      "sha256": "30f1f727fa62402d",
+      "also_counted_in": [
+        "tool:record_knowledge_note"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.Analytic",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:Analytic",
+      "residence": "every-request",
+      "tokens": 14,
+      "chars": 39,
+      "sha256": "77a6dcbe17abf9d1",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ChargeLine",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ChargeLine",
+      "residence": "every-request",
+      "tokens": 40,
+      "chars": 141,
+      "sha256": "fac274d0f4004180",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.EvidenceRef",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:EvidenceRef",
+      "residence": "every-request",
+      "tokens": 16,
+      "chars": 46,
+      "sha256": "28184582850ebf3f",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ExpectedOutcome",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ExpectedOutcome",
+      "residence": "every-request",
+      "tokens": 14,
+      "chars": 37,
+      "sha256": "1e3b23c4c00e660e",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ExperimentRequest",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ExperimentRequest",
+      "residence": "every-request",
+      "tokens": 12,
+      "chars": 30,
+      "sha256": "550335ebcf7b4c32",
+      "also_counted_in": [
+        "tool:structure_experiment_request"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.Factor",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:Factor",
+      "residence": "every-request",
+      "tokens": 35,
+      "chars": 122,
+      "sha256": "0908f22bb01cb650",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.FactorLevel",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:FactorLevel",
+      "residence": "every-request",
+      "tokens": 12,
+      "chars": 30,
+      "sha256": "b7bdf9c2be7d722f",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ProtocolArm",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ProtocolArm",
+      "residence": "every-request",
+      "tokens": 12,
+      "chars": 31,
+      "sha256": "6e724af6081cda71",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ProtocolBody",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ProtocolBody",
+      "residence": "every-request",
+      "tokens": 13,
+      "chars": 36,
+      "sha256": "a70239a00f96c545",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ProtocolStep",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ProtocolStep",
+      "residence": "every-request",
+      "tokens": 11,
+      "chars": 26,
+      "sha256": "8a37e2706498ee60",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.ProtocolStepKind",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:ProtocolStepKind",
+      "residence": "every-request",
+      "tokens": 64,
+      "chars": 240,
+      "sha256": "7a08491fcf94cbc9",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.RequestField",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:RequestField",
+      "residence": "every-request",
+      "tokens": 24,
+      "chars": 79,
+      "sha256": "e2e9ab69abc88eb5",
+      "also_counted_in": [
+        "tool:structure_experiment_request"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.RequestedComponent",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:RequestedComponent",
+      "residence": "every-request",
+      "tokens": 42,
+      "chars": 152,
+      "sha256": "7a22c1d3ca70aa04",
+      "also_counted_in": [
+        "tool:structure_experiment_request"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.models.Setpoints",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/models.py:Setpoints",
+      "residence": "every-request",
+      "tokens": 15,
+      "chars": 42,
+      "sha256": "b95a93d5292425f0",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.protocols.results.ArmResult",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/protocols/results.py:ArmResult",
+      "residence": "every-request",
+      "tokens": 95,
+      "chars": 362,
+      "sha256": "5cd85c99e4a9a002",
+      "also_counted_in": [
+        "tool:attach_plate_results"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.retrieval.harness.ReportSection",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/retrieval/harness.py:ReportSection",
+      "residence": "every-request",
+      "tokens": 24,
+      "chars": 78,
+      "sha256": "f325ee463604528e",
+      "also_counted_in": [
+        "tool:request_development_report"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.CampaignSpec",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:CampaignSpec",
+      "residence": "every-request",
+      "tokens": 48,
+      "chars": 176,
+      "sha256": "32fe1ede7b80cdf6",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.CategoricalParameter",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:CategoricalParameter",
+      "residence": "every-request",
+      "tokens": 88,
+      "chars": 334,
+      "sha256": "5be213477d8a5e61",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.ContinuousParameter",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:ContinuousParameter",
+      "residence": "every-request",
+      "tokens": 18,
+      "chars": 53,
+      "sha256": "f87764ccdf17b7ea",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.ExcludeConstraint",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:ExcludeConstraint",
+      "residence": "every-request",
+      "tokens": 92,
+      "chars": 349,
+      "sha256": "05e1f1064fd406df",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.LinearConstraint",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:LinearConstraint",
+      "residence": "every-request",
+      "tokens": 79,
+      "chars": 297,
+      "sha256": "a169fca280179e00",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.Objective",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:Objective",
+      "residence": "every-request",
+      "tokens": 17,
+      "chars": 51,
+      "sha256": "1c5b667223c294e8",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.bo.problem.OptimizationProblem",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/bo/problem.py:OptimizationProblem",
+      "residence": "every-request",
+      "tokens": 23,
+      "chars": 73,
+      "sha256": "5ce4684e0dcf383c",
+      "also_counted_in": [
+        "tool:start_optimization_campaign"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.science.labels.vocabulary.SpeciesRole",
+      "kind": "schema-class",
+      "owner": "src/chemclaw/science/labels/vocabulary.py:SpeciesRole",
+      "residence": "every-request",
+      "tokens": 223,
+      "chars": 874,
+      "sha256": "fcfcb5d15f84e857",
+      "also_counted_in": [
+        "tool:draft_experiment_protocol",
+        "tool:structure_experiment_request"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.BondStrengthSurveyInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/bond-strength-survey.yaml",
+      "residence": "every-request",
+      "tokens": 50,
+      "chars": 182,
+      "sha256": "18c177275c08e94b",
+      "also_counted_in": [
+        "tool:run_bond_strength_survey"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.ConformerRefinementInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/conformer-refinement.yaml",
+      "residence": "every-request",
+      "tokens": 46,
+      "chars": 167,
+      "sha256": "ab417adf11c0f456",
+      "also_counted_in": [
+        "tool:run_conformer_refinement"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.DegradantTriageInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/degradant-triage.yaml",
+      "residence": "every-request",
+      "tokens": 39,
+      "chars": 138,
+      "sha256": "5a394615f97b8dda",
+      "also_counted_in": [
+        "tool:run_degradant_triage"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.EnsembleFreeEnergyInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/ensemble-free-energy.yaml",
+      "residence": "every-request",
+      "tokens": 41,
+      "chars": 145,
+      "sha256": "70b19432df6277f0",
+      "also_counted_in": [
+        "tool:run_ensemble_free_energy"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.HazardBriefingInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/hazard-briefing.yaml",
+      "residence": "every-request",
+      "tokens": 26,
+      "chars": 87,
+      "sha256": "00841bfe2aff0630",
+      "also_counted_in": [
+        "tool:run_hazard_briefing"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.MicrospeciesProfileInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/microspecies-profile.yaml",
+      "residence": "every-request",
+      "tokens": 67,
+      "chars": 252,
+      "sha256": "6ac03f1e4f25ee39",
+      "also_counted_in": [
+        "tool:run_microspecies_profile"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.RegioselectivityInConformerInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/regioselectivity-in-conformer.yaml",
+      "residence": "every-request",
+      "tokens": 40,
+      "chars": 144,
+      "sha256": "d59bfd49743281f5",
+      "also_counted_in": [
+        "tool:run_regioselectivity_in_conformer"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.StereoisomerRankingInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/stereoisomer-ranking.yaml",
+      "residence": "every-request",
+      "tokens": 49,
+      "chars": 177,
+      "sha256": "02771cf4d85ed57a",
+      "also_counted_in": [
+        "tool:run_stereoisomer_ranking"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.SubstitutionSeriesInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/substitution-series.yaml",
+      "residence": "every-request",
+      "tokens": 60,
+      "chars": 223,
+      "sha256": "e8614448929f86e6",
+      "also_counted_in": [
+        "tool:run_substitution_series"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.TautomerResolutionInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/tautomer-resolution.yaml",
+      "residence": "every-request",
+      "tokens": 46,
+      "chars": 167,
+      "sha256": "8c6cadd3ae3c80af",
+      "also_counted_in": [
+        "tool:run_tautomer_resolution"
+      ]
+    },
+    {
+      "id": "skill-body:analytical-readiness",
+      "kind": "skill-body",
+      "owner": "skills/analytical-readiness/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1147,
+      "chars": 4571,
+      "sha256": "9ccd3a871d589194"
+    },
+    {
+      "id": "skill-body:atropisomer-assessment",
+      "kind": "skill-body",
+      "owner": "skills/atropisomer-assessment/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1471,
+      "chars": 5867,
+      "sha256": "fc218bfc00486adb"
+    },
+    {
+      "id": "skill-body:bond-strength-and-radicals",
+      "kind": "skill-body",
+      "owner": "skills/bond-strength-and-radicals/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1146,
+      "chars": 4568,
+      "sha256": "c54f3f2da27e0c63"
+    },
+    {
+      "id": "skill-body:calculation-selection",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/calc/skills/calculation-selection/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 3814,
+      "chars": 15239,
+      "sha256": "7d9ec917bf61d430"
+    },
+    {
+      "id": "skill-body:campaign-narrative-synthesis",
+      "kind": "skill-body",
+      "owner": "skills/campaign-narrative-synthesis/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 560,
+      "chars": 2223,
+      "sha256": "8deb9ec8aaf5d85c"
+    },
+    {
+      "id": "skill-body:charge-tables-and-mass-efficiency",
+      "kind": "skill-body",
+      "owner": "skills/charge-tables-and-mass-efficiency/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1473,
+      "chars": 5873,
+      "sha256": "9cbcae2aebfa2537"
+    },
+    {
+      "id": "skill-body:competing-hypotheses",
+      "kind": "skill-body",
+      "owner": "skills/competing-hypotheses/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2019,
+      "chars": 8059,
+      "sha256": "63d302ce8320689b"
+    },
+    {
+      "id": "skill-body:computational-evidence",
+      "kind": "skill-body",
+      "owner": "skills/computational-evidence/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2521,
+      "chars": 10065,
+      "sha256": "edbdf8c372751adc"
+    },
+    {
+      "id": "skill-body:computed-spectra-comparison",
+      "kind": "skill-body",
+      "owner": "skills/computed-spectra-comparison/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1078,
+      "chars": 4295,
+      "sha256": "d100a0d5a5e000fe"
+    },
+    {
+      "id": "skill-body:conformational-analysis",
+      "kind": "skill-body",
+      "owner": "skills/conformational-analysis/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1947,
+      "chars": 7770,
+      "sha256": "0d7f7611237b8cae"
+    },
+    {
+      "id": "skill-body:crystallisation-design",
+      "kind": "skill-body",
+      "owner": "skills/crystallisation-design/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1280,
+      "chars": 5102,
+      "sha256": "72b4431ffa2edaee"
+    },
+    {
+      "id": "skill-body:deep-research",
+      "kind": "skill-body",
+      "owner": "skills/deep-research/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2518,
+      "chars": 10054,
+      "sha256": "b71627b7adcbad75"
+    },
+    {
+      "id": "skill-body:degradation-liabilities",
+      "kind": "skill-body",
+      "owner": "skills/degradation-liabilities/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1351,
+      "chars": 5386,
+      "sha256": "8ef6d00646c6a5b8"
+    },
+    {
+      "id": "skill-body:development-report",
+      "kind": "skill-body",
+      "owner": "skills/development-report/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 662,
+      "chars": 2631,
+      "sha256": "79a02d6fe521b814"
+    },
+    {
+      "id": "skill-body:eln-reaction-extraction",
+      "kind": "skill-body",
+      "owner": "skills/eln-reaction-extraction/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 838,
+      "chars": 3336,
+      "sha256": "70d87466f34d0d9f"
+    },
+    {
+      "id": "skill-body:ensemble-workflows",
+      "kind": "skill-body",
+      "owner": "skills/ensemble-workflows/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2347,
+      "chars": 9370,
+      "sha256": "cb107326a4930a68"
+    },
+    {
+      "id": "skill-body:exhibits",
+      "kind": "skill-body",
+      "owner": "skills/exhibits/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1397,
+      "chars": 5570,
+      "sha256": "6a71519b7a6d782a"
+    },
+    {
+      "id": "skill-body:experiment-design",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/bo/skills/experiment-design/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 6541,
+      "chars": 26147,
+      "sha256": "b81d042a578a7eeb"
+    },
+    {
+      "id": "skill-body:experiment-progression",
+      "kind": "skill-body",
+      "owner": "skills/experiment-progression/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2030,
+      "chars": 8102,
+      "sha256": "a63e89507abbcdb5"
+    },
+    {
+      "id": "skill-body:hte-campaign-design",
+      "kind": "skill-body",
+      "owner": "skills/hte-campaign-design/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 3322,
+      "chars": 13271,
+      "sha256": "5d5bcf07a80de77a"
+    },
+    {
+      "id": "skill-body:impurity-fate-and-purge",
+      "kind": "skill-body",
+      "owner": "skills/impurity-fate-and-purge/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1243,
+      "chars": 4956,
+      "sha256": "03ee59a58dd4689c"
+    },
+    {
+      "id": "skill-body:ionization-and-partitioning",
+      "kind": "skill-body",
+      "owner": "skills/ionization-and-partitioning/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2233,
+      "chars": 8915,
+      "sha256": "b6e88642618919d7"
+    },
+    {
+      "id": "skill-body:kinetics-and-reactor-choice",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/kinetics/skills/kinetics-and-reactor-choice/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1249,
+      "chars": 4980,
+      "sha256": "4ef831c3d2c7d3f9"
+    },
+    {
+      "id": "skill-body:knowledge-graph-query",
+      "kind": "skill-body",
+      "owner": "skills/knowledge-graph-query/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 541,
+      "chars": 2146,
+      "sha256": "ed1f99d0dd064744"
+    },
+    {
+      "id": "skill-body:knowledge-graph-write",
+      "kind": "skill-body",
+      "owner": "skills/knowledge-graph-write/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 706,
+      "chars": 2805,
+      "sha256": "dd889eafc1da176f"
+    },
+    {
+      "id": "skill-body:molecular-association",
+      "kind": "skill-body",
+      "owner": "skills/molecular-association/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 987,
+      "chars": 3930,
+      "sha256": "d380498732d64d20"
+    },
+    {
+      "id": "skill-body:optimization-campaign-synthesis",
+      "kind": "skill-body",
+      "owner": "skills/optimization-campaign-synthesis/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 642,
+      "chars": 2552,
+      "sha256": "61691e9d83978a83"
+    },
+    {
+      "id": "skill-body:playbook-distillation",
+      "kind": "skill-body",
+      "owner": "skills/playbook-distillation/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 667,
+      "chars": 2651,
+      "sha256": "149d36e6758b355d"
+    },
+    {
+      "id": "skill-body:product-prediction",
+      "kind": "skill-body",
+      "owner": "skills/product-prediction/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1492,
+      "chars": 5950,
+      "sha256": "f3abf6098579c7d6"
+    },
+    {
+      "id": "skill-body:protocol-generation",
+      "kind": "skill-body",
+      "owner": "skills/protocol-generation/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 3210,
+      "chars": 12821,
+      "sha256": "2a2d24de735964fb"
+    },
+    {
+      "id": "skill-body:protocol-scale-translation",
+      "kind": "skill-body",
+      "owner": "skills/protocol-scale-translation/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1340,
+      "chars": 5344,
+      "sha256": "032cbc8a1ba1d07e"
+    },
+    {
+      "id": "skill-body:reaction-search",
+      "kind": "skill-body",
+      "owner": "skills/reaction-search/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2765,
+      "chars": 11044,
+      "sha256": "d43982545532be4a"
+    },
+    {
+      "id": "skill-body:reaction-thermodynamics",
+      "kind": "skill-body",
+      "owner": "skills/reaction-thermodynamics/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1403,
+      "chars": 5596,
+      "sha256": "c7a4e26aa5af05a2"
+    },
+    {
+      "id": "skill-body:reactivity-descriptors",
+      "kind": "skill-body",
+      "owner": "skills/reactivity-descriptors/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1894,
+      "chars": 7560,
+      "sha256": "1672f6bbc66d97b5"
+    },
+    {
+      "id": "skill-body:relative-energy-comparisons",
+      "kind": "skill-body",
+      "owner": "skills/relative-energy-comparisons/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1010,
+      "chars": 4022,
+      "sha256": "3b020241fec08674"
+    },
+    {
+      "id": "skill-body:robustness-and-edge-of-failure",
+      "kind": "skill-body",
+      "owner": "skills/robustness-and-edge-of-failure/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1051,
+      "chars": 4188,
+      "sha256": "d9f584833b633f1f"
+    },
+    {
+      "id": "skill-body:safety-screening",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/safety/skills/safety-screening/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 2195,
+      "chars": 8763,
+      "sha256": "306d82922154efa1"
+    },
+    {
+      "id": "skill-body:scale-up-readiness-review",
+      "kind": "skill-body",
+      "owner": "skills/scale-up-readiness-review/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1255,
+      "chars": 5004,
+      "sha256": "40b66c59274a345c"
+    },
+    {
+      "id": "skill-body:solvent-selection",
+      "kind": "skill-body",
+      "owner": "skills/solvent-selection/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1196,
+      "chars": 4765,
+      "sha256": "66354558cb86e623"
+    },
+    {
+      "id": "skill-body:solvent-swap-and-distillation",
+      "kind": "skill-body",
+      "owner": "skills/solvent-swap-and-distillation/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1019,
+      "chars": 4059,
+      "sha256": "53e6989c877b887e"
+    },
+    {
+      "id": "skill-body:system-suitability",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/suitability/skills/system-suitability/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1004,
+      "chars": 3997,
+      "sha256": "bec472aeef0bcee6"
+    },
+    {
+      "id": "skill-body:tautomer-analysis",
+      "kind": "skill-body",
+      "owner": "skills/tautomer-analysis/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 908,
+      "chars": 3616,
+      "sha256": "3a9e80de8ece260d"
+    },
+    {
+      "id": "skill-body:thermal-safety-assessment",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/thermalsafety/skills/thermal-safety-assessment/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1646,
+      "chars": 6565,
+      "sha256": "f90d1859a16beba2"
+    },
+    {
+      "id": "skill-body:unit-operation-sizing",
+      "kind": "skill-body",
+      "owner": "src/chemclaw/connectors/unitops/skills/unit-operation-sizing/SKILL.md",
+      "residence": "on-demand",
+      "tokens": 1382,
+      "chars": 5510,
+      "sha256": "a14920e37880b92e"
+    },
+    {
+      "id": "skill-description:analytical-readiness",
+      "kind": "skill-description",
+      "owner": "skills/analytical-readiness/SKILL.md",
+      "residence": "every-request",
+      "tokens": 48,
+      "chars": 176,
+      "sha256": "e1301af5f8b22d6a"
+    },
+    {
+      "id": "skill-description:atropisomer-assessment",
+      "kind": "skill-description",
+      "owner": "skills/atropisomer-assessment/SKILL.md",
+      "residence": "every-request",
+      "tokens": 69,
+      "chars": 260,
+      "sha256": "28a574252a95f83d"
+    },
+    {
+      "id": "skill-description:bond-strength-and-radicals",
+      "kind": "skill-description",
+      "owner": "skills/bond-strength-and-radicals/SKILL.md",
+      "residence": "every-request",
+      "tokens": 62,
+      "chars": 231,
+      "sha256": "080d3f47a046cac7"
+    },
+    {
+      "id": "skill-description:calculation-selection",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/calc/skills/calculation-selection/SKILL.md",
+      "residence": "every-request",
+      "tokens": 42,
+      "chars": 150,
+      "sha256": "2e77ae8b7e5ad71c"
+    },
+    {
+      "id": "skill-description:campaign-narrative-synthesis",
+      "kind": "skill-description",
+      "owner": "skills/campaign-narrative-synthesis/SKILL.md",
+      "residence": "every-request",
+      "tokens": 64,
+      "chars": 237,
+      "sha256": "d3e7aa81929c9d43"
+    },
+    {
+      "id": "skill-description:charge-tables-and-mass-efficiency",
+      "kind": "skill-description",
+      "owner": "skills/charge-tables-and-mass-efficiency/SKILL.md",
+      "residence": "every-request",
+      "tokens": 132,
+      "chars": 511,
+      "sha256": "d7609e951e87818c"
+    },
+    {
+      "id": "skill-description:competing-hypotheses",
+      "kind": "skill-description",
+      "owner": "skills/competing-hypotheses/SKILL.md",
+      "residence": "every-request",
+      "tokens": 137,
+      "chars": 529,
+      "sha256": "1d0c16f8820c8d23"
+    },
+    {
+      "id": "skill-description:computational-evidence",
+      "kind": "skill-description",
+      "owner": "skills/computational-evidence/SKILL.md",
+      "residence": "every-request",
+      "tokens": 178,
+      "chars": 693,
+      "sha256": "b2c21b221392d2b6"
+    },
+    {
+      "id": "skill-description:computed-spectra-comparison",
+      "kind": "skill-description",
+      "owner": "skills/computed-spectra-comparison/SKILL.md",
+      "residence": "every-request",
+      "tokens": 75,
+      "chars": 281,
+      "sha256": "e62eddd3aa8c7141"
+    },
+    {
+      "id": "skill-description:conformational-analysis",
+      "kind": "skill-description",
+      "owner": "skills/conformational-analysis/SKILL.md",
+      "residence": "every-request",
+      "tokens": 58,
+      "chars": 213,
+      "sha256": "d9d10c7ffe3ce53b"
+    },
+    {
+      "id": "skill-description:crystallisation-design",
+      "kind": "skill-description",
+      "owner": "skills/crystallisation-design/SKILL.md",
+      "residence": "every-request",
+      "tokens": 64,
+      "chars": 240,
+      "sha256": "b6698acf01ba703d"
+    },
+    {
+      "id": "skill-description:deep-research",
+      "kind": "skill-description",
+      "owner": "skills/deep-research/SKILL.md",
+      "residence": "every-request",
+      "tokens": 108,
+      "chars": 415,
+      "sha256": "b5b6bb1d3a0a9c31"
+    },
+    {
+      "id": "skill-description:degradation-liabilities",
+      "kind": "skill-description",
+      "owner": "skills/degradation-liabilities/SKILL.md",
+      "residence": "every-request",
+      "tokens": 66,
+      "chars": 245,
+      "sha256": "cbd09cd558263abb"
+    },
+    {
+      "id": "skill-description:development-report",
+      "kind": "skill-description",
+      "owner": "skills/development-report/SKILL.md",
+      "residence": "every-request",
+      "tokens": 70,
+      "chars": 263,
+      "sha256": "d17d9683a5625278"
+    },
+    {
+      "id": "skill-description:eln-reaction-extraction",
+      "kind": "skill-description",
+      "owner": "skills/eln-reaction-extraction/SKILL.md",
+      "residence": "every-request",
+      "tokens": 66,
+      "chars": 247,
+      "sha256": "7d867788243c84aa"
+    },
+    {
+      "id": "skill-description:ensemble-workflows",
+      "kind": "skill-description",
+      "owner": "skills/ensemble-workflows/SKILL.md",
+      "residence": "every-request",
+      "tokens": 69,
+      "chars": 258,
+      "sha256": "2ec2a9fdb1091292"
+    },
+    {
+      "id": "skill-description:exhibits",
+      "kind": "skill-description",
+      "owner": "skills/exhibits/SKILL.md",
+      "residence": "every-request",
+      "tokens": 26,
+      "chars": 87,
+      "sha256": "83d3cfdd547284f1"
+    },
+    {
+      "id": "skill-description:experiment-design",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/bo/skills/experiment-design/SKILL.md",
+      "residence": "every-request",
+      "tokens": 190,
+      "chars": 743,
+      "sha256": "6fb29def981f787e"
+    },
+    {
+      "id": "skill-description:experiment-progression",
+      "kind": "skill-description",
+      "owner": "skills/experiment-progression/SKILL.md",
+      "residence": "every-request",
+      "tokens": 158,
+      "chars": 615,
+      "sha256": "bd379a92f146d621"
+    },
+    {
+      "id": "skill-description:hte-campaign-design",
+      "kind": "skill-description",
+      "owner": "skills/hte-campaign-design/SKILL.md",
+      "residence": "every-request",
+      "tokens": 132,
+      "chars": 511,
+      "sha256": "b2378fcf7f3e067f"
+    },
+    {
+      "id": "skill-description:impurity-fate-and-purge",
+      "kind": "skill-description",
+      "owner": "skills/impurity-fate-and-purge/SKILL.md",
+      "residence": "every-request",
+      "tokens": 55,
+      "chars": 201,
+      "sha256": "5130cd75baccce18"
+    },
+    {
+      "id": "skill-description:ionization-and-partitioning",
+      "kind": "skill-description",
+      "owner": "skills/ionization-and-partitioning/SKILL.md",
+      "residence": "every-request",
+      "tokens": 76,
+      "chars": 287,
+      "sha256": "7371d6e830c56631"
+    },
+    {
+      "id": "skill-description:kinetics-and-reactor-choice",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/kinetics/skills/kinetics-and-reactor-choice/SKILL.md",
+      "residence": "conditional",
+      "tokens": 140,
+      "chars": 544,
+      "sha256": "c19b93e1c2da706a"
+    },
+    {
+      "id": "skill-description:knowledge-graph-query",
+      "kind": "skill-description",
+      "owner": "skills/knowledge-graph-query/SKILL.md",
+      "residence": "every-request",
+      "tokens": 38,
+      "chars": 136,
+      "sha256": "49c268c552f8da1e"
+    },
+    {
+      "id": "skill-description:knowledge-graph-write",
+      "kind": "skill-description",
+      "owner": "skills/knowledge-graph-write/SKILL.md",
+      "residence": "every-request",
+      "tokens": 45,
+      "chars": 162,
+      "sha256": "91d964fdecad32bd"
+    },
+    {
+      "id": "skill-description:molecular-association",
+      "kind": "skill-description",
+      "owner": "skills/molecular-association/SKILL.md",
+      "residence": "every-request",
+      "tokens": 63,
+      "chars": 233,
+      "sha256": "34e39d5dfba8a4ac"
+    },
+    {
+      "id": "skill-description:optimization-campaign-synthesis",
+      "kind": "skill-description",
+      "owner": "skills/optimization-campaign-synthesis/SKILL.md",
+      "residence": "every-request",
+      "tokens": 69,
+      "chars": 260,
+      "sha256": "a28b3ea599959bba"
+    },
+    {
+      "id": "skill-description:playbook-distillation",
+      "kind": "skill-description",
+      "owner": "skills/playbook-distillation/SKILL.md",
+      "residence": "every-request",
+      "tokens": 67,
+      "chars": 252,
+      "sha256": "31956c61f5bb1a7e"
+    },
+    {
+      "id": "skill-description:product-prediction",
+      "kind": "skill-description",
+      "owner": "skills/product-prediction/SKILL.md",
+      "residence": "every-request",
+      "tokens": 69,
+      "chars": 257,
+      "sha256": "a4707943402f0a93"
+    },
+    {
+      "id": "skill-description:protocol-generation",
+      "kind": "skill-description",
+      "owner": "skills/protocol-generation/SKILL.md",
+      "residence": "every-request",
+      "tokens": 144,
+      "chars": 557,
+      "sha256": "544781e199b834ce"
+    },
+    {
+      "id": "skill-description:protocol-scale-translation",
+      "kind": "skill-description",
+      "owner": "skills/protocol-scale-translation/SKILL.md",
+      "residence": "every-request",
+      "tokens": 102,
+      "chars": 392,
+      "sha256": "976adbb0f1454d77"
+    },
+    {
+      "id": "skill-description:reaction-search",
+      "kind": "skill-description",
+      "owner": "skills/reaction-search/SKILL.md",
+      "residence": "every-request",
+      "tokens": 88,
+      "chars": 336,
+      "sha256": "a114f13dbcc558a3"
+    },
+    {
+      "id": "skill-description:reaction-thermodynamics",
+      "kind": "skill-description",
+      "owner": "skills/reaction-thermodynamics/SKILL.md",
+      "residence": "every-request",
+      "tokens": 68,
+      "chars": 254,
+      "sha256": "c99a023d931d82ee"
+    },
+    {
+      "id": "skill-description:reactivity-descriptors",
+      "kind": "skill-description",
+      "owner": "skills/reactivity-descriptors/SKILL.md",
+      "residence": "every-request",
+      "tokens": 78,
+      "chars": 296,
+      "sha256": "66c6a3fc37476e44"
+    },
+    {
+      "id": "skill-description:relative-energy-comparisons",
+      "kind": "skill-description",
+      "owner": "skills/relative-energy-comparisons/SKILL.md",
+      "residence": "every-request",
+      "tokens": 64,
+      "chars": 240,
+      "sha256": "350ab470042cd0a6"
+    },
+    {
+      "id": "skill-description:robustness-and-edge-of-failure",
+      "kind": "skill-description",
+      "owner": "skills/robustness-and-edge-of-failure/SKILL.md",
+      "residence": "every-request",
+      "tokens": 48,
+      "chars": 174,
+      "sha256": "fd3e2f7f09581d26"
+    },
+    {
+      "id": "skill-description:safety-screening",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/safety/skills/safety-screening/SKILL.md",
+      "residence": "every-request",
+      "tokens": 143,
+      "chars": 556,
+      "sha256": "476676f06dd8120b"
+    },
+    {
+      "id": "skill-description:scale-up-readiness-review",
+      "kind": "skill-description",
+      "owner": "skills/scale-up-readiness-review/SKILL.md",
+      "residence": "every-request",
+      "tokens": 51,
+      "chars": 187,
+      "sha256": "21e3592b6e5c7de4"
+    },
+    {
+      "id": "skill-description:solvent-selection",
+      "kind": "skill-description",
+      "owner": "skills/solvent-selection/SKILL.md",
+      "residence": "every-request",
+      "tokens": 70,
+      "chars": 262,
+      "sha256": "eed01e11d82d02a8"
+    },
+    {
+      "id": "skill-description:solvent-swap-and-distillation",
+      "kind": "skill-description",
+      "owner": "skills/solvent-swap-and-distillation/SKILL.md",
+      "residence": "every-request",
+      "tokens": 62,
+      "chars": 231,
+      "sha256": "513cd02ee269da93"
+    },
+    {
+      "id": "skill-description:system-suitability",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/suitability/skills/system-suitability/SKILL.md",
+      "residence": "conditional",
+      "tokens": 95,
+      "chars": 362,
+      "sha256": "46232bae8d1d6e92"
+    },
+    {
+      "id": "skill-description:tautomer-analysis",
+      "kind": "skill-description",
+      "owner": "skills/tautomer-analysis/SKILL.md",
+      "residence": "every-request",
+      "tokens": 69,
+      "chars": 257,
+      "sha256": "1d87ccb75ba74f74"
+    },
+    {
+      "id": "skill-description:thermal-safety-assessment",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/thermalsafety/skills/thermal-safety-assessment/SKILL.md",
+      "residence": "conditional",
+      "tokens": 138,
+      "chars": 533,
+      "sha256": "d60b3544f55a0d18"
+    },
+    {
+      "id": "skill-description:unit-operation-sizing",
+      "kind": "skill-description",
+      "owner": "src/chemclaw/connectors/unitops/skills/unit-operation-sizing/SKILL.md",
+      "residence": "conditional",
+      "tokens": 103,
+      "chars": 395,
+      "sha256": "6a0edd48ee265320"
+    },
+    {
+      "id": "tool:ask_clarifying_question",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/dialogue_tools.py:ask_clarifying_question",
+      "residence": "every-request",
+      "tokens": 400,
+      "chars": 1581,
+      "sha256": "b87b574bd5f4c300"
+    },
+    {
+      "id": "tool:assemble_evidence_pack",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/evidence_tools.py:assemble_evidence_pack",
+      "residence": "every-request",
+      "tokens": 395,
+      "chars": 1564,
+      "sha256": "14829c827ab7805f"
+    },
+    {
+      "id": "tool:attach_plate_results",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:attach_plate_results",
+      "residence": "every-request",
+      "tokens": 592,
+      "chars": 2350,
+      "sha256": "5a9d145c11be6616"
+    },
+    {
+      "id": "tool:calculator_outliers",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_outliers",
+      "residence": "every-request",
+      "tokens": 493,
+      "chars": 1954,
+      "sha256": "1d36bd4dd2f6e66c"
+    },
+    {
+      "id": "tool:calculator_trust",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:calculator_trust",
+      "residence": "every-request",
+      "tokens": 463,
+      "chars": 1834,
+      "sha256": "53be5350754ec6de"
+    },
+    {
+      "id": "tool:campaign_progress",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:campaign_progress",
+      "residence": "every-request",
+      "tokens": 2087,
+      "chars": 8332,
+      "sha256": "4d567d7618d12f2f"
+    },
+    {
+      "id": "tool:check_against_specification",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/analytical_tools.py:check_against_specification",
+      "residence": "every-request",
+      "tokens": 316,
+      "chars": 1245,
+      "sha256": "c9ad00cf0279d869"
+    },
+    {
+      "id": "tool:check_pending_requests",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/pending_tools.py:check_pending_requests",
+      "residence": "every-request",
+      "tokens": 328,
+      "chars": 1296,
+      "sha256": "dfe92daa72414def"
+    },
+    {
+      "id": "tool:compare_solvents",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compare_solvents",
+      "residence": "every-request",
+      "tokens": 867,
+      "chars": 3452,
+      "sha256": "f01cc1f712f33ab4"
+    },
+    {
+      "id": "tool:compose_workflow",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/workflow_tools.py:compose_workflow",
+      "residence": "every-request",
+      "tokens": 888,
+      "chars": 3536,
+      "sha256": "de342d88cd5ed334"
+    },
+    {
+      "id": "tool:compute_atomic_descriptors",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_atomic_descriptors",
+      "residence": "every-request",
+      "tokens": 441,
+      "chars": 1745,
+      "sha256": "ec24b06ac6cff693"
+    },
+    {
+      "id": "tool:compute_electronic_properties",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_electronic_properties",
+      "residence": "every-request",
+      "tokens": 517,
+      "chars": 2051,
+      "sha256": "0fdc544613313ca6"
+    },
+    {
+      "id": "tool:compute_ensemble_property",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_ensemble_property",
+      "residence": "every-request",
+      "tokens": 714,
+      "chars": 2839,
+      "sha256": "f2af7a65fbf094a5"
+    },
+    {
+      "id": "tool:compute_interaction_energy",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_interaction_energy",
+      "residence": "every-request",
+      "tokens": 806,
+      "chars": 3206,
+      "sha256": "7830a965423c6ca3"
+    },
+    {
+      "id": "tool:compute_reaction_energy",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.compute_reaction_energy",
+      "residence": "every-request",
+      "tokens": 1060,
+      "chars": 4221,
+      "sha256": "130cef8e7ab27435"
+    },
+    {
+      "id": "tool:compute_surface_potential",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_surface_potential",
+      "residence": "every-request",
+      "tokens": 356,
+      "chars": 1405,
+      "sha256": "fccc8dca5cca6bd2"
+    },
+    {
+      "id": "tool:compute_thermochemistry",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_thermochemistry",
+      "residence": "every-request",
+      "tokens": 671,
+      "chars": 2665,
+      "sha256": "ff3961c6ecc9155b"
+    },
+    {
+      "id": "tool:compute_xtb_energy",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:compute_xtb_energy",
+      "residence": "every-request",
+      "tokens": 185,
+      "chars": 721,
+      "sha256": "d994c42be7407463"
+    },
+    {
+      "id": "tool:condense_protocols",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_tools.py:condense_protocols",
+      "residence": "every-request",
+      "tokens": 709,
+      "chars": 2817,
+      "sha256": "67b9c12b4730c5fe"
+    },
+    {
+      "id": "tool:conditions_for_similar_product",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_product",
+      "residence": "every-request",
+      "tokens": 243,
+      "chars": 954,
+      "sha256": "c9cb8cc95e3f9c81"
+    },
+    {
+      "id": "tool:conditions_for_similar_reaction",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_reaction",
+      "residence": "every-request",
+      "tokens": 554,
+      "chars": 2200,
+      "sha256": "c827ad52f982d9a3"
+    },
+    {
+      "id": "tool:create_exhibit",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:create_exhibit",
+      "residence": "every-request",
+      "tokens": 284,
+      "chars": 1120,
+      "sha256": "7beabf16e14e268f"
+    },
+    {
+      "id": "tool:draft_experiment_protocol",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:draft_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 2738,
+      "chars": 10934,
+      "sha256": "e3f31680b6766f3a"
+    },
+    {
+      "id": "tool:edit_file",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 278,
+      "chars": 1094,
+      "sha256": "5824ccac365897d8"
+    },
+    {
+      "id": "tool:estimate_stability_trend",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/analytical_tools.py:estimate_stability_trend",
+      "residence": "every-request",
+      "tokens": 414,
+      "chars": 1638,
+      "sha256": "bfa3e32aab28e0ae"
+    },
+    {
+      "id": "tool:expand_note",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/graph_tools.py:expand_note",
+      "residence": "every-request",
+      "tokens": 412,
+      "chars": 1630,
+      "sha256": "d382d7444d3ef199"
+    },
+    {
+      "id": "tool:experiment_arms_from_campaign",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:experiment_arms_from_campaign",
+      "residence": "every-request",
+      "tokens": 431,
+      "chars": 1705,
+      "sha256": "04379f85b85cd482"
+    },
+    {
+      "id": "tool:fetch_artifact",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:fetch_artifact",
+      "residence": "every-request",
+      "tokens": 528,
+      "chars": 2093,
+      "sha256": "de105167fa44be6f"
+    },
+    {
+      "id": "tool:find_calculations",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:find_calculations",
+      "residence": "every-request",
+      "tokens": 891,
+      "chars": 3548,
+      "sha256": "5751be842c7abe4b"
+    },
+    {
+      "id": "tool:find_experiment_protocols",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:find_experiment_protocols",
+      "residence": "every-request",
+      "tokens": 191,
+      "chars": 747,
+      "sha256": "681cf97760b1398c"
+    },
+    {
+      "id": "tool:find_knowledge_gaps",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/graph_tools.py:find_knowledge_gaps",
+      "residence": "every-request",
+      "tokens": 410,
+      "chars": 1622,
+      "sha256": "13a1e858cc45bc1a"
+    },
+    {
+      "id": "tool:find_notes",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/graph_tools.py:find_notes",
+      "residence": "every-request",
+      "tokens": 305,
+      "chars": 1204,
+      "sha256": "eb694c17d6bea35b"
+    },
+    {
+      "id": "tool:find_past_jobs",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/durable_tools.py:find_past_jobs",
+      "residence": "every-request",
+      "tokens": 575,
+      "chars": 2282,
+      "sha256": "d47741495778843f"
+    },
+    {
+      "id": "tool:forget_preference",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/preferences.py:forget_preference",
+      "residence": "every-request",
+      "tokens": 92,
+      "chars": 352,
+      "sha256": "f04eb0d498b9d332"
+    },
+    {
+      "id": "tool:gather_evidence",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/research_tools.py:gather_evidence",
+      "residence": "every-request",
+      "tokens": 889,
+      "chars": 3540,
+      "sha256": "73306808de46033a"
+    },
+    {
+      "id": "tool:generate_screening_design",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:generate_screening_design",
+      "residence": "every-request",
+      "tokens": 2673,
+      "chars": 10674,
+      "sha256": "1bc6b4fc42e4a266"
+    },
+    {
+      "id": "tool:get_durable_job_status",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/durable_tools.py:get_durable_job_status",
+      "residence": "every-request",
+      "tokens": 690,
+      "chars": 2744,
+      "sha256": "a7b9eb402b1e38fe"
+    },
+    {
+      "id": "tool:glob",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 413,
+      "chars": 1633,
+      "sha256": "a52c7ddcb2a8e793"
+    },
+    {
+      "id": "tool:grep",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 600,
+      "chars": 2383,
+      "sha256": "ae94f2a87e889f40"
+    },
+    {
+      "id": "tool:list_artifacts",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:list_artifacts",
+      "residence": "every-request",
+      "tokens": 573,
+      "chars": 2276,
+      "sha256": "58aad3fed157c9b4"
+    },
+    {
+      "id": "tool:list_attachments",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/attachments.py:list_attachments",
+      "residence": "every-request",
+      "tokens": 214,
+      "chars": 839,
+      "sha256": "4838d949716544a3"
+    },
+    {
+      "id": "tool:list_watches",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/subscriptions.py:list_watches",
+      "residence": "every-request",
+      "tokens": 66,
+      "chars": 247,
+      "sha256": "85f96deb041431ea"
+    },
+    {
+      "id": "tool:ls",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 121,
+      "chars": 466,
+      "sha256": "25a274e4b751e271"
+    },
+    {
+      "id": "tool:optimize_geometry",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:optimize_geometry",
+      "residence": "every-request",
+      "tokens": 532,
+      "chars": 2109,
+      "sha256": "78bc418c99c722c7"
+    },
+    {
+      "id": "tool:predict_developability_profile",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_developability_profile",
+      "residence": "every-request",
+      "tokens": 215,
+      "chars": 841,
+      "sha256": "596b10e9348f3b47"
+    },
+    {
+      "id": "tool:predict_logd",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_logd",
+      "residence": "every-request",
+      "tokens": 572,
+      "chars": 2269,
+      "sha256": "83247eadad72cdaa"
+    },
+    {
+      "id": "tool:predict_outcome",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:predict_outcome",
+      "residence": "every-request",
+      "tokens": 2201,
+      "chars": 8785,
+      "sha256": "71c42790a997678e"
+    },
+    {
+      "id": "tool:predict_pka",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_pka",
+      "residence": "every-request",
+      "tokens": 363,
+      "chars": 1435,
+      "sha256": "4665c68a7e2ac8ef"
+    },
+    {
+      "id": "tool:predict_pka_ensemble",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.predict_pka_ensemble",
+      "residence": "every-request",
+      "tokens": 844,
+      "chars": 3358,
+      "sha256": "87f47eb5b6c63e32"
+    },
+    {
+      "id": "tool:predict_site_reactivity",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_site_reactivity",
+      "residence": "every-request",
+      "tokens": 863,
+      "chars": 3433,
+      "sha256": "fb4ab9317dd95b30"
+    },
+    {
+      "id": "tool:predict_solubility",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:predict_solubility",
+      "residence": "every-request",
+      "tokens": 156,
+      "chars": 607,
+      "sha256": "73f47b932e8b44b0"
+    },
+    {
+      "id": "tool:profile_rotation",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.profile_rotation",
+      "residence": "every-request",
+      "tokens": 935,
+      "chars": 3723,
+      "sha256": "25b515e0c4e09f6a"
+    },
+    {
+      "id": "tool:propose_skill",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/proposal_tools.py:propose_skill",
+      "residence": "every-request",
+      "tokens": 462,
+      "chars": 1830,
+      "sha256": "de5356c52ba9ba52"
+    },
+    {
+      "id": "tool:rank_competing_hypotheses",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/durable_tools.py:rank_competing_hypotheses",
+      "residence": "every-request",
+      "tokens": 490,
+      "chars": 1942,
+      "sha256": "33ce72c09340d5cb"
+    },
+    {
+      "id": "tool:rank_species",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.rank_species",
+      "residence": "every-request",
+      "tokens": 1141,
+      "chars": 4548,
+      "sha256": "80a614e37fe6263b"
+    },
+    {
+      "id": "tool:rank_species_across_solvents",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.rank_species_across_solvents",
+      "residence": "every-request",
+      "tokens": 1058,
+      "chars": 4214,
+      "sha256": "812aa543dafaf017"
+    },
+    {
+      "id": "tool:reactions_making_substructure",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reactions_making_substructure",
+      "residence": "every-request",
+      "tokens": 205,
+      "chars": 801,
+      "sha256": "57a0756c1c60ecf6"
+    },
+    {
+      "id": "tool:read_attachment",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/attachments.py:read_attachment",
+      "residence": "every-request",
+      "tokens": 185,
+      "chars": 723,
+      "sha256": "b482c8e8483d3705"
+    },
+    {
+      "id": "tool:read_exhibit",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:read_exhibit",
+      "residence": "every-request",
+      "tokens": 122,
+      "chars": 472,
+      "sha256": "8e6247cbf673f0cc"
+    },
+    {
+      "id": "tool:read_experiment_protocol",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:read_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 290,
+      "chars": 1143,
+      "sha256": "54ee140b1934b169"
+    },
+    {
+      "id": "tool:read_file",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 449,
+      "chars": 1777,
+      "sha256": "624395d92621dd59"
+    },
+    {
+      "id": "tool:read_plate_results",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:read_plate_results",
+      "residence": "every-request",
+      "tokens": 286,
+      "chars": 1126,
+      "sha256": "ac695aa8107f4e1a"
+    },
+    {
+      "id": "tool:reagent_frequency",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
+      "residence": "every-request",
+      "tokens": 358,
+      "chars": 1413,
+      "sha256": "c07a2da7242d984a"
+    },
+    {
+      "id": "tool:recall_observations",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/memory_tools.py:recall_observations",
+      "residence": "every-request",
+      "tokens": 460,
+      "chars": 1821,
+      "sha256": "dec74250df980e63"
+    },
+    {
+      "id": "tool:recall_preferences",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/preferences.py:recall_preferences",
+      "residence": "every-request",
+      "tokens": 171,
+      "chars": 666,
+      "sha256": "7d1e445dd03a1a59"
+    },
+    {
+      "id": "tool:record_confirmed_answer",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/memory_tools.py:record_confirmed_answer",
+      "residence": "every-request",
+      "tokens": 397,
+      "chars": 1570,
+      "sha256": "a455beb0cf8c294f"
+    },
+    {
+      "id": "tool:record_failure",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/graph_tools.py:record_failure",
+      "residence": "every-request",
+      "tokens": 814,
+      "chars": 3237,
+      "sha256": "8086582e5a9627e9"
+    },
+    {
+      "id": "tool:record_knowledge_note",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/graph_tools.py:record_knowledge_note",
+      "residence": "every-request",
+      "tokens": 1252,
+      "chars": 4991,
+      "sha256": "a2e340b628e48005"
+    },
+    {
+      "id": "tool:refine_ensemble",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.refine_ensemble",
+      "residence": "every-request",
+      "tokens": 983,
+      "chars": 3916,
+      "sha256": "3949e5e306476e6d"
+    },
+    {
+      "id": "tool:remember_preference",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/preferences.py:remember_preference",
+      "residence": "every-request",
+      "tokens": 292,
+      "chars": 1151,
+      "sha256": "69925cecf2d050af"
+    },
+    {
+      "id": "tool:report_measurement",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/calc/server/tools.py:report_measurement",
+      "residence": "every-request",
+      "tokens": 640,
+      "chars": 2544,
+      "sha256": "cd2c3e1709fbda54"
+    },
+    {
+      "id": "tool:request_development_report",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/durable_tools.py:request_development_report",
+      "residence": "every-request",
+      "tokens": 442,
+      "chars": 1749,
+      "sha256": "14704896407a9a0a"
+    },
+    {
+      "id": "tool:request_external_input",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/pending_tools.py:request_external_input",
+      "residence": "every-request",
+      "tokens": 586,
+      "chars": 2328,
+      "sha256": "e34730685fcd8ff3"
+    },
+    {
+      "id": "tool:rescale_experiment_protocol",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:rescale_experiment_protocol",
+      "residence": "every-request",
+      "tokens": 300,
+      "chars": 1181,
+      "sha256": "2f646e63b275f638"
+    },
+    {
+      "id": "tool:resume_campaign",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:resume_campaign",
+      "residence": "every-request",
+      "tokens": 444,
+      "chars": 1758,
+      "sha256": "0e5e17ffe4e5c7c3"
+    },
+    {
+      "id": "tool:review_activity",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/operations_tools.py:review_activity",
+      "residence": "every-request",
+      "tokens": 665,
+      "chars": 2643,
+      "sha256": "96e9a6f6d31e0464"
+    },
+    {
+      "id": "tool:review_commitments",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/commitment_tools.py:review_commitments",
+      "residence": "every-request",
+      "tokens": 516,
+      "chars": 2045,
+      "sha256": "fa7ec19dddcf80a2"
+    },
+    {
+      "id": "tool:revise_exhibit",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/exhibit_tools.py:revise_exhibit",
+      "residence": "every-request",
+      "tokens": 228,
+      "chars": 896,
+      "sha256": "622258eed606624f"
+    },
+    {
+      "id": "tool:run_bond_strength_survey",
+      "kind": "tool-schema",
+      "owner": "data/templates/bond-strength-survey.yaml",
+      "residence": "every-request",
+      "tokens": 477,
+      "chars": 1891,
+      "sha256": "23f9fe8c1c83ef6d"
+    },
+    {
+      "id": "tool:run_composed_workflow",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/workflow_tools.py:run_composed_workflow",
+      "residence": "every-request",
+      "tokens": 226,
+      "chars": 885,
+      "sha256": "25cde6bd8d70c799"
+    },
+    {
+      "id": "tool:run_conformer_refinement",
+      "kind": "tool-schema",
+      "owner": "data/templates/conformer-refinement.yaml",
+      "residence": "every-request",
+      "tokens": 414,
+      "chars": 1637,
+      "sha256": "59008c9e47cba759"
+    },
+    {
+      "id": "tool:run_degradant_triage",
+      "kind": "tool-schema",
+      "owner": "data/templates/degradant-triage.yaml",
+      "residence": "every-request",
+      "tokens": 596,
+      "chars": 2368,
+      "sha256": "41394b361e7e7fc4"
+    },
+    {
+      "id": "tool:run_ensemble_free_energy",
+      "kind": "tool-schema",
+      "owner": "data/templates/ensemble-free-energy.yaml",
+      "residence": "every-request",
+      "tokens": 421,
+      "chars": 1668,
+      "sha256": "660460f59e9c72b3"
+    },
+    {
+      "id": "tool:run_hazard_briefing",
+      "kind": "tool-schema",
+      "owner": "data/templates/hazard-briefing.yaml",
+      "residence": "every-request",
+      "tokens": 301,
+      "chars": 1186,
+      "sha256": "9d75eeb7b8d2c38f"
+    },
+    {
+      "id": "tool:run_microspecies_profile",
+      "kind": "tool-schema",
+      "owner": "data/templates/microspecies-profile.yaml",
+      "residence": "every-request",
+      "tokens": 479,
+      "chars": 1897,
+      "sha256": "4e21ecb554b97195"
+    },
+    {
+      "id": "tool:run_regioselectivity_in_conformer",
+      "kind": "tool-schema",
+      "owner": "data/templates/regioselectivity-in-conformer.yaml",
+      "residence": "every-request",
+      "tokens": 408,
+      "chars": 1615,
+      "sha256": "224726b32d06bc51"
+    },
+    {
+      "id": "tool:run_stereoisomer_ranking",
+      "kind": "tool-schema",
+      "owner": "data/templates/stereoisomer-ranking.yaml",
+      "residence": "every-request",
+      "tokens": 438,
+      "chars": 1733,
+      "sha256": "8f7debce27693fcd"
+    },
+    {
+      "id": "tool:run_substitution_series",
+      "kind": "tool-schema",
+      "owner": "data/templates/substitution-series.yaml",
+      "residence": "every-request",
+      "tokens": 428,
+      "chars": 1694,
+      "sha256": "0833c2a66893f444"
+    },
+    {
+      "id": "tool:run_tautomer_resolution",
+      "kind": "tool-schema",
+      "owner": "data/templates/tautomer-resolution.yaml",
+      "residence": "every-request",
+      "tokens": 454,
+      "chars": 1799,
+      "sha256": "56dea4e97e369b6e"
+    },
+    {
+      "id": "tool:sample_conformers",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.sample_conformers",
+      "residence": "every-request",
+      "tokens": 762,
+      "chars": 3032,
+      "sha256": "07fad2bfb492e443"
+    },
+    {
+      "id": "tool:scan_coordinate",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.scan_coordinate",
+      "residence": "every-request",
+      "tokens": 783,
+      "chars": 3115,
+      "sha256": "50cc5e6495d7f2f5"
+    },
+    {
+      "id": "tool:similar_molecules",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:similar_molecules",
+      "residence": "every-request",
+      "tokens": 338,
+      "chars": 1335,
+      "sha256": "8ca1775d5042817b"
+    },
+    {
+      "id": "tool:similar_reactions",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
+      "residence": "every-request",
+      "tokens": 345,
+      "chars": 1362,
+      "sha256": "66c26cee4958232d"
+    },
+    {
+      "id": "tool:start_optimization_campaign",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/bo/connector.yaml:jobs.start_optimization_campaign",
+      "residence": "every-request",
+      "tokens": 1565,
+      "chars": 6244,
+      "sha256": "bd47c397a016d6a6"
+    },
+    {
+      "id": "tool:stop_watching",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/subscriptions.py:stop_watching",
+      "residence": "every-request",
+      "tokens": 98,
+      "chars": 374,
+      "sha256": "cc4ed170123d10f0"
+    },
+    {
+      "id": "tool:structure_experiment_request",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/protocol_design_tools.py:structure_experiment_request",
+      "residence": "every-request",
+      "tokens": 1108,
+      "chars": 4414,
+      "sha256": "04de90e53bd28dd1"
+    },
+    {
+      "id": "tool:substrate_precedent",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
+      "residence": "every-request",
+      "tokens": 273,
+      "chars": 1074,
+      "sha256": "69ba05c9a144b68d"
+    },
+    {
+      "id": "tool:substructure_matches",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/molfp/server/tools.py:substructure_matches",
+      "residence": "every-request",
+      "tokens": 194,
+      "chars": 757,
+      "sha256": "e3b58837dc2a77b7"
+    },
+    {
+      "id": "tool:suggest_next_experiment",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/bo/server/tools.py:suggest_next_experiment",
+      "residence": "every-request",
+      "tokens": 2951,
+      "chars": 11786,
+      "sha256": "9869bc79ba400ffa"
+    },
+    {
+      "id": "tool:survey_bond_strengths",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/connectors/calc/connector.yaml:jobs.survey_bond_strengths",
+      "residence": "every-request",
+      "tokens": 1009,
+      "chars": 4018,
+      "sha256": "852c9b3d7037d0c8"
+    },
+    {
+      "id": "tool:synthesize_memory",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/durable_tools.py:synthesize_memory",
+      "residence": "every-request",
+      "tokens": 584,
+      "chars": 2319,
+      "sha256": "b8ad322293e7007d"
+    },
+    {
+      "id": "tool:task",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.SubAgentMiddleware",
+      "residence": "every-request",
+      "tokens": 895,
+      "chars": 3561,
+      "sha256": "a65cb8d3cd2ae668"
+    },
+    {
+      "id": "tool:watch_for",
+      "kind": "tool-schema",
+      "owner": "src/chemclaw/agent/subscriptions.py:watch_for",
+      "residence": "every-request",
+      "tokens": 546,
+      "chars": 2166,
+      "sha256": "bf6f2ac6e46bce64"
+    },
+    {
+      "id": "tool:workup_precedent",
+      "kind": "mcp-tool-schema",
+      "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:workup_precedent",
+      "residence": "every-request",
+      "tokens": 179,
+      "chars": 698,
+      "sha256": "9fa170b333957367"
+    },
+    {
+      "id": "tool:write_file",
+      "kind": "upstream-tool-schema",
+      "owner": "upstream:deepagents.FilesystemMiddleware",
+      "residence": "every-request",
+      "tokens": 188,
+      "chars": 735,
+      "sha256": "a41c117785aafb49"
+    },
+    {
+      "id": "tool:write_todos",
+      "kind": "upstream-tool-schema",
+      "owner": "src/chemclaw/agent/plan_scope.py:ScopedTodoListMiddleware",
+      "residence": "every-request",
+      "tokens": 1372,
+      "chars": 5469,
+      "sha256": "890df239c9183e42"
+    }
+  ]
+}

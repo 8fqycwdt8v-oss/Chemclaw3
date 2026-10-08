@@ -53,6 +53,16 @@ PLAN_GATE_REASON: Final = "plan_gate"
 # The one content type an SSE stream may have (WHATWG); a protocol constant, not a setting.
 _SSE_CONTENT_TYPE: Final = "text/event-stream"
 
+# What a tool reports when the model's arguments did not fit its schema, in the two wordings this
+# system produces: LangChain's `ToolNode` for an in-process tool, and the MCP server's pydantic
+# `<tool>Arguments` model for a connector tool. Matched on the text because neither path gives the
+# `tool_failed` event a reason for it; `tests/test_live_argument_validity.py` runs both real paths,
+# so a rewording upstream fails there rather than reading as a model that stopped erring.
+ARGUMENT_ERROR: Final = re.compile(
+    r"Error invoking tool '[^']+' with kwargs|validation errors? for \w+Arguments"
+    r"|Input validation error"
+)
+
 # Events that mark the turn beginning to answer. `answer` as well as `token`, because a
 # non-streaming turn emits `answer` with no token before it.
 _OUTPUT_EVENTS = frozenset({"token", "answer"})
@@ -170,6 +180,12 @@ class ProbeOutcome(BaseModel):
     # Every other gate's refusals (`dry_run`, `undeclared_write`, `repeat`, `authz`), from the
     # closed `core/turn_signals.RefusalReason` set. Also not tool failures.
     tool_refusals: list[str] = Field(default_factory=list)
+    # Argument validity, the metric a model-text evaluation reads: how many distinct tools the turn
+    # called, and which of them failed the schema on their first call. A tool's first call is the
+    # one a description or a schema has to get right; a retry after the error is the model reading
+    # the error message, which is a different text.
+    first_calls: int = 0
+    first_call_argument_errors: list[str] = Field(default_factory=list)
 
 
 def load_probes(probe_dir: str | None = None) -> list[Probe]:
@@ -424,6 +440,9 @@ async def run_turn(
         session_id=session_id or "",
     )
     counts: dict[str, int] = {}
+    # Calls issued so far, by tool: a schema failure is attributed to a tool's first call only while
+    # exactly one is outstanding, since a failure event names no call.
+    issued: dict[str, int] = {}
     # Every note id this turn's tools returned, untruncated — see `_score_citations`.
     returned_ids: set[str] = set()
     # Every value this turn's tools returned, untruncated — see `_verified_numbers`. A list, since
@@ -459,7 +478,9 @@ async def run_turn(
                     outcome.specialists.append(agent)
 
                 if kind == "tool_call":
-                    outcome.tools_called.append(str(event.get("tool", "")))
+                    called = str(event.get("tool", ""))
+                    outcome.tools_called.append(called)
+                    issued[called] = issued.get(called, 0) + 1
                 elif kind == "tool_result":
                     preview = str(event.get("preview", ""))
                     returned_ids.update(str(note_id) for note_id in event.get("note_ids", []))
@@ -483,6 +504,12 @@ async def run_turn(
                         outcome.tool_refusals.append(tool)
                     else:
                         outcome.tools_failed.append(tool)
+                        if (
+                            issued.get(tool) == 1
+                            and tool not in outcome.first_call_argument_errors
+                            and ARGUMENT_ERROR.search(str(event.get("message", "")))
+                        ):
+                            outcome.first_call_argument_errors.append(tool)
                 elif kind == "capability_degraded":
                     # The event's field is `connectors`, a list.
                     outcome.degraded.extend(str(name) for name in event.get("connectors", []))
@@ -506,6 +533,7 @@ async def run_turn(
 
     outcome.latency_seconds = round(time.monotonic() - started, 2)
     outcome.event_counts = counts
+    outcome.first_calls = len(issued)
     outcome.answered = bool(outcome.answer.strip())
     # `degraded` is not read here: a pre-turn capability announcement is not this turn's work
     # failing.
