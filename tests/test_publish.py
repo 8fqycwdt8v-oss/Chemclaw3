@@ -23,6 +23,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 import chemclaw.durable.publish as publish_module
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.profile_discovery import ProfileError
+from chemclaw.connectors.contract import ContractMismatch
 from chemclaw.connectors.registry import ConnectorError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -143,6 +144,7 @@ def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
     "error_cls",
     [
         ConnectorError,
+        ContractMismatch,
         DataSourceError,
         TemplateError,
         UnresolvedReference,

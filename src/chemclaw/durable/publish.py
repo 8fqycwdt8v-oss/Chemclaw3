@@ -87,6 +87,9 @@ _BAD_DATA_TYPES = [
     "GitWriteError",
     "CalculationDomainError",
     "ConnectorError",
+    # The manifest and the server disagree about a MAJOR of the contract; the same two versions are
+    # found on every attempt, so a retry is the same refusal.
+    "ContractMismatch",
     "DataSourceError",
     # Two sources transcribed the same entry id; the ambiguity is a fact about the corpus.
     "AmbiguousReactionRecord",

@@ -169,11 +169,22 @@ def _every_served_workflow() -> list[tuple[str, type]]:
     from chemclaw.connectors.registry import discovered
 
     queues = ["background"]
-    for bundle in sorted(discovered()):
+    for bundle, (_directory, manifest) in sorted(discovered().items()):
         module = f"chemclaw.connectors.{bundle}.worker"
-        if importlib.util.find_spec(module) is not None:
+        try:
+            present = importlib.util.find_spec(module) is not None
+        except ModuleNotFoundError:
+            # A connector whose manifest the fleet owns has no package here at all, so there is no
+            # parent to look in; that is "no worker", unless the manifest declares jobs.
+            present = False
+        if present:
             importlib.import_module(module)
             queues.append(bundle_queue(bundle))
+        else:
+            assert not manifest.jobs, (
+                f"{bundle} declares jobs in its manifest and has no {module}, so nothing serves "
+                "them"
+            )
     return [(queue, cls) for queue in queues for cls in registered_workflows(queue)]
 
 

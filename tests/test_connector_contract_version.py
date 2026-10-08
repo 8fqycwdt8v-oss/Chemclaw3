@@ -17,6 +17,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 
+import chemclaw.api.runner as runner
 from chemclaw.connectors.contract import compare
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.connectors.registry import _mcp_connection, _with_contract, open_connector_specs
@@ -26,6 +27,20 @@ from tests.test_capability_degradation import _stream_events
 from tests.test_connector_transport import _Server
 
 _NAME = "stub"
+
+
+@pytest.fixture(autouse=True)
+def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the durable subsystem up, so the degraded list says only what these tests are about.
+
+    Without a broker the same event also names `durable-jobs (Temporal)`; that half is
+    `tests/test_runner.py`'s.
+    """
+
+    async def _reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_durable_subsystem_reachable", _reachable)
 
 
 class _Stub:
