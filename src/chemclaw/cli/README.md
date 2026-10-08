@@ -14,6 +14,7 @@ and the terminal get the same answer.
 | `backfill_corpus.py`, `backfill_publications.py`, `refresh_baseline.py`, `synthesize.py`, `sync_share.py` | one-shot operational jobs: notes from existing documents, queueing results computed before a sink existed, the eval baseline, a memory-synthesis job, crawling a mounted share |
 | `rekey_campaigns.py`, `rekey_compounds.py` | carry recorded rows across an identity-derivation bump (`make rekey-compounds`) |
 | `erase_actor.py`, `explain.py` | offboard a person's data (`make user-erase`); reconstruct why a session's tool calls happened (`make explain`) |
+| `openapi.py` | regenerate the published API contract `schema/api/openapi.json` (`make openapi`); the logic is `api/contract.py` |
 | `sink_schema.py`, `egress_preload.py` | print the DDL a results database needs; print the egress posture `deploy/entrypoint.sh` arms the compiled guard with |
 | `distill.py`, `trajectory_census.py`, `propose_profile.py` | mine stored conversations: recurring trajectories, proposals, profile candidates (`make distill`, `make trajectory-census`, `make propose-profile`) |
 | `live_*.py`, `leak_probe.py`, `retrieval_arms.py`, `hypothesis_recovery.py`, `verifier_margin.py`, `soak_report.py`, `phoenix_publish.py` | the live lane and measurement drivers behind the `make live-*` targets |
