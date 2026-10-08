@@ -174,19 +174,19 @@ class PostgresClaims:
     def beat_bound(cls) -> float:
         """The longest one heartbeat may take, derived from the lease so the two cannot disagree.
 
-        Pool wait, connect and statement all fit inside it; with a beat every `lease / 3`, several
-        beats can fail inside one lease and a later one still lands before it lapses.
+        Pool wait, connect and statement all fit inside it (`_beat` enforces it); with a beat every
+        `lease / 3`, several beats can fail inside one lease and a later one still lands.
         """
         return cls.lease_seconds() / _POLLS_PER_LEASE
 
     async def heartbeat(self, claim: Claim) -> bool:
         """Extend the lease; `False` when the claim is no longer this attempt's.
 
-        The statement is bounded by `beat_bound`; the caller bounds the pool wait and connect.
+        Unbounded here on purpose: the caller (`_beat`) wraps the whole borrow-and-statement in
+        `beat_bound`, so the shared pool's settings are used and no extra pool is minted. A
+        timeout cancels the statement and the pool discards the interrupted connection.
         """
-        async with db.connection(
-            self._dsn, operation="calc_claim", statement_timeout_seconds=self.beat_bound()
-        ) as conn:
+        async with db.connection(self._dsn, operation="calc_claim") as conn:
             cur = await conn.execute(_BEAT, (self.lease_seconds(), claim.slot, claim.attempt))
             return cur.rowcount > 0
 

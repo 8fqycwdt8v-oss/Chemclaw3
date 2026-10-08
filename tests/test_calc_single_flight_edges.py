@@ -301,3 +301,36 @@ async def test_a_claim_won_while_the_caller_is_cancelled_is_not_stranded(
         await task
 
     assert await _claim_rows(key) == [], "a claim nobody will heartbeat was left standing"
+
+
+async def test_a_beat_cut_mid_statement_does_not_return_a_dirty_connection(
+    flight_on: None,  # noqa: F811
+) -> None:
+    """The beat's bound is an `asyncio` timeout over the shared pool; it must leave it sound."""
+    sleeping = "SELECT pg_sleep(30)"
+    async with db.pooling():
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.3):
+                async with db.connection(settings.postgres_dsn, operation="calc_claim") as conn:
+                    await conn.execute(sleeping)
+
+        for _ in range(3):  # every later borrow answers: the connection was reset, not left busy
+            async with db.connection(settings.postgres_dsn, operation="calc_claim") as conn:
+                cur = await conn.execute("SELECT 1")
+                assert await cur.fetchone() == (1,)
+
+        async def still_running() -> bool:
+            async with db.connection(settings.postgres_dsn, operation="calc_claim") as conn:
+                cur = await conn.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE query = %s AND state = 'active'",
+                    (sleeping,),
+                )
+                row = await cur.fetchone()
+                return row is not None and row[0] > 0
+
+        await _until(lambda: _async_not(still_running()), seconds=10)
+
+
+async def _async_not(pending: Awaitable[bool]) -> bool:
+    """The negation of an awaitable, for `_until`."""
+    return not await pending
