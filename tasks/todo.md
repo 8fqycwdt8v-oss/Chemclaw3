@@ -280,7 +280,7 @@ behind-an-evaluation`).
       spread per metric) goes in the PR description, and a one-line summary goes in this file.
 
 ### Track E — Guard rails (owner decision 2026-10-08)
-- [ ] **W2.18 Git-safety hook** (`.claude/hooks/block_destructive_git.py`; the owner authorised
+- [x] **W2.18 Git-safety hook** (`.claude/hooks/block_destructive_git.py`; the owner authorised
       the change explicitly):
       - Block `git checkout -f`/`--force`, `git switch --discard-changes`/`-f`, and destructive
         verbs wrapped in `bash -c`/`sh -c` (recurse into the quoted string).
