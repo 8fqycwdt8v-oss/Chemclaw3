@@ -1,6 +1,7 @@
 """Postgres backend for the calculation store, over `calculation_results`.
 
-`put` upserts by the flat calculation key; `get` is a primary-key lookup.
+`put` upserts by the flat calculation key; `get` is a primary-key lookup; `claims` is the ledger
+that lets processes missing one key agree on who computes it.
 """
 
 import logging
@@ -13,6 +14,7 @@ from psycopg.rows import TupleRow
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
+from chemclaw.science.calc.flight import PostgresClaims
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -123,6 +125,14 @@ class PostgresStore:
         """
         async with db.connection(self._dsn) as conn:
             yield conn
+
+    def claims(self) -> PostgresClaims | None:
+        """The claim ledger for cross-process dedup under the postgres session store.
+
+        `None` under `session_store="memory"`, a single-process run where the in-process future is
+        the whole answer and the claim table may not be migrated.
+        """
+        return PostgresClaims(self._dsn) if settings.session_store == "postgres" else None
 
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""

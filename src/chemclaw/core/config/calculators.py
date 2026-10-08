@@ -177,6 +177,11 @@ class CalculatorSettings(BaseSettings):
     # server's `xtb_cli_timeout_seconds`. A shorter bound is a retryable abandonment that starts a
     # duplicate run beside the orphaned one.
     calc_atomic_timeout_seconds: float = Field(default=3600.0, gt=0)
+    # How long a pod's claim on a calculation miss survives without a heartbeat. This is how fast a
+    # waiter notices that the pod computing a result was killed (takeover = lease + one poll), so
+    # shorter detects a crash sooner and tolerates a stalled event loop less; the pod refreshes it
+    # three times per lease.
+    calc_claim_lease_seconds: float = Field(default=30.0, gt=0)
     # Molecule `connectors/calc/remote.py::remote_version` asks a key for when reading a
     # calculator's version, which does not depend on the molecule. Acetic acid because every
     # calibrated calculator can enumerate it (it has an acidic O-H).

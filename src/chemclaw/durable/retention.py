@@ -254,6 +254,12 @@ _NOT_PRUNED: dict[str, str] = {
     "is somebody following or stopping a turn",
     "session_turn_frames": "frames in transit between two replicas, deleted by the asker as it "
     "reads them and by cascade with their request (`infra/sql/121_session_turn_remotes.sql`)",
+    "calculation_claims": "a claim per calculation being computed, deleted by its holder when the "
+    "result is persisted, fails to a waiter or is cancelled; a crashed holder's row lapses on the "
+    "database clock and the next claim on its key replaces it in place, so the only residue is a "
+    "key-sized row per key whose last attempt died and was never asked for again "
+    "(`infra/sql/125_calculation_claims.sql`) — never on a clock of its own, because a live row is "
+    "a computation another pod is waiting on",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",
