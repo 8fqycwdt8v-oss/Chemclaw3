@@ -593,7 +593,15 @@ def test_a_stopped_turns_settle_lands_before_the_message_behind_it_runs(
                 assert stopped.status_code == 200, stopped.text
                 await first
                 assert (await second)[-1]["type"] == "answer"
-                return await PostgresHistoryProvider().get_messages(session_id)
+                try:
+                    return await PostgresHistoryProvider().get_messages(session_id)
+                finally:
+                    # The server thread has `db.pooling()` on, so this read opens a pool on this
+                    # test's loop. Left open, `asyncio.run` cancels its workers mid-connect;
+                    # psycopg_pool turns that cancellation into a connection error, the worker goes
+                    # back to waiting on its queue with the cancel consumed, and the loop never
+                    # finishes closing. Closed here, its workers stop on their own.
+                    await db.close_pools_of_this_loop()
 
     transcript = asyncio.run(_run())
     questions = [m for m in transcript if isinstance(m, HumanMessage)]
