@@ -871,6 +871,20 @@ def diff(committed: dict[str, Any], current: dict[str, Any]) -> list[str]:
     return lines
 
 
+@contextmanager
+def _quiet() -> Iterator[None]:
+    """Silence INFO while the graph is built (it logs its wiring) and put logging back after.
+
+    Restored, because `main` is also called in-process by tests and `logging.disable` is global.
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.INFO)
+    try:
+        yield
+    finally:
+        logging.disable(previous)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Write the inventory, or with `--check` compare it; exit 1 when the file is stale."""
     parser = argparse.ArgumentParser(description="Dump every string the model reads.")
@@ -879,9 +893,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, default=INVENTORY_PATH, help="where to write")
     args = parser.parse_args(argv)
-    logging.disable(
-        logging.INFO
-    )  # building the graph logs its wiring; the output here is the answer
     if running_python() != target_python():
         print(
             f"the inventory is measured under Python {target_python()} (the image's); this is "
@@ -897,7 +908,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    current = build_inventory()
+    with _quiet():
+        current = build_inventory()
     text = render(current)
     if args.check:
         committed = (

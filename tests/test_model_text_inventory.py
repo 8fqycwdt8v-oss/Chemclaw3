@@ -7,15 +7,14 @@ it carries an inventory diff, and the text-edit evaluation
 """
 
 import json
-import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from chemclaw.agent import text_overlay
-from chemclaw.agent.chemclaw_agent import _capability_tools, withheld_tool_names
+from chemclaw.agent import chemclaw_agent, text_overlay
+from chemclaw.agent.chemclaw_agent import withheld_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.cli.model_text_inventory import (
     INVENTORY_PATH,
@@ -30,9 +29,8 @@ from chemclaw.cli.model_text_inventory import (
     target_python,
     tokens,
 )
-from chemclaw.connectors.registry import discovered
 from chemclaw.core.config import settings
-from chemclaw.core.tool_registry import registered_tool_names
+from chemclaw.core.tool_registry import _REGISTRY, register_tool, registered_tool_names
 from tests.test_context_floor import CEILINGS, _floor
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -250,17 +248,28 @@ def test_a_model_facing_text_the_deployment_withholds_is_not_read(
 def test_the_inventory_does_not_depend_on_what_an_earlier_build_registered(
     current: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The registry only grows: a graph built under a wider connector set leaves its launchers.
+    """The registry only grows: a launcher an earlier build bound stays registered after it.
 
-    Built under every bundle enabled first, then the inventory under the shipped configuration
-    must still be the one committed, with no launcher listed twice or listed at all.
+    Simulated, so the result does not depend on what the process has already built: a stub launcher
+    is registered and this deployment is made to withhold it through the public inputs
+    (`withheld_job_names`). It is read when the withholding is off, and neither read nor listed
+    when it is on, and the inventory under the shipped configuration is the one committed.
     """
-    before = set(registered_tool_names())
-    with monkeypatch.context() as wider:
-        wider.setattr(settings, "connectors_enabled", os.pathsep.join(discovered()))
-        _capability_tools()
-        grown = set(registered_tool_names()) - before
-    assert grown, "no launcher was registered by the wider build, so this test proves nothing"
-    after = build_inventory()
+
+    async def zz_stub_launcher() -> str:
+        """Launch the stub calculation (a test double, never bound)."""
+        return "stub"
+
+    register_tool(zz_stub_launcher)
+    try:
+        assert "zz_stub_launcher" in registered_tool_names()
+        assert "zz_stub_launcher" not in withheld_tool_names(), "setup: not withheld yet"
+        assert "zz_stub_launcher" in model_facing_descriptions(), "the control: visible unwithheld"
+        monkeypatch.setattr(chemclaw_agent, "withheld_job_names", lambda: ["zz_stub_launcher"])
+        assert "zz_stub_launcher" in withheld_tool_names(), "setup: now withheld"
+        assert "zz_stub_launcher" not in model_facing_descriptions()
+        after = build_inventory()
+    finally:
+        _REGISTRY.pop("zz_stub_launcher", None)
     assert after == current
-    assert not {f"doc:{name}" for name in grown} & {row["id"] for row in after["entries"]}
+    assert not any("zz_stub_launcher" in row["id"] for row in after["entries"])
