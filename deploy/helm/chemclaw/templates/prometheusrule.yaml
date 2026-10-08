@@ -1335,12 +1335,13 @@ spec:
             summary: No process has reported a result-outbox backlog for several drain intervals
             description: >-
               `chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds` and
-              `chemclaw_outbox_dead_lettered` are refreshed together by the drain pass and are
-              absent from a worker's `/metrics` until its first pass completes. Several missed
-              passes of `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES` means the drain is not running —
-              the same fault `ChemclawResultOutboxStuck` exists for, arriving as silence, which that
-              rule cannot fire on. Check the Temporal Schedule first; a pod that is gone entirely
-              raises `ChemclawTargetDown` beside this.
+              `chemclaw_outbox_dead_lettered` are re-read from the table together, on a timer by
+              every background worker and after each drain pass, and are absent from a worker's
+              `/metrics` until its first read completes. Several missed passes of
+              `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES` means no worker is reporting: none is
+              running, or none can reach the database. A drain that stopped while workers are up
+              is `ChemclawResultOutboxStuck`, whose age keeps growing. Check the workers first; a
+              pod that is gone entirely raises `ChemclawTargetDown` beside this.
 
         {{- if .Values.retention.windows }}
         {{- /* Disposal happened and nothing anywhere could see it. Twelve Temporal Schedules run in

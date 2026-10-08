@@ -127,8 +127,8 @@ publicly-trusted certificates none of this is needed (`sslmode=require` verifies
 `verify-full` needs the CA file).
 
 Other objects you create yourself, when you turn on what needs them: one ConfigMap per
-`extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim
-for an SMB/CIFS share, and the image pull secrets.
+`extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim (state its `documentShare.accessMode`;
+ReadWriteMany or ReadOnlyMany with more than one background worker) for an SMB/CIFS share, and the image pull secrets.
 
 ### 5. Wire the MCP tool fleet
 

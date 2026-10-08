@@ -14,7 +14,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.retrieval.vector_index import default_note_index, reindex_exclusively
+    from chemclaw.retrieval.vector_index import (
+        REINDEX_SKIPPED,
+        default_note_index,
+        reindex_exclusively,
+    )
 
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -24,14 +28,17 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 async def reindex_notes_activity() -> int:
     """Rebuild the derived note index from the knowledge graph; return the note count indexed.
 
+    Returns `REINDEX_SKIPPED` (-1) instead of a count when another worker held the pass, so a
+    skipped run reads differently from an index that was already current (0) in the run's result.
     Heartbeats throughout, since a whole-corpus pass plus an embedding batch has no unit boundary to
     report progress at.
     """
-    return await beating(
+    indexed = await beating(
         reindex_exclusively(default_note_index()),
         "note reindex",
         settings.background_activity_heartbeat_timeout_seconds,
     )
+    return REINDEX_SKIPPED if indexed is None else indexed
 
 
 @durable_workflow("background")

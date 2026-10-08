@@ -1437,6 +1437,104 @@ def _alert_expression(rules: str, name: str) -> str:
     return rules[start : rules.index("for:", start)]
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_rollout_peak_leaves_a_connection_for_each_held_job_lock() -> None:
+    """The declared ceiling covers the pools at a rollout's peak plus the lock connections.
+
+    A single-instance job holds one connection outside the pools for its pass
+    (`core/job_lock.py`), and the background workers are the processes that hold one, so the
+    unaccounted spend is at most one per replica. Built from the rendered ConfigMap, the numbers
+    every pod's `Settings` reads, so the margin is the release's and not the values file's.
+    """
+    from chemclaw.core.config import Settings
+
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    config = next(
+        document["data"]
+        for document in yaml.safe_load_all(render)
+        if document
+        and document.get("kind") == "ConfigMap"
+        and document["metadata"]["name"] == "chemclaw-config"
+    )
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pools=int(config["CHEMCLAW_PG_FLEET_POOLS"]),
+        pg_fleet_pools_at_rollout_peak=int(config["CHEMCLAW_PG_FLEET_POOLS_AT_ROLLOUT_PEAK"]),
+        pg_pool_max_size=int(config["CHEMCLAW_PG_POOL_MAX_SIZE"]),
+        service_fleet_replicas=int(config["CHEMCLAW_SERVICE_FLEET_REPLICAS"]),
+        service_fleet_replicas_at_rollout_peak=int(
+            config["CHEMCLAW_SERVICE_FLEET_REPLICAS_AT_ROLLOUT_PEAK"]
+        ),
+        pg_fleet_max_connections=int(config["CHEMCLAW_PG_FLEET_MAX_CONNECTIONS"]),
+    )
+    peak = settings.fleet_connections_per_server(at_rollout_peak=True)[0]
+    locks = int(_values()["workers"]["background"]["replicas"])
+    declared = int(config["CHEMCLAW_PG_FLEET_MAX_CONNECTIONS"])
+    assert peak + locks <= declared, (
+        f"the rollout peak is {peak} connections in pools plus {locks} held job-lock connections "
+        f"(one per background worker) against a declared ceiling of {declared}; raise "
+        "postgres.maxConnections together with the server's max_connections, or lower "
+        "CHEMCLAW_PG_POOL_MAX_SIZE"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_shared_document_volume_is_required_before_a_second_worker_mounts_it() -> None:
+    """A `ReadWriteOnce` claim would leave the second worker Pending, so the chart will not render.
+
+    The claim is the operator's and the chart cannot read its mode, so it asks. One worker keeps
+    working with any claim, and a release with no share is untouched.
+    """
+
+    def render(*extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "helm",
+                "template",
+                "chemclaw",
+                str(CHART),
+                "--set",
+                "networkPolicy.allowAnyDestination=true",
+                "--set",
+                "retention.unboundedGrowthAccepted=true",
+                "--set",
+                "temporal.namespace=chemclaw",
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    shared = ("--set", "documentShare.enabled=true")
+    assert render().returncode == 0, "a release with no share must render at two workers"
+    for refused in ("", "ReadWriteOnce", "ReadWriteOncePod"):
+        result = render(*shared, "--set", f"documentShare.accessMode={refused}")
+        assert result.returncode != 0 and "documentShare.accessMode" in result.stderr, (
+            f"two workers rendered with a {refused or 'blank'} access mode: {result.stderr[-300:]}"
+        )
+    for accepted in ("ReadWriteMany", "ReadOnlyMany"):
+        assert render(*shared, "--set", f"documentShare.accessMode={accepted}").returncode == 0
+    single = render(*shared, "--set", "workers.background.replicas=1")
+    assert single.returncode == 0, "one worker may mount any claim"
+
+
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
     """The connection ceiling needs a runtime check, as the turn ceiling does.
 
@@ -3597,6 +3695,9 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
     ),
     # The second is a posture: the chart refuses to publish the face until a deployment names who
     # may reach it; stated here as the router's selector, as a real publishing release would.
+    # A posture: every background worker mounts the share, so with two the chart asks for the
+    # claim's access mode.
+    "documentShare.enabled": ("--set", "documentShare.accessMode=ReadWriteMany"),
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",

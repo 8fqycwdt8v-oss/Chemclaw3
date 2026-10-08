@@ -33,6 +33,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
+- [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
+  clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised

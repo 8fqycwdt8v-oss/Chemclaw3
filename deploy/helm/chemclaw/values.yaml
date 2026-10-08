@@ -257,6 +257,10 @@ workers:
 documentShare:
   enabled: false
   claimName: "chemclaw-sharedrive"
+  # The access mode of the claim above, as you created it. The chart cannot read it, so it asks:
+  # with more than one background worker it must be ReadWriteMany or ReadOnlyMany, because every
+  # worker mounts the share and a ReadWriteOnce claim attaches to one node. Unchecked at one worker.
+  accessMode: ""
   mountPath: "/mnt/sharedrive"
 
 # The knowledge graph is a Git-backed Markdown tree that every reader resolves as a plain local

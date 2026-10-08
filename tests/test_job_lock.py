@@ -48,7 +48,7 @@ vector_index.embed_texts = slow
 
 async def main() -> None:
     count = await vector_index.reindex_exclusively(vector_index.PostgresNoteIndex(), sys.argv[1])
-    print(f"DONE {count}", flush=True)
+    print("DONE skipped" if count is None else f"DONE {count}", flush=True)
 
 asyncio.run(main())
 """
@@ -203,7 +203,7 @@ async def test_two_note_reindexers_embed_each_note_once(
     try:
         assert (await _line(first)).startswith("EMBEDDING 3")
         second = await _spawn(_REINDEXER, str(notes), "0", env=postgres_worker_env)
-        assert await _lines_until_done(second) == ["DONE 0"], (
+        assert await _lines_until_done(second) == ["DONE skipped"], (
             "a second reindex embedded notes while the first held the lock"
         )
         assert await _lines_until_done(first) == ["DONE 3"]
@@ -239,8 +239,78 @@ async def test_a_reindexer_killed_mid_pass_is_finished_by_the_next(
     while True:
         survivor = await _spawn(_REINDEXER, str(notes), "0", env=postgres_worker_env)
         done = await _lines_until_done(survivor)
-        if done[-1] != "DONE 0":
+        if done[-1] != "DONE skipped":
             break
         assert time.monotonic() < deadline, "the killed worker's pass was never taken over"
         await asyncio.sleep(0.2)
     assert done[-1] == "DONE 2"
+
+
+async def test_the_lock_works_on_a_cold_pool_and_takes_no_pool_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker's first job runs on a cold pool, and the lock must not use up one of its slots.
+
+    The first borrow against an endpoint leaves a transaction open (the identity probe), which
+    made a pooled lock connection refuse `set_autocommit`; and a pooled connection held for a whole
+    pass leaves the activities one slot short when the pool is as wide as they are. The subprocess
+    tests above run unpooled, so this one drives `db.pooling()`.
+    """
+    from chemclaw.core import db
+
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(db, "_SERVER_IDENTITY", {})
+    monkeypatch.setattr(db, "_IDENTITY_UNREADABLE", set())
+    async with db.pooling():
+        async with exclusive_job("cold-pool") as first:
+            assert first is True
+            assert not db._all_pools(), "the lock opened a pool, so it competes with the activities"
+            async with exclusive_job("cold-pool") as second:
+                assert second is False, "a second claimant held a lock the first still has"
+            # Work on a cold pool proceeds while the lock is held, and the lock stays held.
+            async with db.connection(settings.postgres_dsn) as conn:
+                await conn.execute("SELECT 1")
+                assert conn.autocommit is False
+        async with exclusive_job("cold-pool") as again:
+            assert again is True
+
+
+async def test_a_hand_run_beside_the_pods_is_locked_and_says_it_skipped(
+    postgres_worker_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The command line takes the lock even on the default memory session store.
+
+    It shares the index with the pods, and a skipped run is an exit status of its own, not a count
+    of zero.
+    """
+    await migrated_db_or_skip()
+    notes = tmp_path / "notes"
+    _write_notes(notes, 2)
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM note_index")
+        await conn.commit()
+
+    holder = await _spawn(_REINDEXER, str(notes), "20", env=postgres_worker_env)
+    try:
+        assert (await _line(holder)).startswith("EMBEDDING 2")
+        hand_run_env = {
+            **postgres_worker_env,
+            "CHEMCLAW_SESSION_STORE": "memory",
+            "CHEMCLAW_NOTE_REPO_DIR": str(tmp_path),
+            "CHEMCLAW_KNOWLEDGE_DIR": "notes",
+        }
+        cli = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "chemclaw.retrieval.vector_index",
+            env=hand_run_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(cli.communicate(), 120)
+        assert cli.returncode == 3, f"{out!r} {err!r}"
+        assert b"skipped" in out and b"indexed 0" not in out
+    finally:
+        holder.kill()
+        await holder.wait()

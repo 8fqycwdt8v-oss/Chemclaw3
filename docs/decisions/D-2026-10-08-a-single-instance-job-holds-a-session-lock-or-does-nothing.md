@@ -37,7 +37,7 @@ costs embedding calls twice and writes the same rows twice.
 
 **Option 2 for the reindex, option 1 for everything else.** `exclusive_job(name)` yields whether the
 caller holds the lock and counts `chemclaw_job_lock_skipped_total{job}` when it does not;
-`reindex_exclusively` (the activity and the command line) returns 0 when it is not held. The key folds in `current_schema()` so deployments
+`reindex_exclusively` (the activity and the command line) reports a skipped run (the activity returns -1, the command line exits 3) when it is not held, on a connection of its own so it takes no pool slot. The key folds in `current_schema()` so deployments
 sharing a database do not contend. The connection comes from the session layer's DSN, so behind a
 transaction pooler it is the session-mode endpoint (`D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`).
 The chart ships two replicas with a `minAvailable: 1` PodDisruptionBudget, rendered only from two,

@@ -9,16 +9,20 @@ anyone running a cleanup, and the next caller takes over.
 Invariants:
 - The key folds in `current_schema()`, so deployments and tests sharing one database do not
   contend, while every pod of one deployment (one `search_path`) agrees on it.
-- The connection comes from the session layer's DSN (`session_store_dsn`, else `postgres_dsn`)
-  and runs in autocommit, so the lock is never held by an idle transaction a server timeout can
-  end. Behind a transaction pooler that DSN must be a session-mode endpoint (the deployment guide
-  lists which connections need it).
-- A memory session store means one process; the block runs unlocked.
+- The connection is dedicated, not a pool slot, and comes from the session layer's DSN
+  (`session_store_dsn`, else `postgres_dsn`). It runs in autocommit, so the lock is never held by
+  an idle transaction a server timeout can end. Behind a transaction pooler that DSN must be a
+  session-mode endpoint. It is one connection per held lock outside the pools, which
+  `postgres.maxConnections` leaves room for (`tests/test_deploy_chart.py`).
+- A memory session store means one process; the block runs unlocked unless the caller says the
+  work itself lives in a shared database (`shared_database=True`).
 """
 
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+
+import psycopg
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -34,12 +38,14 @@ _UNLOCK = f"SELECT pg_advisory_unlock({_KEY})"
 
 
 @asynccontextmanager
-async def exclusive_job(name: str) -> AsyncIterator[bool]:
+async def exclusive_job(name: str, *, shared_database: bool = False) -> AsyncIterator[bool]:
     """Hold the cluster-wide lock `name` for the block, or yield `False` without waiting.
 
     Args:
         name: A stable literal naming the job (`"note-reindex"`), never request-derived; it is
             the metric label and part of the lock key.
+        shared_database: The job writes to Postgres that other processes also write, so it is
+            locked even when the session store is `memory` (a hand-run beside the pods).
 
     Yields:
         `True` when this caller holds the lock for the whole block; `False` when another holder
@@ -49,37 +55,30 @@ async def exclusive_job(name: str) -> AsyncIterator[bool]:
         ConnectionError: The lock connection could not be had. Not swallowed into `False`: a job
             that cannot reach Postgres must fail and be retried, not report itself skipped.
     """
-    if settings.session_store != "postgres":
+    if settings.session_store != "postgres" and not shared_database:
         yield True
         return
     dsn = settings.session_store_dsn or settings.postgres_dsn
-    async with db.connection(dsn, operation=f"job_lock:{name}") as conn:
+    async with await db.connect(dsn) as conn:
         await conn.set_autocommit(True)
+        cursor = await conn.execute(_TRY, (name,))
+        row = await cursor.fetchone()
+        held = bool(row and row[0])
+        if not held:
+            record_metric(
+                lambda m: m.increment("chemclaw_job_lock_skipped_total", labels={"job": name})
+            )
+            log_event(
+                logger,
+                "job_lock.skipped",
+                "%s is already running on another worker; this one does nothing",
+                name,
+                job=name,
+            )
         try:
-            cursor = await conn.execute(_TRY, (name,))
-            row = await cursor.fetchone()
-            held = bool(row and row[0])
-            if not held:
-                record_metric(
-                    lambda m: m.increment("chemclaw_job_lock_skipped_total", labels={"job": name})
-                )
-                log_event(
-                    logger,
-                    "job_lock.skipped",
-                    "%s is already running on another worker; this one does nothing",
-                    name,
-                    job=name,
-                )
-            try:
-                yield held
-            finally:
-                if held:
-                    try:
-                        await conn.execute(_UNLOCK, (name,))
-                    except Exception:
-                        # A lock that cannot be released explicitly dies with its backend, so the
-                        # connection is closed rather than returned to the pool still holding it.
-                        await conn.close()
+            yield held
         finally:
-            if not conn.closed:
-                await conn.set_autocommit(False)
+            if held:
+                # Closing the connection releases the lock anyway; this just frees it sooner.
+                with suppress(psycopg.Error):
+                    await conn.execute(_UNLOCK, (name,))
