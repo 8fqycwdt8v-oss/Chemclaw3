@@ -17,6 +17,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc.flight import ClaimsProvider, PostgresClaims
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
@@ -324,6 +325,11 @@ class ArrayOffloadingStore:
             payload.pop(field)
             payload[_address(name)] = by_name[name].content_hash
         await self._results.put(stored.model_copy(update={"result": payload}))
+
+    def claims(self) -> PostgresClaims | None:
+        """The wrapped store's claim ledger, if it has one: arrays live beside the same row."""
+        inner = self._results
+        return inner.claims() if isinstance(inner, ClaimsProvider) else None
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
         """Delegate, deliberately without restoring anything.

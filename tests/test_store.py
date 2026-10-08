@@ -165,7 +165,7 @@ def test_concurrent_misses_on_one_key_share_one_computation() -> None:
     """Concurrent misses on one key in one process share one computation.
 
     The first miss computes; concurrent misses await the same future and report `was_cached=True`.
-    The cross-process half is deferred (`docs/planning/BACKLOG.md`).
+    The cross-process half is `tests/test_calc_single_flight.py`.
     """
     computes = 0
     release = asyncio.Event()

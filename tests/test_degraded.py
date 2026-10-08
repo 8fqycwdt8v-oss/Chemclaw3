@@ -29,6 +29,10 @@ _EXPECTED_SUBSYSTEMS = {
     # `core/db.py`, where a DSN libpq cannot parse is swallowed: the error message degrades to
     # `<postgres>` and the DSN's `options` are dropped, invisible even on a connect that succeeds.
     "db_dsn",
+    # `science/calc/flight.py`: a claim listener that dropped its connection, a heartbeat that did
+    # not land, a claim that could not be closed. Each falls back to the lease or to polling, so
+    # the calculation still completes and the counter is the only trace.
+    "calc_claim",
     # `connectors/calc/remote.py`, on the paths that raise `CalcServerError` (backend unreachable,
     # internal error, dropped mid-call). `CalcToolError` is a refusal of a chemist's input and is
     # not counted, so a typo cannot look like a down pod.

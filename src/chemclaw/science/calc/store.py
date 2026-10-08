@@ -2,7 +2,8 @@
 
 Results are addressed by a versioned `CalculationKey`, so a calculator change is a miss, not a stale
 hit; `CALCULATION_EPOCH` covers changes on our side. `cached_compute` is the single
-lookup-before-compute path.
+lookup-before-compute path: concurrent misses share one computation inside a process (a future) and,
+with `session_store="postgres"`, across processes (`science/calc/flight.py`).
 """
 
 import asyncio
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.science.calc.flight import ClaimsProvider, PeerWaitTimeout, single_flight, wait_budget
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +412,8 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
 
 
 #: Computations in flight by key, per event loop (an `asyncio.Future` belongs to one): a second
-#: miss awaits the first. Cross-process dedup is deferred (`docs/planning/BACKLOG.md`).
+#: miss in the process awaits the first. Across processes the claim table coordinates
+#: (`science/calc/flight.py`).
 _Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
 _IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
 
@@ -426,12 +429,18 @@ async def cached_compute(
     compute: Callable[[], Awaitable[ResultPayload]],
     *,
     structure_id: str = "",
+    wait_seconds: float | None = None,
 ) -> tuple[ResultPayload, bool]:
     """Return a result for `key`, computing and persisting it only on a miss.
 
-    Concurrent misses on one key in one process share one computation; a failure fails every waiter
-    and clears the slot. The result is shape-checked (`checked_payload`) before it becomes
-    permanent. Metered by `chemclaw_calc_cache_total{outcome}` (`hit`, `miss`, `shared`).
+    Concurrent misses on one key share one computation: in this process through a future and, when
+    the store can coordinate (`session_store="postgres"`), across processes through a claim — the
+    other processes wait for the holder's result instead of computing it. A failure fails every
+    waiter and clears the slot; a holder killed mid-computation hands the key to exactly one
+    waiter once its lease lapses. The result is shape-checked (`checked_payload`) before it
+    becomes permanent. A hit costs one read and no claim. Metered by
+    `chemclaw_calc_cache_total{outcome}` (`hit`, `miss`, `shared`) and, across processes,
+    `chemclaw_calc_claims_total`.
 
     Args:
         store: The backend to read from and write to.
@@ -439,9 +448,16 @@ async def cached_compute(
         compute: Zero-arg coroutine that produces the result on a miss.
         structure_id: The geometry this calculation is about, recorded for lookup by geometry; empty
             for molecule-keyed calculators.
+        wait_seconds: The longest this caller waits on someone else's computation — what the
+            computer itself would have been allowed (the calculation's request timeout); default
+            `calc_server_timeout_seconds`. Unused when nobody else is computing.
 
     Returns:
-        `(result, was_cached)`; `was_cached` is True on a hit and on a joined in-flight computation.
+        `(result, was_cached)`; `was_cached` is True on a hit and on a joined computation.
+
+    Raises:
+        PeerComputationFailed: another process's computation of this key failed while awaited.
+        PeerWaitTimeout: another computation outlasted `wait_seconds`; it continues unharmed.
     """
     hit = await store.get(key)
     if hit is not None:
@@ -452,6 +468,8 @@ async def cached_compute(
         _credit_saved_seconds(hit.compute_seconds)
         return hit.result, True
     slot = key.as_str()
+    ledger = store.claims() if isinstance(store, ClaimsProvider) else None
+    budget = wait_budget(wait_seconds)
     in_flight = _in_flight()
     waiting = in_flight.get(slot)
     if waiting is not None:
@@ -460,7 +478,7 @@ async def cached_compute(
         record_metric(
             lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "shared"})
         )
-        result, saved = await asyncio.shield(waiting)
+        result, saved = await _join(waiting, slot, budget if ledger else None)
         # Credited once the joined computation finishes and its cost is known; never if it was
         # cancelled.
         _credit_saved_seconds(saved)
@@ -469,7 +487,8 @@ async def cached_compute(
     # saved.
     future: asyncio.Future[tuple[ResultPayload, float]] = asyncio.get_running_loop().create_future()
     in_flight[slot] = future
-    try:
+
+    async def _produce() -> tuple[ResultPayload, float]:
         logger.debug("calc cache miss, computing: %s", slot)
         record_metric(
             lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "miss"})
@@ -494,8 +513,27 @@ async def cached_compute(
                 epoch=CALCULATION_EPOCH,
             )
         )
+        return result, elapsed
+
+    async def _persisted() -> tuple[ResultPayload, float] | None:
+        stored = await store.get(key)
+        return None if stored is None else (stored.result, stored.compute_seconds or 0.0)
+
+    try:
+        if ledger is not None:
+            (result, elapsed), computed = await single_flight(
+                ledger, slot, lookup=_persisted, produce=_produce, wait_seconds=budget
+            )
+            if not computed:
+                record_metric(
+                    lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "shared"})
+                )
+                _credit_saved_seconds(elapsed)
+        else:
+            result, elapsed = await _produce()
+            computed = True
         future.set_result((result, elapsed))
-        return result, False
+        return result, not computed
     except BaseException as exc:
         # Cancellation included: a waiter must never hang on a future its computer abandoned.
         if not future.done():
@@ -505,6 +543,27 @@ async def cached_compute(
         raise
     finally:
         in_flight.pop(slot, None)
+
+
+async def _join(
+    waiting: "asyncio.Future[tuple[ResultPayload, float]]", slot: str, budget: float | None
+) -> tuple[ResultPayload, float]:
+    """Await another task's computation of `slot`, for at most `budget` seconds when one is set.
+
+    The shield keeps this caller's cancellation or timeout from cancelling the computation.
+    """
+    if budget is None:
+        return await asyncio.shield(waiting)
+    try:
+        async with asyncio.timeout(budget) as scope:
+            return await asyncio.shield(waiting)
+    except TimeoutError:
+        if not scope.expired():
+            raise
+        raise PeerWaitTimeout(
+            f"{slot} is still being computed and the {budget:g} s allowed for this call ran out. "
+            "The computation continues and its result is cached when it ends; ask again."
+        ) from None
 
 
 def _credit_saved_seconds(compute_seconds: float | None) -> None:

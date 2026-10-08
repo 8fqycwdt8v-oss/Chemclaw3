@@ -245,6 +245,12 @@ BEGIN
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_turn_remotes TO %I', app_role);
     EXECUTE format('GRANT INSERT, DELETE ON session_turn_frames TO %I', app_role);
 
+    -- `calculation_claims` (`125_calculation_claims.sql`): a pod claims a calculation miss before
+    -- computing it (INSERT), refreshes its lease while it computes, takes a lapsed claim over and
+    -- records a failure for its waiters (UPDATE), and removes the claim when the result is
+    -- persisted or the work is abandoned (DELETE).
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON calculation_claims TO %I', app_role);
+
     -- `budget_usage` holds all three for three distinct writes, and none of them is a retention
     -- sweep. INSERT and UPDATE are the two arms of one upsert (`api/budget_store.py::_BOOK`): a
     -- principal's first turn in a window inserts the row, every later one updates it in place,

@@ -50,7 +50,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 
 ## Durable execution and calculation
 
-- A persisted result is never recomputed — [D-011](D-011-results-are-persisted-once-never-recomputed.md).
+- A persisted result is never recomputed — [D-011](D-011-results-are-persisted-once-never-recomputed.md); one being computed by another process is awaited, not recomputed — [D-2026-10-08-a-calculation-miss-is-claimed-in-postgres-before-it-is-computed](D-2026-10-08-a-calculation-miss-is-claimed-in-postgres-before-it-is-computed.md).
 - The physics leaves for `Chemclaw3-mcp`, the cache stays; a composite is decomposed into keyed primitives — [D-2026-08-16-the-physics-leaves-the-cache-stays](D-2026-08-16-the-physics-leaves-the-cache-stays.md).
 - Semiempirical is the whole tier: no HPC, no DFT — [D-2026-08-26-semiempirical-is-the-whole-tier](D-2026-08-26-semiempirical-is-the-whole-tier.md), [D-2026-09-19-the-condition-was-met-and-the-answer-is-still-no](D-2026-09-19-the-condition-was-met-and-the-answer-is-still-no.md).
 - A cache is not a record: results are published to an external store through a sink — [D-2026-08-25-a-cache-is-not-a-record](D-2026-08-25-a-cache-is-not-a-record.md).
