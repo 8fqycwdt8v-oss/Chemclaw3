@@ -16,6 +16,7 @@ import logging
 import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from datetime import timedelta
 from functools import cache, partial
 from pathlib import Path
@@ -412,6 +413,17 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
     return factory
 
 
+def _with_contract(spec: ConnectorSpec, manifest: ConnectorManifest) -> ConnectorSpec:
+    """`spec` plus what a session open needs to compare the manifest's contract with the server's.
+
+    The version the manifest declares and the route the server reports its own on, moved with
+    `connector_urls` like every other address (`health_url`).
+    """
+    return replace(
+        spec, contract_version=manifest.contract_version, health_url=health_url(manifest)
+    )
+
+
 def mcp_connections() -> list[ConnectorSpec]:
     """One connection spec per enabled connector that declares an endpoint (unopened).
 
@@ -419,7 +431,7 @@ def mcp_connections() -> list[ConnectorSpec]:
     turn, so a profile can never widen what the deployment enabled.
     """
     return [
-        _mcp_connection(manifest, manifest.endpoint)
+        _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
         for manifest in enabled()
         if manifest.endpoint is not None
     ]
@@ -436,7 +448,7 @@ def connector_spec(name: str) -> ConnectorSpec:
     """
     for manifest in enabled():
         if manifest.name == name and manifest.endpoint is not None:
-            return _mcp_connection(manifest, manifest.endpoint)
+            return _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
     raise ConnectorError(
         f"connector {name!r} is not enabled in this deployment, or declares no endpoint to call"
     )

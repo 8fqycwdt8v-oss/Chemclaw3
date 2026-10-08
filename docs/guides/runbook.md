@@ -704,6 +704,14 @@ refuses a `skills/` directory that names no discovered connector.
 `tests/test_sibling_manifest_agreement.py` holds that the installed package is the only source of
 those manifests.
 
+**A connector refused for its contract.** A manifest declares a `contract_version` (the fleet's, from
+the installed `chemclaw-contracts`) and its server reports its own on `/healthz`. When a session
+opens, a different **major** refuses that connector by name for the turn: it is announced as
+degraded, the log line says `connector <name> is refused` with both versions, and `/mcp` is not
+dialled. Align the package pinned in `pyproject.toml` with the server image the release runs. A
+different minor is logged once as a warning and the connector is used; a version missing on either
+side is logged once as unknown and never refuses.
+
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
 bundle's `connector-<name>` queue — a bundle that owns durable work and whose worker fleet is at
