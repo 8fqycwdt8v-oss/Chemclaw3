@@ -7,6 +7,7 @@ it carries an inventory diff, and the text-edit evaluation
 """
 
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -14,18 +15,24 @@ from typing import Any
 import pytest
 
 from chemclaw.agent import text_overlay
+from chemclaw.agent.chemclaw_agent import _capability_tools, withheld_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.cli.model_text_inventory import (
     INVENTORY_PATH,
     RESIDENCES,
+    SURFACE_SETTINGS,
     build_inventory,
     canonical,
     diff,
+    main,
+    model_facing_descriptions,
     running_python,
     target_python,
     tokens,
 )
+from chemclaw.connectors.registry import discovered
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import registered_tool_names
 from tests.test_context_floor import CEILINGS, _floor
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +99,8 @@ def test_an_edit_to_model_facing_text_moves_the_inventory(
     finally:
         text_overlay.load_overlay.cache_clear()
     changes = diff(current, edited)
+    assert edited["overlay"] == text_overlay.load_overlay(str(tmp_path)).digest[:16]
+    assert current["overlay"] is None
     assert any(line.startswith("~ block:0:") for line in changes), changes
     assert any(line.startswith(f"~ {tool}:") for line in changes), changes
     assert edited["prefix"]["total"] < current["prefix"]["total"]
@@ -99,7 +108,7 @@ def test_an_edit_to_model_facing_text_moves_the_inventory(
 
 
 def test_every_entry_is_well_formed_unique_and_in_order(current: dict[str, Any]) -> None:
-    """The file's shape is the contract the W2.16 ratchet reads."""
+    """The file's shape is the contract anything reading the inventory relies on."""
     rows = current["entries"]
     ids = [row["id"] for row in rows]
     assert ids == sorted(ids), "entries are written in id order so the file diffs cleanly"
@@ -199,3 +208,59 @@ def _no_overlay_leaks() -> Iterator[None]:
     """No test in this module may leave an overlay loaded."""
     yield
     text_overlay.load_overlay.cache_clear()
+
+
+def test_the_shipped_inventory_records_its_environment_and_no_overlay() -> None:
+    """Two inventories are comparable only if these agree, and the shipped one is shipped text."""
+    committed = _committed()
+    assert committed["overlay"] is None
+    assert set(committed["environment"]) == set(SURFACE_SETTINGS)
+    assert all(
+        not str(value).startswith("/") for value in committed["environment"]["connectors_dirs"]
+    ), "paths inside the repository are written relative to it, so a checkout elsewhere agrees"
+
+
+def test_the_shipped_inventory_is_not_written_under_an_overlay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An overlay in the environment must not be committed as the shipped text's inventory."""
+    (tmp_path / "blocks").mkdir()
+    (tmp_path / "blocks" / "0.txt").write_text("Candidate.", encoding="utf-8")
+    monkeypatch.setattr(settings, "model_text_overlay_dir", str(tmp_path))
+    text_overlay.load_overlay.cache_clear()
+    before = INVENTORY_PATH.read_bytes()
+    assert main([]) == 2
+    assert main(["--check"]) == 2
+    message = capsys.readouterr().err
+    assert "CHEMCLAW_MODEL_TEXT_OVERLAY_DIR is set" in message
+    assert "--output" in message
+    assert INVENTORY_PATH.read_bytes() == before
+
+
+def test_a_model_facing_text_the_deployment_withholds_is_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The artefact tools are the graph's to withhold, and the reading follows the same source."""
+    assert "create_exhibit" in model_facing_descriptions()
+    monkeypatch.setattr(settings, "agent_exhibits_enabled", False)
+    assert "create_exhibit" not in model_facing_descriptions()
+    assert withheld_tool_names() >= {"create_exhibit", "revise_exhibit", "read_exhibit"}
+
+
+def test_the_inventory_does_not_depend_on_what_an_earlier_build_registered(
+    current: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry only grows: a graph built under a wider connector set leaves its launchers.
+
+    Built under every bundle enabled first, then the inventory under the shipped configuration
+    must still be the one committed, with no launcher listed twice or listed at all.
+    """
+    before = set(registered_tool_names())
+    with monkeypatch.context() as wider:
+        wider.setattr(settings, "connectors_enabled", os.pathsep.join(discovered()))
+        _capability_tools()
+        grown = set(registered_tool_names()) - before
+    assert grown, "no launcher was registered by the wider build, so this test proves nothing"
+    after = build_inventory()
+    assert after == current
+    assert not {f"doc:{name}" for name in grown} & {row["id"] for row in after["entries"]}

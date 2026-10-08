@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from chemclaw.agent.chemclaw_agent import _withheld_tool_names, available_tool_names
+from chemclaw.agent.chemclaw_agent import available_tool_names, withheld_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.evals.probe import ABSENT_MARKER, Probe, ProbeSet
 from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_root
@@ -102,7 +102,7 @@ def withheld_tools() -> set[str]:
     `republish_calculations` is withheld while no result sink is enabled (the default). Public so
     `tests/test_live_probes.py` imports it rather than restating the rule.
     """
-    return _withheld_tool_names()
+    return withheld_tool_names()
 
 
 def fleet_expected_tools() -> set[str]:

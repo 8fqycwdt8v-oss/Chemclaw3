@@ -1,6 +1,24 @@
 {
   "estimator": "langchain_core count_tokens_approximately (chars/4 plus 3 per message), the counter tests/test_context_floor.py and agent/compaction.py use",
   "python": "3.11",
+  "environment": {
+    "connectors_dirs": [
+      "src/chemclaw/connectors"
+    ],
+    "connectors_enabled": "",
+    "connector_urls": {},
+    "templates_dir": "data/templates",
+    "templates_enabled": "",
+    "skills_dir": "skills",
+    "skills_enabled": "",
+    "profiles_dir": "data/profiles",
+    "agent_exhibits_enabled": true,
+    "agent_html_artefacts_enabled": true,
+    "agent_helper_roster": "evidence:computation:safety",
+    "agent_peer_roster": "",
+    "harness_autonomy": "plan_only"
+  },
+  "overlay": null,
   "profile": "default",
   "prefix": {
     "tool_schemas": 64622,

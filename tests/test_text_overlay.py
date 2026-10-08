@@ -153,3 +153,53 @@ def test_startup_accepts_an_overlay_that_applies(overlay_dir: Path) -> None:
     _write(overlay_dir, "blocks/0.txt", "text")
     refuse_a_misapplied_overlay()
     assert get_profile(None) is not None
+
+
+@pytest.mark.parametrize(
+    "relative", ["tools/ask_clarifying_question.txt", "safety/1.txt", "blocks/0.txt"]
+)
+@pytest.mark.parametrize("content", ["", "  \n\t\n"])
+def test_an_empty_replacement_is_refused_not_applied_as_a_blank(
+    overlay_dir: Path, relative: str, content: str
+) -> None:
+    """An empty file would blank the text it replaces, which no candidate means."""
+    _write(overlay_dir, relative, content)
+    with pytest.raises(ChemclawError, match="is empty"):
+        text_overlay.active()
+
+
+def test_the_digest_is_computed_from_the_bytes_that_were_applied(
+    overlay_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A file changed between a hash and a read would apply text the digest does not name.
+
+    Each file is read once: the first read's bytes are what is applied and what is hashed, even
+    though the file on disk is rewritten the moment it has been read.
+    """
+    _write(overlay_dir, "blocks/0.txt", "first")
+    reference = tmp_path_factory.mktemp("reference")
+    _write(reference, "blocks/0.txt", "first")
+    real_bytes, real_text = Path.read_bytes, Path.read_text
+    reads: list[Path] = []
+
+    def rewrite_after(path: Path) -> None:
+        if path.parent.parent == overlay_dir:
+            reads.append(path)
+            path.write_text("second", encoding="utf-8")
+
+    def read_bytes(self: Path) -> bytes:
+        content = real_bytes(self)
+        rewrite_after(self)
+        return content
+
+    def read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        content = real_text(self, encoding, errors)
+        rewrite_after(self)
+        return content
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    loaded = text_overlay.load_overlay(str(overlay_dir))
+    assert len(reads) == 1
+    assert loaded.blocks["blocks"][0] == "first"
+    assert loaded.digest == text_overlay.load_overlay(str(reference)).digest

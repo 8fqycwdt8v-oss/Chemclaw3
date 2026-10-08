@@ -54,25 +54,21 @@ from chemclaw.agent.chemclaw_agent import (
     harness_tool_names,
     instructions_for,
     subagent_tool_names,
+    withheld_tool_names,
 )
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.text_overlay import block_text
+from chemclaw.agent.text_overlay import DIGEST_CHARS, active, block_text
 from chemclaw.agent.turn_ambient import turn_caps
 from chemclaw.agent.turn_usage import TurnUsage
-from chemclaw.connectors.registry import (
-    discovered,
-    enabled,
-    server_tools_module,
-    withheld_job_names,
-)
+from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.registry import discovered as templates
-from chemclaw.templates.registry import template_tool_names, tool_name
+from chemclaw.templates.registry import tool_name
 
 _ROOT = Path(__file__).resolve().parents[3]
 INVENTORY_PATH = _ROOT / "schema" / "model-text" / "inventory.json"
@@ -96,6 +92,48 @@ def target_python() -> str:
 def running_python() -> str:
     """This interpreter's `major.minor`."""
     return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+#: The settings that decide which tools, blocks and skills a default turn is built from. Two
+#: inventories are comparable only when these agree, so each records them.
+SURFACE_SETTINGS = (
+    "connectors_dirs",
+    "connectors_enabled",
+    "connector_urls",
+    "templates_dir",
+    "templates_enabled",
+    "skills_dir",
+    "skills_enabled",
+    "profiles_dir",
+    "agent_exhibits_enabled",
+    "agent_html_artefacts_enabled",
+    "agent_helper_roster",
+    "agent_peer_roster",
+    "harness_autonomy",
+)
+
+
+def overlay_digest() -> str | None:
+    """The digest of the model-text overlay this process runs under, or `None` for shipped text."""
+    overlay = active()
+    return None if overlay is None else overlay.digest[:DIGEST_CHARS]
+
+
+def environment() -> dict[str, Any]:
+    """The values of `SURFACE_SETTINGS` this process runs under, with paths made repo-relative.
+
+    A path inside the repository is written relative to it, so a checkout elsewhere agrees; one
+    outside stays absolute and disagrees, which is the point.
+    """
+
+    def relative(value: Any) -> Any:
+        if isinstance(value, list):
+            return [relative(one) for one in value]
+        if isinstance(value, str) and value.startswith(str(_ROOT)):
+            return Path(value).relative_to(_ROOT).as_posix()
+        return value
+
+    return {name: relative(getattr(settings, name)) for name in SURFACE_SETTINGS}
 
 
 ESTIMATOR = (
@@ -176,9 +214,7 @@ def model_facing_descriptions() -> dict[str, str]:
     """
     # The registry only grows, so it still holds a launcher an earlier build bound under another
     # configuration; the graph never binds a withheld tool, and neither does this reading.
-    withheld = (set(template_tool_names(declared=True)) - set(template_tool_names())) | set(
-        withheld_job_names()
-    )
+    withheld = withheld_tool_names()
     described: dict[str, str] = {
         getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or ""
         for fn in registered_tools()
@@ -800,6 +836,8 @@ def build_inventory() -> dict[str, Any]:
     return {
         "estimator": ESTIMATOR,
         "python": running_python(),
+        "environment": environment(),
+        "overlay": overlay_digest(),
         "profile": "default",
         "prefix": _prefix_section(entries, bound_names),
         "totals": totals,
@@ -848,6 +886,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"the inventory is measured under Python {target_python()} (the image's); this is "
             f"{running_python()}. Run it with `uv run --python {target_python()}`.",
+            file=sys.stderr,
+        )
+        return 2
+    if overlay_digest() is not None and args.output.resolve() == INVENTORY_PATH.resolve():
+        print(
+            f"CHEMCLAW_MODEL_TEXT_OVERLAY_DIR is set ({overlay_digest()}), so this process builds "
+            "candidate text, and the shipped inventory is the shipped text's. Unset it, or write "
+            "the candidate's inventory elsewhere with --output.",
             file=sys.stderr,
         )
         return 2

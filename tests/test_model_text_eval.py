@@ -22,7 +22,12 @@ from chemclaw.core.config import settings
 from chemclaw.evals import delegation_run
 from chemclaw.evals.live import ProbeOutcome
 from chemclaw.evals.live_judge import Judgement, Verdict
-from chemclaw.evals.model_text import METRIC_NAMES, GradedProbe
+from chemclaw.evals.model_text import (
+    DEFAULT_MAX_DROP_SHARE,
+    METRIC_NAMES,
+    GradedProbe,
+    ShipDecision,
+)
 from chemclaw.evals.probe import Probe
 
 PROBE = Probe(
@@ -46,7 +51,17 @@ def no_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _dry(tmp_path: Path, *extra: str) -> tuple[int, dict[str, Any], str]:
     """One dry run into `tmp_path`: its exit code, `results.json` and `summary.md`."""
-    code = cli.main(["--dry-run", "--skip-offline", "--transcript-dir", str(tmp_path), *extra])
+    code = cli.main(
+        [
+            "--dry-run",
+            "--skip-offline",
+            "--control-inventory",
+            str(INVENTORY_PATH),
+            "--transcript-dir",
+            str(tmp_path),
+            *extra,
+        ]
+    )
     results = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
     return code, results, (tmp_path / "summary.md").read_text(encoding="utf-8")
 
@@ -61,6 +76,14 @@ def test_without_a_gateway_credential_the_live_arm_is_unreached_and_names_the_th
     for name in cli.CREDENTIAL_SETTINGS:
         assert name in message
     assert not list(tmp_path.iterdir()), "nothing may be written for a run that measured nothing"
+
+
+def test_a_bare_invocation_without_a_credential_is_unreached_not_a_usage_error(
+    no_gateway: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`make model-text-eval` with no ARGS names the three settings (3), as the guide says."""
+    assert cli.main([]) == cli.EXIT_UNREACHED
+    assert "CHEMCLAW_LLM_API_KEY" in capsys.readouterr().err
 
 
 def test_credential_gap_reports_only_what_is_missing(
@@ -82,15 +105,19 @@ def test_a_dry_run_exercises_the_whole_pipeline_and_says_it_is_not_evidence(
     code, results, summary = _dry(tmp_path, "--sample", "40")
     printed = capsys.readouterr().out
     assert code == cli.EXIT_UNDECIDED
-    assert printed.startswith("**NOT EVIDENCE")
+    assert printed.startswith("Planned spend: 40 probes x 5 runs x 2 arms = 400 agent turns")
+    assert "**NOT EVIDENCE — dry run.**" in printed
     assert summary.startswith("**NOT EVIDENCE")
     assert results["provenance"]["evidence"] is False
     assert len(results["provenance"].keys()) >= 5
     runs = results["runs"]
     assert {arm: len(runs[arm]) for arm in ("control", "candidate")} == {
-        "control": 3,
-        "candidate": 3,
+        "control": 5,
+        "candidate": 5,
     }
+    assert results["provenance"]["offline_gate"] == "skipped"
+    assert results["provenance"]["ship_exit_code"] == cli.EXIT_SHIP
+    assert "SKIPPED" in summary
     assert set(runs["control"][0]) == set(METRIC_NAMES)
     decision = results["decision"]
     assert [m["metric"] for m in decision["metrics"]] == list(METRIC_NAMES)
@@ -109,7 +136,7 @@ def test_a_dry_run_is_deterministic(tmp_path: Path) -> None:
 
 def test_a_dry_run_with_a_worse_candidate_does_not_ship(tmp_path: Path) -> None:
     """The verdict follows the rule: a candidate that is clearly worse is not shipped."""
-    _, results, summary = _dry(tmp_path, "--sample", "60", "--runs", "5", "--dry-run-shift", "-0.3")
+    _, results, summary = _dry(tmp_path, "--sample", "60", "--dry-run-shift", "-0.3")
     assert results["decision"]["ship"] is False
     failing = [m["metric"] for m in results["decision"]["metrics"] if not m["ok"]]
     assert failing, "a candidate shifted against every metric must fail at least one"
@@ -118,21 +145,44 @@ def test_a_dry_run_with_a_worse_candidate_does_not_ship(tmp_path: Path) -> None:
 
 def test_a_dry_run_with_a_better_candidate_and_a_smaller_prefix_ships(tmp_path: Path) -> None:
     """The other direction: better on every metric and smaller, so the rule says ship."""
-    _, results, summary = _dry(tmp_path, "--sample", "60", "--runs", "5", "--dry-run-shift", "0.3")
+    _, results, summary = _dry(tmp_path, "--sample", "60", "--dry-run-shift", "0.3")
     assert results["decision"]["ship"] is True, results["decision"]["reason"]
     assert "**SHIP**" in summary
 
 
-def test_fewer_than_three_runs_cannot_be_asked_for() -> None:
-    """The floor is not a flag's to lower."""
+@pytest.mark.parametrize(
+    "arguments", [["--runs", "4"], ["--min-runs", "3"], ["--min-runs", "4", "--runs", "4"]]
+)
+def test_the_ship_floor_is_not_a_flags_to_lower(arguments: list[str]) -> None:
+    """Fewer runs than the floor could never ship, so they cannot be asked for."""
     with pytest.raises(SystemExit):
-        cli.main(["--dry-run", "--runs", "2"])
+        cli.main(["--dry-run", *arguments])
 
 
-def test_both_arms_may_not_be_the_same_front_door() -> None:
-    """Two identical arms would be a control measured against itself."""
-    with pytest.raises(SystemExit):
-        cli.main(["--control-url", "http://x:8000", "--candidate-url", "http://x:8000"])
+def test_the_floor_can_be_raised(tmp_path: Path) -> None:
+    """More runs than the floor is the operator's to ask for."""
+    _, results, _ = _dry(tmp_path, "--sample", "20", "--min-runs", "6")
+    assert results["decision"]["minimum_runs"] == 6
+    assert len(results["runs"]["control"]) == 6
+
+
+@pytest.fixture
+def gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A credential, as far as this process can tell. Nothing is sent anywhere."""
+    monkeypatch.setattr(settings, "llm_base_url", "https://gateway.example/v1")
+    monkeypatch.setattr(settings, "llm_model", "a-real-model")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("k"))
+
+
+def test_a_live_run_needs_a_candidate_door_that_is_not_the_control(
+    gateway: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Misuse is undecided (2), not a crash and not a result."""
+    assert cli.main([]) == cli.EXIT_UNDECIDED
+    assert "--candidate-url is required" in capsys.readouterr().err
+    equal = ["--control-url", "http://x:8000", "--candidate-url", "http://x:8000"]
+    assert cli.main(equal) == cli.EXIT_UNDECIDED
+    assert "both arms would be one front door" in capsys.readouterr().err
 
 
 def test_a_failed_offline_gate_stops_before_any_run_is_spent(
@@ -256,17 +306,20 @@ def test_a_front_door_nothing_reached_is_unreached_not_a_result(
         asyncio.run(driver.run_once("control", 1, [PROBE]))
 
 
-def test_the_candidate_prefix_is_measured_by_running_a_process_under_the_overlay(
+def test_both_arms_are_measured_by_the_same_process_in_the_same_environment(
     tmp_path: Path,
 ) -> None:
     """The overlay is read when the process starts, so the measurement is a real subprocess."""
     (tmp_path / "blocks").mkdir()
     (tmp_path / "blocks" / "0.txt").write_text("Short.", encoding="utf-8")
-    shipped = cli.load_inventory(INVENTORY_PATH)
-    candidate = cli.inventory_under_overlay(tmp_path)
+    shipped = cli.measure_inventory(None)
+    candidate = cli.measure_inventory(tmp_path)
     assert cli.prefix_tokens(candidate) < cli.prefix_tokens(shipped)
+    assert candidate["overlay"] == load_overlay(str(tmp_path.resolve())).digest[:DIGEST_CHARS]
+    assert shipped["overlay"] is None
     [row] = [r for r in candidate["entries"] if r["id"] == "block:0"]
     assert row["chars"] < 20, "the overlay's text, in the shipped block's separators"
+    cli.check_inventories_agree(shipped, candidate, tmp_path)
 
 
 def test_an_unreadable_inventory_is_undecided_not_a_crash(tmp_path: Path) -> None:
@@ -372,3 +425,245 @@ def test_readyz_reports_the_overlay_digest_only_when_one_is_active(
     assert "model_text_overlay" not in readyz()
     monkeypatch.setattr(settings, "model_text_overlay_dir", str(overlay))
     assert readyz()["model_text_overlay"] == digest
+
+
+# ------------------------------------------------------- exit codes, spend and the environment
+
+
+def _decision(*, ship: bool, underpowered: bool = False, reason: str = "x") -> ShipDecision:
+    """A decision of the given shape, for the exit-code table."""
+    return ShipDecision.model_construct(
+        ship=ship,
+        underpowered=underpowered,
+        runs=5,
+        minimum_runs=5,
+        metrics=[],
+        prefix=None,
+        coverage=None,
+        power="",
+        reason=reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("decision", "dry_run", "gate_passed", "expected"),
+    [
+        (_decision(ship=True), False, True, cli.EXIT_SHIP),
+        (_decision(ship=True), False, False, cli.EXIT_UNGATED),
+        (_decision(ship=True), True, True, cli.EXIT_UNDECIDED),
+        (_decision(ship=False, reason="failing: turn cost"), False, True, cli.EXIT_NO_SHIP),
+        (_decision(ship=False, reason="failing: turn cost"), False, False, cli.EXIT_NO_SHIP),
+        (
+            _decision(ship=False, underpowered=True, reason="underpowered: 3 run(s)"),
+            False,
+            True,
+            cli.EXIT_UNDECIDED,
+        ),
+        (
+            _decision(ship=False, underpowered=True, reason="failing: turn cost"),
+            False,
+            True,
+            cli.EXIT_NO_SHIP,
+        ),
+    ],
+)
+def test_only_a_live_run_with_its_gate_passed_returns_the_ship_code(
+    decision: ShipDecision, dry_run: bool, gate_passed: bool, expected: int
+) -> None:
+    """The ship code is not 0, and nothing but a complete live run reaches it."""
+    assert cli.exit_code(decision, dry_run=dry_run, gate_passed=gate_passed) == expected
+    assert cli.EXIT_SHIP not in {cli.EXIT_OFFLINE_PASSED, cli.EXIT_UNGATED, cli.EXIT_UNDECIDED}
+
+
+def test_the_offline_gate_alone_exits_zero_and_says_it_is_not_a_ship(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Zero means the gate passed; the output says nothing shipped."""
+    monkeypatch.setattr(cli, "run_offline_gate", lambda: [cli.GateResult("eval-strict", True, "")])
+    assert cli.main(["--offline-only"]) == cli.EXIT_OFFLINE_PASSED == 0
+    printed = capsys.readouterr().out
+    assert "not a ship verdict" in printed
+    assert f"a ship exits {cli.EXIT_SHIP}" in printed
+
+
+def test_a_live_table_that_would_ship_without_its_gate_exits_four_and_records_it(
+    gateway: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`--skip-offline` can produce a table but never the ship code, in the output or on disk."""
+    code, results, summary = _live(tmp_path, monkeypatch, "--skip-offline")
+    assert results["decision"]["ship"] is True
+    assert code == cli.EXIT_UNGATED
+    assert results["provenance"]["offline_gate"] == "skipped"
+    assert results["provenance"]["exit_code"] == cli.EXIT_UNGATED
+    assert "Offline gate: **SKIPPED**" in summary
+
+
+def test_a_live_table_with_its_gate_passed_is_the_only_way_to_exit_with_a_ship(
+    gateway: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same run with the gate run and passing returns the ship code."""
+    monkeypatch.setattr(
+        cli, "run_offline_gate", lambda: [cli.GateResult(n, True, "") for n, _ in cli.OFFLINE_GATE]
+    )
+    code, results, summary = _live(tmp_path, monkeypatch)
+    assert code == cli.EXIT_SHIP == 10
+    assert results["provenance"]["offline_gate"] == "passed"
+    assert "NOT EVIDENCE" not in summary
+
+
+def _inventory(total: int, **fields: Any) -> dict[str, Any]:
+    """The part of an inventory the evaluation reads."""
+    return {
+        "python": "3.11",
+        "environment": {"connectors_enabled": ""},
+        "overlay": None,
+        "prefix": {"total": total},
+        **fields,
+    }
+
+
+def _live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str
+) -> tuple[int, dict[str, Any], str]:
+    """A live-shaped run whose front doors are the deterministic fake: only the wiring is real.
+
+    Credentials, the arm check and the two inventory files are supplied; the driver is the dry-run
+    double with a better candidate, so the table says ship.
+    """
+    (tmp_path / "control.json").write_text(json.dumps(_inventory(70_000)), encoding="utf-8")
+    (tmp_path / "candidate.json").write_text(json.dumps(_inventory(69_900)), encoding="utf-8")
+
+    async def arms_differ(*_: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "check_arms", arms_differ)
+    monkeypatch.setattr(
+        cli, "LiveDriver", lambda urls, directory: cli.DryRunDriver(candidate_shift=0.3)
+    )
+    out = tmp_path / "out"
+    code = cli.main(
+        [
+            "--candidate-url",
+            "http://candidate:8000",
+            "--control-inventory",
+            str(tmp_path / "control.json"),
+            "--candidate-inventory",
+            str(tmp_path / "candidate.json"),
+            "--sample",
+            "60",
+            "--confirm-turns",
+            "600",
+            "--max-turns",
+            "600",
+            "--transcript-dir",
+            str(out),
+            *extra,
+        ]
+    )
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    return code, results, (out / "summary.md").read_text(encoding="utf-8")
+
+
+def test_a_live_run_prints_its_spend_and_does_not_start_until_it_is_typed_back(
+    gateway: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The plan is 60 probes x 5 runs x 2 arms = 600 turns; nothing is asked without the 600."""
+
+    async def refuse(*_: object, **__: object) -> None:
+        raise AssertionError("a probe was asked before the spend was confirmed")
+
+    monkeypatch.setattr(cli, "collect", refuse)
+    monkeypatch.setattr(cli, "check_arms", refuse)
+    arguments = [
+        "--candidate-url",
+        "http://candidate:8000",
+        "--skip-offline",
+        "--sample",
+        "60",
+        "--max-turns",
+        "600",
+        "--transcript-dir",
+        str(tmp_path),
+    ]
+    assert cli.main(arguments) == cli.EXIT_UNDECIDED
+    captured = capsys.readouterr()
+    assert "Planned spend: 60 probes x 5 runs x 2 arms = 600 agent turns" in captured.out
+    assert "--confirm-turns 600" in captured.err
+    assert cli.main([*arguments, "--confirm-turns", "599"]) == cli.EXIT_UNDECIDED
+
+
+def test_a_plan_over_the_ceiling_is_refused_until_the_ceiling_is_raised(
+    gateway: None, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The default ceiling stops a whole-corpus run that nobody meant to buy."""
+    arguments = [
+        "--candidate-url",
+        "http://candidate:8000",
+        "--skip-offline",
+        "--sample",
+        "0",
+        "--confirm-turns",
+        "99999",
+        "--transcript-dir",
+        str(tmp_path),
+    ]
+    assert cli.main(arguments) == cli.EXIT_UNDECIDED
+    captured = capsys.readouterr()
+    assert f"over --max-turns {cli.DEFAULT_MAX_TURNS}" in captured.err
+    assert "raise --max-turns" in captured.err
+
+
+def test_the_default_plan_fits_under_the_default_ceiling() -> None:
+    """Fifty probes, five runs, two arms is the default and is allowed."""
+    plan = cli.Plan(cli.DEFAULT_SAMPLE, 5)
+    assert plan.turns == cli.DEFAULT_MAX_TURNS
+    assert (
+        cli.check_plan(plan, max_turns=cli.DEFAULT_MAX_TURNS, confirmed=plan.turns, charged=True)
+        is None
+    )
+    assert cli.check_plan(plan, max_turns=cli.DEFAULT_MAX_TURNS, confirmed=0, charged=False) is None
+
+
+def test_two_prefixes_measured_in_different_environments_are_not_compared() -> None:
+    """A difference that may be the environment's is refused, naming the setting."""
+    control = _inventory(70_000)
+    cli.check_inventories_agree(control, _inventory(69_900), None)
+    elsewhere = _inventory(69_900, environment={"connectors_enabled": "bo,calc"})
+    with pytest.raises(cli.Undecidable, match=r"different environments.*connectors_enabled"):
+        cli.check_inventories_agree(control, elsewhere, None)
+    with pytest.raises(cli.Undecidable, match="python"):
+        cli.check_inventories_agree(control, _inventory(69_900, python="3.13"), None)
+    with pytest.raises(cli.Undecidable, match="predates"):
+        cli.check_inventories_agree(control, {"prefix": {"total": 1}}, None)
+
+
+def test_the_control_inventory_must_be_the_shipped_text_and_the_candidates_the_overlay_given(
+    tmp_path: Path,
+) -> None:
+    """An overlay-built control, or a candidate built under another overlay, is refused."""
+    overlay, digest = _overlay_with_digest(tmp_path)
+    with pytest.raises(cli.Undecidable, match="control inventory was built under overlay"):
+        cli.check_inventories_agree(_inventory(1, overlay=digest), _inventory(1), None)
+    cli.check_inventories_agree(_inventory(2), _inventory(1, overlay=digest), overlay)
+    with pytest.raises(cli.Undecidable, match="not the"):
+        cli.check_inventories_agree(
+            _inventory(2), _inventory(1, overlay="0" * DIGEST_CHARS), overlay
+        )
+
+
+def test_a_dry_run_whose_candidate_loses_probes_is_blocked_by_coverage(tmp_path: Path) -> None:
+    """Thirty percent of candidate probes ungraded: the arms would be on different questions."""
+    _, results, summary = _dry(
+        tmp_path, "--sample", "60", "--dry-run-shift", "0.3", "--dry-run-drop", "0.3"
+    )
+    coverage = results["decision"]["coverage"]
+    assert coverage["ok"] is False
+    assert results["decision"]["ship"] is False
+    arms = {arm["arm"]: arm for arm in coverage["report"]["arms"]}
+    assert arms["control"]["dropped"] == 0
+    assert arms["candidate"]["share"] > DEFAULT_MAX_DROP_SHARE
+    assert coverage["report"]["common"] < coverage["report"]["selected"]
+    assert "probes dropped (share)" in summary

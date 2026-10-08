@@ -87,7 +87,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - The schema only goes forward; rollback is not a schema step — [D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md), [D-2026-08-08-a-rollback-that-is-not-a-schema-step](D-2026-08-08-a-rollback-that-is-not-a-schema-step.md); the app is its own migrator — [D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns](D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns.md).
 - The connection budget is a fleet number — [D-2026-08-05-the-connection-budget-is-a-fleet-number](D-2026-08-05-the-connection-budget-is-a-fleet-number.md).
 - The suite gate goes parallel; a parallel-only failure is a defect to root-cause, and until W3.12 flips the default the gate stays serial — [D-2026-10-08-the-test-gate-runs-in-parallel](D-2026-10-08-the-test-gate-runs-in-parallel.md).
-- Model-facing text changes one batch at a time, behind an offline and a live A/B eval — [D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation](D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation.md).
+- Model-facing text changes one batch at a time, behind an offline and a live A/B eval — [D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation](D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation.md); the evaluation ships only on five runs per arm, states its power, and holds the prefix to the batch's claim — [D-2026-10-08-the-text-evaluation-states-its-power-and-holds-the-prefix-to-its-claim](D-2026-10-08-the-text-evaluation-states-its-power-and-holds-the-prefix-to-its-claim.md).
 
 ## Record and process
 

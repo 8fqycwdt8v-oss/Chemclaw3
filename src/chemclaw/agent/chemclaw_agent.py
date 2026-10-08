@@ -713,7 +713,7 @@ def capability_tool_names() -> set[str]:
     are ordinary English words. `agent/verifier.promised_uncalled_tools` scans answers for these
     names as bare tokens; defining the union in terms of this keeps the two in step.
     """
-    withheld = _withheld_tool_names()
+    withheld = withheld_tool_names()
     return {
         *(name for name in registered_tool_names() if name not in withheld),
         # A withheld *job* is still a declared connector name (`connector_tool_names` reports the
@@ -733,7 +733,7 @@ def _reject_unknown_tool_names(profile: AgentProfile) -> None:
     available = available_tool_names()
     # A withheld launcher is a known name this deployment cannot run, not a typo: a profile naming
     # it builds, and the launcher is simply absent from what the build binds.
-    unknown = profile.tool_names - available - _withheld_tool_names()
+    unknown = profile.tool_names - available - withheld_tool_names()
     if unknown:
         raise ValueError(
             f"agent profile {profile.name!r} lists unknown tool(s) {sorted(unknown)}; "
@@ -797,11 +797,11 @@ def _register_generated_tools() -> list[CapabilityTool]:
         for tool_fn in [*job_tools(), *template_tools()]:
             if tool_fn.__name__ not in known:
                 register_tool(tool_fn)
-        withheld = _withheld_tool_names()
+        withheld = withheld_tool_names()
         return [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 
-def _withheld_tool_names() -> set[str]:
+def withheld_tool_names() -> set[str]:
     """Tools this deployment declares and does not bind, read at the moment of asking.
 
     Template launchers whose opt-in capability is off, job launchers the deployment cannot run, and

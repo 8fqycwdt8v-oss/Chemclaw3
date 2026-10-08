@@ -7,7 +7,7 @@ middleware.
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_tool_names
+from chemclaw.agent.chemclaw_agent import _capability_tools, withheld_tool_names
 from chemclaw.connectors.registry import enabled, withheld_job_names
 from chemclaw.core.tool_registry import (
     _REGISTRY,
@@ -135,7 +135,7 @@ def test_capability_tools_are_exactly_the_registry() -> None:
     Connector tools are per turn. Template launchers this deployment withholds are subtracted.
     """
     tools = _capability_tools()
-    withheld = _withheld_tool_names()
+    withheld = withheld_tool_names()
     assert tools == [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 

@@ -82,7 +82,7 @@ def profile_named_tools() -> frozenset[str]:
     lacks, so a launcher some profile names must stay bound. A profile with `tool_names` unset lists
     nothing. Read from the profile registry rather than the files, since this sits under the
     frequently called `available_tool_names`; withholding is applied where the tool registry is read
-    (`chemclaw_agent._withheld_tool_names`), so the answer stays current.
+    (`chemclaw_agent.withheld_tool_names`), so the answer stays current.
     """
     from chemclaw.agent.profiles import get_profile
 

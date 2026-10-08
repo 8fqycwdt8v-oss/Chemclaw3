@@ -22,6 +22,15 @@ compiled default-profile graph binds, middleware tools (`task`, `write_todos`, t
 verbs) included. The per-process framing nonce is replaced by zeros of the same length, so the file
 does not change from one process to the next.
 
+## `environment` and `overlay`
+
+`environment` records the settings that decide what a default turn is built from (the connector set,
+the templates and skills, the exhibit tools, the helper roster), with paths inside the repository
+written relative to it. Two inventories are comparable only when these agree, and the text
+evaluation refuses two that do not. `overlay` is the digest of the model-text overlay the inventory
+was built under, and is `null` here: `make model-text` refuses to write this file while an overlay
+is set, so candidate text cannot be committed as the shipped text's inventory.
+
 ## `prefix`
 
 The default profile's per-request prefix, in the parts the context floor charges:
