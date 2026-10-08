@@ -29,6 +29,7 @@ from psycopg.rows import TupleRow
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import degraded, record_metric
 
 logger = logging.getLogger(__name__)
@@ -43,12 +44,22 @@ CHANNEL = "calc_flight"
 _BEATS_PER_LEASE = 3
 _POLLS_PER_LEASE = 6
 
-#: Characters of a failed attempt's description shown to its waiters.
-_ERROR_CHARS = 500
+#: Characters of a failed attempt's description kept for its waiters: the retry class, the
+#: exception's name and the start of its message. Enough to act on; the full text is in the holder's
+#: log, and the row is readable by every session that asks for the same calculation.
+_ERROR_CHARS = 300
 
 
 class PeerComputationFailed(RuntimeError):
-    """The pod computing this calculation failed; nothing was cached and nothing was retried."""
+    """The pod computing this calculation failed in a way a retry may fix; nothing was cached.
+
+    Retryable, as the holder's own failure was. A refusal reaches waiters as
+    `PeerCalculationRefused` instead.
+    """
+
+
+class PeerCalculationRefused(ChemclawError):
+    """The pod computing this calculation was refused or given bad data, so a retry fails alike."""
 
 
 class PeerWaitTimeout(TimeoutError):
@@ -60,7 +71,7 @@ class Claim:
     """The right to compute one key, held until `release` or `fail`, or until the lease lapses."""
 
     slot: str
-    holder: str
+    attempt: str
     taken_over: bool
 
 
@@ -68,12 +79,12 @@ class Claim:
 class Observed:
     """The row a claimant lost to: who holds the key and in what state."""
 
-    holder: str
+    attempt: str
     state: str
     error: str
 
 
-def _holder_id() -> str:
+def _attempt_id() -> str:
     """A fresh id for one attempt, naming where it runs for the operator reading a row."""
     return f"{gethostname()}:{getpid()}:{uuid.uuid4().hex[:12]}"
 
@@ -105,6 +116,11 @@ _BEAT = """
      WHERE key = %s AND attempt = %s AND state = 'running'
 """
 _RELEASE = "DELETE FROM calculation_claims WHERE key = %s AND attempt = %s"
+_ABANDON = """
+    UPDATE calculation_claims
+       SET lease_until = now() + make_interval(secs => %s)
+     WHERE key = %s AND attempt = %s AND state = 'running'
+"""
 _FAIL = """
     UPDATE calculation_claims SET state = 'failed', error = %s WHERE key = %s AND attempt = %s
 """
@@ -131,13 +147,13 @@ class PostgresClaims:
         (`retry_failed`) — never for a waiter, who must receive that failure. Concurrent claimants
         serialise on the row, so exactly one of them gets a row back.
         """
-        holder = _holder_id()
+        attempt = _attempt_id()
         async with db.connection(self._dsn, operation="calc_claim") as conn:
             cur = await conn.execute(
                 _CLAIM,
                 {
                     "key": slot,
-                    "attempt": holder,
+                    "attempt": attempt,
                     "lease": self.lease_seconds(),
                     "retry_failed": retry_failed,
                 },
@@ -145,31 +161,60 @@ class PostgresClaims:
             row = await cur.fetchone()
         if row is None:
             return None
-        return Claim(slot=slot, holder=holder, taken_over=bool(row[0]))
+        return Claim(slot=slot, attempt=attempt, taken_over=bool(row[0]))
 
     async def observe(self, slot: str) -> Observed | None:
         """The row holding `slot`, or `None` when nobody does."""
         async with db.connection(self._dsn, operation="calc_claim") as conn:
             cur = await conn.execute(_OBSERVE, (slot,))
             row = await cur.fetchone()
-        return None if row is None else Observed(holder=row[0], state=row[1], error=row[2])
+        return None if row is None else Observed(attempt=row[0], state=row[1], error=row[2])
+
+    @classmethod
+    def beat_bound(cls) -> float:
+        """The longest one heartbeat may take, derived from the lease so the two cannot disagree.
+
+        Pool wait, connect and statement all fit inside it; with a beat every `lease / 3`, several
+        beats can fail inside one lease and a later one still lands before it lapses.
+        """
+        return cls.lease_seconds() / _POLLS_PER_LEASE
 
     async def heartbeat(self, claim: Claim) -> bool:
-        """Extend the lease; `False` when the claim is no longer this attempt's."""
-        async with db.connection(self._dsn, operation="calc_claim") as conn:
-            cur = await conn.execute(_BEAT, (self.lease_seconds(), claim.slot, claim.holder))
+        """Extend the lease; `False` when the claim is no longer this attempt's.
+
+        The statement is bounded by `beat_bound`; the caller bounds the pool wait and connect.
+        """
+        async with db.connection(
+            self._dsn, operation="calc_claim", statement_timeout_seconds=self.beat_bound()
+        ) as conn:
+            cur = await conn.execute(_BEAT, (self.lease_seconds(), claim.slot, claim.attempt))
             return cur.rowcount > 0
 
-    async def release(self, claim: Claim) -> None:
-        """Remove the claim and wake the waiters; they find the result, or take the key over."""
+    async def abandon(self, claim: Claim) -> None:
+        """Give up a claim whose caller was cancelled: shorten the lease instead of deleting it.
+
+        The cancelled call's server-side run is still unwinding as its session closes, so the key
+        is offered to a waiter only after one beat interval. A waiter takes it over then; with no
+        waiter the row simply lapses and the next claim replaces it.
+        """
         async with db.connection(self._dsn, operation="calc_claim") as conn:
-            await conn.execute(_RELEASE, (claim.slot, claim.holder))
+            await conn.execute(
+                _ABANDON, (self.lease_seconds() / _BEATS_PER_LEASE, claim.slot, claim.attempt)
+            )
+
+    async def release(self, claim: Claim) -> None:
+        """Remove the claim and wake the waiters; they find the result, or take the key over.
+
+        Only the attempt's own row: a holder that was taken over cannot remove its successor's.
+        """
+        async with db.connection(self._dsn, operation="calc_claim") as conn:
+            await conn.execute(_RELEASE, (claim.slot, claim.attempt))
             await conn.execute(_NOTIFY, (CHANNEL, _topic(claim.slot)))
 
     async def fail(self, claim: Claim, error: str) -> None:
         """Record that this attempt failed, for its waiters, and wake them."""
         async with db.connection(self._dsn, operation="calc_claim") as conn:
-            await conn.execute(_FAIL, (error[:_ERROR_CHARS], claim.slot, claim.holder))
+            await conn.execute(_FAIL, (error[:_ERROR_CHARS], claim.slot, claim.attempt))
             await conn.execute(_NOTIFY, (CHANNEL, _topic(claim.slot)))
 
     @asynccontextmanager
@@ -284,8 +329,14 @@ def _listener_for(dsn: str) -> _Listener:
 
 
 def _describe(exc: BaseException) -> str:
-    """One line naming a failure for the waiters on it."""
-    return f"{type(exc).__name__}: {exc}"
+    """A failure as stored for its waiters: `refused|` or `failed|`, the class and a short message.
+
+    A `ValueError` (`ChemclawError`, a validation error) is a deterministic refusal that a retry
+    repeats; anything else may succeed on retry. The waiter raises the matching class, so its
+    activity retries exactly when the holder's would have.
+    """
+    kind = "refused" if isinstance(exc, ValueError) else "failed"
+    return f"{kind}|{type(exc).__name__}: {' '.join(str(exc).split())}"
 
 
 def wait_budget(wait_seconds: float | None) -> float:
@@ -321,16 +372,25 @@ async def single_flight(
     `PeerWaitTimeout` without disturbing the holder.
 
     Raises:
-        PeerComputationFailed: the holder's attempt failed while this caller waited on it.
-        PeerWaitTimeout: the holder was still working when the budget ran out.
+        PeerCalculationRefused: the holder was refused or given bad data while this caller waited.
+        PeerComputationFailed: the holder failed in a way a retry may fix.
+        PeerWaitTimeout: the holder was still working when the budget ran out, or too little of it
+            remained to start the calculation here.
     """
     claim = await claims.claim(slot, retry_failed=True)
     if claim is None:
         started = time.monotonic()
         _record("awaited")
+        waited: T | Claim | None = None
         try:
             async with claims.watch(slot) as woken:
                 waited = await _wait(claims, slot, woken, started, lookup, wait_seconds)
+        except BaseException:
+            # A claim won in `_wait` and not yet led (the exit of the block above is a point where
+            # this caller can be cancelled) has no heartbeat: give it back rather than let it lapse.
+            if isinstance(waited, Claim):
+                await _settle(claims.release(waited), waited, "give back")
+            raise
         finally:
             seconds = time.monotonic() - started
             record_metric(lambda m: m.observe("chemclaw_calc_claim_wait_seconds", seconds))
@@ -352,30 +412,41 @@ async def _wait(
 
     Ends when the result is readable, the holder's attempt failed or lapsed or was abandoned, or
     the budget is spent. Each pass looks up the result before claiming, so a release whose wake-up
-    was missed is seen on the next poll, and never claims over a failed row: that failure is
-    what this caller was waiting for.
+    was missed is seen on the next poll, and never claims over a failed row: that failure is what
+    this caller was waiting for.
+
+    **A key is taken over only while at least one lease of the budget remains.** A calculation
+    started under a deadline about to cancel it would be abandoned and handed on, one partial run
+    after another, each leaving a server-side run behind; the waiter times out instead and the next
+    caller, with a whole budget, takes the key.
     """
-    poll = claims.lease_seconds() / _POLLS_PER_LEASE
+    lease = claims.lease_seconds()
+    poll = lease / _POLLS_PER_LEASE
     while True:
         woken.clear()
         found = await lookup()
         if found is not None:
             return found
-        claim = await claims.claim(slot, retry_failed=False)
-        if claim is not None:
-            return claim
+        remaining = wait_seconds - (time.monotonic() - started)
+        can_start = remaining >= lease
+        if can_start:
+            claim = await claims.claim(slot, retry_failed=False)
+            if claim is not None:
+                return claim
         seen = await claims.observe(slot)
         if seen is not None and seen.state == "failed":
             _record("peer_failed")
-            raise PeerComputationFailed(
-                "another worker's computation of this calculation failed, so nothing was cached: "
-                f"{seen.error}. Ask again to start a fresh attempt."
-            )
-        if seen is None:
+            raise _peer_failure(seen.error)
+        if seen is None and can_start:
             continue  # the holder released between the claim and the read; try again at once
-        remaining = wait_seconds - (time.monotonic() - started)
-        if remaining <= 0:
+        if remaining <= 0 or seen is None:
             _record("wait_timed_out")
+            if seen is None:
+                raise PeerWaitTimeout(
+                    f"the worker computing {slot} stopped, but too little of the "
+                    f"{wait_seconds:g} s allowed for this call remains to start the calculation "
+                    "here. Ask again."
+                )
             raise PeerWaitTimeout(
                 f"another worker is still computing {slot} and the {wait_seconds:g} s allowed for "
                 "this call ran out. Its work continues and the result is cached when it ends; "
@@ -383,6 +454,22 @@ async def _wait(
             )
         with suppress(TimeoutError):
             await asyncio.wait_for(woken.wait(), min(poll, remaining))
+
+
+def _peer_failure(stored: str) -> Exception:
+    """The error a waiter raises for a holder's recorded failure, of the holder's retry class."""
+    kind, _, text = stored.partition("|")
+    if not text:
+        kind, text = "failed", stored
+    if kind == "refused":
+        return PeerCalculationRefused(
+            f"another worker's attempt at this calculation was refused: {text}. Nothing was "
+            "cached, and the same request is refused the same way."
+        )
+    return PeerComputationFailed(
+        f"another worker's computation of this calculation failed, so nothing was cached: {text}. "
+        "Ask again to start a fresh attempt."
+    )
 
 
 async def _lead(
@@ -394,8 +481,9 @@ async def _lead(
     """Compute under `claim`, heartbeating, and settle the claim whichever way it ends.
 
     The result is looked up once more first: the previous holder may have persisted it between this
-    caller's miss and its claim. A failure is recorded for the waiters; a cancellation removes the
-    claim so one of them takes the key over.
+    caller's miss and its claim. A failure is recorded for the waiters; a cancellation abandons the
+    claim (`PostgresClaims.abandon`) so a waiter takes the key over after a short cooling-off. The
+    heartbeat is stopped before the claim is settled, so a late beat cannot report a takeover.
     """
     _record("taken_over" if claim.taken_over else "won")
     beating = asyncio.get_running_loop().create_task(_beat(claims, claim))
@@ -406,18 +494,33 @@ async def _lead(
         else:
             value, computed = await produce(), True
     except Exception as exc:
-        await _settle(claims.fail(claim, _describe(exc)), claim, "record the failure of")
+        await _close(beating, claims.fail(claim, _describe(exc)[:_ERROR_CHARS]), claim, "fail")
         raise
     except BaseException:
-        await _settle(claims.release(claim), claim, "release")
+        await _close(beating, claims.abandon(claim), claim, "abandon")
         raise
-    else:
-        await _settle(claims.release(claim), claim, "release")
-        return value, computed
+    await _close(beating, claims.release(claim), claim, "release")
+    return value, computed
+
+
+async def _close(
+    beating: "asyncio.Task[None]", step: Awaitable[None], claim: Claim, what: str
+) -> None:
+    """Stop the heartbeat, then run the claim-closing `step`, even if the caller is cancelled."""
+    try:
+        await _stop(beating)
     finally:
-        beating.cancel()
-        with suppress(asyncio.CancelledError):
-            await beating
+        await _settle(step, claim, what)
+
+
+async def _stop(task: "asyncio.Task[None]") -> None:
+    """Cancel `task` and wait for it to unwind, without absorbing this caller's own cancellation.
+
+    `asyncio.wait` returns when the task is done and does not raise its `CancelledError`; a
+    cancellation of the caller, delivered at that await, still propagates.
+    """
+    task.cancel()
+    await asyncio.wait({task})
 
 
 async def _settle(step: Awaitable[None], claim: Claim, what: str) -> None:
@@ -440,19 +543,21 @@ async def _settle(step: Awaitable[None], claim: Claim, what: str) -> None:
 
 
 async def _beat(claims: PostgresClaims, claim: Claim) -> None:
-    """Refresh the lease until cancelled; stops, counting it, if the claim was taken away."""
+    """Refresh the lease until cancelled; stops, counting it, if the claim was taken away.
+
+    Each beat has a hard bound (`PostgresClaims.beat_bound`, covering the pool wait and connect as
+    well as the statement). A beat that fails or times out is retried after that bound rather than
+    after a whole interval, and a beat that lands after a lapse nobody exploited re-asserts the
+    claim, because the statement matches on the attempt, not on the lease.
+    """
     interval = claims.lease_seconds() / _BEATS_PER_LEASE
+    bound = claims.beat_bound()
+    delay = interval
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(delay)
         try:
-            if not await claims.heartbeat(claim):
-                _record("lost")
-                logger.warning(
-                    "the claim on %s was taken over while its holder was still computing; "
-                    "finishing anyway, the results are identical",
-                    claim.slot,
-                )
-                return
+            async with asyncio.timeout(bound):
+                held = await claims.heartbeat(claim)
         except Exception:
             degraded(
                 logger,
@@ -461,3 +566,14 @@ async def _beat(claims: PostgresClaims, claim: Claim) -> None:
                 claim.slot,
                 level=logging.WARNING,
             )
+            delay = bound
+            continue
+        if not held:
+            _record("lost")
+            logger.warning(
+                "the claim on %s was taken over while its holder was still computing; "
+                "finishing anyway, the results are identical",
+                claim.slot,
+            )
+            return
+        delay = interval

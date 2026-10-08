@@ -86,6 +86,9 @@ _BAD_DATA_TYPES = [
     "ConnectorJobError",
     "GitWriteError",
     "CalculationDomainError",
+    # A waiter on another pod's calculation, told that the holder was refused (`science/calc/
+    # flight.py`); the holder's own retry class, carried across.
+    "PeerCalculationRefused",
     "ConnectorError",
     "DataSourceError",
     # Two sources transcribed the same entry id; the ambiguity is a fact about the corpus.

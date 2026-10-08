@@ -55,13 +55,28 @@ connection: 1,550 µs before, 1,561 µs after). On a miss:
   result, try to claim, read the row. It sleeps until the notification or one poll
   (`lease / 6`), whichever is first, so a missed notification costs one poll and never a hang. The
   in-process future stays the first level: eight tasks in one process produce one waiter.
-- **A holder's failure is delivered, not retried.** A computation that raises records its error on
-  the row (`state = 'failed'`) and notifies; every waiter on that attempt raises
-  `PeerComputationFailed` carrying the text. Each waiter retrying would repeat an hours-long failing
-  search once per waiter, and it is what the in-process path already did ("a failure fails every
-  waiter"). A waiter never claims over a failed row; a caller arriving afterwards starts afresh and
-  replaces it. A *cancelled* holder is not a failure: its claim is deleted and one waiter takes the
-  key.
+- **A holder's failure is delivered, not retried, and keeps its retry class.** A computation that
+  raises records its error on the row (`state = 'failed'`, text `refused|` or `failed|`, then the
+  exception's class and the start of its message) and notifies. A `ValueError` (a `ChemclawError`
+  such as `CalcToolError`, a validation error) is a deterministic refusal: every waiter on that
+  attempt raises `PeerCalculationRefused`, listed non-retryable by name in
+  `durable/publish.py::_BAD_DATA_TYPES`. Anything else raises `PeerComputationFailed`, retryable
+  like the holder's own error. Without the carry, each waiter's activity would retry a refusal,
+  claim over the failed row and recompute an hours-long deterministic failure. A waiter never
+  claims over a failed row; a caller arriving afterwards starts afresh and replaces it. A
+  *cancelled* holder is not a failure: its lease is shortened to one beat interval (a cooling-off,
+  because its server-side call is still unwinding as the session closes) and the next waiter takes
+  the key over then.
+- **The heartbeat is bounded inside the lease.** Each beat has a hard bound of `lease / 6` (pool
+  wait, connect and statement together), is retried after that bound when it fails, and re-asserts
+  the claim when the database returns, because the statement matches the attempt, not the lease.
+  A database outage shorter than the lease costs no duplicate; a longer one (a failover) lapses
+  the claim and one waiter takes it over — the returning holder finds the claim gone, counts
+  `lost`, finishes, and cannot remove its successor's row (release and failure match the attempt).
+  Set `calc_claim_lease_seconds` above the failover time to avoid that duplicate.
+- **A key is taken over only while a lease of the waiter's budget remains.** Starting a calculation
+  under a deadline about to cancel it would hand the key on, one partial run after another; the
+  waiter raises `PeerWaitTimeout` instead.
 - **A waiter holds nothing.** Its own timeout or cancellation unregisters its wake-up and leaves the
   holder's work and row untouched. Its wait is bounded by `wait_seconds`, which `cached_remote`
   sets to the calculation's own request timeout (D-2026-08-26-a-request-timeout-bounds-the-wait-not-the-work),
@@ -78,13 +93,18 @@ connection: 1,550 µs before, 1,561 µs after). On a miss:
   (`tests/test_calc_single_flight.py`, with `tests/calc_flight_worker.py` as the second process).
 - `kill -9` of the holder with three waiter processes and three waiter threads already blocked on
   it: exactly one computes; the result reached the first waiter 1.6 s after the kill at a 1.2 s lease
-  (takeover is bounded by lease plus one poll).
+  (takeover is bounded by lease plus one poll; the test asserts exactly-once, not the time).
 - Wake-up after the holder's release commits: 16–40 ms to the waiter returning, with the poll
   pushed out to 100 s so only `NOTIFY` could have woken it; that figure includes the waiter's
   re-read on a non-pooled connection.
-- Cost: a `LISTEN` connection per process while any waiter exists, and a claim, a read and a
-  release per *miss* (never per hit). A calculation session is held open by the waiter for the
-  length of its wait; a takeover after a long wait computes on that session.
+- Cost: a `LISTEN` connection per process while any waiter exists — a dedicated connection outside
+  the pool, so `pg_fleet_max_connections` does not count it (one per replica with a waiter) — and a
+  claim, a read and a release per *miss* (never per hit). A waiter holds its calculation session
+  open for the length of its wait: it counts in `chemclaw_calc_requests_in_flight` and in the
+  server's `MCP_MAX_SESSIONS`, and a takeover after a long wait computes on that session. The
+  failure text kept on the row is the retry class, the exception's name and up to 300 characters of
+  its message, readable by any session asking for the same calculation; the cache is global, so
+  that is no wider than the result itself.
 - The table is transient (`infra/sql/125_calculation_claims.sql`): not swept on a clock, because a
   live row is a computation somebody awaits; the residue is a key-sized row per key whose last
   attempt died and was never asked for again.
