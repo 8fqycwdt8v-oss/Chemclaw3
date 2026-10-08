@@ -11,7 +11,8 @@ resolve the agent, open the MCP tool sessions, stream events, close them), with 
 readers that lifecycle uses beside it — `runner_trace.py` (the events a tool call and its result become),
 `runner_usage.py` (the turn's token arithmetic), `runner_answer.py` (score the final answer);
 `auth.py` is the single
-authorization gate; `events.py` the SSE envelope; `budget.py` the per-turn cost meter, with
+authorization gate; `events.py` the SSE envelope; `contract.py` the version and rendering of the
+published OpenAPI document (`schema/api/`); `budget.py` the per-turn cost meter, with
 `budget_store.py` its Postgres-backed per-user spend window. Beside the lifecycle: `graph_stream.py`
 turns a compiled graph's stream into the turn event contract, `detach.py` lets a turn outlive its
 client (it stops only on request), `turn_relay.py` lets any replica follow or stop a turn another
