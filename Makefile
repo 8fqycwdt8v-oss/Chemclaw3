@@ -51,7 +51,7 @@ SHELL := bash
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
   kind-smoke synthesize reindex reindex-full share-estimate share-sync rekey-compounds user-erase \
-  sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
+  openapi sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
@@ -173,7 +173,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -317,6 +317,9 @@ user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. 
 	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
 	esac
 	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
+
+openapi:  ## Regenerate schema/api/openapi.json, the published API contract (offline; review the diff).
+	uv run python -m chemclaw.cli.openapi
 
 sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
 	uv run python -m chemclaw.cli.sink_schema --all

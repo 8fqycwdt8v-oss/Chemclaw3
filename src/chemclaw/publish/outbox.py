@@ -10,6 +10,7 @@ its caller: failures are counted (`chemclaw_result_publish_failures_total`, or
 `chemclaw_result_projection_failures_total` for an unreadable payload) and logged.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Sequence
@@ -544,6 +545,22 @@ async def refresh_backlog(dsn: str | None = None) -> None:
     _replace(_DEAD_GAUGE, {str(row[0]): float(row[1]) for row in dead})
 
 
+async def poll_backlog(stop: asyncio.Event) -> None:
+    """Re-read the backlog every `jobs_in_flight_refresh_seconds` until `stop` is set.
+
+    The gauges are this process's last reading, aged at scrape time, so a worker that does not drain
+    keeps the age of whatever it last saw growing after a peer has delivered it. Every worker runs
+    this on a timer, which makes each one report the table's truth within one interval instead of
+    only the one that drained last; a drain that stops still shows the age growing.
+    """
+    await refresh_backlog()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), settings.jobs_in_flight_refresh_seconds)
+        except TimeoutError:
+            await refresh_backlog()
+
+
 def _replace(gauge: dict[str, float], reading: dict[str, float]) -> None:
     """Update a gauge family in place, keeping known sinks that have fallen to zero."""
     gauge.update(dict.fromkeys(gauge, 0.0))
@@ -569,7 +586,7 @@ def bind_backlog_gauges() -> None:
     """Publish the three backlog gauge families off the last reading (no query on a scrape).
 
     Called at import, so any process that drains the outbox reports its depth with no startup hook
-    to forget.
+    to forget. Every background worker also refreshes on a timer (`poll_backlog`).
     """
     record_metric(lambda m: m.bind_gauge_family("chemclaw_outbox_pending", lambda: _PENDING_GAUGE))
     record_metric(
@@ -592,5 +609,6 @@ __all__ = [
     "enqueue_payload",
     "mark_delivered",
     "mark_failed",
+    "poll_backlog",
     "refresh_backlog",
 ]

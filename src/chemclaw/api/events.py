@@ -5,9 +5,9 @@ discriminated union on `type` lets every surface render the same events; the app
 one SSE frame via `model_dump_json()`.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from chemclaw.agent.verifier import AnswerCheck
 from chemclaw.core.turn_signals import RefusalReason
@@ -734,6 +734,11 @@ def sse_frame(event: Event) -> dict[str, str]:
     return {"event": event.type, "data": event.model_dump_json()}
 
 
+#: The union with its discriminator declared, for validating a frame and for the published schema.
+#: `Event` stays a plain union so annotations and `typing.get_args` keep working; serialisation is
+#: `model_dump_json()` on the member and is untouched by this.
+TURN_EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Annotated[Event, Field(discriminator="type")])
+
 #: The name the union is published under in the OpenAPI document's `components.schemas`.
 TURN_EVENT_SCHEMA = "TurnEvent"
 TURN_EVENT_REF = f"#/components/schemas/{TURN_EVENT_SCHEMA}"
@@ -743,15 +748,13 @@ def event_schemas() -> dict[str, object]:
     """Every OpenAPI component this union needs, keyed by component name.
 
     The SSE body is `text/event-stream`, which FastAPI cannot describe, so the union is merged into
-    the published document for `Chemclaw3_ui`'s contract check. `TypeAdapter` emits the
-    `discriminator` mapping; `ref_template` points at `components/schemas`, where these are merged.
+    the published document for the UI's generated types. The union component is a `oneOf` with a
+    `discriminator` on `type`; each frame's SSE `event:` name equals that `type`.
 
     Returns:
         The union's own component plus every member component it references.
     """
-    from pydantic import TypeAdapter
-
-    schema = TypeAdapter(Event).json_schema(ref_template="#/components/schemas/{model}")
+    schema = TURN_EVENT_ADAPTER.json_schema(ref_template="#/components/schemas/{model}")
     components: dict[str, object] = dict(schema.pop("$defs", {}))
     components[TURN_EVENT_SCHEMA] = schema
     return components

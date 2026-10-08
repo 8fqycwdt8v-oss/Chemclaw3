@@ -1,0 +1,162 @@
+{
+  "answer/full": {
+    "data": "{\"type\":\"answer\",\"text\":\"pKa 4.76\",\"checks_run\":[\"verifier\",\"answer-shape\"],\"confidence\":0.62,\"unsupported_claims\":[\"yield 91%\"],\"review_required\":true,\"verified_by\":\"citation-gate\",\"challenged\":true,\"review_hold_id\":\"h-1\"}",
+    "event": "answer"
+  },
+  "answer/minimal": {
+    "data": "{\"type\":\"answer\",\"text\":\"done\",\"checks_run\":[],\"confidence\":null,\"unsupported_claims\":[],\"review_required\":false,\"verified_by\":null,\"challenged\":false,\"review_hold_id\":null}",
+    "event": "answer"
+  },
+  "approval_request/full": {
+    "data": "{\"type\":\"approval_request\",\"prompt\":\"Approve this plan?\",\"approval_id\":\"a-1\"}",
+    "event": "approval_request"
+  },
+  "approval_request/minimal": {
+    "data": "{\"type\":\"approval_request\",\"prompt\":\"Approve this plan?\",\"approval_id\":\"\"}",
+    "event": "approval_request"
+  },
+  "awaiting_answer/full": {
+    "data": "{\"type\":\"awaiting_answer\",\"request_id\":\"r-1\",\"state\":\"waiting\",\"subject\":\"measured yields for plate 3\",\"kind\":\"measurement\",\"asked_of\":\"chemist@example.org\",\"due_at\":\"2026-10-09T08:00:00Z\",\"reminders\":2}",
+    "event": "awaiting_answer"
+  },
+  "awaiting_answer/minimal": {
+    "data": "{\"type\":\"awaiting_answer\",\"request_id\":\"r-1\",\"state\":\"waiting\",\"subject\":\"\",\"kind\":\"\",\"asked_of\":\"\",\"due_at\":\"\",\"reminders\":0}",
+    "event": "awaiting_answer"
+  },
+  "capability_degraded/full": {
+    "data": "{\"type\":\"capability_degraded\",\"connectors\":[\"eln\",\"durable-jobs (Temporal)\"]}",
+    "event": "capability_degraded"
+  },
+  "capability_degraded/minimal": {
+    "data": "{\"type\":\"capability_degraded\",\"connectors\":[]}",
+    "event": "capability_degraded"
+  },
+  "error/full": {
+    "data": "{\"type\":\"error\",\"message\":\"the turn timed out\",\"code\":\"turn_timeout\",\"retryable\":true,\"correlation_id\":\"abc123\"}",
+    "event": "error"
+  },
+  "error/minimal": {
+    "data": "{\"type\":\"error\",\"message\":\"failed\",\"code\":\"internal\",\"retryable\":false,\"correlation_id\":\"\"}",
+    "event": "error"
+  },
+  "evidence_source/full": {
+    "data": "{\"type\":\"evidence_source\",\"source\":\"notes\",\"chunks\":4,\"failed\":true}",
+    "event": "evidence_source"
+  },
+  "evidence_source/minimal": {
+    "data": "{\"type\":\"evidence_source\",\"source\":\"notes\",\"chunks\":0,\"failed\":false}",
+    "event": "evidence_source"
+  },
+  "exhibit/full": {
+    "data": "{\"type\":\"exhibit\",\"exhibit_id\":\"e-1\",\"revision\":3,\"kind\":\"table\",\"title\":\"Screen results\",\"op\":\"revised\",\"author_kind\":\"human\",\"author\":\"chemist@example.org\",\"call_id\":\"c-2\"}",
+    "event": "exhibit"
+  },
+  "exhibit/minimal": {
+    "data": "{\"type\":\"exhibit\",\"exhibit_id\":\"e-1\",\"revision\":1,\"kind\":\"document\",\"title\":\"Report\",\"op\":\"created\",\"author_kind\":\"agent\",\"author\":\"agent\",\"call_id\":\"\"}",
+    "event": "exhibit"
+  },
+  "exhibit_draft/full": {
+    "data": "{\"type\":\"exhibit_draft\",\"call_id\":\"c-3\",\"op\":\"revise\",\"exhibit_id\":\"e-1\",\"kind\":\"document\",\"title\":\"Report\",\"markdown\":\"# Report\\n\\nbody\",\"done\":true}",
+    "event": "exhibit_draft"
+  },
+  "exhibit_draft/minimal": {
+    "data": "{\"type\":\"exhibit_draft\",\"call_id\":\"c-3\",\"op\":\"create\",\"exhibit_id\":\"\",\"kind\":\"\",\"title\":\"\",\"markdown\":\"# R\",\"done\":false}",
+    "event": "exhibit_draft"
+  },
+  "handoff/full": {
+    "data": "{\"type\":\"handoff\",\"from_agent\":\"root\",\"to_agent\":\"analyst\",\"reason\":\"needs the DoE tool\"}",
+    "event": "handoff"
+  },
+  "job_completed/full": {
+    "data": "{\"type\":\"job_completed\",\"job_id\":\"qm-1\",\"summary\":{\"energy\":-12.5,\"ok\":true}}",
+    "event": "job_completed"
+  },
+  "job_completed/minimal": {
+    "data": "{\"type\":\"job_completed\",\"job_id\":\"qm-1\",\"summary\":{}}",
+    "event": "job_completed"
+  },
+  "job_failed/full": {
+    "data": "{\"type\":\"job_failed\",\"job_id\":\"qm-1\",\"reason\":\"xtb exited 2: SCF not converged\"}",
+    "event": "job_failed"
+  },
+  "job_failed/minimal": {
+    "data": "{\"type\":\"job_failed\",\"job_id\":\"qm-1\",\"reason\":\"\"}",
+    "event": "job_failed"
+  },
+  "job_started/full": {
+    "data": "{\"type\":\"job_started\",\"job_id\":\"qm-1\",\"kind\":\"calc\",\"plan_step\":\"optimise geometry\"}",
+    "event": "job_started"
+  },
+  "job_started/minimal": {
+    "data": "{\"type\":\"job_started\",\"job_id\":\"qm-1\",\"kind\":\"job\",\"plan_step\":\"\"}",
+    "event": "job_started"
+  },
+  "note_recorded/full": {
+    "data": "{\"type\":\"note_recorded\",\"note_id\":\"n-1\",\"reference\":\"notes/n-1.md\"}",
+    "event": "note_recorded"
+  },
+  "plan/full": {
+    "data": "{\"type\":\"plan\",\"todos\":[\"screen bases\",\"run DoE\"],\"plan_hash\":\"ab12\",\"scope\":[\"calc\"]}",
+    "event": "plan"
+  },
+  "plan/minimal": {
+    "data": "{\"type\":\"plan\",\"todos\":[],\"plan_hash\":\"\",\"scope\":[]}",
+    "event": "plan"
+  },
+  "question/full": {
+    "data": "{\"type\":\"question\",\"question\":\"Which Suzuki campaign?\",\"options\":[\"C-12\",\"C-14\"]}",
+    "event": "question"
+  },
+  "question/minimal": {
+    "data": "{\"type\":\"question\",\"question\":\"Which Suzuki campaign?\",\"options\":[]}",
+    "event": "question"
+  },
+  "queued/full": {
+    "data": "{\"type\":\"queued\",\"ticket\":7,\"position\":2}",
+    "event": "queued"
+  },
+  "queued/minimal": {
+    "data": "{\"type\":\"queued\",\"ticket\":null,\"position\":null}",
+    "event": "queued"
+  },
+  "token/full": {
+    "data": "{\"type\":\"token\",\"text\":\"The pKa is\",\"agent\":\"subagent\"}",
+    "event": "token"
+  },
+  "token/minimal": {
+    "data": "{\"type\":\"token\",\"text\":\"hi\",\"agent\":\"\"}",
+    "event": "token"
+  },
+  "tool_call/full": {
+    "data": "{\"type\":\"tool_call\",\"tool\":\"predict_pka\",\"arguments\":\"{\\\"smiles\\\": \\\"CC(=O)O\\\"}\",\"agent\":\"subagent\"}",
+    "event": "tool_call"
+  },
+  "tool_call/minimal": {
+    "data": "{\"type\":\"tool_call\",\"tool\":\"predict_pka\",\"arguments\":\"\",\"agent\":\"\"}",
+    "event": "tool_call"
+  },
+  "tool_failed/full": {
+    "data": "{\"type\":\"tool_failed\",\"tool\":\"run_calc\",\"message\":\"refused\",\"agent\":\"subagent\",\"reason\":\"plan_gate\",\"call_id\":\"c-1\"}",
+    "event": "tool_failed"
+  },
+  "tool_failed/minimal": {
+    "data": "{\"type\":\"tool_failed\",\"tool\":\"run_calc\",\"message\":\"boom\",\"agent\":\"\",\"reason\":null,\"call_id\":\"\"}",
+    "event": "tool_failed"
+  },
+  "tool_queued/full": {
+    "data": "{\"type\":\"tool_queued\",\"tool\":\"crest\",\"job_id\":\"j-9\",\"state\":\"queued\",\"waiting\":3}",
+    "event": "tool_queued"
+  },
+  "tool_queued/minimal": {
+    "data": "{\"type\":\"tool_queued\",\"tool\":\"crest\",\"job_id\":\"j-9\",\"state\":\"running\",\"waiting\":null}",
+    "event": "tool_queued"
+  },
+  "tool_result/full": {
+    "data": "{\"type\":\"tool_result\",\"tool\":\"predict_pka\",\"preview\":\"pKa 4.76\",\"note_ids\":[\"n-1\"],\"numbers\":[4.76,1.6],\"values\":[{\"label\":\"pka\",\"value\":4.76,\"unit\":\"\"}],\"result_ref\":\"tr-1\",\"result_inline\":\"{\\\"pka\\\": 4.76}\",\"result_cut\":true,\"agent\":\"subagent\"}",
+    "event": "tool_result"
+  },
+  "tool_result/minimal": {
+    "data": "{\"type\":\"tool_result\",\"tool\":\"predict_pka\",\"preview\":\"\",\"note_ids\":[],\"numbers\":[],\"values\":[],\"result_ref\":\"\",\"result_inline\":\"\",\"result_cut\":false,\"agent\":\"\"}",
+    "event": "tool_result"
+  }
+}

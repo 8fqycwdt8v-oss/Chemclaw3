@@ -523,6 +523,11 @@ class ConnectorManifest(BaseModel):
     # deployment that wants it names it in `CHEMCLAW_CONNECTORS_ENABLED`; `connectors_enabled`
     # remains the single switch.
     default_enabled: bool = True
+    # The semver of the tool surface this manifest declares: major on a removal, rename or argument
+    # change; minor on an additive change, including a description rewrite. The fleet owns the value
+    # and its server reports the same string from `/healthz`, so a mismatch is visible at session
+    # open. Optional until every manifest carries one.
+    contract_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$")
 
     @model_validator(mode="after")
     def _vocabulary_is_well_formed(self) -> Self:

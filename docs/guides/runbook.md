@@ -172,13 +172,14 @@ guide; this runbook covers configuring, extending and troubleshooting a running 
   hand with `git -C "$CHEMCLAW_NOTE_REPO_DIR" status` and `git -C "$CHEMCLAW_NOTE_REPO_DIR" fetch`
   from the pod that writes; afterwards `chemclaw_notes_publish_failures_total` (§(ix)) is the
   signal.
-- **Note writing is serialized per host.** Keep the background worker at one replica
-  (`workers.background.replicas: 1` in `deploy/helm/chemclaw/values.yaml`); the writer's checkout lock is host-local, and the
-  cross-pod half is the Postgres advisory lock, which is taken only under
-  `CHEMCLAW_SESSION_STORE=postgres` (the chart sets it). Two writers on one `note_repo_dir` share
-  one working tree and one index, so the second stages its files into the first's in-flight commit. On a filesystem where
-  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and nothing
-  serialises two writes on that one index at all.
+- **Note writing is serialized per host and per remote.** The writer's checkout lock is host-local;
+  the cross-pod half is the Postgres advisory lock, taken only under
+  `CHEMCLAW_SESSION_STORE=postgres` (the chart sets it), so any number of background workers may
+  write, each into its own clone (`noteRepoVolume` is a per-pod `emptyDir`). Never point two pods'
+  `note_repo_dir` at one shared volume: two writers on one `note_repo_dir` share one working tree
+  and one index, so the second stages its files into the first's in-flight commit, and on a
+  filesystem where `flock` is not honoured (some NFS/ReadWriteMany setups) nothing serialises
+  them at all.
 
 ## Talk to the agent from a terminal (testing)
 
@@ -1248,6 +1249,58 @@ What *does* decide it on OpenShift is a cluster-wide switch that is off by defau
 check `networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the
 connector port and the worker probe port.
 
+## (x-a) Run more than one background worker
+
+`workers.background.replicas` ships at 2 with a `minAvailable: 1` PodDisruptionBudget, so a node
+drain, an eviction or one crashed pod leaves `background-jobs` polled. The count is free to change
+because nothing the worker runs depends on there being one of it. What it runs, by how it is kept
+to one effective run:
+
+| Kind | Jobs | Why a second worker is harmless |
+| --- | --- | --- |
+| Temporal Schedule, `SKIP` | `eln-sync`, `eval-drift`, `note-reindex`, `document-sync`, `reaction-labels`, `reaction-corpus`, `commitment-mirror`, `digest`, `agent-check-in`, `retention`, `exhibit-pushes`, `artifact-eviction`, `orphaned-waits`, `result-publish`, `observations` | The Temporal service drops a fire while the previous run is going; worker count never reaches it. The Schedules are created by the `chemclaw-schedules` Helm hook Job, not by a worker. |
+| Cluster-wide lock | the note reindex pass (`core/job_lock.py`, key `note-reindex`), from the scheduled activity and from `python -m chemclaw.retrieval.vector_index` | A session-level Postgres advisory lock, tried and never awaited, on a connection of its own. A pass that finds it held does nothing, counts `chemclaw_job_lock_skipped_total{job}`, and says so: the activity returns -1 (not 0, which is an index already current) and the command line prints `skipped` and exits 3. The lock belongs to the holder's connection, so a killed pod frees it and the next scheduled pass runs. The command line locks even with the default `CHEMCLAW_SESSION_STORE=memory`, because it shares the index with the pods. |
+| Cluster-wide lock (older) | git note submission (`kg/git_writer.py`), checkpoint-table setup, migrations | Same mechanism, one lock each, queued rather than skipped. |
+| Idempotent or claim-based | the result outbox (`FOR UPDATE SKIP LOCKED`), ELN and label cursors (`GREATEST`), retention (every `DELETE` re-checks its predicate), digests (one `UPDATE` advances the watermark), memory/report/connector-job/template workflows (deterministic workflow ids) | Two overlapping runs do the same work once or do it twice with the same result. |
+| Per pod, by design | the knowledge checkout and its sync sidecar, the document-share mount, `poll_open_jobs`, `/metrics` | Read, never treated as the cluster's truth: a reindex prune is bounded by the corpus revision a row was built from, and a note's fingerprint is a hash of its bytes, so two pods on different commits do not fight over a row. |
+
+A note written in one activity lands in that pod's clone, so a later activity of the same workflow on
+the other pod would not see it until the sync sidecar's next fetch. No shipped workflow does this:
+the hypothesis tournament, report and memory workflows only write notes, and a tournament check
+reads `compound` notes that predate the run. A template whose agent step holds a note-writing tool
+and is followed by a reading step would; that is a backlog row (`docs/planning/BACKLOG.md`).
+
+The only in-process loop a worker runs is `poll_open_jobs` (a read-only gauge refresh) and its probe
+server; it has no startup task that writes.
+
+**What an operator must still provide.**
+
+- A `documentShare` claim that every worker can mount: state its mode in
+  `documentShare.accessMode` (`ReadWriteMany` or `ReadOnlyMany`, e.g. an SMB/CIFS volume). The
+  chart refuses to render two workers without it, since a `ReadWriteOnce` claim leaves the second
+  pod `Pending` on the attach and, with the PodDisruptionBudget, blocks node drains.
+- No shared `note_repo_dir` between pods (see "Note writing" above).
+- Alerts that read a per-pod gauge must take the freshest pod: `chemclaw_ingest_cursor_lag_seconds`
+  is the last cursor a pod loaded, aged at scrape time, so `ChemclawIngestCursorStalled` uses
+  `min by (source)`. The result-outbox gauges are re-read from the table every
+  `CHEMCLAW_JOBS_IN_FLIGHT_REFRESH_SECONDS` by every background worker, so each reports the table's
+  truth and `max by (sink)` is right.
+- Each replica opens one Postgres pool, which `chemclaw.fleetPools` counts. A held job lock is one
+  more connection outside the pools, at most one per replica, which `postgres.maxConnections` has to
+  leave room for (`tests/test_deploy_chart.py` checks the rollout peak plus one per worker).
+
+**Rollouts are not rolling.** `deployment-workers.yaml` is `Recreate`, so `helm upgrade` replaces
+both pods together and the queue backs up in Temporal until they return. A rolling update would run
+two code generations on one queue, each replaying the other's histories.
+
+**Check it with two workers running.**
+
+    kubectl -n <ns> get deploy,pdb chemclaw-background-worker
+    # while one reindex pass is running, the other worker logs that it did nothing:
+    kubectl -n <ns> logs -l app.kubernetes.io/component=background-worker --prefix \
+      | grep "already running on another worker"
+    sum by (job) (increase(chemclaw_job_lock_skipped_total[1h]))
+
 ## (x-b) Make the monitoring stack actually collect this
 
 **Do this before believing anything above.** The chart ships a ServiceMonitor, a PodMonitor and a
@@ -1698,6 +1751,16 @@ Check the spelling of the two DSNs first. Both this alert and the startup check 
 not" by comparing the DSN strings, so one server named two ways is measured as two servers each
 inside its own ceiling, and neither check sees the real total. Spell both DSNs identically.
 
+#### ChemclawFleetNearItsConnectionCeiling
+`warning`, and the early form of the alert above: the same two comparisons, at
+`monitoring.alerts.connectionsWarningFraction` (0.8) of each declared ceiling. Nothing is failing
+yet. The ceilings are the *declared* `postgres.maxConnections` and `sessionStoreMaxConnections`, which
+the chart carries into every pod as `chemclaw_pg_fleet_max_connections`; it cannot ask the server, so
+keep them equal to what the server (or the pooler's client limit, see `deploy/README.md`) will
+actually serve. Run the two `promql` lines under `ChemclawFleetAboveItsConnectionCeiling` to see
+which server it is about, then raise that ceiling together with the server's `max_connections`, lower
+`CHEMCLAW_PG_POOL_MAX_SIZE`, or move to PgBouncer.
+
 ### chemclaw.cost
 
 #### ChemclawTokenBurnHigh
@@ -1795,10 +1858,10 @@ fire together.
 
 It means **nothing in this release is polling `background-jobs`**: sync, re-index, reports and the
 connector-job wrapper are all stopped, and none of them emits a counter when it is not running, so
-no other alert will say so. That Deployment uses `Recreate` (deliberately — two background workers
-racing on one corpus clone is what `D-2026-08-27-what-a-second-background-worker-would-race-on`
-pins the replica count to prevent), which means the old pod was taken down *before* the new one was
-tried: there is no previous generation still serving.
+no other alert will say so. That Deployment uses `Recreate` (deliberately — a rolling update would
+let two code generations replay one history), which means the old pods were taken down *before* the
+new ones were tried: there is no previous generation still serving. A node drain, by contrast,
+leaves one of the two replicas polling (`PodDisruptionBudget`, `minAvailable: 1`).
 
 `absent()` fires only when *no series matches*, so the cause is a pod that never became a scrape
 target: unschedulable, `workers.background.replicas: 0`, a selector that stopped matching, or the PodMonitor
@@ -2020,13 +2083,14 @@ it; the hold is what stops a fresh install from paging before its first pass.
 
 #### ChemclawOutboxBacklogUnreported
 `warning`, and it is the *absence* of the series the alert above reads. All three outbox gauge
-families are written together by one drain pass and are empty on a fresh process until that pass
-runs, so a drain that is not running at all produces no series — and a rule over
-`max by (sink) (…)` then has nothing to evaluate and stays green, which reads exactly like an empty
-queue. Check the `result-publish` Temporal Schedule first (as for `ChemclawRetentionNotSweeping`
-above) and the background worker's logs second. A pod
-that is gone entirely raises `ChemclawTargetDown` beside this; only this one fires for a pod that is
-up with its drain not running.
+families are re-read from the table together, on a timer by every background worker and after
+each drain pass, and are empty on a fresh process until the first read. So no series means no worker
+is reporting (none running, or none can reach the database) — and a rule over `max by (sink) (…)`
+then has nothing to evaluate and stays green, which reads exactly like an empty queue. Check the
+background workers' logs and Postgres reachability first, the `result-publish` Temporal Schedule
+second (as for `ChemclawRetentionNotSweeping` above). A pod that is gone entirely raises
+`ChemclawTargetDown` beside this. A drain that stopped while the workers are up is not this alert:
+the oldest pending age keeps growing and `ChemclawResultOutboxStuck` fires.
 
 Its window and hold are `monitoring.alerts.silenceWindowPasses` and `silenceHoldPasses` multiplied
 by `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES`, so changing the cadence moves the alert with it. The
@@ -2064,7 +2128,7 @@ neither series and is not what this is about.
 `warning`. A source is further behind than `monitoring.alerts.ingestLagSeconds`, so the corpus
 chemists query is stale by at least that much. A wedged fetch advances no cursor and logs
 `ingested=0`, which is byte-identical to a genuinely quiet source — the lag gauge is the only thing
-that separates them. Read `max by (source) (chemclaw_ingest_cursor_lag_seconds)` for which source
+that separates them. Read `min by (source) (chemclaw_ingest_cursor_lag_seconds)` (the freshest of the workers' per-pod readings; `max` would show a replica that simply did not run the last sync) for which source
 and `sum by (source, outcome) (increase(chemclaw_ingest_records_total[1h]))` for whether it is
 fetching anything, then the background worker's log for that source's sync. §(v) covers
 re-ingesting rejected entries.

@@ -11,24 +11,7 @@
        continue it), and an evicted pod's turns are marked interrupted. Uploaded attachments, the
        harness todos and the session handle used to be on this list and are all durable now
        (`session_attachments`, the LangGraph checkpointer). So the number that matters is how many
-       running turns one drain can end, and that is what `maxUnavailable` bounds.
-
-       **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton, and
-       the reason is whatever `values.yaml` currently gives rather than a copy of it here — this
-       comment has now named three different ones (the D-069 checkout lock, then the reindex's
-       retirement, then its re-embedding) and each was closed by a later commit that did not think
-       to come and edit a PDB template. All three are closed
-       (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`,
-       `D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), and the
-       pin outlived them, which is the argument for pointing at the knob instead of restating its
-       justification beside it. A PDB over a
-       singleton is the classic footgun either way: `minAvailable: 1` makes it un-evictable and
-       blocks every node drain in the cluster forever, while `maxUnavailable: 1` permits exactly
-       what no PDB permits. Neither is worth rendering. The singleton itself is the real
-       availability gap, and it stays an open backlog row rather than being papered over with a
-       policy object that would make things worse. (The connector servers also run one replica, and
-       *not* for that reason — an MCP server here is stateless; that is a capacity default, not an
-       invariant, which is why the same sentence should not cover both.) */ -}}
+       running turns one drain can end, and that is what `maxUnavailable` bounds. */ -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -42,4 +25,29 @@ spec:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: service
+{{- end }}
+{{- /* The background worker. A PDB over one pod is a footgun: `minAvailable: 1` on a singleton
+       makes it un-evictable and blocks every node drain, and `maxUnavailable: 1` permits exactly
+       what no PDB permits. From two replicas up `minAvailable: 1` is the right statement: a drain
+       may take all but one, so `background-jobs` keeps a poller through a node drain or a cluster
+       upgrade of the nodes.
+
+       Rendered only from two replicas, so a dev override to `replicas: 1` does not render the
+       footgun. It does not cover a chart rollout: `deployment-workers.yaml` is `Recreate`, which
+       replaces the pods without consulting a PDB. */ -}}
+{{- if and .Values.workers.background.disruptionBudget.enabled (gt (int .Values.workers.background.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "chemclaw.name" . }}-background-worker
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: background-worker
+spec:
+  minAvailable: {{ .Values.workers.background.disruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: background-worker
 {{- end }}

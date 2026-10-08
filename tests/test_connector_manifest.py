@@ -371,3 +371,12 @@ def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path
     )
     with pytest.raises(ConnectorError, match=r"connector\.yaml: invalid manifest"):
         _load_manifest(bundle)
+
+
+def test_a_contract_version_is_an_optional_semver() -> None:
+    """The fleet owns the surface's version; core accepts it before any manifest carries one."""
+    assert _manifest().contract_version is None
+    assert _manifest(contract_version="1.4.0").contract_version == "1.4.0"
+    for bad in ("1", "1.0", "v1.0.0", "1.0.0-rc1", ""):
+        with pytest.raises(ValidationError):
+            _manifest(contract_version=bad)

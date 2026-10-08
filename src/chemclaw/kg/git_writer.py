@@ -407,7 +407,8 @@ class GitNoteWriter:
 
         Each pod's clone is local, so the `flock` cannot exclude another pod. With
         `session_store="postgres"`, a write takes a session-level advisory lock keyed on the remote
-        URL for its duration; `pg_advisory_lock` queues, bounded by the statement timeout, and a
+        URL for its duration, on the session layer's DSN (a session-mode endpoint behind a
+        transaction pooler); `pg_advisory_lock` queues, bounded by the statement timeout, and a
         timeout raises the retryable `GitRemoteError`. A memory-store deployment is single-process,
         and the chart refuses to render with any other session store. A race that slips through only
         diverges the clones, which `_replay_our_unpushed_commits` resolves on the next write.
@@ -423,7 +424,9 @@ class GitNoteWriter:
         # Only acquisition failures are wrapped; wrapping the `yield` would relabel a write error as
         # a lock error. The operation is named because this connection is held across the whole
         # fetch, commit and push, which would otherwise read as slow database queries.
-        connection_ctx = db.connection(settings.postgres_dsn, operation="kg_cluster_submit_lock")
+        connection_ctx = db.connection(
+            settings.session_store_dsn or settings.postgres_dsn, operation="kg_cluster_submit_lock"
+        )
         try:
             conn = await connection_ctx.__aenter__()
         except Exception as exc:

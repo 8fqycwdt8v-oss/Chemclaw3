@@ -37,6 +37,7 @@ from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
 from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.contract import API_CONTRACT_VERSION, payload_schemas
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
 from chemclaw.api.events import event_schemas
@@ -267,7 +268,12 @@ def create_app(
     # `require_principal`. The document is served from a gated `APIRoute` below instead.
     # `docs_url`/`redoc_url` stay off.
     app = FastAPI(
-        title="Chemclaw", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
+        title="Chemclaw",
+        version=API_CONTRACT_VERSION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=_lifespan,
     )
     # First, which makes it innermost (`add_middleware` prepends): inside `_SecurityHeaders`, so its
     # 500 carries them, and outside FastAPI's `ExceptionMiddleware`, so handler 4xx responses are
@@ -426,17 +432,17 @@ def create_app(
     ):
         module.register(app)
 
-    # Merge the turn-event union into the published document: the SSE body is `text/event-stream`,
-    # which FastAPI cannot infer, and `Chemclaw3_ui` mirrors these types. The streaming routes
-    # reference `TURN_EVENT_REF`; this makes it resolve. Wrapped around `app.openapi` because
-    # FastAPI caches the generated document.
+    # Merge the turn-event union and the tool-result payload models into the published document:
+    # the SSE body is `text/event-stream`, which FastAPI cannot infer, and `Chemclaw3_ui` generates
+    # its types from the result. The streaming routes reference `TURN_EVENT_REF`; this makes it
+    # resolve. Wrapped around `app.openapi` because FastAPI caches the generated document.
     _generate = app.openapi
 
     def _openapi_with_events() -> dict[str, Any]:
         """The generated document with the turn-event components merged into it, generated once."""
         document = _generate()
         components = document.setdefault("components", {}).setdefault("schemas", {})
-        for name, schema in event_schemas().items():
+        for name, schema in (event_schemas() | payload_schemas()).items():
             components.setdefault(name, schema)
         return document
 

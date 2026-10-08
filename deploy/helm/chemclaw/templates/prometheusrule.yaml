@@ -696,6 +696,46 @@ spec:
               `postgres.maxConnections` when it is the session server that is over changes nothing.
               Without a split the second gauge is zero everywhere and this is one comparison again.
 
+        {{- /* The warning before that one. The alert above fires at 100% of the *declared* ceiling,
+               which is the point where the next pod's pools are refused; this fires at
+               `monitoring.alerts.connectionsWarningFraction` of it, while there is still room for
+               what the sum does not count: a migration or grants Job (dedicated connections, not
+               pools), an operator's `psql`, a rolling update's second generation, and the one
+               connection per held single-instance job lock (`core/job_lock.py`). Same two
+               per-server comparisons for the same reason, with the fraction applied to each
+               ceiling. `max_connections` is the *declared* `postgres.maxConnections` (and
+               `sessionStoreMaxConnections`), carried into every pod as
+               `chemclaw_pg_fleet_max_connections`: the chart cannot ask the server, so an
+               operator who raises the server's setting raises the value too. Behind a transaction
+               pooler the declared value is the pooler's client limit (`deploy/README.md`). */}}
+        - alert: ChemclawFleetNearItsConnectionCeiling
+          expr: >-
+            (
+            max(chemclaw_pg_fleet_max_connections) > 0
+            and sum(chemclaw_pg_pool_max_size)
+            - sum(chemclaw_pg_session_pool_max_size or vector(0))
+            > {{ .Values.monitoring.alerts.connectionsWarningFraction }} * max(chemclaw_pg_fleet_max_connections)
+            )
+            or (
+            max(chemclaw_pg_session_fleet_max_connections) > 0
+            and sum(chemclaw_pg_session_pool_max_size or vector(0))
+            > {{ .Values.monitoring.alerts.connectionsWarningFraction }} * max(chemclaw_pg_session_fleet_max_connections)
+            )
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetnearitsconnectionceiling
+            summary: The fleet's Postgres pools are close to a server's declared connection ceiling
+            description: >-
+              The pools this fleet may open exceed the configured share of a declared Postgres
+              connection ceiling, so the next scale-up, rollout surge or hand-run Job can be refused
+              by a database that is not busy. Nothing is failing yet; this is the time to raise
+              `postgres.maxConnections` together with the server's own `max_connections`, lower
+              `CHEMCLAW_PG_POOL_MAX_SIZE`, or put a pooler in front (`deploy/README.md`). Run both
+              comparisons in `ChemclawFleetAboveItsConnectionCeiling`'s runbook entry: the alert
+              does not say which server it is about.
+
     - name: chemclaw.cost
       rules:
         - alert: ChemclawTokenBurnHigh
@@ -887,10 +927,9 @@ spec:
 
         {{- /* The same failure one component down, and the one `Recreate` makes reachable.
                `deployment-workers.yaml` is the only Deployment in this chart with a `strategy:`
-               block, and it is `Recreate` — deliberately, because two background workers racing on
-               one corpus clone is the defect `D-2026-08-27-what-a-second-background-worker-would-race-on`
-               pins the replica count to prevent. The cost of that choice is that the old pod is
-               gone *before* the new one is tried, so a background worker that cannot start leaves
+               block, and it is `Recreate` — deliberately, so that no second code generation replays
+               the first one's histories. The cost of that choice is that the old pods are gone
+               *before* the new ones are tried, so a background worker that cannot start leaves
                the release with none at all, and the rule above stays green whenever a connector
                worker is still scraped on the same endpoint. Every other Deployment here
                defaults to RollingUpdate, which keeps the old pod serving, so this is scoped to the
@@ -1296,12 +1335,13 @@ spec:
             summary: No process has reported a result-outbox backlog for several drain intervals
             description: >-
               `chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds` and
-              `chemclaw_outbox_dead_lettered` are refreshed together by the drain pass and are
-              absent from a worker's `/metrics` until its first pass completes. Several missed
-              passes of `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES` means the drain is not running —
-              the same fault `ChemclawResultOutboxStuck` exists for, arriving as silence, which that
-              rule cannot fire on. Check the Temporal Schedule first; a pod that is gone entirely
-              raises `ChemclawTargetDown` beside this.
+              `chemclaw_outbox_dead_lettered` are re-read from the table together, on a timer by
+              every background worker and after each drain pass, and are absent from a worker's
+              `/metrics` until its first read completes. Several missed passes of
+              `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES` means no worker is reporting: none is
+              running, or none can reach the database. A drain that stopped while workers are up
+              is `ChemclawResultOutboxStuck`, whose age keeps growing. Check the workers first; a
+              pod that is gone entirely raises `ChemclawTargetDown` beside this.
 
         {{- if .Values.retention.windows }}
         {{- /* Disposal happened and nothing anywhere could see it. Twelve Temporal Schedules run in
@@ -1409,10 +1449,16 @@ spec:
 
         {{- /* An ingest cursor that has stopped moving. A wedged fetch advances no cursor and logs
                `ingested=0`, which is byte-identical to a genuinely quiet source; the lag gauge is
-               the only thing that separates them. */}}
+               the only thing that separates them.
+
+               `min`, because the gauge is per pod: it is the last cursor *that pod* loaded or
+               stored, aged at scrape time, so with two background workers the one that did not run
+               the latest sync reports an ever-growing lag for a source that is current. A cursor
+               only moves forward, so every stale reading is an over-estimate and the smallest is
+               the freshest; `max` would page on the idle replica. */}}
         - alert: ChemclawIngestCursorStalled
           expr: >-
-            max by (source) (chemclaw_ingest_cursor_lag_seconds)
+            min by (source) (chemclaw_ingest_cursor_lag_seconds)
             > {{ .Values.monitoring.alerts.ingestLagSeconds }}
           for: 30m
           labels:

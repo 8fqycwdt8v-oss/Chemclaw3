@@ -727,6 +727,72 @@ async def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_ye
     )
 
 
+class _Pod:
+    """One worker process's backlog gauges, swapped in for the module-level state of the test's.
+
+    The gauges are per-process dicts, so two pods are two sets of them; `serving` makes one of them
+    the module's, as that process's `/metrics` would see it.
+    """
+
+    def __init__(self) -> None:
+        self.pending: dict[str, float] = {}
+        self.oldest: dict[str, float] = {}
+        self.dead: dict[str, float] = {}
+
+    def serving(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(outbox, "_PENDING_GAUGE", self.pending)
+        monkeypatch.setattr(outbox, "_OLDEST_ENQUEUED", self.oldest)
+        monkeypatch.setattr(outbox, "_DEAD_GAUGE", self.dead)
+
+    def age(self, monkeypatch: pytest.MonkeyPatch) -> float:
+        self.serving(monkeypatch)
+        return outbox._oldest_pending_seconds().get("alpha", 0.0)
+
+
+async def test_a_worker_that_did_not_drain_does_not_report_a_backlog_a_peer_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With two workers, the outbox age is the table's, not the last pass each one happened to run.
+
+    Pod A last looked while a row was pending; pod B then delivered it. Without a refresh of its own
+    A keeps reporting a row older every second, and `ChemclawResultOutboxStuck` (a `max` over pods)
+    pages for a queue that is empty. Each worker therefore re-reads the table on a timer, and a row
+    that really is stuck reads old on both.
+    """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "jobs_in_flight_refresh_seconds", 0.05)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("shared-row")])
+    async with outbox._connect("test_fixture") as conn:
+        await conn.execute("UPDATE result_publications SET enqueued_at = now() - interval '1 hour'")
+        await conn.commit()
+    pod_a, pod_b = _Pod(), _Pod()
+
+    async def pollers_run_for(seconds: float) -> None:
+        for pod in (pod_a, pod_b):
+            pod.serving(monkeypatch)
+            stop = asyncio.Event()
+            task = asyncio.create_task(outbox.poll_backlog(stop))
+            await asyncio.sleep(seconds)
+            stop.set()
+            await task
+
+    # Both look while the row is pending, as the pass that delivers it will have.
+    await pollers_run_for(0.2)
+    assert pod_a.age(monkeypatch) > 3000 and pod_b.age(monkeypatch) > 3000, "a stuck row reads old"
+
+    # Pod B delivers it. Pod A does not run the pass again.
+    pod_b.serving(monkeypatch)
+    claimed = await outbox.claim("alpha", 10)
+    await outbox.mark_delivered([claimed[0].lease])
+    await pollers_run_for(0.2)
+
+    ages = [pod_a.age(monkeypatch), pod_b.age(monkeypatch)]
+    assert max(ages) == 0.0, f"a delivered row still reads {max(ages):.0f}s old on a pod: {ages}"
+
+
 def test_all_three_backlog_gauge_families_are_actually_bound() -> None:
     """All three backlog gauge families are actually bound.
 
