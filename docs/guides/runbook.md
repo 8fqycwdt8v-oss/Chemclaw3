@@ -646,10 +646,10 @@ door at. In a cluster, each such bundle is its own Deployment + Service
 Deployment with `worker: true`, and the chart *computes* `CHEMCLAW_CONNECTOR_URLS` from that same
 block, so addresses cannot drift from the pods that exist.
 
-**A bundle this image does not ship** — one of `Chemclaw3-mcp`'s `manifests/`, or a private one —
-is mounted rather than built in: put its folder in a ConfigMap and list it under
+**A bundle this image does not ship** — a private one; `Chemclaw3-mcp`'s own manifests are in the
+image — is mounted rather than built in: put its folder in a ConfigMap and list it under
 `extraConnectors.bundles` (`{name: <bundle>, configMap: <configmap>}`); the chart mounts each at
-`extraConnectors.mountPath/<name>` and prepends that directory to `CHEMCLAW_CONNECTORS_DIR`. Then
+`extraConnectors.mountPath/<name>` and puts that directory first on `CHEMCLAW_CONNECTORS_DIR`. Then
 give it a `connectors.<name>` entry (`enabled: true`, `server: true`, `url:`) and do the three
 steps below.
 
@@ -684,9 +684,9 @@ The tools such a server exposes are still read/compute only, still narrowed by `
 carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
 must never make an access decision on a header's word (`connectors/identity.py`).
 
-**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
-override a shipped one; setting it *replaces* the shipped default, so name the shipped directory
-too), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS` (a JSON object, bundle name → MCP
+**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — add a private bundle dir; a
+name found in two directories is a startup error, never an override; setting it *replaces* the
+default, which is the fleet's manifests and the shipped bundles, so name both too), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS` (a JSON object, bundle name → MCP
 URL), `CHEMCLAW_CONNECTORS_REQUIRED`, `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS`,
 `CHEMCLAW_CONNECTOR_JOB_TIMEOUT_SECONDS`. A connector's request timeout and auth mode are per-manifest
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is

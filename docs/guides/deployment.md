@@ -661,16 +661,15 @@ no patch.
 
 - **Connectors** (`chem`, `safety`, `rxnpredict`, and any you enable later): set
   `connectors.<name>.url`. The chart folds it into `CHEMCLAW_CONNECTOR_URLS` and renders no pods
-  for that bundle. The manifest that declares the tool surface ships in the image under
-  `src/chemclaw/connectors/<name>/`.
+  for that bundle. The manifest that declares the tool surface ships in the image, installed with
+  the `chemclaw-contracts` package.
 - **Backends** (`calc`, `rxnlabel`): set `config.CHEMCLAW_CALC_SERVER_URL` and
   `config.CHEMCLAW_RXNLABEL_SERVER_URL`. The settings `calc_server_token_env` and
   `rxnlabel_server_token_env` name the bearer variables (`core/config/calculators.py`,
   `core/config/labels.py`).
 - **Never put `Chemclaw3-mcp:manifests-internal/` on `CHEMCLAW_CONNECTORS_DIR`**, not even through
-  `extraConnectors`. A `calc` manifest that is discovered there wins the name collision with this
-  repository's `calc` bundle, and that silently removes the calculation cache, the calibration
-  ledger and every durable calc job from the agent. The internal manifests declare
+  `extraConnectors`. Its `calc` manifest names a connector this repository already has, and it would
+  put the backend's internal primitives in the prompt. The internal manifests declare
   `mount: backend`, which this repository's manifest model refuses, so the mistake shows up as a
   start-up error that names the file.
 

@@ -80,10 +80,10 @@ class ConnectorError(ChemclawError):
 def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
     """Every connector bundle directory found across `dirs`, by name, in path order.
 
-    Every directory, not only the winner: a name collision decides which manifest describes the
-    capability, not which content exists on disk (see `_bundle_content_dirs`). Sorted by name so
-    tool order (part of the prompt) is identical on every machine; within a name, path order is the
-    precedence. Cached on `dirs`; `forget_discovered` clears it.
+    A bundle is a subdirectory holding a `connector.yaml`. Sorted by name so tool order (part of
+    the prompt) is identical on every machine. More than one directory per name is possible here and
+    refused by `_bundle_dirs`; the same directory reached twice (a repeated path entry) is one.
+    Cached on `dirs`; `forget_discovered` clears it.
     """
     found: dict[str, list[Path]] = {}
     for directory in dirs:
@@ -92,18 +92,33 @@ def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
             continue
         for path in sorted(root.iterdir()):
             if (path / MANIFEST_FILENAME).is_file() and within_root(root, path):
-                found.setdefault(path.name, []).append(path)
+                same = [
+                    seen for seen in found.get(path.name, []) if seen.resolve() == path.resolve()
+                ]
+                if not same:
+                    found.setdefault(path.name, []).append(path)
     return {name: tuple(found[name]) for name in sorted(found)}
 
 
 def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
-    """The directory that wins each bundle name, sorted by name.
+    """The directory of each bundle, sorted by name.
 
-    First dir wins, like `PATH`, so an operator's private dir can override a shipped bundle. A
-    shadowed manifest is never parsed, so an override cannot fail startup over a file the system
-    does not use.
+    One directory owns a connector name. A name declared in two directories is a startup error
+    naming both paths, not a precedence: which of two manifests described the capability would
+    otherwise depend on the order of a path list, with nothing logged about the one that lost.
     """
-    return [paths[0] for paths in _bundle_dirs_by_name(dirs).values()]
+    bundles: list[Path] = []
+    for name, paths in _bundle_dirs_by_name(dirs).items():
+        if len(paths) > 1:
+            raise ConnectorError(
+                f"connector {name!r} is declared in more than one directory: "
+                f"{' and '.join(str(path / MANIFEST_FILENAME) for path in paths)}. A connector "
+                "name has exactly one owner, so remove one of the two from CHEMCLAW_CONNECTORS_DIR "
+                "(the fleet's manifests arrive through the installed `chemclaw-contracts` "
+                "package). To point a connector at another server, set CHEMCLAW_CONNECTOR_URLS."
+            )
+        bundles.append(paths[0])
+    return bundles
 
 
 def _load_manifest(bundle: Path) -> ConnectorManifest:

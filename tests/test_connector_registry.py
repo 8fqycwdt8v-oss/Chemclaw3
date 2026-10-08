@@ -18,7 +18,6 @@ from chemclaw.agent.chemclaw_agent import (
     subagent_tool_names,
     template_tool_names,
 )
-from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     ConnectorError,
     connector_tool_names,
@@ -185,11 +184,10 @@ def test_a_backend_manifest_is_refused_rather_than_partially_adopted(
 ) -> None:
     """A `mount: backend` manifest is refused rather than partially adopted.
 
-    Both repositories hold a `calc` manifest, and `_bundle_dirs` takes the first on the path
-    silently, so the backend's smaller surface could replace this repository's `calc` (cache,
-    ledger, artifacts, durable jobs) with no error. `ConnectorManifest`'s `extra="forbid"` refuses
-    the `mount` key; relaxing it or adding a `mount` field turns the startup error into a partial
-    surface.
+    Both repositories hold a `calc` manifest. `ConnectorManifest`'s `extra="forbid"` refuses the
+    `mount` key, so the backend's smaller surface cannot be read as this repository's `calc` (cache,
+    ledger, artifacts, durable jobs); relaxing it or adding a `mount` field turns the startup error
+    into a partial surface.
     """
     _bundle(tmp_path, "calc", _BACKEND_MANIFEST)
     _use(monkeypatch, tmp_path)
@@ -530,19 +528,45 @@ def test_a_connectors_judgment_is_found_beside_a_manifest_it_does_not_hold(
     assert declared_skills_dirs() == skills_dirs()
 
 
-def test_the_first_connectors_dir_wins_a_name_collision(
+def test_a_name_declared_in_two_directories_is_refused_naming_both(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`PATH` precedence: an operator's private bundle dir can override a shipped bundle."""
-    private = tmp_path / "private"
-    shipped = tmp_path / "shipped"
-    _bundle(private, "alpha", _http_manifest("alpha", port=7777))
-    _bundle(shipped, "alpha", _http_manifest("alpha", port=8888))
-    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{private}:{shipped}")
+    """Two manifests for one connector are an error at discovery, not a precedence.
+
+    This replaces `test_the_first_connectors_dir_wins_a_name_collision`, which held `PATH`
+    precedence: an operator's directory overriding a shipped bundle. Which of two copies described
+    a capability then depended on the order of a path list, with nothing logged about the one that
+    lost, and with the fleet's manifests on the default path a stale copy would hide a fleet
+    change. The message names both files and the way out
+    (`D-2026-10-08-a-connector-name-has-one-owner`).
+    """
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _bundle(first, "alpha", _http_manifest("alpha", port=7777))
+    _bundle(second, "alpha", _http_manifest("alpha", port=8888))
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{first}:{second}")
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    (manifest,) = enabled()
-    assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)
-    assert "7777" in str(manifest.endpoint)
+    with pytest.raises(ConnectorError) as raised:
+        enabled()
+    message = str(raised.value)
+    assert "'alpha'" in message
+    assert str(first / "alpha" / "connector.yaml") in message
+    assert str(second / "alpha" / "connector.yaml") in message
+    assert "CHEMCLAW_CONNECTOR_URLS" in message, "the message must say how to repoint a connector"
+
+
+def test_the_same_directory_named_twice_is_not_a_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated path entry (or a link to the same directory) is one owner, not two."""
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setattr(
+        "chemclaw.core.config.settings.connectors_dir", f"{tmp_path}:{tmp_path}:{link}"
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
+    assert [manifest.name for manifest in enabled()] == ["alpha"]
 
 
 def test_a_bundle_contributes_note_types_without_a_core_edit(
