@@ -1,11 +1,14 @@
-"""Cross-repository agreement between this repository and a `Chemclaw3-mcp` checkout.
+"""The fleet's manifests reach this repository through one door: the installed contracts package.
 
-Backend seams (`calc`, `rxnlabel`) have no manifest here, so every hardcoded call site is checked
-against the fleet's `tool-surface.json`, in both directions: every name sent is served, and every
-served tool is called or declined with a reason.
+`chemclaw-contracts` (`Chemclaw3-mcp`'s `packages/chemclaw_contracts`, pinned in `pyproject.toml`)
+owns every `connector.yaml` the fleet serves. These tests need no checkout and never skip: no second
+copy exists in this tree, discovery reads the package, and the validators pass against it. The
+fleet's own `agreement` lane runs this module with its pull request's package installed over the
+pinned one, so a manifest this tree cannot read fails there, before it merges.
 
-Opt-in: each test needs a sibling checkout and skips without one; `tests/conftest.py` reports
-how many skipped.
+Two things still read a checkout and skip without one (`CHEMCLAW_SIBLINGS_REQUIRED` turns the skip
+into a failure in CI): the `calc` and `rxnlabel` call sites against the fleet's `tool-surface.json`,
+and the e2e lane's wiring.
 """
 
 from __future__ import annotations
@@ -18,14 +21,137 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, get_args, get_origin, get_type_hints
 
+import chemclaw_contracts as contracts
 import pytest
 import yaml
 
+from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.connectors.registry import ConnectorError, discovered, forget_discovered
+from chemclaw.core.config import Settings, settings
 from tests.siblings import (
     REPO_ROOT,
     SIBLING_SKIP,
+    bundles_declared_here,
     sibling_root,
 )
+
+_CHART_VALUES = REPO_ROOT / "deploy" / "helm" / "chemclaw" / "values.yaml"
+
+
+def _default_connectors_dir() -> str:
+    """The code's own default for `connectors_dir`, whatever the environment says."""
+    default = Settings.model_fields["connectors_dir"].get_default(call_default_factory=True)
+    assert isinstance(default, str)
+    return default
+
+
+@pytest.fixture
+def default_path(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point discovery at the default path with an empty enable-list, and drop its cache."""
+    default = _default_connectors_dir()
+    monkeypatch.setattr(settings, "connectors_dir", default)
+    monkeypatch.setattr(settings, "connectors_enabled", "")
+    forget_discovered()
+    return default
+
+
+def test_no_second_copy_of_a_fleet_manifest_exists_in_this_tree() -> None:
+    """A bundle directory here never carries the name of a connector the package publishes.
+
+    A copy would be a collision at discovery (`registry._bundle_dirs`) and, before that, two files
+    that could disagree unseen: the defect the package was introduced to end. The package's
+    internal manifests (`calc`, `rxnlabel`) are not connectors and are deliberately outside this:
+    this tree's own `calc` bundle shares a name with the `calc` backend, and `mount: backend` is
+    what keeps the two apart (`test_a_backend_manifest_cannot_be_mounted`).
+    """
+    owned = set(contracts.manifest_names())
+    assert owned, "the installed package declares no manifest; has its layout changed?"
+    copies = sorted(set(bundles_declared_here()) & owned)
+    assert not copies, (
+        f"{copies} are declared by the fleet's package and by a connector.yaml in this tree. "
+        "Delete the copy (keep its skills/ beside a README); the package supplies the manifest."
+    )
+
+
+def test_every_connector_the_package_declares_is_discovered_from_the_package(
+    default_path: str,
+) -> None:
+    """Each manifest the package publishes is the one discovery loads, field for field.
+
+    Read back through `ConnectorManifest`, so a key the model refuses fails here and not in a pod,
+    and a `contract_version` the package declares is the value the model holds.
+    """
+    del default_path
+    found = discovered()
+    for name in contracts.manifest_names():
+        assert name in found, f"{name} is in the package and discovery did not find it"
+        bundle, manifest = found[name]
+        assert bundle.parent == contracts.manifests_dir(), (
+            f"{name} was discovered in {bundle.parent}, not in the installed package"
+        )
+        from_package = ConnectorManifest.model_validate(
+            yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))
+        )
+        assert manifest == from_package
+        assert manifest.contract_version == contracts.contract_version(name)
+
+
+def test_the_connector_validators_pass_against_the_installed_package(default_path: str) -> None:
+    """`connector-validate`, `skill-validate` and `template-validate`, over the default path.
+
+    The three the fleet's `agreement` lane runs against its pull request's package: a manifest that
+    names a tool no validator can resolve, or a skill whose declared tools the package does not
+    serve, fails here.
+    """
+    del default_path
+    from chemclaw.cli.validate_connectors import validate_connectors
+    from chemclaw.cli.validate_skills import validate_skills
+    from chemclaw.cli.validate_templates import validate_templates
+    from chemclaw.connectors.registry import declared_skills_dirs
+
+    assert validate_connectors() == []
+    assert validate_skills([*settings.skills_dirs, *declared_skills_dirs()]) == []
+    assert validate_templates() == []
+
+
+@pytest.mark.parametrize("name", contracts.manifest_names(internal=True))
+def test_a_backend_manifest_cannot_be_mounted(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package's internal manifests (`mount: backend`) are refused by this tree's model.
+
+    Those servers are addressed by `CHEMCLAW_CALC_SERVER_URL` / `CHEMCLAW_RXNLABEL_SERVER_URL`;
+    mounting their directory would put internal primitives in the prompt.
+    """
+    monkeypatch.setattr(settings, "connectors_dir", str(contracts.internal_manifests_dir()))
+    forget_discovered()
+    with pytest.raises(ConnectorError, match="mount") as raised:
+        discovered()
+    assert f"{name}/connector.yaml" in str(raised.value) or "mount" in str(raised.value)
+
+
+def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
+    """Every server the package declares has an egress port and a token slot in the chart.
+
+    A NetworkPolicy restricts by port independently of its destinations, and without a
+    `secrets.optionalKeys` slot the bearer has nowhere to come from. Derived from the package, which
+    names both the port and `auth.token_env` of every connector and backend.
+    """
+    values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
+    ports = {int(port) for port in values["networkPolicy"]["egressPorts"].values()}
+    slots = set(values["secrets"]["optionalKeys"].values())
+    names = [*contracts.manifest_names(), *contracts.manifest_names(internal=True)]
+    assert names, "the installed package declares no manifest"
+    missing: list[str] = []
+    for name in names:
+        endpoint = yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))[
+            "endpoint"
+        ]
+        port = int(endpoint["url"].rsplit(":", 1)[1].split("/", 1)[0])
+        if port not in ports:
+            missing.append(f"{name}: port {port} is not in networkPolicy.egressPorts")
+        token_env = (endpoint.get("auth") or {}).get("token_env")
+        if token_env and token_env not in slots:
+            missing.append(f"{name}: {token_env} has no secrets.optionalKeys slot")
+    assert not missing, "\n".join(missing)
 
 
 def _sibling_or_skip() -> Path:
@@ -43,6 +169,75 @@ def _manifest(path: Path) -> dict[str, Any]:
     """One `connector.yaml`, parsed."""
     declared: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
     return declared
+
+
+#: The script whose directory order decides which manifests the four-repo lane reads.
+_E2E_UP = REPO_ROOT / "infra/live/e2e-full-stack/up.sh"
+
+
+def _e2e_connectors_dir(fleet: Path) -> str:
+    """`CHEMCLAW_CONNECTORS_DIR` exactly as `up.sh` exports it, with its three variables bound.
+
+    Read off the script rather than transcribed, because the wiring *is* the claim: a transcription
+    would go on agreeing with itself after the script changed.
+    """
+    import chemclaw.connectors
+
+    exports = [
+        line.split("=", 1)[1].strip().strip('"')
+        for line in _E2E_UP.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("export CHEMCLAW_CONNECTORS_DIR=")
+    ]
+    assert len(exports) == 1, f"{_E2E_UP} exports CHEMCLAW_CONNECTORS_DIR {len(exports)} times"
+    bindings = {
+        "$own_connectors": str(Path(chemclaw.connectors.__file__).resolve().parent),
+        "$MCP_REPO": str(fleet),
+        "$HARNESS_DIR": str(_E2E_UP.parent),
+    }
+    value = exports[0]
+    for variable, path in bindings.items():
+        value = value.replace(variable, path)
+    assert "$" not in value, f"{_E2E_UP} names a variable this test does not bind: {value}"
+    return value
+
+
+def test_the_e2e_lane_reads_every_fleet_connector_and_binds_no_opt_in_one_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `up.sh`'s own wiring the registry discovers what the package declares, and only that.
+
+    The lane puts the fleet *checkout's* `manifests/` on the path rather than the installed package,
+    so the manifests it reads and the servers it starts are one revision. Every connector the
+    package publishes must still be discovered there, and the ones the fleet declares
+    `default_enabled: false` must stay unbound with no enable-list: the lane's enable-list is
+    derived from discovery, and a lane that binds an opt-in bundle by silence pays its schemas on
+    every call.
+    """
+    from chemclaw.connectors import registry
+
+    fleet = _sibling_or_skip()
+    opt_in = {
+        name
+        for name in contracts.manifest_names()
+        if yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8")).get(
+            "default_enabled", True
+        )
+        is False
+    }
+    assert opt_in, "no package manifest declares `default_enabled: false`, so this checks nothing"
+    monkeypatch.setattr(settings, "connectors_dir", _e2e_connectors_dir(fleet))
+    monkeypatch.setattr(settings, "connectors_enabled", "")
+    forget_discovered()
+    assert set(contracts.manifest_names()) <= set(registry.discovered()), (
+        f"the lane's wiring does not discover {sorted(set(contracts.manifest_names()))} "
+        "from the fleet checkout"
+    )
+    bound = {manifest.name for manifest in registry.enabled()}
+    assert not opt_in & bound, (
+        f"{sorted(opt_in & bound)} bind in the e2e lane's wiring with no enable-list, although "
+        f"the fleet declares them `default_enabled: false`. {_E2E_UP} has changed its "
+        "CHEMCLAW_CONNECTORS_DIR."
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -443,34 +638,3 @@ def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> 
         f"record, and not {sorted(set(surface) - fake)} that it does. A fake that has drifted from "
         "the server proves the suite runs, not that the seam works."
     )
-
-
-#: `deploy/helm/chemclaw/values.yaml`, read for the two maps a fleet server needs to be reachable.
-_CHART_VALUES = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw" / "values.yaml"
-
-
-def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
-    """Every fleet server has an egress port and a token slot in the chart.
-
-    A NetworkPolicy restricts by port independently of its destinations, and without a
-    `secrets.optionalKeys` slot the bearer has nowhere to come from. Derived from the fleet's
-    `manifests/` and `manifests-internal/`, which name both the port and `auth.token_env`.
-    """
-    root = _sibling_or_skip()
-    values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
-    ports = {int(port) for port in values["networkPolicy"]["egressPorts"].values()}
-    slots = set(values["secrets"]["optionalKeys"].values())
-    manifests = sorted(root.glob("manifests/*/connector.yaml")) + sorted(
-        root.glob("manifests-internal/*/connector.yaml")
-    )
-    assert manifests, f"{root} holds no fleet manifest; the derivation is broken"
-    missing: list[str] = []
-    for path in manifests:
-        endpoint = _manifest(path)["endpoint"]
-        port = int(endpoint["url"].rsplit(":", 1)[1].split("/", 1)[0])
-        if port not in ports:
-            missing.append(f"{path.parent.name}: port {port} is not in networkPolicy.egressPorts")
-        token_env = (endpoint.get("auth") or {}).get("token_env")
-        if token_env and token_env not in slots:
-            missing.append(f"{path.parent.name}: {token_env} has no secrets.optionalKeys slot")
-    assert not missing, "\n".join(missing)
