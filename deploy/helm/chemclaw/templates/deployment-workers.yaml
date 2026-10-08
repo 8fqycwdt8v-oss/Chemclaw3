@@ -13,49 +13,21 @@ metadata:
     app.kubernetes.io/component: background-worker
 spec:
   replicas: {{ .Values.workers.background.replicas }}
-  {{- /* The other half of that `replicas: 1`, because one replica is one process only at steady
-         state. Kubernetes' default `RollingUpdate` is `maxSurge: 25%`/`maxUnavailable: 25%`, which
-         for a single replica rounds to `maxSurge: 1, maxUnavailable: 0` — the new pod is started
-         and becomes Ready *before* the old one is told to stop, and the old one then gets its whole
-         `terminationGracePeriodSeconds` (150) to finish. Two background workers poll
-         `background-jobs` for that window, which is the race
-         `D-2026-08-27-what-a-second-background-worker-would-race-on` pinned the count to prevent:
-         the two pods hold two differently-aged clones of the corpus. **Both halves of that are now
-         closed** — a prune is bounded by the corpus revision the row was built from
-         (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), so the older pod no
-         longer deletes the freshly merged notes' rows, and a note's fingerprint is a hash of its
-         bytes rather than the mtime its own checkout wrote
-         (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
-         pods holding one commit no longer re-embed each other's work.
+  {{- /* `Recreate`: with no overlap, every unfinished run on `background-jobs` is resumed by exactly
+         one code version, the new one. So the new image must *replay* the histories the old one
+         wrote, which is a property of `src/chemclaw/durable/`, not of this file, checked against
+         committed histories by `tests/test_workflow_replay.py`
+         (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`).
 
-         **So the corpus argument no longer reaches this knob, and `Recreate` stays for the reason
-         below rather than for that one.** Written out because the two were stated together for
-         long enough to read as one: an overlap during a rollout is now a capacity question for
-         the reindex, and a correctness question only for replay. `values.yaml` says what is left
-         before `replicas` itself moves.
-
-         `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
-         Temporal redelivers an activity whose worker went away — so the honest statement is that
-         the old process is gone before the new one starts.
-
-         **What that guarantees, and what it therefore costs.** With no overlap, every unfinished
-         run on `background-jobs` is resumed by exactly one code version: the new one. So the new
-         image must be able to *replay* the histories the old one wrote, and that is a property of
-         `src/chemclaw/durable/`, not of this file — checked against committed histories by
-         `tests/test_workflow_replay.py`
-         (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). Measured there
-         rather than argued here, because prose in a chart template cannot fail.
-
-         Temporal's worker versioning is the alternative that would let the two generations
-         disagree, and it is declined in that ADR for this deployment's own reason: pinning an
-         in-flight run to the build id that started it requires the old worker to stay up until it
-         drains — a `TemplateWorkflow` run lives up to `template_run_timeout_seconds`, 12.6 h at
-         the shipped default — which is a second background worker for half a day, the exact thing
-         the paragraph above pins `replicas: 1` to prevent.
+         This is independent of `replicas`. Two replicas make a node drain or a crash survivable
+         (`poddisruptionbudget.yaml`); they do not make a rollout rolling. A `RollingUpdate` would
+         let an old and a new worker poll one queue, so a history started by the new code could be
+         replayed by the old; Temporal's worker versioning would allow that and is declined in that
+         ADR because pinning an in-flight run to its build id keeps the old worker up until the
+         run drains, and a `TemplateWorkflow` run lives up to `template_run_timeout_seconds`.
 
          The connector workers below keep the default on purpose; nothing on their queues is
-         host-local, so an overlap is only capacity — and no bundle workflow has an archived
-         history yet either, which is why the control above is scoped to core's queue. */}}
+         host-local, so an overlap is only capacity. */}}
   strategy:
     type: Recreate
   selector:
@@ -72,6 +44,8 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- /* Two replicas on one node are one failure domain: see `chemclaw.spreadAcrossNodes`. */}}
+      {{- include "chemclaw.spreadAcrossNodes" (dict "Release" .Release "component" "background-worker") | nindent 6 }}
       {{- /* No service links: see deployment-service.yaml. */}}
       enableServiceLinks: false
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}

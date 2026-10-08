@@ -1051,33 +1051,92 @@ def test_the_drain_budget_the_chart_grants_covers_the_one_the_code_takes() -> No
 def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     """`minReplicas: 2` bounds what the HPA runs and nothing about where it lands or what may go.
 
-    Anti-affinity and a PDB keep the two replicas off one node and out of one eviction; it matters
-    because the Route pins a browser to one pod. Front-door only: a PDB over the singleton
-    background worker would make it un-evictable and block every node drain.
+    Anti-affinity and a PDB keep the replicas off one node and out of one eviction, for both roles
+    that run more than one pod: the front door (the Route pins a browser to one pod) and the
+    background worker (a drain must leave `background-jobs` a poller).
     """
-    service = (CHART / "templates" / "deployment-service.yaml").read_text()
-    assert "chemclaw.spreadAcrossNodes" in service, "both front-door replicas may land on one node"
+    for template in ("deployment-service.yaml", "deployment-workers.yaml"):
+        body = (CHART / "templates" / template).read_text()
+        assert "chemclaw.spreadAcrossNodes" in body, f"{template}: replicas may land on one node"
 
     budget = (CHART / "templates" / "poddisruptionbudget.yaml").read_text()
     # As YAML keys, not as text: this template *discusses* `minAvailable` in the comment explaining
-    # why it is not used, and a substring check reads that explanation as the thing it warns
-    # against. The same trap as the worker-probes assertion above, hit twice on one branch.
-    keys = set(re.findall(r"^\s*(minAvailable|maxUnavailable):", budget, flags=re.MULTILINE))
-    assert keys == {"maxUnavailable"}, (
+    # why the front door does not use it, and a substring check reads that explanation as the thing
+    # it warns against. The front door's is the first document, the worker's the second.
+    service_part, worker_part = budget.split("component: service\n{{- end }}", 1)
+    service_keys = set(re.findall(r"^\s*(minAvailable|maxUnavailable):", service_part, re.M))
+    worker_keys = set(re.findall(r"^\s*(minAvailable|maxUnavailable):", worker_part, re.M))
+    assert service_keys == {"maxUnavailable"}, (
         "minAvailable would permit five of six pods to be evicted together once the HPA scales up; "
         "what needs bounding is how many conversations one drain can end"
     )
+    assert worker_keys == {"minAvailable"}, (
+        "the worker's PDB must say how many pollers a drain has to leave, not how many it may take"
+    )
     assert "component: service" in budget, "the disruption budget does not select the front door"
     assert _values()["service"]["disruptionBudget"]["enabled"] is True
+    worker_budget = _values()["workers"]["background"]["disruptionBudget"]
+    assert worker_budget == {"enabled": True, "minAvailable": 1}
+    # A PDB over one pod blocks every node drain; it is rendered only from two replicas.
+    assert "gt (int .Values.workers.background.replicas) 1" in worker_part
 
-    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
-    # Comments stripped first: this template's prose discusses the background worker by name, so a
-    # substring check over it would match the explanation.
-    rendered_body = re.sub(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}", "", budget, flags=re.DOTALL)
-    assert "PodDisruptionBudget" not in workers and "-background-worker" not in rendered_body, (
-        "a PDB over a replicas:1 worker either blocks every node drain in the cluster or permits "
-        "exactly what no PDB permits — neither is worth rendering"
-    )
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_background_worker_renders_two_replicas_and_a_pdb_that_leaves_one() -> None:
+    """The render, not the template text: two pods, `minAvailable: 1`, and none from one replica."""
+
+    def render(*extra: str) -> list[dict[str, Any]]:
+        out = subprocess.run(
+            [
+                "helm",
+                "template",
+                "chemclaw",
+                str(CHART),
+                "--set",
+                "networkPolicy.allowAnyDestination=true",
+                "--set",
+                "retention.unboundedGrowthAccepted=true",
+                "--set",
+                "temporal.namespace=chemclaw",
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return [doc for doc in yaml.safe_load_all(out) if doc]
+
+    def worker_objects(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        deployment = next(
+            d
+            for d in docs
+            if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-background-worker")
+        )
+        budgets = [
+            d
+            for d in docs
+            if d["kind"] == "PodDisruptionBudget"
+            and d["metadata"]["name"].endswith("-background-worker")
+        ]
+        return deployment, (budgets[0] if budgets else None)
+
+    deployment, budget = worker_objects(render())
+    assert deployment["spec"]["replicas"] == 2
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    assert budget is not None, "two background workers render no PodDisruptionBudget"
+    assert budget["spec"]["minAvailable"] == 1
+    selected = budget["spec"]["selector"]["matchLabels"]
+    assert selected == deployment["spec"]["selector"]["matchLabels"]
+    spread = deployment["spec"]["template"]["spec"]["topologySpreadConstraints"]
+    assert spread[0]["topologyKey"] == "kubernetes.io/hostname"
+
+    single, none = worker_objects(render("--set", "workers.background.replicas=1"))
+    assert single["spec"]["replicas"] == 1
+    assert none is None, "a PDB over one background worker would block every node drain"
+
+    off = render("--set", "workers.background.disruptionBudget.enabled=false")
+    _, disabled = worker_objects(off)
+    assert disabled is None
 
 
 def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None:
@@ -1378,6 +1437,104 @@ def _alert_expression(rules: str, name: str) -> str:
     return rules[start : rules.index("for:", start)]
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_rollout_peak_leaves_a_connection_for_each_held_job_lock() -> None:
+    """The declared ceiling covers the pools at a rollout's peak plus the lock connections.
+
+    A single-instance job holds one connection outside the pools for its pass
+    (`core/job_lock.py`), and the background workers are the processes that hold one, so the
+    unaccounted spend is at most one per replica. Built from the rendered ConfigMap, the numbers
+    every pod's `Settings` reads, so the margin is the release's and not the values file's.
+    """
+    from chemclaw.core.config import Settings
+
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    config = next(
+        document["data"]
+        for document in yaml.safe_load_all(render)
+        if document
+        and document.get("kind") == "ConfigMap"
+        and document["metadata"]["name"] == "chemclaw-config"
+    )
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pools=int(config["CHEMCLAW_PG_FLEET_POOLS"]),
+        pg_fleet_pools_at_rollout_peak=int(config["CHEMCLAW_PG_FLEET_POOLS_AT_ROLLOUT_PEAK"]),
+        pg_pool_max_size=int(config["CHEMCLAW_PG_POOL_MAX_SIZE"]),
+        service_fleet_replicas=int(config["CHEMCLAW_SERVICE_FLEET_REPLICAS"]),
+        service_fleet_replicas_at_rollout_peak=int(
+            config["CHEMCLAW_SERVICE_FLEET_REPLICAS_AT_ROLLOUT_PEAK"]
+        ),
+        pg_fleet_max_connections=int(config["CHEMCLAW_PG_FLEET_MAX_CONNECTIONS"]),
+    )
+    peak = settings.fleet_connections_per_server(at_rollout_peak=True)[0]
+    locks = int(_values()["workers"]["background"]["replicas"])
+    declared = int(config["CHEMCLAW_PG_FLEET_MAX_CONNECTIONS"])
+    assert peak + locks <= declared, (
+        f"the rollout peak is {peak} connections in pools plus {locks} held job-lock connections "
+        f"(one per background worker) against a declared ceiling of {declared}; raise "
+        "postgres.maxConnections together with the server's max_connections, or lower "
+        "CHEMCLAW_PG_POOL_MAX_SIZE"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_shared_document_volume_is_required_before_a_second_worker_mounts_it() -> None:
+    """A `ReadWriteOnce` claim would leave the second worker Pending, so the chart will not render.
+
+    The claim is the operator's and the chart cannot read its mode, so it asks. One worker keeps
+    working with any claim, and a release with no share is untouched.
+    """
+
+    def render(*extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "helm",
+                "template",
+                "chemclaw",
+                str(CHART),
+                "--set",
+                "networkPolicy.allowAnyDestination=true",
+                "--set",
+                "retention.unboundedGrowthAccepted=true",
+                "--set",
+                "temporal.namespace=chemclaw",
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    shared = ("--set", "documentShare.enabled=true")
+    assert render().returncode == 0, "a release with no share must render at two workers"
+    for refused in ("", "ReadWriteOnce", "ReadWriteOncePod"):
+        result = render(*shared, "--set", f"documentShare.accessMode={refused}")
+        assert result.returncode != 0 and "documentShare.accessMode" in result.stderr, (
+            f"two workers rendered with a {refused or 'blank'} access mode: {result.stderr[-300:]}"
+        )
+    for accepted in ("ReadWriteMany", "ReadOnlyMany"):
+        assert render(*shared, "--set", f"documentShare.accessMode={accepted}").returncode == 0
+    single = render(*shared, "--set", "workers.background.replicas=1")
+    assert single.returncode == 0, "one worker may mount any claim"
+
+
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
     """The connection ceiling needs a runtime check, as the turn ceiling does.
 
@@ -1436,24 +1593,210 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
         assert gauge in rendered, f"the alert compares against {gauge}, which the app never exposes"
 
 
-def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
-    """`replicas: 1` is one process only at steady state; a rollout must not overlap two.
+def _evaluate_alerts(
+    names: tuple[str, ...], cases: list[dict[str, Any]]
+) -> subprocess.CompletedProcess[str]:
+    """Render the chart and run `promtool test rules` over the named alerts.
 
-    The default `RollingUpdate` for one replica starts the new pod before the old one stops, so two
-    background workers poll `background-jobs` for the whole grace period. `Recreate` means every
-    unfinished run is resumed by exactly one code version, which is what replay requires. It, rather
-    than `maxSurge: 0`, because a singleton worker has no availability to protect: Temporal
-    redelivers an activity whose worker vanished.
+    Each case is a promtool `tests` entry (`input_series`, `alert_rule_test`). Rule bodies are
+    rebuilt with only `alert`, `expr` and `for`, since a unit test matches annotations exactly.
+    """
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    rules = [
+        {key: rule[key] for key in ("alert", "expr", "for")}
+        for document in yaml.safe_load_all(render)
+        if document and document.get("kind") == "PrometheusRule"
+        for group in document["spec"]["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") in names
+    ]
+    assert {rule["alert"] for rule in rules} == set(names), (
+        f"the render no longer carries {names}: {[r['alert'] for r in rules]}"
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        work = Path(scratch)
+        (work / "rules.yaml").write_text(
+            yaml.safe_dump({"groups": [{"name": "unit", "rules": rules}]})
+        )
+        (work / "test.yaml").write_text(
+            yaml.safe_dump(
+                {"rule_files": ["rules.yaml"], "evaluation_interval": "1m", "tests": cases}
+            )
+        )
+        return subprocess.run(
+            ["promtool", "test", "rules", "test.yaml"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+def _pool_fleet(
+    pods: int, *, ceiling: int, width: int = 16, session: int = 0, session_ceiling: int = 0
+) -> list[dict[str, str]]:
+    """Per-pod gauges for `pods` identical pods, as the app exposes them."""
+    series: list[dict[str, str]] = []
+    for pod in range(pods):
+        for metric, value in (
+            ("chemclaw_pg_pool_max_size", width + session),
+            ("chemclaw_pg_session_pool_max_size", session),
+            ("chemclaw_pg_fleet_max_connections", ceiling),
+            ("chemclaw_pg_session_fleet_max_connections", session_ceiling),
+        ):
+            series.append({"series": f'{metric}{{pod="p{pod}"}}', "values": f"{value}x25"})
+    return series
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("promtool") is None,
+    reason="helm is not installed (or promtool is): both render and evaluate the rule",
+)
+def test_the_connection_warning_fires_at_the_configured_share_of_each_ceiling() -> None:
+    """The warning fires above 80% of a declared ceiling, before the 100% alert, per server.
+
+    Evaluated, not read: 5 pods of 16 are exactly 80 of 100 (quiet), 6 are 96 (the warning only),
+    7 are 112 (both). A split session store is judged against its own ceiling, so 90 session
+    connections of a declared 100 warn while the primary sits far below its own.
+    """
+    near, above = "ChemclawFleetNearItsConnectionCeiling", "ChemclawFleetAboveItsConnectionCeiling"
+
+    def expect(alerts: dict[str, bool]) -> list[dict[str, Any]]:
+        return [
+            {
+                "eval_time": "20m",
+                "alertname": name,
+                "exp_alerts": [{"exp_labels": {}}] if fires else [],
+            }
+            for name, fires in alerts.items()
+        ]
+
+    cases = [
+        {
+            "interval": "1m",
+            "input_series": _pool_fleet(5, ceiling=100),
+            "alert_rule_test": expect({near: False, above: False}),
+        },
+        {
+            "interval": "1m",
+            "input_series": _pool_fleet(6, ceiling=100),
+            "alert_rule_test": expect({near: True, above: False}),
+        },
+        {
+            "interval": "1m",
+            "input_series": _pool_fleet(7, ceiling=100),
+            "alert_rule_test": expect({near: True, above: True}),
+        },
+        {
+            # One pod holding 16 primary and 90 session connections; the primary ceiling is wide.
+            "interval": "1m",
+            "input_series": _pool_fleet(1, ceiling=200, session=90, session_ceiling=100),
+            "alert_rule_test": expect({near: True, above: False}),
+        },
+        {
+            # No ceiling declared (0) keeps the alert self-disabled however many pools there are.
+            "interval": "1m",
+            "input_series": _pool_fleet(20, ceiling=0),
+            "alert_rule_test": expect({near: False, above: False}),
+        },
+    ]
+    evaluated = _evaluate_alerts((near, above), cases)
+    assert evaluated.returncode == 0, f"{evaluated.stdout}{evaluated.stderr}"
+
+
+def test_the_connection_warning_is_configured_by_a_fraction_below_one() -> None:
+    """The share is a chart value below 1; at or above 1 it would be the other alert."""
+    fraction = _values()["monitoring"]["alerts"]["connectionsWarningFraction"]
+    assert 0 < fraction < 1
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    expr = _alert_expression(rules, "ChemclawFleetNearItsConnectionCeiling")
+    assert expr.count(".Values.monitoring.alerts.connectionsWarningFraction") == 2, (
+        "each server's comparison must apply the configured share to its own ceiling"
+    )
+    joined = " ".join(expr.split())
+    assert "or vector(0)" in joined and joined.count(") or (") == 1
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("promtool") is None,
+    reason="helm is not installed (or promtool is): both render and evaluate the rule",
+)
+def test_an_idle_background_worker_does_not_page_a_current_ingest_source() -> None:
+    """With two workers, the one that did not run the last sync reports an ever-growing lag.
+
+    The gauge is the last cursor a *pod* loaded or stored, aged at scrape time, so the idle replica
+    reads days behind for a source that is current. The alert takes the freshest reading (`min`);
+    it still fires when every replica is behind, which is the stall it exists for.
+    """
+    budget = _values()["monitoring"]["alerts"]["ingestLagSeconds"]
+    name = "ChemclawIngestCursorStalled"
+
+    def pods(active: int, idle: int) -> list[dict[str, str]]:
+        return [
+            {
+                "series": 'chemclaw_ingest_cursor_lag_seconds{pod="active",source="eln"}',
+                "values": f"{active}x70",
+            },
+            {
+                "series": 'chemclaw_ingest_cursor_lag_seconds{pod="idle",source="eln"}',
+                "values": f"{idle}x70",
+            },
+        ]
+
+    cases = [
+        {
+            "interval": "1m",
+            "input_series": pods(active=60, idle=budget * 3),
+            "alert_rule_test": [{"eval_time": "60m", "alertname": name, "exp_alerts": []}],
+        },
+        {
+            "interval": "1m",
+            "input_series": pods(active=budget * 2, idle=budget * 3),
+            "alert_rule_test": [
+                {
+                    "eval_time": "60m",
+                    "alertname": name,
+                    "exp_alerts": [{"exp_labels": {"source": "eln"}}],
+                }
+            ],
+        },
+    ]
+    evaluated = _evaluate_alerts((name,), cases)
+    assert evaluated.returncode == 0, f"{evaluated.stdout}{evaluated.stderr}"
+
+
+def test_the_background_worker_is_not_rolled_while_two_versions_could_replay_one_history() -> None:
+    """Two replicas make a drain survivable; a rollout must still not overlap two code versions.
+
+    The default `RollingUpdate` starts the new pod before stopping the old one, so two generations
+    poll `background-jobs` together. `Recreate` means every unfinished run is resumed by exactly one
+    code version, which is what replay requires and is independent of the replica count.
     """
     text = (CHART / "templates" / "deployment-workers.yaml").read_text()
-    assert _values()["workers"]["background"]["replicas"] == 1, (
-        "the background worker is no longer pinned to one replica — which is allowed now that the "
-        "corpus race is closed, but `Recreate` below then has to be re-argued for replay alone"
+    assert _values()["workers"]["background"]["replicas"] == 2, (
+        "the background worker is a single point of failure again; every job it runs is safe under "
+        "any replica count (docs/guides/runbook.md, `Background worker replicas`)"
     )
     strategy = re.search(r"^  strategy:\n\s+type: (\w+)", text, flags=re.MULTILINE)
     assert strategy and strategy.group(1) == "Recreate", (
-        "the background worker takes the default RollingUpdate, which starts the second pod before "
-        "stopping the first — two workers on `background-jobs` for a whole grace period"
+        "the background worker takes the default RollingUpdate, which starts the second "
+        "generation before stopping the first — two code versions on `background-jobs`"
     )
 
 
@@ -3352,6 +3695,9 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
     ),
     # The second is a posture: the chart refuses to publish the face until a deployment names who
     # may reach it; stated here as the router's selector, as a real publishing release would.
+    # A posture: every background worker mounts the share, so with two the chart asks for the
+    # claim's access mode.
+    "documentShare.enabled": ("--set", "documentShare.accessMode=ReadWriteMany"),
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",

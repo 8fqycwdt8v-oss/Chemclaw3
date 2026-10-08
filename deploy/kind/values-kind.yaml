@@ -40,6 +40,12 @@ service:
   autoscaling:
     enabled: false
 
+# One background worker: availability is not what a workstation cluster tests, and the production
+# default of two doubles the largest memory request on one node. No PodDisruptionBudget renders at one.
+workers:
+  background:
+    replicas: 1
+
 # ServiceMonitor / PodMonitor / PrometheusRule / dashboards are prometheus-operator and OpenShift
 # console resources; kind has neither.
 monitoring:

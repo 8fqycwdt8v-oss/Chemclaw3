@@ -591,7 +591,7 @@
       },
       "targets": [
         {
-          "expr": "max by (source) (chemclaw_ingest_cursor_lag_seconds)",
+          "expr": "min by (source) (chemclaw_ingest_cursor_lag_seconds)",
           "legendFormat": "{{source}}",
           "refId": "A"
         }

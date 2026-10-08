@@ -31,6 +31,7 @@ Then in `values.yaml`:
 documentShare:
   enabled: true
   claimName: chemclaw-sharedrive
+  accessMode: ReadWriteMany   # required with more than one background worker
   mountPath: /mnt/sharedrive
 ```
 

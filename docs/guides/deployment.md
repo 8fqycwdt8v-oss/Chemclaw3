@@ -164,6 +164,9 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
   (`core/config/__init__.py`, `_TLS_SSLMODES`).
 - **Connections.** The server must accept at least `postgres.maxConnections` (default 256) from
   this release. `Settings` checks the fleet's derived pool count against that number at start-up.
+  Above three replicas, put PgBouncer in front in transaction mode; the connections that hold
+  session state (advisory locks, the checkpointer, `LISTEN/NOTIFY`) and the migrator stay on a
+  session-mode or direct endpoint (`deploy/README.md`, "PgBouncer in front of Postgres").
 - **One database per release.** Many tables have no deployment discriminator, so a second release
   on the same database would have its live threads pruned by this release's retention sweep
   (`values.yaml`, comment on `temporal:`).
@@ -564,8 +567,9 @@ More on what this file says:
   or a result sink, must be listed in `CHEMCLAW_EGRESS_ALLOW` (`core/config/observability.py`).
 - **The knowledge graph.** `knowledge.sync.repoUrl` is a Git HTTPS URL. If you leave it empty, pods
   serve the corpus baked into the image and **no agent-recorded note can be persisted**
-  (`deploy/knowledge-sync.sh`, `checkout` mode). Keep `workers.background.replicas: 1`, because the
-  note writer's checkout lock is per host.
+  (`deploy/knowledge-sync.sh`, `checkout` mode). Each background worker pod keeps its own clone
+  (an `emptyDir`), so `workers.background.replicas` may exceed 1; the cross-pod note-writer lock is
+  a Postgres advisory lock.
 - **The ServiceMonitor label.** If your Prometheus selects ServiceMonitors by label, set
   `monitoring.additionalLabels`.
 
