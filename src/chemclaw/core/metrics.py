@@ -645,7 +645,8 @@ _COUNTERS: dict[str, str] = {
     # working.
     "chemclaw_calc_cache_total": (
         "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
-        "miss on one key that `cached_compute` single-flighted onto another caller's computation."
+        "miss on one key that `cached_compute` single-flighted onto another caller's computation, "
+        "in this process or in another (`chemclaw_calc_claims_total` separates the two)."
     ),
     # The value, not the count: compute seconds avoided, read from `StoredResult.compute_seconds` on
     # each hit. One avoided CREST search outweighs a thousand avoided lookups.
@@ -655,6 +656,15 @@ _COUNTERS: dict[str, str] = {
         "waiter joined. Zero for a row that records no cost (a measured value, a backfill), never "
         "a fabricated zero. Read beside `chemclaw_calc_cache_total`: that one says how often the "
         "cache answered, this one says what it was worth."
+    ),
+    "chemclaw_calc_claims_total": (
+        "Cross-process claims on a calculation miss, by outcome: `won` (this pod computes), "
+        "`awaited` (another pod holds the claim; this one waits for its result), `taken_over` "
+        "(this pod computes because the previous holder's lease lapsed or its attempt failed), "
+        "`lost` (a holder's heartbeat found its claim replaced and finishes anyway), "
+        "`peer_failed` (a waiter received the holder's failure) and `wait_timed_out` (a waiter's "
+        "budget ran out while the holder was still working). A high `awaited` beside a flat "
+        "`won` is the dedup working; `taken_over` is a crashed or stalled pod."
     ),
     # The backend refusing for capacity rather than bad data. Kept out of `chemclaw_degraded_total`
     # because a busy backend is ordinary operation; this is the calculation tier's saturation
@@ -828,6 +838,12 @@ _HISTOGRAMS: dict[str, str] = {
         "most expensive work in the system."
     ),
     "chemclaw_sink_delivery_seconds": "Wall-clock duration of one delivery to a result sink.",
+    "chemclaw_calc_claim_wait_seconds": (
+        "Wall-clock time a calculation miss spent waiting on another pod's claim, from the first "
+        "sighting of the claim to the result, the holder's failure, a takeover or the wait budget. "
+        "Dominated by the computation itself; the wake-up after the holder commits is "
+        "sub-second."
+    ),
     # How long a turn waited on the checkpointer lock. `asyncio.Lock` has no timeout, so this is the
     # only bound on that wait; nothing raises.
     "chemclaw_checkpointer_lock_wait_seconds": (
@@ -844,6 +860,7 @@ _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
     "chemclaw_turn_duration_seconds": _TURN_BUCKETS,
     "chemclaw_tool_duration_seconds": _TOOL_BUCKETS,
     "chemclaw_job_duration_seconds": _JOB_BUCKETS,
+    "chemclaw_calc_claim_wait_seconds": _JOB_BUCKETS,
     "chemclaw_http_request_duration_seconds": _CALL_BUCKETS,
     "chemclaw_model_call_duration_seconds": _CALL_BUCKETS,
     "chemclaw_evidence_source_seconds": _CALL_BUCKETS,
@@ -956,6 +973,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # label, so alerts can say which connector went dark.
     "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
+    "chemclaw_calc_claims_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
     "chemclaw_queued_tool_calls_total": ("tool",),
     "chemclaw_queued_tool_calls_direct_total": ("tool",),

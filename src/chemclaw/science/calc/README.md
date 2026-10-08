@@ -10,6 +10,9 @@ What stayed is what a stateless server cannot hold:
 
 - `store.py`, `postgres_store.py` — the D-011 cache. An identical calculation is computed once,
   ever, and concurrent misses on one key in one process share one computation.
+- `flight.py` — the same promise across processes: a miss is claimed in `calculation_claims`
+  (lease on the database clock, heartbeated), the others wait for the holder's result, and a killed
+  holder's key goes to exactly one waiter.
 - `calibration.py` — the prediction ledger, keyed exactly on `(calc_type, calc_version,
   input_hash)`; nothing here derives a version.
 - `artifacts.py`, `postgres_artifacts.py` — the content-addressed store for a run's by-products.

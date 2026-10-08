@@ -87,8 +87,9 @@ class QueuedDispatch(BaseModel):
     (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
 
     **Only a tool whose answer is a function of its arguments belongs here.** Identical concurrent
-    calls rejoin one run — the cross-process single-flight `cached_compute` lacks — which is right
-    for a calculation and wrong for anything that reads or writes per-caller state.
+    calls rejoin one run, as `cached_compute` makes concurrent misses on a calculation do across
+    processes — which is right for a calculation and wrong for anything that reads or writes
+    per-caller state.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
