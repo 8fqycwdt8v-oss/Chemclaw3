@@ -112,6 +112,41 @@ def test_a_stop_signal_drains_instead_of_killing() -> None:
     assert worker.drained, "the runtime stopped waiting before the drain completed"
 
 
+@pytest.mark.parametrize(
+    ("component", "publishing", "expected"),
+    [
+        ("background-worker", True, True),
+        ("background-worker", False, False),
+        ("connector-worker-calc", True, False),
+    ],
+)
+def test_only_the_background_worker_with_a_sink_reports_the_outbox_backlog(
+    monkeypatch: pytest.MonkeyPatch, component: str, publishing: bool, expected: bool
+) -> None:
+    """Each background replica re-reads the outbox backlog on a timer, and no other role does.
+
+    The age gauge is a process's own last reading, so a replica that did not drain last would
+    otherwise report a row a peer delivered as still waiting.
+    """
+    started: list[str] = []
+
+    async def _backlog(stop: asyncio.Event) -> None:
+        started.append("poll")
+        await stop.wait()
+
+    monkeypatch.setattr("chemclaw.durable.serve.poll_backlog", _backlog)
+    monkeypatch.setattr("chemclaw.durable.serve.publishing_enabled", lambda: publishing)
+    worker = _FakeWorker()
+
+    async def _exercise() -> None:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(serve_worker(cast(Any, worker), component=component))
+            group.create_task(_sigterm_once_polling(worker))
+
+    asyncio.run(_exercise())
+    assert bool(started) is expected
+
+
 def test_sigint_drains_the_same_way() -> None:
     """A developer's Ctrl-C takes the path the cluster takes, rather than a different one.
 

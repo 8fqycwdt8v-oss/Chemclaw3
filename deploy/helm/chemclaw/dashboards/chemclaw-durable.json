@@ -758,6 +758,57 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 18,
+      "type": "graph",
+      "title": "Single-instance runs skipped, by job",
+      "description": "Runs of a job that must not overlap itself (the note reindex) that did nothing because another background worker held its cluster-wide lock. A few are the lock doing its job when two workers poll one queue; a steady rate beside a job that never completes means the holder is wedged.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (job) (increase(chemclaw_job_lock_skipped_total[1h]))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",

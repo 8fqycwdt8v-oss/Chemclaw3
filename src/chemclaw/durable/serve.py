@@ -28,11 +28,16 @@ from chemclaw.durable.job_metrics import (
     poll_open_jobs,
 )
 from chemclaw.durable.job_record import log_record_durability
+from chemclaw.publish.outbox import poll_backlog
+from chemclaw.publish.registry import publishing_enabled
 
 logger = logging.getLogger(__name__)
 
 # SIGTERM is what the kubelet sends; SIGINT (Ctrl-C) makes a local worker drain the same way.
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+# The one worker that drains the result outbox, and so the one that reports its backlog.
+_BACKLOG_COMPONENT = "background-worker"
 
 
 def refuse_unauthenticated_worker() -> None:
@@ -127,6 +132,13 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
             # through the drain so `/metrics` does not freeze during shutdown, and cancelled however
             # this function exits.
             polling = asyncio.create_task(poll_open_jobs(worker.client, stop))
+            # The result outbox's backlog, for the worker that drains it: read from the table on
+            # a timer so every replica reports the same truth, not the last pass it ran itself.
+            backlog = (
+                asyncio.create_task(poll_backlog(stop))
+                if component == _BACKLOG_COMPONENT and publishing_enabled()
+                else None
+            )
             try:
                 await asyncio.wait({running, waiting}, return_when=asyncio.FIRST_COMPLETED)
                 waiting.cancel()
@@ -159,6 +171,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
                 )
             finally:
                 polling.cancel()
+                if backlog is not None:
+                    backlog.cancel()
     finally:
         for sig in _STOP_SIGNALS:
             loop.remove_signal_handler(sig)

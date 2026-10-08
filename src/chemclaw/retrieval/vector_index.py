@@ -28,6 +28,7 @@ from chemclaw.core.fulltext import (
     reference_terms,
     reference_tokens,
 )
+from chemclaw.core.job_lock import exclusive_job
 from chemclaw.kg.graph import (
     corpus_revision,
     invalidate_cache,
@@ -502,6 +503,29 @@ def _notes_that_failed_to_parse(directory: Path, stems: set[str]) -> list[str]:
     return unparsed
 
 
+#: What the scheduled activity returns, in place of a count, when another worker held the pass.
+REINDEX_SKIPPED = -1
+
+
+async def reindex_exclusively(
+    index: NoteIndex, notes_dir: str | None = None, *, full: bool = False
+) -> int | None:
+    """`reindex_notes`, as the one pass running cluster-wide; `None` when another worker holds it.
+
+    A pass that finds another running does nothing instead of embedding the same notes twice
+    (`exclusive_job`), and says so by returning `None` rather than a count of zero. A
+    Postgres-backed index is locked whatever the session store, since a hand-run shares its rows
+    with the pods. Per-pod checkouts still differ, which the prune's corpus-revision bound and the
+    content fingerprint absorb. The scheduled activity and the command line both come through here.
+    """
+    async with exclusive_job(
+        "note-reindex", shared_database=isinstance(index, PostgresNoteIndex)
+    ) as held:
+        if not held:
+            return None
+        return await reindex_notes(index, notes_dir, full=full)
+
+
 async def reindex_notes(
     index: NoteIndex, notes_dir: str | None = None, *, full: bool = False
 ) -> int:
@@ -510,7 +534,8 @@ async def reindex_notes(
     Incremental: a note whose content hash matches the stored one under the current embedding
     configuration is skipped, so a model change re-embeds without a flag; `full=True` re-embeds all.
     Notes deleted from disk are retired. Both note caches are bypassed (`reparse=True`) so parsed
-    bodies and fingerprints come from the same moment.
+    bodies and fingerprints come from the same moment. Takes no lock: concurrent callers use
+    `reindex_exclusively`.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))
@@ -586,10 +611,15 @@ async def reindex_notes(
     return indexed
 
 
+#: Exit status of the command line when another worker held the pass: neither success nor error.
+_EXIT_SKIPPED = 3
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: rebuild the durable note index from the knowledge graph; print the count.
 
-    `--full` re-embeds every note regardless of its stored fingerprint.
+    `--full` re-embeds every note regardless of its stored fingerprint. Exits 3, having changed
+    nothing, when another worker is already running the pass.
     """
     import argparse
 
@@ -598,7 +628,10 @@ def main(argv: list[str] | None = None) -> int:
         "--full", action="store_true", help="re-embed every note, ignoring stored fingerprints"
     )
     args = parser.parse_args(argv)
-    count = asyncio.run(reindex_notes(default_note_index(), full=args.full))
+    count = asyncio.run(reindex_exclusively(default_note_index(), full=args.full))
+    if count is None:
+        print("skipped: another worker is reindexing; nothing was changed")
+        return _EXIT_SKIPPED
     print(f"indexed {count} note(s) into note_index" + (" (full rebuild)" if args.full else ""))
     return 0
 
