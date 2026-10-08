@@ -2,8 +2,8 @@
 
 Keeps the dense and lexical `note_index` in step with the graph: under hybrid retrieval a stale
 entry ranks confidently beside live hits with no staleness signal. One activity wrapping
-`reindex_notes`, one workflow on `background-jobs`, one Schedule. Idempotent by upsert, and the
-index is derived (Git-Markdown is the source of truth), so a failed run never loses data.
+`reindex_exclusively`, one workflow on `background-jobs`, one Schedule. Idempotent by upsert, and
+the index is derived (Git-Markdown is the source of truth), so a failed run never loses data.
 """
 
 from datetime import timedelta
@@ -14,7 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.retrieval.vector_index import default_note_index, reindex_notes
+    from chemclaw.retrieval.vector_index import default_note_index, reindex_exclusively
 
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -28,7 +28,7 @@ async def reindex_notes_activity() -> int:
     report progress at.
     """
     return await beating(
-        reindex_notes(default_note_index()),
+        reindex_exclusively(default_note_index()),
         "note reindex",
         settings.background_activity_heartbeat_timeout_seconds,
     )

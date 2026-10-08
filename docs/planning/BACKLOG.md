@@ -100,7 +100,6 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **Push-to-registry + `helm upgrade` rollout, run** — written, never run · *Revisit:* a registry, namespace and the Jenkins credential ids in `deploy/jenkins/README.md`.
 - **A chart for `Chemclaw3_ui` and the `Chemclaw3-mcp` servers** — neither repo is deployable as a chart yet · *Revisit:* the rollout row above closes.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
-- **Two background workers on one `background-jobs` queue** — `workers.background.replicas` is 1 because nobody has driven two · *Revisit:* a live broker with two workers.
 - **A live target for the results store** — the publish path is built, no real sink exists · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
 - **Backup and restore tooling for Postgres and Temporal** — no owner of those stores is named · *Revisit:* an owner exists to run and verify a restore.
 - **A worker whose broker is down never opens its probe port** — `durable/background_worker.py::main` connects first · *Revisit:* a second dependency joins `connect()` or an operator misdiagnoses an outage.

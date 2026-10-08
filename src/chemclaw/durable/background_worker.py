@@ -6,11 +6,11 @@ synthesis, the generic connector-job wrapper and template runs. Run it with
 run on the bundle's own worker and queue, so this worker never imports a capability's
 dependency closure.
 
-The chart pins this worker to `replicas: 1` because of `NoteReindexWorkflow`: it retires index
-rows for every note absent from this pod's own knowledge checkout, so two pods would index and
-retire each other's notes. Periodic jobs are Schedules under `ScheduleOverlapPolicy.SKIP` and
-every other activity is serialized, idempotent or claim-based. Raising the count requires giving
-that prune a cluster-wide view of the corpus first.
+Any number of replicas may poll the queue. Periodic jobs are Schedules under
+`ScheduleOverlapPolicy.SKIP` (the server allows one run), every other activity is idempotent or
+claim-based, and the one pass that must not overlap itself, the note reindex, takes a cluster-wide
+lock (`core/job_lock.py`). State that is per pod (the knowledge checkout, the document share
+mount) is read, never treated as the cluster's truth. `docs/guides/runbook.md` has the inventory.
 """
 
 import asyncio
