@@ -6,6 +6,7 @@ owns the env prefix, `.env` loading and cross-section validators.
 
 import os
 
+from chemclaw_contracts import manifests_dir
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -23,8 +24,12 @@ class ConnectorSettings(BaseSettings):
     """
 
     # OS-pathsep list of directories holding bundles (any subdirectory with `connector.yaml`); read
-    # via `connectors_dirs`. Earlier directories win a name collision.
-    connectors_dir: str = Field(default_factory=lambda: _shipped("connectors"))
+    # via `connectors_dirs`. The default is the fleet's manifests (the installed
+    # `chemclaw-contracts` package), then the bundles this image ships. Setting it replaces the
+    # default, so name both again.
+    connectors_dir: str = Field(
+        default_factory=lambda: os.pathsep.join([str(manifests_dir()), _shipped("connectors")])
+    )
 
     # Enabled connectors, pathsep-delimited and in tool order (order is part of the prompt). Empty
     # means every discovered bundle. An unknown name is a startup error.

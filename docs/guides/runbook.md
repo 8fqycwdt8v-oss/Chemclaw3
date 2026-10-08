@@ -692,16 +692,17 @@ URL), `CHEMCLAW_CONNECTORS_REQUIRED`, `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
-**What a name collision on that path does and does not replace.** The first directory wins the name
-outright and the loser's manifest is not merged, not warned about and not logged — so the winning
-manifest is the whole of the **tool surface**. It is *not* the whole of the bundle: a bundle's
-`skills/` and `profiles/` directories are read from **every** directory carrying its name, winner
-first (`connectors/registry._bundle_content_dirs`). That matters for the fleet's own manifests:
-`Chemclaw3-mcp` publishes `chem` and `safety` under the same names and with no `skills:`, so when
-its directory is first, its manifest wins and this repository's `connectors/safety/skills/` judgment
-still loads — no `CHEMCLAW_SKILLS_DIR` workaround is needed.
-`tests/test_sibling_manifest_agreement.py` compares every bundle-level manifest key between the two
-trees.
+**A name declared in two directories on that path is a startup error.** It names both files; no
+directory wins. The default path is the fleet's manifests (the installed `chemclaw-contracts`
+package) and this image's own bundles, so a copy of a fleet manifest kept here, or a mounted bundle
+called `chem`, fails every pod at boot. To dial a connector at another server, set
+`CHEMCLAW_CONNECTOR_URLS`. A connector's judgment is not its manifest: its `skills/` and
+`profiles/` directories are found by connector name in **every** directory on the path, with or
+without a `connector.yaml` of their own (`connectors/registry._bundle_content_dirs`) — which is how
+`connectors/safety/skills/` loads beside a manifest `Chemclaw3-mcp` owns. `make connector-validate`
+refuses a `skills/` directory that names no discovered connector.
+`tests/test_sibling_manifest_agreement.py` holds that the installed package is the only source of
+those manifests.
 
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
@@ -742,17 +743,18 @@ thermal-hazard arithmetic from measured calorimetry), `kinetics` (isothermal rat
 arithmetic), `unitops` (scale-up and unit-operation sizing) and `suitability` (USP <621>
 chromatographic system suitability). These declare `default_enabled: false`, so an empty
 `CHEMCLAW_CONNECTORS_ENABLED` binds none of them and the chart ships all five at `enabled: false`
-(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests are
-here anyway because the declaration validators resolve tool names through them, which lets the
-judgment beside each one name the tools it is judgment about. Turning one on is the same three
+(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests
+come with the fleet's `chemclaw-contracts` package anyway because the declaration validators
+resolve tool names through them, which lets the judgment kept here beside each one name the tools
+it is judgment about. Turning one on is the same three
 obligations as the three above — host, port, bearer (`CHEMCLAW_PROPS_TOKEN`,
 `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`,
 `CHEMCLAW_SUITABILITY_TOKEN`) — plus a fourth that the other three do not have: it costs prefix on
 **every** model call, not only on the calls that use it, so enable the ones a site's chemists
 actually ask for rather than the set.
 
-**`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
-`servers/chem`, so this release renders no Deployment and no Service for it and dials the address
+**`chem` is declared by the fleet and served elsewhere.** Its capability and its manifest are
+`Chemclaw3-mcp`'s (`servers/chem`), so this release renders no Deployment and no Service for it and dials the address
 in `connectors.chem.url` instead (D-2026-08-09) — that value and its `networkPolicy.egressPorts`
 entry are where the port lives, because it is the sibling release's to choose. Two things that are the operator's,
 because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide

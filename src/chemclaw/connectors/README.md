@@ -9,7 +9,7 @@ directory; it is not editing core.
 
 | File | What it is | Required |
 | --- | --- | --- |
-| `connector.yaml` | the manifest: tools, jobs, health, `module:callable` pointers | yes |
+| `connector.yaml` | the manifest: tools, jobs, health, `module:callable` pointers | yes, unless the fleet owns it |
 | `app.py` | the FastAPI transport, in `server/` — `/healthz` + `/mcp`, built by `connector_app()` | if **we** host the server |
 | `tools.py` | the `FastMCP` instance, in `server/`: the argument names, defaults and docstrings the agent sees | if **we** host the server |
 | `worker.py`, `workflows.py`, `activities.py` | the Temporal half, on the bundle's own queue | if it owns durable work |
@@ -28,15 +28,18 @@ needs no file in the bundle — one manifest block and one chart entry
 (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
 
 **The variance is information.** `bo` and `calc` have workflows, activities and a worker; `molfp`
-and `rxnfp` have only a server; `results` has jobs and no server; `chem`, `safety`, `rxnpredict` and
-the five process-development bundles have neither `server/` file. That says which capabilities own
+and `rxnfp` have only a server; `results` has jobs and no server. That says which capabilities own
 long-running work and which are served elsewhere, so do not flatten it into a uniform template.
 
-**A bundle whose server somebody else runs has neither `server/` file.** It declares an `endpoint:`
-like any other, and the deployment says the address is not ours to render
-(`connectors.<name>.url` in the chart, D-2026-08-09-a-connector-we-do-not-run). Reached across a
-network, it must carry a bearer credential — `HttpEndpoint` refuses `auth: mode: none` for a
-non-loopback URL.
+**A connector whose server somebody else runs has no bundle here at all.** The fleet owns its
+`connector.yaml` and ships it in the `chemclaw-contracts` package, which is the first directory of
+`connectors_dir`; the deployment says the address is not ours to render (`connectors.<name>.url` in
+the chart, D-2026-08-09-a-connector-we-do-not-run). Reached across a network, it must carry a
+bearer credential — `HttpEndpoint` refuses `auth: mode: none` for a non-loopback URL. What stays
+here for such a connector, if anything, is a directory of its own name holding only `skills/` (and
+a README saying so): judgment is architecture layer 3, and it is found by connector name, so it
+loads beside a manifest this tree does not hold. **A connector name declared in two directories is a
+startup error**, naming both files, so nothing here can shadow the fleet's manifest.
 
 **And a bundle may declare itself off by default.** `default_enabled: false` is read in exactly one
 place — what an *empty* `connectors_enabled` means — because declaring a capability and binding it
@@ -46,7 +49,8 @@ free and is what lets a validator resolve a tool name and a `SKILL.md` name the 
 judgment about; binding puts every one of that bundle's schemas ahead of the system message on
 **every** model call, which `tests/test_context_floor.py` charges to `PREFIX_BOUND` and
 `core/config/agent.py` turns into both compaction thresholds. The five process-development bundles
-(`props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) take that shape. An explicit
+(`props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and `pyexec` take that shape, the
+flag being in the fleet's manifest. An explicit
 enable-list is deliberately **not** filtered by the flag: it says what silence means, not what a
 deployment may ask for, and a bundle no configuration could reach would be a control whose
 condition cannot occur.

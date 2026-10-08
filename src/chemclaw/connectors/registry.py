@@ -231,8 +231,8 @@ def skills_dirs() -> list[str]:
 
     A connector's judgment ships with its capability; appended to `settings.skills_dirs`, so bundled
     skills are ordinary skills under every existing gate. Only existing directories are returned
-    (`make connector-validate` reports missing ones), and a shadowed bundle's directory is included
-    (see `_bundle_content_dirs`).
+    (`make connector-validate` reports missing ones); see `_bundle_content_dirs` for where a
+    directory may sit relative to the manifest.
     """
     return _bundle_content_dirs("skills", enabled())
 
@@ -472,32 +472,31 @@ async def open_connector_specs(
 def profiles_dirs() -> list[str]:
     """The `profiles/` directory of every enabled connector, wherever on the path it is found.
 
-    Same rule as `skills_dirs`. A shadowed bundle's profile cannot widen anything: a profile varies
-    only instructions and model route, and narrows itself to the tools the winning surface binds.
+    Same rule as `skills_dirs`. A profile cannot widen anything: it varies only instructions and
+    model route, and narrows itself to the tools the connector's manifest binds.
     """
     return _bundle_content_dirs("profiles", enabled())
 
 
 def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> list[str]:
-    """Every named bundle's `<kind>/` directory, across every directory carrying that name.
+    """Every named bundle's `<kind>/` directory, wherever on the path it sits.
 
-    The winning manifest decides the tool surface; the directories on disk decide the content. For
-    each enabled bundle, every directory carrying its name contributes an existing `<kind>/`, winner
-    first, so a same-name replacement manifest that declares no skills cannot silently delete the
-    shadowed bundle's judgment.
+    A connector's manifest and its judgment may live in different places: the fleet owns the
+    manifest (the `chemclaw-contracts` package) and this repository keeps the `skills/` beside a
+    directory of the same name. So the directories on the path decide the content and the manifests
+    decide which names are asked for; a directory with no `connector.yaml` of its own still
+    contributes. Non-existent paths are never returned, and a link out of its root is not followed.
 
-    A union rather than a startup refusal, so a deliberate replacement can still start; judgment
-    about tools the winner does not serve is hidden by `agent.skill_access.ToolScopedSkills`. The
-    manifest's declaration is not the gate: `cli/validate_connectors._bundle_content_problems`
-    already holds declarations and directories equal for every validated bundle. Non-existent paths
-    are never returned.
+    The manifest's declaration is not the gate: `cli/validate_connectors` holds declarations and
+    directories equal where a bundle declares them, and refuses a content directory that names no
+    discovered connector.
     """
     dirs: list[str] = []
-    by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
     for manifest in manifests:
-        for bundle in by_name.get(manifest.name, ()):
-            candidate = bundle / kind
-            if candidate.is_dir() and str(candidate) not in dirs:
+        for directory in settings.connectors_dirs:
+            root = Path(directory)
+            candidate = root / manifest.name / kind
+            if candidate.is_dir() and within_root(root, candidate) and str(candidate) not in dirs:
                 dirs.append(str(candidate))
     return dirs
 

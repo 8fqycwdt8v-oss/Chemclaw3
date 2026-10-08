@@ -151,8 +151,8 @@ shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as
    already listed there.
 
 The front door's `CHEMCLAW_CONNECTOR_URLS` and `CHEMCLAW_CONNECTORS_ENABLED` are **derived** from
-the `connectors:` block; never set them in `config`. A bundle this image does not ship (`pyexec`,
-a site's own) additionally needs its manifest mounted — see "Attaching a connector bundle
+the `connectors:` block; never set them in `config`. A bundle this image does not ship (a
+site's own) additionally needs its manifest mounted — see "Attaching a connector bundle
 this image does not ship". The five process-development bundles (`props`, `thermalsafety`,
 `kinetics`, `unitops`, `suitability`) ship `enabled: false`: each one enabled costs prompt prefix
 on every model call.
@@ -400,7 +400,9 @@ ConfigMap, and in any values diff.
 
 ## Attaching a connector bundle this image does not ship
 
-`Chemclaw3-mcp`'s servers, and any private bundle a site keeps of its own, reach an OpenShift
+`Chemclaw3-mcp`'s servers need only the first line of what follows: their manifests are in the
+image, installed with the `chemclaw-contracts` package, and each is switched on with
+`connectors.<name>.enabled: true`. A private bundle a site keeps of its own reaches an OpenShift
 release through four declarations — all four in a values file, none of them a chart edit
 (`D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`). The *absence* of each fails
 differently:
@@ -418,23 +420,24 @@ to a manifest something in this checkout can see, and a bundle mounted from else
 own.
 
 Plus a `networkPolicy.egressDestinations` entry for the host, on the same terms as the sibling
-servers this release already dials. A worked example, `Chemclaw3-mcp`'s `pyexec`, which this image
-does not ship (the five process-development bundles, `props` among them, do ship their manifests
-here and need only the `connectors:` line set to `enabled: true`). Its egress port and its token
-slot already ship in `values.yaml` (`egressPorts.pyexec`, `optionalKeys.pyexecToken`), so only the
-first two declarations are yours:
+servers this release already dials. A worked example, a site's own `our-eln` bundle. The fleet's
+own bundles (`pyexec` and the five process-development bundles, `props` among them) already have
+their egress port, their token slot and their `connectors:` entry in `values.yaml`:
 
 ```yaml
 connectors:
-  pyexec: {enabled: true, server: true, url: http://chemclaw-mcp-pyexec:8899/mcp}
+  our-eln: {enabled: true, server: true, url: http://our-eln:8899/mcp}
 extraConnectors:
   bundles:
-    - name: pyexec
-      configMap: chemclaw-connector-pyexec   # keys are that bundle's files; `connector.yaml` must be one
+    - name: our-eln
+      configMap: chemclaw-connector-our-eln   # keys are that bundle's files; `connector.yaml` must be one
+networkPolicy:
+  egressPorts:
+    our-eln: 8899
+secrets:
+  optionalKeys:
+    our-elnToken: <the name its manifest gives auth.token_env>
 ```
-
-A site's own bundle adds the other two as well: `networkPolicy.egressPorts.<name>: <port>` and
-`secrets.optionalKeys.<name>Token: <the name its manifest gives auth.token_env>`.
 
 Two things worth knowing before you write that:
 
@@ -442,11 +445,15 @@ Two things worth knowing before you write that:
   `CHEMCLAW_CONNECTORS_ENABLED` is derived from the `connectors:` block, and `registry.enabled()`
   refuses a name no bundle provides — deliberately, because the alternative is a capability that
   silently stops working. The two halves go in together.
-- **A mounted bundle overrides a shipped one of the same name.** `extraConnectors.mountPath` is
-  prepended to `CHEMCLAW_CONNECTORS_DIR` and earlier directories win a name collision. That is a
-  real capability and a real footgun. Never mount `Chemclaw3-mcp`'s `manifests-internal/`
-  (`calc`, `rxnlabel`): those servers are addressed by `CHEMCLAW_CALC_SERVER_URL` /
-  `CHEMCLAW_RXNLABEL_SERVER_URL`, and mounting them is refused at startup.
+- **A mounted bundle cannot replace a shipped one.** A connector name declared in two directories
+  is a startup error naming both files, so mounting a bundle called `chem` or `pyexec` fails every
+  pod at boot. To dial a shipped connector at another server, set its `url:` instead
+  (`CHEMCLAW_CONNECTOR_URLS`). `extraConnectors.mountPath` is the first directory of
+  `CHEMCLAW_CONNECTORS_DIR`, then `contractsPath` (the fleet's manifests) and `shippedPath` (this
+  image's own bundles and the skills that go with the fleet's). Never mount `Chemclaw3-mcp`'s
+  internal manifests (`calc`, `rxnlabel`): those servers are addressed by
+  `CHEMCLAW_CALC_SERVER_URL` / `CHEMCLAW_RXNLABEL_SERVER_URL`, and mounting them is refused at
+  startup.
 
 The addresses above are the Services `Chemclaw3-mcp` creates in **this** namespace: its servers'
 NetworkPolicies admit their caller with a bare `podSelector`, which is same-namespace only, so a

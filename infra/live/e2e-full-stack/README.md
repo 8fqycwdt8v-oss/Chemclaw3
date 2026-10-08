@@ -16,8 +16,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | --- | --- | --- | --- |
 | Postgres/pgvector + Temporal | this repo | 5432, 7233 | `infra/live/bootstrap.sh` |
 | note-writer repo | this repo | — | `infra/live/bootstrap.sh` |
-| every fleet bundle this repo declares an endpoint for and the front door binds — `chem`, `safety`, `rxnpredict` (`fake_a`/`fake_c` doubles), and the five opt-in process-development bundles (`props`, `kinetics`, `suitability`, `thermalsafety`, `unitops`), which this lane enables | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
-| `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
+| every fleet bundle the front door binds — `chem`, `safety`, `rxnpredict` (`fake_a`/`fake_c` doubles), `pyexec`, and the five opt-in process-development bundles (`props`, `kinetics`, `suitability`, `thermalsafety`, `unitops`), which this lane enables | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `rxnlabel` (the reaction labeller the background worker's label drain dials — *not* a connector; RDKit path, no `models` extra) | Chemclaw3-mcp | 8865 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
@@ -25,10 +24,11 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | connectors, the Temporal workers (one per jobs queue, plus an interactive worker per bundle that queues tool calls), front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
-**Every fleet bundle this repository declares an endpoint for, and the `calc` and `rxnlabel`
-backends, are started by `infra/live/processes.sh`, which this script calls.** The set is not listed here:
-`processes.sh::fleet_bundle_names` derives it (core's endpoint-declaring bundles that the fleet also
-publishes *and the front door binds*), and every enumeration of it in this lane has gone stale.
+**Every fleet bundle the front door binds, and the `calc` and `rxnlabel` backends, are started by
+`infra/live/processes.sh`, which this script calls.** The set is not listed here:
+`processes.sh::fleet_bundle_names` derives it (the endpoint-declaring bundles the registry
+discovers that the fleet also publishes *and the front door binds*), and every enumeration of it in
+this lane has gone stale.
 
 **This lane binds every bundle it discovers, the `default_enabled: false` ones included.** `up.sh`
 sets `CHEMCLAW_CONNECTORS_ENABLED` to every name on its `CHEMCLAW_CONNECTORS_DIR` (derived from
@@ -38,8 +38,7 @@ called. The cost is their schemas on every model call, which
 `tests/test_context_floor.FLEET_PUBLISHED_ALLOWANCE` bounds. `make live-up` sets no list, binds
 none of the five and — since `processes.sh` starts only what the front door binds — starts none.
 
-The only fleet server this
-script starts itself is `pyexec`, which this repository declares no manifest for. One lane starts
+This script starts no fleet server itself. One lane starts
 them, and it is the one that cannot do its work without them
 (`docs/decisions/D-2026-08-27-one-lane-starts-the-fleet.md`, extended to `calc` by
 `docs/decisions/D-2026-08-28-the-durable-half-has-a-backend-too.md`: that lane's durable jobs are
@@ -90,14 +89,14 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
+`restart <name>` (`mock-eln`, `mock-vendor`, or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
 this repo's own stack (a connector, a worker, `calc`, `rxnlabel`, or any fleet bundle `processes.sh` starts —
 `props`, `rxnpredict`, `chem`, `safety`, …) is `infra/live/processes.sh restart <name>` instead;
 asking this script for one of those says so rather than reporting an unknown process. A restart
 comes back in this lane's environment — `up` persists what it composed to `.live/run/lane-env.sh`,
 which `processes.sh` reads back with your own shell's values winning — so a restarted front door
-keeps `mock-vendor`, `pyexec` and the ELN/ORD sources. **The model gateway is not in that file**,
+keeps `mock-vendor` and the ELN/ORD sources. **The model gateway is not in that file**,
 and its key never is: a restart runs against whatever gateway the restarting shell names, and
 against the local mock when it names none. To restart onto the real gateway, set
 `CHEMCLAW_LLM_BASE_URL`, `CHEMCLAW_LLM_MODEL` and `CHEMCLAW_LLM_API_KEY` in that shell.

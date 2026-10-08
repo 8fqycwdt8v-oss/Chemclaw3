@@ -504,48 +504,30 @@ def test_forgetting_discovery_forgets_every_cache_this_module_keeps() -> None:
     )
 
 
-def test_a_shadowed_bundles_content_is_still_reachable(
+def test_a_connectors_judgment_is_found_beside_a_manifest_it_does_not_hold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Winning a name collision replaces the tool surface, never the files on disk.
+    """The manifest comes from one directory and the `skills/` from another, found by name.
 
-    `Chemclaw3-mcp` ports `safety` under the same name and its manifest declares no `skills:`, while
-    `connectors/safety/skills/safety-screening/SKILL.md` lives here. Two things must hold: the
-    shadowed directory is read, and the winner's declaration is not the gate. The winner's own
-    content comes first.
+    The fleet owns `safety`'s manifest (`chemclaw-contracts`) and declares no `skills:`, while
+    `connectors/safety/skills/safety-screening/SKILL.md` lives here, in a directory with no
+    `connector.yaml`. The skill must load, and the manifest's silence about it is not the gate.
     """
-    private = tmp_path / "private"
-    shipped = tmp_path / "shipped"
-    # The winner: same name, same tools, and no `skills:` key at all — the fleet's shape exactly.
-    _bundle(private, "alpha", _http_manifest("alpha", port=7777))
-    # The loser: declares its skill and ships it beside the manifest, as this tree's bundles do.
-    shadowed = _bundle(
-        shipped, "alpha", _http_manifest("alpha", port=8888) + "skills:\n  - judgment\n"
-    )
-    (shadowed / "skills" / "judgment").mkdir(parents=True)
-    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{private}:{shipped}")
+    fleet = tmp_path / "fleet"
+    judgment = tmp_path / "judgment"
+    _bundle(fleet, "alpha", _http_manifest("alpha"))
+    (judgment / "alpha" / "skills" / "judgment").mkdir(parents=True)
+    (judgment / "beta" / "skills" / "unasked").mkdir(parents=True)
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{fleet}:{judgment}")
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
 
-    # The surface is the winner's, unchanged: a collision still resolves to one manifest.
     (manifest,) = enabled()
-    assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)
-    assert "7777" in str(manifest.endpoint), "the name collision must still resolve to one surface"
-    assert not manifest.skills, "the winning manifest is the one that declares no skills"
-
-    # ...and the judgment that shipped beside the losing manifest is still reachable.
-    assert str(shadowed / "skills") in skills_dirs(), (
-        f"skills_dirs() answered {skills_dirs()}. A bundle that won the name collision while "
-        "declaring no skills has silently removed the shadowed bundle's SKILL.md — which is the "
-        "safety-screening defect, reproduced. A collision decides which manifest describes the "
-        "capability; it does not decide which files exist."
+    assert not manifest.skills, "the manifest is the fleet's and declares no skills"
+    assert skills_dirs() == [str(judgment / "alpha" / "skills")], (
+        f"skills_dirs() answered {skills_dirs()}; a directory with no manifest of its own must "
+        "contribute the skills of the connector it is named for, and only that connector's"
     )
-
-    # And the winner's own content keeps precedence, which is what a collision does decide.
-    (private / "alpha" / "skills" / "judgment").mkdir(parents=True)
-    assert skills_dirs() == [str(private / "alpha" / "skills"), str(shadowed / "skills")], (
-        f"skills_dirs() answered {skills_dirs()}; the winning directory must come first, because "
-        "the skills backend resolves a duplicate skill name by root order"
-    )
+    assert declared_skills_dirs() == skills_dirs()
 
 
 def test_the_first_connectors_dir_wins_a_name_collision(

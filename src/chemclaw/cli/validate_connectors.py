@@ -4,7 +4,8 @@
 
 1. **An enabled connector that does not exist** — it would advertise nothing at run time.
 2. **A declaration that does not match the bundle on disk**, both ways: a declared skill or
-   profile with no file, and a file nobody declared.
+   profile with no file, and a file nobody declared; and a `skills/` or `profiles/` directory
+   beside no connector at all.
 3. **A mutating tool on the agent-facing allow-list.** The agent's connector surface is
    read/compute only; mutation goes through a `jobs:` entry (authorized, dry-run-gated,
    attributed) or a core write tool (D-029).
@@ -88,6 +89,31 @@ def _bundle_content_problems(bundle: Path, manifest: ConnectorManifest) -> list[
         *_both_ways("skill", manifest.skills, skills_present, bundle),
         *_both_ways("profile", manifest.profiles, profiles_present, bundle),
     ]
+
+
+def _orphan_content_problems(discovered_names: set[str]) -> list[str]:
+    """Refuse a `skills/` or `profiles/` directory that belongs to no discovered connector.
+
+    A connector's judgment may sit beside a manifest the fleet owns (a directory with no
+    `connector.yaml`), found by name. If the manifest is renamed or withdrawn there, that directory
+    stops loading with no error; this is the half that says so.
+    """
+    problems: list[str] = []
+    for directory in settings.connectors_dirs:
+        root = Path(directory)
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if path.name in discovered_names or not path.is_dir():
+                continue
+            held = [kind for kind in ("skills", "profiles") if (path / kind).is_dir()]
+            if held:
+                problems.append(
+                    f"{path}: holds {held} but no connector named {path.name!r} is discovered, so "
+                    "nothing would load them. Restore the manifest (it comes from the installed "
+                    "`chemclaw-contracts` package) or move the directory"
+                )
+    return problems
 
 
 def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
@@ -345,6 +371,7 @@ def validate_connectors() -> list[str]:
         problems.extend(_queued_problems(manifest))
     # Check that connector_urls configuration is valid (rule 6).
     problems.extend(_connector_urls_problems(discovered_names))
+    problems.extend(_orphan_content_problems(discovered_names))
     try:
         # Two properties of the enabled set: `connectors_enabled` names bundles that exist (rule 1),
         # and no two enabled connectors claim one tool name — job or endpoint tool (rule 4).

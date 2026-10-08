@@ -237,6 +237,13 @@ dependencies = [
     # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). Everywhere
     # else in this tree the pattern is first-party and `re` stays the engine.
     "regex>=2026.7.19",
+    # The fleet's contracts, owned by `Chemclaw3-mcp`: every connector manifest it serves and the
+    # typed wire of its `calc` and `rxnlabel` backends
+    # (`D-2026-10-08-the-fleet-publishes-its-contracts-as-a-pinned-git-package`). Pinned by commit
+    # because the `contracts-v1.0.0` tag could not be pushed; the pin moves to the tag, and `uv.lock`
+    # records the resolved commit either way. Needs GitHub at *build* time (the image builds with
+    # `git`), never at run time.
+    "chemclaw-contracts @ git+https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp@1d551d40cdf1d1e13d5b86d85ee86fa91f41195f#subdirectory=packages/chemclaw_contracts",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
@@ -319,6 +326,11 @@ override-dependencies = ["nvidia-nccl-cu12 ; sys_platform == 'never'"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# `chemclaw-contracts` is a git reference; hatchling refuses a direct reference among a project's
+# own dependencies unless told it is intended.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 # One package, so there is no list to keep in sync and nothing to silently omit. Before D-148 this

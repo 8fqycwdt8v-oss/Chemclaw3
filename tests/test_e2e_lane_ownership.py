@@ -15,9 +15,8 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
-from tests.siblings import REPO_ROOT, SIBLING_SKIP, bundles_declared_here, sibling_python
+from tests.siblings import REPO_ROOT, SIBLING_SKIP, sibling_python
 
 _UP = REPO_ROOT / "infra/live/e2e-full-stack/up.sh"
 _PROCESSES = REPO_ROOT / "infra/live/processes.sh"
@@ -34,22 +33,26 @@ def _started_by_up() -> set[str]:
     }
 
 
-def test_up_starts_no_bundle_processes_sh_derives() -> None:
-    """No server `up()` starts is one core declares an endpoint for.
+def _endpoint_bundles() -> set[str]:
+    """Every connector the registry discovers that declares an endpoint, this tree's or the fleet's.
 
-    Core's endpoint-declaring bundles are the superset `fleet_bundle_names` intersects with the
-    fleet's manifests, so staying out of it needs no sibling checkout to check.
+    The superset `fleet_bundle_names` intersects with the fleet checkout's manifests, so staying
+    out of it needs no sibling checkout to check.
     """
+    from chemclaw.connectors.registry import discovered
+
+    return {name for name, (_, manifest) in discovered().items() if manifest.endpoint is not None}
+
+
+def test_up_starts_no_bundle_processes_sh_derives() -> None:
+    """No server `up()` starts is a connector the registry discovers an endpoint for."""
     started = _started_by_up()
-    assert "pyexec" in started, f"{_UP}'s `up()` parse found {sorted(started)}; the regex is stale"
-    owned_elsewhere = {
-        name
-        for name, manifest in bundles_declared_here().items()
-        if (yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}).get("endpoint")
-    }
-    clash = sorted(started & owned_elsewhere)
+    assert "mock-eln" in started, (
+        f"{_UP}'s `up()` parse found {sorted(started)}; the regex is stale"
+    )
+    clash = sorted(started & _endpoint_bundles())
     assert not clash, (
-        f"{_UP}'s `up()` starts {clash}, which this repository declares an endpoint for — so "
+        f"{_UP}'s `up()` starts {clash}, which the registry discovers an endpoint for — so "
         "`processes.sh::start_fleet_bundles` starts it too and dies on the served port. Remove the "
         "call; processes.sh is the one owner."
     )
@@ -70,12 +73,7 @@ def test_up_checks_no_derived_bundle_s_credential_by_a_hardcoded_name() -> None:
     body = _function("up")
     assert "check_fleet_bundle_credentials" in body, f"{_UP}'s `up()` checks no fleet credential"
     literal = set(re.findall(r"^\s*assert_credential_accepted ([a-z_]+)\b", body, re.M))
-    endpoint_bundles = {
-        name
-        for name, manifest in bundles_declared_here().items()
-        if (yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}).get("endpoint")
-    }
-    clash = sorted((literal - {"calc"}) & endpoint_bundles)
+    clash = sorted((literal - {"calc"}) & _endpoint_bundles())
     assert not clash, f"{_UP}'s `up()` names {clash}; `check_fleet_bundle_credentials` owns them"
 
 

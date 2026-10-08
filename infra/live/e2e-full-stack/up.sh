@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (pyexec here; calc, rxnlabel and every fleet bundle this repo declares
-# via processes.sh), Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool),
+# Chemclaw3-mcp tool fleet (every fleet bundle the front door binds, and calc and rxnlabel, via
+# processes.sh), Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool),
 # and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
@@ -165,29 +165,14 @@ for name, url in sorted(json.loads(sys.argv[1] or "{}").items()):
 # every calculator tool fails at call time with `CalcServerError: the calculation service is not
 # answering`. That is how `predict_pka` failed on this harness's first real turn.
 #
-# Note the collision, because it is intentional: `chem` and `safety` exist *both* in this repo's
-# `src/chemclaw/connectors/` and in the fleet's `manifests/`, same names, same tools. First
-# directory on `CHEMCLAW_CONNECTORS_DIR` wins (`connectors/registry.py::_bundle_dirs`) and this
-# script lists Chemclaw3's own first, so the in-tree bundles answer. That is the right way round
-# for an end-to-end pass: the in-tree `safety` bundle ships `skills/safety-screening/SKILL.md`,
-# and a skill is architecture layer 3 — the fleet's manifest declares none. Either way both
-# bundles name the same URLs, so these two servers must run regardless of which manifest wins.
+# This tree declares no `chem` or `safety` manifest: the fleet owns both, and a name found in two
+# directories on `CHEMCLAW_CONNECTORS_DIR` is a startup error. What stays here for `safety` is
+# `skills/safety-screening/SKILL.md` (architecture layer 3), found by directory name beside the
+# fleet's manifest. This lane puts the fleet *checkout's* `manifests/` on the path, not the
+# installed `chemclaw-contracts` package, so the servers it starts and the manifests it reads are
+# one revision.
 
 mcp_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
-
-start_pyexec() {
-  local python="$1"
-  # A connector, and the one fleet server this lane still starts itself, for the reason the front door found out
-  # the hard way: `manifests/pyexec/` is on `CHEMCLAW_CONNECTORS_DIR` (line ~268), so the bundle is
-  # *discovered* whether or not anything serves it, and under `CHEMCLAW_CONNECTORS_REQUIRED=true`
-  # an unreachable discovered connector is fatal at startup rather than degraded at call time.
-  # Before this the whole four-repo lane died at `api exited before becoming ready`, with the real
-  # reason four lines deep in `.live/api.log`.
-  CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}" \
-    start pyexec "$python" -m uvicorn chemclaw_mcp_pyexec.app:app --host 127.0.0.1 --port 8899
-  wait_for pyexec "http://127.0.0.1:8899/healthz"
-  assert_credential_accepted pyexec "http://127.0.0.1:8899/mcp" "${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
-}
 
 # ---------------------------------------------------------------------------- Chemclaw3_mock
 # Its own venv (start.sh/start-mcp.sh hard-code `.venv/bin/python`), created once, idempotently.
@@ -281,7 +266,7 @@ start_ui() {
 # `processes.sh restart <name>` is the primitive the storm's chaos family uses and the command the
 # end of `up` tells an operator to run — and it runs in a fresh shell holding none of the exports
 # above. So a restarted front door came back without the fleet and harness manifest directories
-# (no `pyexec`, no `mock-vendor`) and without the ELN/ORD sources. `processes.sh` sources this
+# (no `mock-vendor`) and without the ELN/ORD sources. `processes.sh` sources this
 # file at start with the caller's own environment winning (`source_unset_only`), and its `down`
 # deletes it with the lane.
 #
@@ -380,8 +365,6 @@ up() {
   export CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}"
   export CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
   export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
-  # `pyexec` was missing from this block while `start_pyexec` set the server half four lines
-  # further up — the exact asymmetry the paragraph above describes, sitting directly under it.
   export CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
 
   # **Every bundle this lane can reach is bound, the five opt-in ones included.** `props`,
@@ -412,18 +395,15 @@ print(os.pathsep.join(sorted(discovered())))')" \
   # Persisted for every later `processes.sh` invocation — see `persist_lane_env`.
   persist_lane_env
 
-  # **Only the fleet servers this repository declares no manifest for** — today `pyexec`.
-  # Every other one is `processes.sh::start_fleet_bundles`', whose set is `fleet_bundle_names`
-  # (core's endpoint-declaring bundles that the fleet also publishes). That set is deliberately not
-  # listed here: an enumeration of it in this comment went stale twice, and each time the lane
+  # **No fleet server is started here.** Every one the front door binds is
+  # `processes.sh::start_fleet_bundles`', whose set is `fleet_bundle_names` (the endpoint-declaring
+  # bundles the registry discovers that the fleet checkout also publishes). That set is deliberately
+  # not listed here: an enumeration of it in this comment went stale twice, and each time the lane
   # started a server processes.sh also owned. The two scripts keep pidfiles in different run dirs
   # (`.live/e2e/run` here, `.live/run` there), so `running <name>` there is false while the port is
-  # served and its collision guard kills the lane — first
-  # `rxnpredict: 127.0.0.1:8857 is already served, and not by a process this lane started`, then
-  # the same for `props` on 8850 once core gained a `props` manifest. One owner per server.
-  log "starting the Chemclaw3-mcp fleet (pyexec; calc and the fleet bundles this repo declares via processes.sh)"
+  # served and its collision guard kills the lane. One owner per server.
+  log "starting the Chemclaw3-mcp fleet (calc, rxnlabel and the fleet bundles, via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
-  start_pyexec "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
   local mock_python; mock_python="$(mock_venv_bin)"
@@ -572,7 +552,7 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (pyexec, mock-eln, mock-vendor, ui-bff);
+# covers the processes this script owns (mock-eln, mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb — and
 # since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety, and since
 # D-2026-08-28-the-durable-half-has-a-backend-too the calc and rxnlabel backends as well, and every other fleet
@@ -583,10 +563,9 @@ restart() {
   local name="$1" pidfile="$RUN_DIR/$1.pid"
   # The fleet bundles are derived rather than listed: a hand-kept `chem|safety|calc` arm is how
   # `restart props` came to die on a pidfile this lane stopped writing once processes.sh took props
-  # over. A bundle both trees declare is processes.sh's, the same test `fleet_bundle_names` makes.
+  # over. A bundle the fleet publishes is processes.sh's, the same test `fleet_bundle_names` makes.
   if [ "$name" = calc ] || [ "$name" = rxnlabel ] \
-      || { [ -e "$MCP_REPO/manifests/$name/connector.yaml" ] \
-      && [ -e "$REPO_ROOT/src/chemclaw/connectors/$name/connector.yaml" ]; }; then
+      || [ -e "$MCP_REPO/manifests/$name/connector.yaml" ]; then
     die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
   bash infra/live/processes.sh restart $name"
   fi
@@ -597,7 +576,6 @@ restart() {
   rm -f "$pidfile"
   log "$name killed (pid $pid)"
   case "$name" in
-    pyexec) start_pyexec "$(mcp_python_bin)" ;;
     mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
     ui-bff) start_ui ;;
