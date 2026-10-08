@@ -232,3 +232,28 @@ def test_the_fake_keys_calculations_the_way_the_server_keys_them() -> None:
         + "\nEvery cache assertion in tests/test_calc_*.py is evidence about this table, so fix "
         "the table (and check what the change means for the composites that share a row)."
     )
+
+
+async def test_the_fake_refuses_what_the_fleets_request_models_refuse() -> None:
+    """The fake answers only requests the package's models accept, as the real server does.
+
+    An argument no model declares, a required one left out and a tool the package does not model
+    are each refused with the server's wire shape (a text block marked as an error), so a client
+    that drifts from the fleet's schema fails against the fake and not first in a pod. This needs no
+    checkout: the models come from the installed `chemclaw-contracts`.
+    """
+    from tests.calc_server_fake import FakeCalcServer
+
+    server = FakeCalcServer()
+    undeclared = await server.call_tool("predict_pka", {"smiles": "CC(=O)O", "top_n": 3})
+    missing = await server.call_tool("predict_pka", {})
+    unknown = await server.call_tool("compute_thermochemistry", {"smiles": "CC(=O)O"})
+    nested = await server.call_tool(
+        "calculation_key", {"tool": "predict_pka", "arguments": {"smiles": "CC(=O)O", "top_n": 3}}
+    )
+    accepted = await server.call_tool("predict_pka", {"smiles": "CC(=O)O"})
+
+    for refused in (undeclared, missing, unknown, nested):
+        assert refused.isError
+    assert not accepted.isError
+    assert "invalid arguments for predict_pka" in undeclared.content[0].text

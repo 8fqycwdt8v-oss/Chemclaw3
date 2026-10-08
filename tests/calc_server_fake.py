@@ -3,6 +3,10 @@
 It answers the same shapes and counts every call: "was this recomputed?" is a question about call
 counts (D-011). Returned numbers are placeholders, never asserted as chemistry.
 
+The tools it serves and the arguments it accepts are `chemclaw_contracts.calc`'s request models,
+the same ones the client builds its requests from: an argument the real server would refuse, or a
+required one left out, is refused here too.
+
 Keys are derived as the server derives them, including two properties a composite must handle: a
 Fukui key does not name the mode (callers re-rank via `SiteReactivityResult.ranked_for`), and
 `optimize_geometry` and `relax_structure` share one `xtb.opt` key while returning different
@@ -16,6 +20,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+from chemclaw_contracts.calc import CALC_REQUESTS
+from pydantic import ValidationError
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolTransforms
 
@@ -341,9 +347,22 @@ class FakeCalcServer:
             # (`core/mcp_session.server_marked`).
             return _Result(f"Error executing tool {name}: {error}", is_error=True)
 
+    @staticmethod
+    def _checked(name: str, arguments: dict[str, Any]) -> None:
+        """Refuse a tool the package does not model, or arguments its request model refuses."""
+        model = CALC_REQUESTS.get(name)
+        if model is None:
+            raise ValueError(f"{name!r} is not a tool on this server")
+        try:
+            model.model_validate(arguments)
+        except ValidationError as error:
+            raise ValueError(f"invalid arguments for {name}: {error}") from error
+
     def _answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one call, honouring an override the test installed."""
+        self._checked(name, arguments)
         if name == "calculation_key":
+            self._checked(arguments["tool"], arguments["arguments"])
             return self._identity(arguments["tool"], arguments["arguments"])
         override = self.overrides.get(name)
         if override is not None:

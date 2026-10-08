@@ -19,8 +19,14 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any, Literal
+from typing import Any
 
+from chemclaw_contracts.calc import (
+    CalculationKeyRequest,
+    PredictPkaRequest,
+    PredictSolubilityRequest,
+)
+from chemclaw_contracts.calc import Structure as WireStructure
 from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
 
@@ -35,11 +41,13 @@ from chemclaw.core.mcp_session import (
     McpRequestRefused,
     McpServerFault,
     McpTimeBudget,
+    WireRequest,
     invoke,
     open_session,
 )
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.science.calc.models import Structure
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -169,15 +177,25 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
         _dispatching(-1)
 
 
-async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:
+def wire_structure(structure: Structure) -> WireStructure:
+    """`structure` as the wire model of the same name: the fields core sends, and nothing else.
+
+    Both models carry the same fields, so what `exclude_unset` leaves on the wire is exactly what
+    `structure.model_dump(mode="json")` has always sent.
+    """
+    return WireStructure.model_validate(structure.model_dump(mode="json"))
+
+
+async def _call(session: ClientSession, request: WireRequest) -> Any:
     """Invoke one tool and return its decoded payload, in this service's error vocabulary.
 
     Maps `core.mcp_session.invoke`'s refused / full / broken onto the classes a durable retry policy
     reads. A domain refusal keeps the server's message (it is the whole content); a saturation
     refusal is reworded, with the original on `__cause__`.
     """
+    tool = request.tool_name
     try:
-        return await invoke(session, tool, arguments)
+        return await invoke(session, tool, request.wire())
     except McpAtCapacity as exc:
         # Must precede `McpRequestRefused`, its base class. A full pod is the gate working, so it
         # gets its own saturation counter rather than the `degraded` outage series.
@@ -245,24 +263,23 @@ class KeyedCalculation(BaseModel):
     structure_id: str = ""
 
 
-async def _identity(session: ClientSession, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """`calculation_key`'s answer for `tool`, refused as `CalcToolError` unless it is an object."""
-    identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
+async def _identity(session: ClientSession, request: WireRequest) -> dict[str, Any]:
+    """`calculation_key`'s answer for `request`, refused as `CalcToolError` unless an object."""
+    tool = request.tool_name
+    identity = await _call(session, CalculationKeyRequest(tool=tool, arguments=request.wire()))
     if not isinstance(identity, dict):
         raise CalcToolError(f"calculation_key returned {type(identity).__name__} for {tool}")
     return identity
 
 
-async def remote_key(
-    session: ClientSession, tool: str, arguments: dict[str, Any]
-) -> KeyedCalculation | None:
+async def remote_key(session: ClientSession, request: WireRequest) -> KeyedCalculation | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
     `None` when the server reports no derivable key; `cached_remote` treats that as a miswiring. The
     key arrives as its four parts, not the flat string, because a real `calc_version` can contain
     both `@` and `:`.
     """
-    identity = await _identity(session, tool, arguments)
+    identity = await _identity(session, request)
     key = identity.get("key")
     if key is None:
         return None
@@ -283,20 +300,20 @@ async def remote_key(
             structure_id=str(identity.get("structure_id") or ""),
         )
     except (KeyError, TypeError) as exc:
-        raise CalcToolError(f"calculation_key returned an unusable key for {tool}: {key}") from exc
+        raise CalcToolError(
+            f"calculation_key returned an unusable key for {request.tool_name}: {key}"
+        ) from exc
 
 
-async def remote_compute(
-    session: ClientSession, tool: str, arguments: dict[str, Any]
-) -> ResultPayload:
+async def remote_compute(session: ClientSession, request: WireRequest) -> ResultPayload:
     """Run one calculation on the server and return its payload as the cache stores it."""
-    payload = await _call(session, tool, arguments)
+    payload = await _call(session, request)
     if not isinstance(payload, dict):
-        raise CalcToolError(f"{tool} returned {type(payload).__name__}, not an object")
+        raise CalcToolError(f"{request.tool_name} returned {type(payload).__name__}, not an object")
     return payload
 
 
-async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
+async def remote_call(request: WireRequest) -> ResultPayload:
     """One round trip to a tool that has no cache row, in its own session.
 
     For `embed_structure` and `combine_structures`, which `calculation_key` refuses. They run on the
@@ -304,26 +321,28 @@ async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
     every downstream `structure_id`.
     """
     async with calc_session() as session:
-        return await remote_compute(session, tool, arguments)
+        return await remote_compute(session, request)
 
 
-#: The calibrated calculators, and the only tools `remote_version` accepts. A `Literal` rather than
-#: `str` so mypy and the sibling-manifest seam walker check every call site against the fleet.
-CalibratedTool = Literal["predict_solubility", "predict_pka"]
+#: The calibrated calculators, and the only requests `remote_version` accepts: a closed set, so a
+#: call naming any other tool is a type error.
+CalibratedRequest = PredictSolubilityRequest | PredictPkaRequest
 
 
-async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str:
+async def remote_version(request: CalibratedRequest) -> str:
     """The `calc_version` this tool would stamp on a result, without computing one.
 
     The only way to learn a calculator's current version, which `calculator_trust` needs because the
-    calibration ledger is keyed exactly on version. `arguments` are required by `calculation_key`
-    but do not affect the version; callers pass `settings.calc_version_probe_smiles`.
+    calibration ledger is keyed exactly on version. The molecule is required by `calculation_key`
+    but does not affect the version; callers pass `settings.calc_version_probe_smiles`.
     """
     async with calc_session() as session:
-        identity = await _identity(session, tool, arguments)
+        identity = await _identity(session, request)
     version = identity.get("calc_version")
     if not isinstance(version, str) or not version:
-        raise CalcToolError(f"calculation_key returned no calc_version for {tool}: {identity}")
+        raise CalcToolError(
+            f"calculation_key returned no calc_version for {request.tool_name}: {identity}"
+        )
     return version
 
 
@@ -361,8 +380,7 @@ def _record(key: CalculationKey) -> None:
 
 async def cached_remote(
     store: ResultStore,
-    tool: str,
-    arguments: dict[str, Any],
+    request: WireRequest,
     *,
     timeout_seconds: float | None = None,
 ) -> tuple[ResultPayload, bool]:
@@ -373,18 +391,18 @@ async def cached_remote(
     key is a caller error, not a silent uncached compute.
     """
     async with calc_session(timeout_seconds) as session:
-        keyed = await remote_key(session, tool, arguments)
+        keyed = await remote_key(session, request)
         if keyed is None:
             raise CalcToolError(
-                f"{tool} has no derivable cache key, so it cannot be routed through the cache. "
-                "Either it is composed here from keyed primitives (as predict_logd is), or it "
-                "should be called with remote_call."
+                f"{request.tool_name} has no derivable cache key, so it cannot be routed through "
+                "the cache. Either it is composed here from keyed primitives (as predict_logd is), "
+                "or it should be called with remote_call."
             )
 
         # Recorded on hit and miss alike: what a run rested on is the same either way.
         _record(keyed.key)
 
         async def _compute() -> ResultPayload:
-            return await remote_compute(session, tool, arguments)
+            return await remote_compute(session, request)
 
         return await cached_compute(store, keyed.key, _compute, structure_id=keyed.structure_id)

@@ -17,6 +17,13 @@ record SMILES; answers are then positional against the list we sent.
 import logging
 from typing import Any, Protocol, runtime_checkable
 
+from chemclaw_contracts.rxnlabel import (
+    LabellerVersionRequest,
+    NameReactionsRequest,
+    NamingRequest,
+    ReactionRequest,
+    RepresentReactionsRequest,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.call_identity import turn_identity_hook
@@ -28,6 +35,7 @@ from chemclaw.core.mcp_session import (
     McpCredentialRefused,
     McpRequestRefused,
     McpServerFault,
+    WireRequest,
     invoke,
     open_session,
 )
@@ -183,7 +191,7 @@ class RxnLabelServer:
 
         A change to our standardization or vocabulary version also makes stored labels stale.
         """
-        payload = await self._call("labeller_version", {})
+        payload = await self._call(LabellerVersionRequest())
         remote = str(payload.get("version") or "").strip()
         if not remote:
             raise LabelToolError(
@@ -211,13 +219,12 @@ class RxnLabelServer:
         """
         sent = {rid: len(species) for rid, _smiles, species in reactions}
         payload = await self._call(
-            "represent_reactions",
-            {
-                "reactions": [
-                    {"id": rid, "reaction_smiles": smiles, "species": species}
+            RepresentReactionsRequest(
+                reactions=[
+                    ReactionRequest(id=rid, reaction_smiles=smiles, species=species)
                     for rid, smiles, species in reactions
                 ]
-            },
+            )
         )
         answers: dict[str, ReactionRepresentation] = {}
         for item in (ReactionRepresentation.model_validate(r) for r in _results(payload)):
@@ -249,19 +256,23 @@ class RxnLabelServer:
             One naming per id the server answered for; absent means unclassified this pass.
         """
         payload = await self._call(
-            "name_reactions",
-            {"reactions": [{"id": rid, "reaction_smiles": smiles} for rid, smiles in reactions]},
+            NameReactionsRequest(
+                reactions=[
+                    NamingRequest(id=rid, reaction_smiles=smiles) for rid, smiles in reactions
+                ]
+            )
         )
         return {
             item.id: item for item in (ReactionNaming.model_validate(r) for r in _results(payload))
         }
 
-    async def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Open a session, invoke `tool`, and translate the failure into this service's vocabulary.
+    async def _call(self, request: WireRequest) -> dict[str, Any]:
+        """Open a session, send `request`, and translate the failure into this service's vocabulary.
 
         Transport, timeouts and credential handling are `core.mcp_session`'s; this decides only
         which failures a durable activity should retry.
         """
+        tool = request.tool_name
         try:
             async with open_session(
                 settings.rxnlabel_server_url,
@@ -271,7 +282,7 @@ class RxnLabelServer:
                 # this server's origin and strips on a cross-origin redirect.
                 request_hook=turn_identity_hook(settings.rxnlabel_server_url),
             ) as session:
-                payload = await invoke(session, tool, arguments)
+                payload = await invoke(session, tool, request.wire())
         except McpCredentialRefused as exc:
             raise LabelToolError(
                 f"the labelling server refused this client's credential (HTTP {exc.status} from "

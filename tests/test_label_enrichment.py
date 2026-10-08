@@ -297,7 +297,7 @@ def test_a_short_species_list_costs_the_roles_and_not_the_atom_map(
             ]
         }
 
-        async def _fake_call(tool: str, arguments: dict[str, object]) -> dict[str, object]:
+        async def _fake_call(request: object) -> dict[str, object]:
             return short
 
         # The transport is the one thing this seam does not decide; the arity contract is.
