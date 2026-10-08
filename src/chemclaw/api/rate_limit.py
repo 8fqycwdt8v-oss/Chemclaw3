@@ -6,13 +6,22 @@ real work (Temporal, Postgres, connector sweeps).
 A token bucket rather than a fixed window, so a caller cannot double the rate across a window
 edge; `burst` states how much may be spent at once. Called from `require_principal`, which every
 authenticated route depends on, so a new route cannot skip it; `/healthz`, `/readyz` and
-`/metrics` are not limited. Per process: the fleet-wide ceiling is the rate times the replica
-count, which belongs at the ingress and is not checked here.
+`/metrics` are not limited.
+
+Under `session_store=postgres` the bucket is one row per principal (`api/rate_limit_store.py`), so
+the rate is the deployment's however many replicas run. A principal just refused is remembered
+locally until its next token, which is correct because only this principal's own spends drain its
+bucket, and saves a round trip per refused request. If the database cannot be reached the
+in-process bucket answers instead, so the limit degrades to per-replica rather than to none.
+Under the in-memory store the in-process bucket is the only one.
 """
 
 import logging
 import time
 
+import psycopg
+
+from chemclaw.api import rate_limit_store
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
@@ -82,6 +91,14 @@ class RequestLimiter:
 
 _limiter: RequestLimiter | None = None
 
+# Principals the shared bucket refused, each to the monotonic moment its next token exists. A cache:
+# losing an entry costs one round trip.
+_refused_until: BoundedLru[str, float] | None = None
+
+# Whether the last shared spend failed, so an outage is logged when it starts and when it ends and
+# not once per request.
+_shared_unreachable = False
+
 
 def limiter() -> RequestLimiter:
     """The process-wide limiter, built from config on first use.
@@ -100,11 +117,50 @@ def limiter() -> RequestLimiter:
 
 def reset_limiter() -> None:
     """Discard the process limiter so the next call rebuilds it from current config."""
-    global _limiter
+    global _limiter, _refused_until, _shared_unreachable
     _limiter = None
+    _refused_until = None
+    _shared_unreachable = False
 
 
-def enforce_request_budget(principal_id: str) -> None:
+async def _check_shared(principal_id: str) -> None:
+    """Spend from the principal's shared bucket, or raise `RateLimited`.
+
+    Falls back to the in-process bucket when the database cannot be reached.
+    """
+    global _refused_until, _shared_unreachable
+    if _refused_until is None:
+        _refused_until = BoundedLru(settings.service_rate_limit_max_principals)
+    now = time.monotonic()
+    wait_until = _refused_until.get(principal_id)
+    if wait_until is not None:
+        if wait_until > now:
+            raise RateLimited(wait_until - now)
+    per_minute = settings.service_rate_limit_per_minute
+    try:
+        spent = await rate_limit_store.spend(
+            principal_id, per_minute=per_minute, burst=settings.service_rate_limit_burst
+        )
+    except (ConnectionError, OSError, psycopg.Error):
+        record_metric(lambda m: m.increment("chemclaw_rate_limit_shared_unavailable_total"))
+        if not _shared_unreachable:
+            _shared_unreachable = True
+            logger.warning(
+                "the shared request budget is unreachable; limiting per replica until it returns",
+                exc_info=True,
+            )
+        limiter().check(principal_id)
+        return
+    if _shared_unreachable:
+        _shared_unreachable = False
+        logger.info("the shared request budget is reachable again")
+    if not spent.allowed:
+        wait = spent.retry_after(per_minute / 60.0)
+        _refused_until.put(principal_id, now + wait)
+        raise RateLimited(wait)
+
+
+async def enforce_request_budget(principal_id: str) -> None:
     """Spend one request against `principal_id`'s budget; raise `RateLimited` when it is gone.
 
     A no-op when `service_rate_limit_per_minute` is 0, the code default for CLI, tests and dev; the
@@ -113,7 +169,10 @@ def enforce_request_budget(principal_id: str) -> None:
     if not settings.service_rate_limit_per_minute:
         return
     try:
-        limiter().check(principal_id)
+        if settings.session_store == "postgres":
+            await _check_shared(principal_id)
+        else:
+            limiter().check(principal_id)
     except RateLimited:
         record_metric(lambda m: m.increment("chemclaw_requests_rate_limited_total"))
         logger.info("rate limit exceeded for principal %s", principal_id)

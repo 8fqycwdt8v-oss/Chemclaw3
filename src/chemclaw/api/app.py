@@ -36,7 +36,7 @@ from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
-from chemclaw.api.budget import BudgetTracker, drain_pending
+from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
 from chemclaw.api.events import event_schemas
@@ -83,7 +83,7 @@ from chemclaw.api.tool_results import fetchable_refs, load_tool_result
 from chemclaw.api.turn_relay import TurnRelay
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
-from chemclaw.core import db
+from chemclaw.core import bookkeeping, db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
@@ -228,7 +228,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await serving
             # After the turns (which book spend as they finish) and before the pool closes (the
             # booking needs it); otherwise a rollout drops each in-flight principal's last booking.
-            await drain_pending()
+            await bookkeeping.drain()
             # `close_checkpointer` also closes the memory store, in the order their pools require.
             await close_checkpointer()
 

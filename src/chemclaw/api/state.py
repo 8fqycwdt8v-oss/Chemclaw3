@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Request
 
@@ -47,8 +47,9 @@ class _LiveSessions:
 
     Eviction drops only the live handle; history stays durable. Session, owner and profile are
     stored together so they cannot drift. Sessions with a turn in flight are `pinned`, since
-    re-hydrating a second handle would diverge in `session.state`; pins come from expiring turn
-    leases. Built on `chemclaw.core.bounded.BoundedLru`.
+    re-hydrating a second handle would split the in-memory store's thread (`session.state`) and
+    the turn's in-process lease; pins come from expiring turn leases. Built on
+    `chemclaw.core.bounded.BoundedLru`.
     """
 
     def __init__(self, capacity: int, pinned: Callable[[str], bool] | None = None) -> None:
@@ -131,6 +132,25 @@ class SessionTurns(Protocol):
 
     async def release(self, session_id: str, holder: str) -> None:
         """Give the slot back when the turn ends."""
+        ...
+
+
+@runtime_checkable
+class TurnAdmission(Protocol):
+    """The deployment-wide limits on running turns, kept where every replica sees them.
+
+    Offered by a claim store that holds its leases in a shared database; a store without these
+    methods leaves the per-process permits as the only limit.
+    """
+
+    async def admit(
+        self, session_id: str, holder: str, *, fleet_cap: int, actor: str | None, actor_cap: int
+    ) -> bool:
+        """Take a concurrent-turn slot for this claim, atomically; False when a limit is reached."""
+        ...
+
+    async def actor_turns(self, actor: str, besides: str) -> int:
+        """The live turn claims `actor` holds anywhere, on sessions other than `besides`."""
         ...
 
 
@@ -506,6 +526,12 @@ class FrontDoorState:
         """The durable cross-process turn claim, or None under the in-memory session store."""
         claims: SessionTurns | None = self._app.state.turn_claims
         return claims
+
+    @property
+    def turn_admission(self) -> TurnAdmission | None:
+        """The deployment-wide turn limits, or None where the claim store cannot share them."""
+        claims = self.turn_claims
+        return claims if isinstance(claims, TurnAdmission) else None
 
     @property
     def turn_relay(self) -> "TurnRelay | None":

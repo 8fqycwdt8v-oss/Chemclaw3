@@ -2402,9 +2402,11 @@ that deployment, not to switch the limiter off.
 
 Two properties worth knowing before you tune it:
 
-- **It is per process.** With `service.autoscaling.maxReplicas: 6` the fleet ceiling is six times
-  what you configured, and a caller pinned to one pod by the Route's affinity cookie (D-121) sees
-  the per-process number. A genuine fleet-wide limit belongs at the ingress.
+- **It is the deployment's, under Postgres.** With `CHEMCLAW_SESSION_STORE=postgres` the bucket is
+  one row per principal (`request_buckets`), spent in a single statement, so six replicas admit the
+  rate you configured and not six times it. If the database cannot be reached a replica limits on its
+  own bucket for that request and counts it on `chemclaw_rate_limit_shared_unavailable_total`; under
+  `memory` (a single-process dev run) the bucket is the process's.
 - **The probes are exempt by construction.** `/healthz`, `/readyz` and `/metrics` do not depend on
   `require_principal`, which is the only place the budget is spent. If a probe ever starts getting
   429s, the gate has been moved somewhere it should not be.
@@ -2412,7 +2414,8 @@ Two properties worth knowing before you tune it:
 **429, `Retry-After: N`, on `POST /sessions/{id}/messages` only — and this is a *different* refusal
 with the same shape.** The per-actor concurrent-turn cap
 (`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`). It answers when one principal already holds
-`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR` turns *in flight* on this process, so it is a
+`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR` turns *in flight* (on every replica under
+Postgres, from the turns' `session_turns` leases; on this process under `memory`), so it is a
 count of simultaneous turns rather than a rate, and the request budget above can be wide open while
 this fires. **The counter is `chemclaw_turns_refused_actor_cap_total`**, not
 `chemclaw_requests_rate_limited_total` — reading the wrong one is the likeliest way to spend an

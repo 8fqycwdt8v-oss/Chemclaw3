@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from chemclaw.core import bookkeeping
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded, record_metric
@@ -28,10 +29,6 @@ if TYPE_CHECKING:
     from chemclaw.api import budget_store
 
 logger = logging.getLogger(__name__)
-
-# Strong references to in-flight durable writes, as in `agent/turn_cost.py`, so a write is not
-# garbage-collected mid-statement.
-_PENDING: set[asyncio.Task[None]] = set()
 
 
 class BudgetExceeded(Exception):
@@ -287,29 +284,30 @@ class BudgetTracker:
         if _over(max_tokens, counter.tokens):
             raise BudgetExceeded(f"{scope} token budget exhausted ({counter.tokens} tokens)")
 
-    def record(self, session_id: str, user: str | None, tokens: int) -> None:
+    def record(self, session_id: str, user: str | None, tokens: int) -> asyncio.Task[None] | None:
         """Book one completed turn and its metered tokens against the session and the user.
 
         No-op when `budget_enabled` is off. A failed turn is still booked: it consumed tokens.
         Synchronous by contract (see the class); the in-process counters update now and the durable
-        write is scheduled as its own task.
+        write is scheduled as its own task, returned for a caller that can wait on it
+        (`core.bookkeeping.settle`). `None` when there is no durable write to wait for.
         """
         if not settings.budget_enabled:
-            return
+            return None
         with self._lock:
             session = _book(self._sessions, session_id, tokens)
             local = _book(self._users, user, tokens, rolls=True) if user is not None else None
         booked = max(tokens, 0)
         _warn("session", session_id, session.turns, session.tokens, booked)
         if user is None:
-            return
+            return None
         if not _durable():
             if local is not None:
                 _warn("user", user, local.turns, local.tokens, booked)
-            return
-        self._schedule(user, tokens)
+            return None
+        return self._schedule(user, tokens)
 
-    def _schedule(self, user: str, tokens: int) -> None:
+    def _schedule(self, user: str, tokens: int) -> asyncio.Task[None] | None:
         """Book the durable window off the hot path, warning off the totals it returns.
 
         A failed write is logged and lost rather than failing an answered turn; the in-process
@@ -343,13 +341,10 @@ class BudgetTracker:
             self._reconcile(user, stored)
             _warn("user", user, stored.turns, stored.tokens, max(tokens, 0))
 
-        try:
-            task = asyncio.get_running_loop().create_task(_write())
-        except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
+        task = bookkeeping.schedule(_write())
+        if task is None:
             logger.debug("no event loop to book the durable budget window for %s", user)
-            return
-        _PENDING.add(task)
-        task.add_done_callback(_PENDING.discard)
+        return task
 
 
 class ThreadTooLong(BudgetExceeded):
@@ -396,25 +391,4 @@ async def check_thread_size(session_id: str) -> None:
             f"This conversation has reached its size limit ({stored / 1024**2:.1f} MiB stored, "
             f"against {cap / 1024**2:.1f} MiB). Start a new session to continue — this one's "
             "transcript stays readable."
-        )
-
-
-async def drain_pending(timeout: float = 5.0) -> None:
-    """Wait for the in-flight durable bookings, so an orderly shutdown does not drop them.
-
-    Called from the front door's lifespan after the turns drain; otherwise every rollout hands back
-    the last booking of each in-flight principal. Bounded, since the pod is inside its termination
-    grace.
-    """
-    if not _PENDING:
-        return
-    pending = tuple(_PENDING)
-    _, still_running = await asyncio.wait(pending, timeout=timeout)
-    if still_running:
-        degraded(
-            logger,
-            "budget_window",
-            "%d durable budget booking(s) did not land within %.1fs of shutdown",
-            len(still_running),
-            timeout,
         )

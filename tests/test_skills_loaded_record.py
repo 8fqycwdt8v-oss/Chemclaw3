@@ -14,7 +14,7 @@ from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT, save_local_skill
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
 from chemclaw.agent.skill_access import SkillNarrowing
-from chemclaw.core import turn_signals
+from chemclaw.core import bookkeeping, turn_signals
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import SkillLoadedSignal
 
@@ -165,9 +165,8 @@ async def test_the_row_really_carries_what_the_ledger_folded(
         profile="default",
         budget=None,
     )
-    # `record_turn_cost` writes on its own task, deliberately (it runs under a `finally` where an
-    # await would re-raise a pending cancellation), so the pending set is what to wait on.
-    await asyncio.gather(*turn_cost._PENDING)
+    # `record_turn_cost` writes on its own tracked task, so the pending set is what to wait on.
+    await asyncio.gather(*bookkeeping.pending())
 
     loaded = await _skills_by_session()
 

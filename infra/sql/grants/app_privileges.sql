@@ -255,6 +255,12 @@ BEGIN
     -- that ever removes a row, and the grant is that narrow by intent rather than by accident.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON budget_usage TO %I', app_role);
 
+    -- `request_buckets` (`122_shared_limits.sql`): a principal's first request inserts the bucket,
+    -- every later one updates it in place (the two arms of `api/rate_limit_store.py::_SPEND`), and
+    -- DELETE is offboarding's (`chemclaw.agent.leaver`). No retention sweep takes it: a row is one
+    -- person, so the table is bounded by the people served.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON request_buckets TO %I', app_role);
+
     -- `commitments` is a **mirror**, which is why it holds DELETE where the tables it used to sit
     -- beside do not. Those withhold it so a retention refusal is enforced rather than intended; a
     -- mirror's job is the opposite — to converge on a source this system does not own — and a

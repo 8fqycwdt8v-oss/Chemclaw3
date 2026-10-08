@@ -170,6 +170,8 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # Erasable: a rate-limiting counter, not a record of the science. `turn_costs` stays retained as
     # the spend record.
     ("budget_usage", "DELETE FROM budget_usage WHERE actor = ANY(%(actors)s)"),
+    # The same kind of thing: a person's request-rate balance, nothing a record depends on.
+    ("request_buckets", "DELETE FROM request_buckets WHERE principal_id = ANY(%(actors)s)"),
     # A composed workflow is the person's own working procedure, reachable only by its owner, so it
     # goes with the conversation. `approved_by` can only ever hold the owner, so the `owner`
     # predicate covers it.

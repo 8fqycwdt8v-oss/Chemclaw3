@@ -81,6 +81,7 @@ from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.tool_results import full_result_sink, session_sink
 from chemclaw.connectors.registry import open_connector_specs
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
@@ -504,11 +505,13 @@ async def run_turn(
             # the cost row's `answer_confidence`, `review_required` and `notes_cited`. Before the
             # yield, for the reason `ledger.answered` is.
             ledger.note_event(answer)
+            # The last thing the turn does before telling the client it is done: its cost row, its
+            # budget booking and its spent approval are written first, so a process killed once the
+            # client holds the answer has nothing left unwritten.
+            await _finish_turn(
+                session, ledger, actor=actor, profile=profile, budget=budget, plan_gated=plan_gated
+            )
             yield answer
-            # The turn used its authorization, so spend it here: in the teardown an `await` would
-            # re-raise the cancellation and skip later steps.
-            if plan_gated:
-                await consume_turn_approval(session.session_id)
         except (GeneratorExit, asyncio.CancelledError):
             # First in this clause: `_book_turn_spend` reads it, and must not depend on the rollback
             # having run.
@@ -524,17 +527,23 @@ async def run_turn(
                 spend_approval_after_teardown(session.session_id)
             raise
         except Exception as exc:
-            yield _failure_event(exc, session, ledger)
+            failure = _failure_event(exc, session, ledger)
             if not transcript_settled:
                 await _settle_transcript_turn(history, session, turn_row, "failed")
                 transcript_settled = True
-            # A turn that failed after its tools may have run has still spent its approval.
-            if plan_gated:
-                await consume_turn_approval(session.session_id)
+            # A turn that failed after its tools may have run has still spent its approval. Written
+            # before the client is told, as an answered turn's are.
+            await _finish_turn(
+                session, ledger, actor=actor, profile=profile, budget=budget, plan_gated=plan_gated
+            )
+            yield failure
         finally:
+            # A turn that reached its end booked itself above (a second call books nothing); a
+            # torn-down one books here, synchronously, on tracked tasks. Nothing in this block may
+            # `await`: on the cancellation path it would re-raise and skip what follows.
             _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
-            # Settle the torn-down turn's question off this frame (a teardown under cancellation may
-            # not `await`). A Stop is `stopped`; the clock is a failure.
+            # Settle the torn-down turn's question off this frame. A Stop is `stopped`; the clock
+            # is a failure.
             if turn_row is not None and not transcript_settled:
                 _settle_after_teardown(
                     history,
@@ -542,6 +551,29 @@ async def run_turn(
                     turn_row,
                     "stopped" if ledger.cancelled and not ledger.timed_out else "failed",
                 )
+
+
+async def _finish_turn(
+    session: TurnSession,
+    ledger: "_TurnLedger",
+    *,
+    actor: str | None,
+    profile: str | None,
+    budget: BudgetTracker | None,
+    plan_gated: bool,
+) -> None:
+    """Write what a turn that reached its end owes the record, and wait for it, bounded.
+
+    The turn's spend (cost row, budget window) and, for a plan-gated profile, its spent approval:
+    the turn used its authorization, so the next request needs its own. Called before the terminal
+    event is yielded, so the client never holds an answer whose bookkeeping a kill could still
+    lose. A write that fails is logged and counted by its own site and never fails the turn; one
+    that outlasts `service_turn_bookkeeping_timeout_seconds` finishes in the background.
+    """
+    tasks = _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
+    if plan_gated:
+        await consume_turn_approval(session.session_id)
+    await bookkeeping.settle(tasks)
 
 
 @dataclass(slots=True)
@@ -562,6 +594,8 @@ class _TurnLedger:
     # Started at construction (`run_turn`'s first statement), so the duration covers the whole turn.
     started: float = field(default_factory=time.perf_counter)
     answered: bool = False
+    # Whether the turn's spend is already booked (`_finish_turn`), so the teardown books it once.
+    booked: bool = False
     run_complete: bool = False
     answer_parts: list[str] = field(default_factory=list)
     # Durable jobs this turn launched, for the optional mid-turn resume.
@@ -1347,11 +1381,12 @@ def _roll_back_unfinished(
 ) -> None:
     """Undo the bookkeeping of a turn torn down before its exchange completed.
 
-    Restores `session.state` (todo list, plan hash, marks) when a disconnect or deadline tears down
-    a turn whose last model run had not returned (`run_complete`), so the next turn does not read
-    steps never taken. sse-starlette delivers a disconnect as `CancelledError`. The graph's
-    checkpoint is not undone, so a teardown after the graph run but before `_record_transcript`
-    leaves the two records diverged; that branch is counted.
+    Restores `session.state` (the in-memory store's transcript; empty under Postgres) when a
+    disconnect or deadline tears down a turn whose last model run had not returned
+    (`run_complete`), so the next turn does not read a question never answered. sse-starlette
+    delivers a disconnect as `CancelledError`. The graph's checkpoint is not undone, so a teardown
+    after the graph run but before `_record_transcript` leaves the two records diverged; that
+    branch is counted.
     """
     if ledger.answered or ledger.run_complete:
         if not ledger.answered:
@@ -1442,14 +1477,18 @@ def _book_turn_spend(
     actor: str | None,
     profile: str | None,
     budget: BudgetTracker | None,
-) -> None:
+) -> list[asyncio.Task[None] | None]:
     """Book what the turn cost, on every path — success, failure and disconnect alike.
 
-    Synchronous so it cannot `await` on the cancellation path. Observes duration on failures too and
-    publishes tokens labelled by profile; `record_turn_cost` books the same per actor in a table,
-    since an oid must not be a metric label. The one producer of a chat turn's `turn_costs` row
-    (template steps book their own).
+    Synchronous so it cannot `await` on the cancellation path: the durable writes run as tracked
+    tasks, returned for a caller that can wait on them. Once only; a second call books nothing and
+    returns nothing. Observes duration on failures too and publishes tokens labelled by profile;
+    `record_turn_cost` books the same per actor in a table, since an oid must not be a metric
+    label. The one producer of a chat turn's `turn_costs` row (template steps book their own).
     """
+    if ledger.booked:
+        return []
+    ledger.booked = True
     elapsed = time.perf_counter() - ledger.started
     # The budget is booked first, so a failure in any later derivation costs record precision, not
     # the budget record or the row. Tokens the provider never reported (usage arrives only on the
@@ -1457,8 +1496,9 @@ def _book_turn_spend(
     # than dropped, so a late disconnect costs what it costs; zero on ordinary turns. The estimate
     # is an input to the booking and cannot fail, so it may precede it.
     estimated = ledger.prompts.unbilled_tokens
+    writes: list[asyncio.Task[None] | None] = []
     if budget is not None:
-        budget.record(session.session_id, actor, ledger.usage.total + estimated)
+        writes.append(budget.record(session.session_id, actor, ledger.usage.total + estimated))
     outcome = "unknown"
     model = ""
     context = None
@@ -1478,7 +1518,7 @@ def _book_turn_spend(
     METRICS.observe("chemclaw_turn_duration_seconds", elapsed)
     METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": outcome})
     spend_labels = {"profile": profile or "default"}
-    record_turn_cost(
+    cost_row = record_turn_cost(
         TurnCost(
             correlation_id=ledger.correlation_id,
             session_id=session.session_id,
@@ -1516,6 +1556,7 @@ def _book_turn_spend(
             skills_loaded=sorted(skill_fingerprint(name) for name in ledger.skills_loaded),
         )
     )
+    writes.append(cost_row)
     # The same record as a log line, since the cost row needs Postgres and the log stack is always
     # there; pairs with `turn.started`.
     log_event(
@@ -1571,6 +1612,7 @@ def _book_turn_spend(
     ):
         if value:
             METRICS.increment(name, float(value), spend_labels)
+    return writes
 
 
 async def _turn_checkpointer() -> Any:
@@ -1867,16 +1909,17 @@ async def settle_interrupted_turns(
             exc,
         )
         return 0
-    for turn in interrupted:
-        _book_interrupted(session_id, turn)
+    # Waited for: the question was flipped exactly once, here, so this booking is the only chance a
+    # turn that died mid-flight has of a cost row.
+    await bookkeeping.settle([_book_interrupted(session_id, turn) for turn in interrupted])
     return len(interrupted)
 
 
-def _book_interrupted(session_id: str, turn: InterruptedTurn) -> None:
+def _book_interrupted(session_id: str, turn: InterruptedTurn) -> asyncio.Task[None] | None:
     """The record of one interrupted turn: its counter, its log record and its `turn_costs` row.
 
     Skipped for a turn already booked by its own process (which then failed to settle its question),
-    so no turn is counted twice.
+    so no turn is counted twice. Returns the row's write, for the caller to wait on.
     """
     correlation_id, actor = turn.correlation_id, turn.actor
     if turn.booked:
@@ -1886,7 +1929,7 @@ def _book_interrupted(session_id: str, turn: InterruptedTurn) -> None:
             session_id,
             correlation_id,
         )
-        return
+        return None
     METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": INTERRUPTED})
     log_event(
         logger,
@@ -1898,14 +1941,15 @@ def _book_interrupted(session_id: str, turn: InterruptedTurn) -> None:
         correlation_id=correlation_id,
         outcome=INTERRUPTED,
     )
-    if correlation_id:
+    if not correlation_id:
         # Without a correlation id there is no turn to name, and `TurnCost` refuses an empty one.
-        record_turn_cost(
-            TurnCost(
-                correlation_id=correlation_id,
-                session_id=session_id,
-                actor=actor or "",
-                completed=False,
-                outcome=INTERRUPTED,
-            )
+        return None
+    return record_turn_cost(
+        TurnCost(
+            correlation_id=correlation_id,
+            session_id=session_id,
+            actor=actor or "",
+            completed=False,
+            outcome=INTERRUPTED,
         )
+    )

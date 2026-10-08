@@ -358,9 +358,33 @@ _TURN_CLAIM = (
     "VALUES (%s, %s, now() + make_interval(secs => %s), %s) "
     "ON CONFLICT (session_id) DO UPDATE "
     "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at, "
-    "actor = EXCLUDED.actor "
+    "actor = EXCLUDED.actor, admitted = false "
     "WHERE session_turns.expires_at <= now() "
     "RETURNING holder"
+)
+# Serialises admissions across replicas; released with the transaction, so no connection holds it
+# between turns.
+_ADMISSION_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('turn_admission', 0))"
+# Take one of the deployment's concurrent-turn slots (`SessionTurnClaims.admit`). Run after
+# `_ADMISSION_LOCK` in the same transaction: this statement's snapshot is taken after the lock is
+# granted, so it counts every admission committed before it. A claim that is no longer this
+# holder's matches no row, which reads as refused. `%(fleet)s = 0` and `%(actor_cap)s = 0` switch
+# their limit off.
+_TURN_ADMIT = (
+    "UPDATE session_turns SET admitted = true "
+    "WHERE session_id = %(session)s AND holder = %(holder)s AND expires_at > now() "
+    "AND (%(fleet)s = 0 OR (SELECT count(*) FROM session_turns "
+    "      WHERE admitted AND expires_at > now()) < %(fleet)s) "
+    "AND (%(actor_cap)s = 0 OR %(actor)s::text IS NULL OR (SELECT count(*) FROM session_turns "
+    "      WHERE admitted AND expires_at > now() AND actor = %(actor)s "
+    "      AND session_id <> %(session)s) < %(actor_cap)s) "
+    "RETURNING session_id"
+)
+# How many turns a person holds on sessions other than this one: the leases they sent that have not
+# lapsed, admitted or not, so a turn that is still waiting for its slot counts.
+_ACTOR_TURNS = (
+    "SELECT count(*) FROM session_turns "
+    "WHERE actor = %s AND session_id <> %s AND expires_at > now()"
 )
 # Guarded by `holder` so a worker whose lease already lapsed and was taken by someone else cannot
 # extend — or delete — the new owner's claim.
@@ -382,7 +406,8 @@ _TURN_CLAIM_MANY = (
     "INSERT INTO session_turns (session_id, holder, expires_at) "
     "SELECT s, %s, now() + make_interval(secs => %s) FROM unnest(%s::text[]) AS s "
     "ON CONFLICT (session_id) DO UPDATE "
-    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at "
+    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at, "
+    "admitted = false "
     "WHERE session_turns.expires_at <= now() "
     "RETURNING session_id"
 )
@@ -523,6 +548,11 @@ _ACTOR_SCOPED_ONLY: dict[str, str] = {
     "budget_usage": (
         "a spend window bounds a person, not a conversation — and a session delete that reset it "
         "would be a free allowance reset available to anyone who is over budget"
+    ),
+    # The same argument for the request rate.
+    "request_buckets": (
+        "a request-rate balance bounds a person, not a conversation — and a session delete that "
+        "refilled it would be a free burst available to anyone who is being limited"
     ),
 }
 
@@ -1022,6 +1052,41 @@ class SessionTurnClaims:
                 taken = await cur.fetchone() is not None
             await conn.commit()
         return taken
+
+    async def admit(
+        self, session_id: str, holder: str, *, fleet_cap: int, actor: str | None, actor_cap: int
+    ) -> bool:
+        """Take one of the deployment's concurrent-turn slots for this holder's live claim.
+
+        Atomic across replicas: the count and the take happen in one transaction under an advisory
+        lock, so two replicas cannot both see the last slot free. `fleet_cap` bounds the turns
+        admitted at once anywhere (0: unbounded); `actor_cap` bounds the admitted turns of `actor`
+        on other sessions (0: unbounded). A slot lives as long as the claim: it is freed by the
+        turn's release, or by the claim's lease lapsing when its pod dies. False when a limit is
+        reached or the claim is no longer this holder's.
+        """
+        params = {
+            "session": session_id,
+            "holder": holder,
+            "fleet": fleet_cap,
+            "actor": actor,
+            "actor_cap": actor_cap,
+        }
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_ADMISSION_LOCK)
+                await cur.execute(_TURN_ADMIT, params)
+                taken = await cur.fetchone() is not None
+            await conn.commit()
+        return taken
+
+    async def actor_turns(self, actor: str, besides: str) -> int:
+        """How many live turn claims `actor` holds on sessions other than `besides`, anywhere."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_ACTOR_TURNS, (actor, besides))
+                row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
         """Push this holder's claim out by another lease; False if it is no longer ours.

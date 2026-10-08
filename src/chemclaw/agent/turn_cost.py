@@ -8,14 +8,16 @@ history, and `core/metrics` caps label series because a label value is attacker-
 `api/budget.py` either: that is an in-process guard that may forget; a ledger must not.
 
 `record_turn_cost` never awaits: it is called from teardown on the disconnect path, where an `await`
-re-raises the cancellation and skips the rest. It schedules the write as a task, so a disconnected
-turn — often the runaway one — is still booked.
+re-raises the cancellation and skips the rest. It schedules the write as a tracked task and returns
+it, so a disconnected turn — often the runaway one — is still booked, and a turn that can wait
+(`core.bookkeeping.settle`) does so before it reports itself finished.
 """
 
 import asyncio
 import logging
 from typing import Protocol
 
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.turn_cost import TurnCost
@@ -30,10 +32,6 @@ __all__ = [
     "default_turn_cost_sink",
     "record_turn_cost",
 ]
-
-# Strong references to in-flight writes; the event loop keeps only weak ones, so a write could be
-# garbage-collected mid-flight.
-_PENDING: set[asyncio.Task[None]] = set()
 
 
 class TurnCostSink(Protocol):
@@ -65,18 +63,19 @@ def default_turn_cost_sink() -> TurnCostSink:
     return PostgresTurnCostSink()
 
 
-def record_turn_cost(cost: TurnCost) -> None:
+def record_turn_cost(cost: TurnCost) -> asyncio.Task[None] | None:
     """Book one turn's cost without awaiting — see the module docstring.
 
-    Synchronous by contract: both callers (`api/runner._book_turn_spend` and
-    `durable/template_activities._book_step_spend`) run in teardown, where an `await` would re-raise
-    a pending cancellation and skip what follows. The write runs as its own task held in `_PENDING`,
-    and a failure is logged at warning level and lost rather than failing a turn that already
-    answered.
+    Synchronous by contract: its callers (`api/runner._book_turn_spend` and
+    `durable/template_activities._book_step_spend`) may run in teardown, where an `await` would
+    re-raise a pending cancellation and skip what follows. The write runs as its own task; a failure
+    is logged at warning level and lost rather than failing a turn that already answered. Returns
+    the task for a caller that can wait, or `None` when there is nothing to wait for (no database,
+    or no event loop).
     """
     sink = default_turn_cost_sink()
     if isinstance(sink, NullTurnCostSink):
-        return
+        return None
 
     async def _write() -> None:
         try:
@@ -90,10 +89,7 @@ def record_turn_cost(cost: TurnCost) -> None:
                 cost.correlation_id,
             )
 
-    try:
-        task = asyncio.get_running_loop().create_task(_write())
-    except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
+    task = bookkeeping.schedule(_write())
+    if task is None:
         logger.debug("no event loop to record the cost of turn %s", cost.correlation_id)
-        return
-    _PENDING.add(task)
-    task.add_done_callback(_PENDING.discard)
+    return task

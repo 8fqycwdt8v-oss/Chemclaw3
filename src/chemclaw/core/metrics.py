@@ -380,6 +380,17 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_requests_rate_limited_total": (
         "Requests refused with 429 by the per-principal request budget."
     ),
+    # The shared bucket's database was unreachable and this replica limited on its own: the limit
+    # was per replica for that request.
+    "chemclaw_rate_limit_shared_unavailable_total": (
+        "Requests limited by this replica's own bucket because the shared one was unreachable."
+    ),
+    # A finished turn's bookkeeping that outlived `service_turn_bookkeeping_timeout_seconds`: the
+    # answer went out without it, and a kill in that window loses the write.
+    "chemclaw_bookkeeping_unsettled_total": (
+        "Bookkeeping writes (cost row, budget booking, spent approval) still running when the "
+        "turn stopped waiting for them."
+    ),
     "chemclaw_requests_too_large_total": (
         "Requests refused with 413 because the body exceeded service_max_request_bytes."
     ),

@@ -83,6 +83,7 @@ class composed — and the cross-section startup rules enforced — in its `__in
 | --- | --- |
 | `aio`, `executor` | async primitives that survive several event loops in one process; the one sized thread pool every `asyncio.to_thread` shares |
 | `asgi`, `worker_http` | shared pure-ASGI middleware; the scrape and probe surface for a process that is not the front door |
+| `bookkeeping` | the writes a turn owes the record once it has acted: tracked in one registry, awaited once and bounded, never fatal |
 | `bounded` | the one bounded LRU map for every cache keyed by an unbounded identity |
 | `call_identity`, `mcp_session` | the turn's identity as outbound headers for one origin; the one outbound MCP client session |
 | `temporal_client` | the one place a Temporal client is opened |

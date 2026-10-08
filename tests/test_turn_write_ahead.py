@@ -22,7 +22,6 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_core.runnables import RunnableConfig
 
-from chemclaw.agent import turn_cost
 from chemclaw.agent.checkpointer import checkpointer, close_checkpointer
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.session import TurnSession
@@ -43,7 +42,7 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.events import Event
 from chemclaw.api.routes import turns as turns_module
 from chemclaw.api.runner import run_turn
-from chemclaw.core import db
+from chemclaw.core import bookkeeping, db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
@@ -183,7 +182,7 @@ async def _transcript(session_id: str) -> list[BaseMessage]:
 
 async def _outcomes(correlation_id: str) -> list[str]:
     """Every `turn_costs` outcome booked for one turn, once the ledger's writes have landed."""
-    await asyncio.gather(*list(turn_cost._PENDING), return_exceptions=True)
+    await asyncio.gather(*bookkeeping.pending(), return_exceptions=True)
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         cursor = await conn.execute(
             "SELECT outcome FROM turn_costs WHERE correlation_id = %s", (correlation_id,)
@@ -279,6 +278,37 @@ async def test_an_answered_turn_reads_back_as_it_always_did_with_its_question_se
         ("user", "what is 2+2?", "done"),
         ("assistant", "4", None),
     ]
+
+
+async def test_a_durable_turn_leaves_the_sessions_process_state_empty(durable: None) -> None:
+    """Under Postgres a finished turn leaves `TurnSession.state` empty: no session data in-process.
+
+    The dict is the in-memory store's transcript and the disconnect rollback's snapshot target; the
+    durable provider ignores it. A replica that has never seen the session therefore loses nothing
+    by not having the dict (`tests/test_session_across_replicas.py` reads the thread from another
+    process).
+    """
+    session_id = await _session()
+    session = TurnSession(session_id=session_id)
+    token = set_current_correlation_id("wa-state-1")
+    try:
+        events = [
+            event
+            async for event in run_turn(
+                session,
+                "what is 2+2?",
+                actor=_ALICE.oid,
+                history=PostgresHistoryProvider(),
+                connectors=[],
+                graph_factory=_factory(_answering("4")),
+            )
+        ]
+    finally:
+        reset_current_correlation_id(token)
+        await close_checkpointer()
+
+    assert events[-1].type == "answer", events
+    assert session.state == {}, "a durable turn left state in the process that others cannot see"
 
 
 async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next_turn_runs(
