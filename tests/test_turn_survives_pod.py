@@ -22,21 +22,26 @@ from typing import Any
 import httpx
 import pytest
 
-from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.session_store import SessionTurnClaims
-from chemclaw.agent.state import turn_config
 from chemclaw.core.config import settings
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
-from tests.replica_turns import ANA, BEN, FINAL, Victim, attach
-from tests.replica_turns import answers as _answers
-from tests.replica_turns import costs as _costs
-from tests.replica_turns import executions as _executions
-from tests.replica_turns import marks as _marks
-from tests.replica_turns import open_gate as _open_gate
-from tests.replica_turns import question_status as _question_status
-from tests.replica_turns import rows as _rows
-from tests.replica_turns import types_of as _types
-from tests.replica_turns import wait_claim_lapsed as _wait_claim_lapsed
+from tests.replica_turns import (
+    ANA,
+    BEN,
+    FINAL,
+    Victim,
+    answers,
+    attach,
+    costs,
+    executions,
+    latest_thread,
+    marks,
+    open_gate,
+    question_status,
+    rows,
+    types_of,
+    wait_claim_lapsed,
+)
 from tests.replicas import Replica, replica, replica_env, replicas
 
 #: The claim lease of the replicas: a killed turn is dead for the others after this long.
@@ -90,16 +95,16 @@ def test_a_turn_killed_between_two_model_calls_is_resumed_once_by_its_sender(
     b, _ = survivors
     with replica(env) as a:
         dead = Victim(a, work, ANA, "resume1").dies_at("q steps=read,read park-model-2", "model-2")
-    assert _question_status(dead.session_id) == "running", "a resumable turn was marked dead"
+    assert question_status(dead.session_id) == "running", "a resumable turn was marked dead"
 
     status, headers, events = attach(b, dead.session_id, ANA)
-    kinds = _types(events)
+    kinds = types_of(events)
 
     assert status == 200
     assert headers["X-Chemclaw-Turn-Correlation-Id"] == dead.correlation
     assert kinds.count("answer") == 1 and kinds[-1] == "answer", kinds
     assert FINAL.format(2) in events[-1]["text"]
-    executed = _executions(work, "resume1")
+    executed = executions(work, "resume1")
     assert executed == {
         "model-1": 1,  # A, before the kill
         "model-2": 2,  # A, killed inside it; B, again
@@ -107,12 +112,12 @@ def test_a_turn_killed_between_two_model_calls_is_resumed_once_by_its_sender(
         "tool-probe_read-1": 1,  # A: recorded in the checkpoint, not repeated
         "tool-probe_read-2": 1,
     }
-    assert _answers(dead.session_id) == [FINAL.format(2)]
-    assert _question_status(dead.session_id) == "done"
+    assert answers(dead.session_id) == [FINAL.format(2)]
+    assert question_status(dead.session_id) == "done"
     # One row, for the whole turn: the call the dead attempt completed is in it (it was paid for
     # and never booked), the call it died inside is not (the provider reported nothing for it).
-    assert _costs(dead.correlation) == [("answered", 300, 30, "ana")]
-    assert _rows("SELECT turns FROM budget_usage WHERE actor = 'ana'") == [(1,)]
+    assert costs(dead.correlation) == [("answered", 300, 30, "ana")]
+    assert rows("SELECT turns FROM budget_usage WHERE actor = 'ana'") == [(1,)]
 
 
 @pytest.mark.parametrize("same_replica", [False, True], ids=["other-replica", "same-replica"])
@@ -137,8 +142,8 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     # Control: Ben is a participant but did not send the turn. Nothing is resumed, nothing marked.
     status, _, _ = attach(b, dead.session_id, BEN)
     assert status == 404
-    assert _executions(work, tag)["model-3"] == 0
-    assert _question_status(dead.session_id) == "running"
+    assert executions(work, tag)["model-3"] == 0
+    assert question_status(dead.session_id) == "running"
 
     results: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
     opened = [threading.Event(), threading.Event()]
@@ -149,21 +154,21 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     for thread in threads:
         thread.start()
     deadline = time.monotonic() + 60
-    while _executions(work, tag)["model-2"] < 2:  # the winner is in the step the dead one was in
+    while executions(work, tag)["model-2"] < 2:  # the winner is in the step the dead one was in
         assert time.monotonic() < deadline, "no attach resumed the turn"
         time.sleep(0.05)
     # Both attaches have been answered, so the one that lost the race is following the winner.
     assert all(event.wait(60) for event in opened), "an attach was never answered"
-    _open_gate(work, tag)
+    open_gate(work, tag)
     for thread in threads:
         thread.join(timeout=120)
 
     assert [status for status, _, _ in results] == [200, 200], results
-    assert all(_types(events)[-1:] == ["answer"] for _, _, events in results), results
-    assert _executions(work, tag)["model-3"] == 1, "the turn ran twice"
-    assert _executions(work, tag)["tool-probe_read-2"] == 1
-    assert _answers(dead.session_id) == [FINAL.format(2)]
-    assert len(_costs(dead.correlation)) == 1
+    assert all(types_of(events)[-1:] == ["answer"] for _, _, events in results), results
+    assert executions(work, tag)["model-3"] == 1, "the turn ran twice"
+    assert executions(work, tag)["tool-probe_read-2"] == 1
+    assert answers(dead.session_id) == [FINAL.format(2)]
+    assert len(costs(dead.correlation)) == 1
 
 
 def test_a_turn_killed_inside_a_state_changing_call_is_not_repeated_and_says_so(
@@ -179,10 +184,10 @@ def test_a_turn_killed_inside_a_state_changing_call_is_not_repeated_and_says_so(
     status, _, body = attach(b, dead.session_id, ANA)
 
     assert status == 410 and "turn_interrupted" in body[0]["body"]
-    assert _executions(work, "act1")["tool-probe_act-2"] == 1, "the act was repeated"
-    assert _executions(work, "act1")["model-3"] == 0
-    assert _question_status(dead.session_id) == "interrupted"
-    assert [row[0] for row in _costs(dead.correlation)] == ["interrupted"]
+    assert executions(work, "act1")["tool-probe_act-2"] == 1, "the act was repeated"
+    assert executions(work, "act1")["model-3"] == 0
+    assert question_status(dead.session_id) == "interrupted"
+    assert [row[0] for row in costs(dead.correlation)] == ["interrupted"]
 
 
 def test_a_turn_that_acted_earlier_is_not_resumed_even_between_steps(
@@ -196,9 +201,9 @@ def test_a_turn_that_acted_earlier_is_not_resumed_even_between_steps(
     status, _, _ = attach(b, dead.session_id, ANA)
 
     assert status == 410
-    assert _executions(work, "act2")["tool-probe_act-1"] == 1
-    assert _executions(work, "act2")["model-3"] == 0
-    assert _question_status(dead.session_id) == "interrupted"
+    assert executions(work, "act2")["tool-probe_act-1"] == 1
+    assert executions(work, "act2")["model-3"] == 0
+    assert question_status(dead.session_id) == "interrupted"
 
 
 def test_a_read_in_flight_at_the_kill_is_repeated_where_an_act_is_not(
@@ -213,9 +218,9 @@ def test_a_read_in_flight_at_the_kill_is_repeated_where_an_act_is_not(
 
     status, _, events = attach(b, dead.session_id, ANA)
 
-    assert status == 200 and _types(events)[-1] == "answer"
-    assert _executions(work, "read1")["tool-probe_read-1"] == 2
-    assert _answers(dead.session_id) == [FINAL.format(1)]
+    assert status == 200 and types_of(events)[-1] == "answer"
+    assert executions(work, "read1")["tool-probe_read-1"] == 2
+    assert answers(dead.session_id) == [FINAL.format(1)]
 
 
 @pytest.mark.parametrize("stopped", [True, False], ids=["stopped", "killed-control"])
@@ -240,11 +245,11 @@ def test_a_stopped_turn_is_never_resumed(
 
     if stopped:
         assert status == 404
-        assert _question_status(victim.session_id) == "stopped"
-        assert _executions(work, tag)["model-3"] == 0
+        assert question_status(victim.session_id) == "stopped"
+        assert executions(work, tag)["model-3"] == 0
     else:
         assert status == 200
-        assert _executions(work, tag)["model-3"] == 1
+        assert executions(work, tag)["model-3"] == 1
 
 
 def test_a_stop_sent_to_a_dead_turn_ends_it_and_it_is_not_resumed_afterwards(
@@ -263,15 +268,15 @@ def test_a_stop_sent_to_a_dead_turn_ends_it_and_it_is_not_resumed_afterwards(
         timeout=30,
     )
     assert unload.status_code == 404
-    assert _question_status(dead.session_id) == "running"
+    assert question_status(dead.session_id) == "running"
 
     stop = httpx.post(f"{b.base}/sessions/{dead.session_id}/turn/stop", headers=ANA, timeout=30)
     status, _, _ = attach(b, dead.session_id, ANA)
 
     assert stop.status_code == 200 and stop.json() == {"stopped": True}
     assert status == 410
-    assert _executions(work, "stopdead")["model-3"] == 0
-    assert _question_status(dead.session_id) == "interrupted"
+    assert executions(work, "stopdead")["model-3"] == 0
+    assert question_status(dead.session_id) == "interrupted"
 
 
 def test_a_new_message_supersedes_a_turn_that_could_have_been_resumed(
@@ -298,8 +303,8 @@ def test_a_new_message_supersedes_a_turn_that_could_have_been_resumed(
 
     assert events[-1]["type"] == "answer"
     assert status == 404, "nothing is running and the old turn must not come back"
-    assert _executions(work, "super1")["model-3"] == 0
-    assert [row[0] for row in _costs(dead.correlation)] == ["interrupted"]
+    assert executions(work, "super1")["model-3"] == 0
+    assert [row[0] for row in costs(dead.correlation)] == ["interrupted"]
 
 
 def test_a_client_attached_to_a_live_turn_on_another_replica_is_unaffected(
@@ -318,19 +323,19 @@ def test_a_client_attached_to_a_live_turn_on_another_replica_is_unaffected(
         )
         watcher.start()
         assert following.wait(60), "the follow was never answered"
-        _open_gate(work, "live1")
+        open_gate(work, "live1")
         watcher.join(timeout=60)
         assert live.thread is not None
         live.thread.join(timeout=60)
 
         status, _, events = followed[0]
-        assert status == 200 and _types(events)[-1] == "answer"
-        executed = _executions(work, "live1")
+        assert status == 200 and types_of(events)[-1] == "answer"
+        executed = executions(work, "live1")
         assert executed["model-2"] == 1 and executed["model-3"] == 1, executed
-        assert len(_costs(live.correlation)) == 1
+        assert len(costs(live.correlation)) == 1
         # Control: the turn is over; an attach finds nothing to follow and nothing to resume.
         assert attach(b, live.session_id, ANA)[0] == 404
-        assert _executions(work, "live1")["model-3"] == 1
+        assert executions(work, "live1")["model-3"] == 1
 
 
 def test_a_turn_that_dies_again_is_not_resumed_a_second_time(
@@ -345,19 +350,19 @@ def test_a_turn_that_dies_again_is_not_resumed_a_second_time(
         attached = threading.Thread(target=lambda: attach(b, dead.session_id, ANA), daemon=True)
         attached.start()
         deadline = time.monotonic() + 90
-        while _executions(work, "twice")["model-2"] < 2:
+        while executions(work, "twice")["model-2"] < 2:
             assert time.monotonic() < deadline, b.output()
             time.sleep(0.05)
         b.kill()
         attached.join(timeout=30)
-        _wait_claim_lapsed(dead.session_id)
+        wait_claim_lapsed(dead.session_id)
 
         status, _, _ = attach(c, dead.session_id, ANA)
 
         assert status == 410
-        assert _executions(work, "twice")["model-2"] == 2
-        assert _executions(work, "twice")["model-3"] == 0
-        assert _question_status(dead.session_id) == "interrupted"
+        assert executions(work, "twice")["model-2"] == 2
+        assert executions(work, "twice")["model-3"] == 0
+        assert question_status(dead.session_id) == "interrupted"
 
 
 def _stall(server: Replica) -> None:
@@ -388,7 +393,7 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         victim.start("q steps=read,act park-model-2")
         victim.reached("model-2")
         _stall(a)
-        _wait_claim_lapsed(victim.session_id)
+        wait_claim_lapsed(victim.session_id)
 
         resumed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
         attaching = threading.Thread(
@@ -396,10 +401,10 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         )
         attaching.start()
         deadline = time.monotonic() + 60
-        while _executions(work, "fence1")["model-2"] < 2:  # B is in the step A is parked in
+        while executions(work, "fence1")["model-2"] < 2:  # B is in the step A is parked in
             assert time.monotonic() < deadline, b.output()
             time.sleep(0.05)
-        _open_gate(work, "fence1")
+        open_gate(work, "fence1")
         _wake(a)
         attaching.join(timeout=120)
         assert victim.thread is not None
@@ -407,13 +412,13 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         _checkpoints_settled(victim.session_id)  # A has had every chance to write
 
         status, _, events = resumed[0]
-        assert status == 200 and _types(events)[-1] == "answer", events
-        executed = _executions(work, "fence1")
+        assert status == 200 and types_of(events)[-1] == "answer", events
+        executed = executions(work, "fence1")
         assert executed["tool-probe_act-2"] == 1, f"the state-changing call ran twice: {executed}"
         assert executed["model-3"] == 1, f"both processes drove the thread: {executed}"
-        assert _answers(victim.session_id) == [FINAL.format(2)]
-        assert _question_status(victim.session_id) == "done"
-        assert len(_costs(victim.correlation)) == 1
+        assert answers(victim.session_id) == [FINAL.format(2)]
+        assert question_status(victim.session_id) == "done"
+        assert len(costs(victim.correlation)) == 1
         assert httpx.get(f"{a.base}/healthz", timeout=10).status_code == 200
 
 
@@ -452,7 +457,7 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         victim.start("q steps=read,read park-model-2")
         victim.reached("model-2")
         _stall(a)
-        _wait_claim_lapsed(victim.session_id)
+        wait_claim_lapsed(victim.session_id)
 
         resumed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
         attaching = threading.Thread(
@@ -460,20 +465,20 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         )
         attaching.start()
         deadline = time.monotonic() + 60
-        while _executions(work, tag)["model-2"] < 2:  # B is in the step A is stopped in
+        while executions(work, tag)["model-2"] < 2:  # B is in the step A is stopped in
             assert time.monotonic() < deadline, b.output()
             time.sleep(0.05)
-        _open_gate(work, tag)  # B runs on to its answer while A stays stopped
+        open_gate(work, tag)  # B runs on to its answer while A stays stopped
         attaching.join(timeout=120)
         status, _, events = resumed[0]
-        assert status == 200 and _types(events)[-1] == "answer", events
-        finished = _latest_thread(victim.session_id)
+        assert status == 200 and types_of(events)[-1] == "answer", events
+        finished = latest_thread(victim.session_id)
         assert finished[-1] == ("ai", FINAL.format(2)), finished
         newest = _latest_checkpoint(victim.session_id)
 
         _wake(a)
         deadline = time.monotonic() + 60
-        while _marks(work, tag)["model-2-woke"] < 2:  # A's model call has returned
+        while marks(work, tag)["model-2-woke"] < 2:  # A's model call has returned
             assert time.monotonic() < deadline, a.output()
             time.sleep(0.05)
         assert victim.thread is not None
@@ -483,12 +488,12 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         if forks:
             assert _latest_checkpoint(victim.session_id) != newest, "the control did not fork"
             answered = 1 if case == "saver-unfenced-control" else 2
-            assert _executions(work, tag)["model-3"] == answered, _executions(work, tag)
+            assert executions(work, tag)["model-3"] == answered, executions(work, tag)
         else:
             assert _latest_checkpoint(victim.session_id) == newest, (
                 "the woken pod forked the thread"
             )
-            assert _latest_thread(victim.session_id) == finished
+            assert latest_thread(victim.session_id) == finished
 
 
 def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
@@ -501,16 +506,16 @@ def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
         victim.reached("model-2")
         _stall(a)
         time.sleep(1.0)
-        _open_gate(work, "fence0")
+        open_gate(work, "fence0")
         _wake(a)
         assert victim.thread is not None
         victim.thread.join(timeout=90)
 
-        executed = _executions(work, "fence0")
+        executed = executions(work, "fence0")
         assert executed["tool-probe_act-2"] == 1 and executed["model-3"] == 1, executed
-        assert _types(victim.events)[-1] == "answer"
-        assert _answers(victim.session_id) == [FINAL.format(2)]
-        assert [row[0] for row in _costs(victim.correlation)] == ["answered"]
+        assert types_of(victim.events)[-1] == "answer"
+        assert answers(victim.session_id) == [FINAL.format(2)]
+        assert [row[0] for row in costs(victim.correlation)] == ["answered"]
 
 
 @pytest.mark.parametrize("bounded", [True, False], ids=["bounded", "unbounded-control"])
@@ -538,7 +543,7 @@ def test_a_pod_stopped_inside_a_checkpoint_write_does_not_lock_its_session(
         while not sign.exists():  # A is stopped, inside the transaction, holding the row
             assert time.monotonic() < deadline, a.output()
             time.sleep(0.05)
-        _wait_claim_lapsed(victim.session_id)
+        wait_claim_lapsed(victim.session_id)
 
         started = time.monotonic()
         taken = asyncio.run(SessionTurnClaims().claim(victim.session_id, "taker:1", 60.0))
@@ -554,43 +559,21 @@ def test_a_pod_stopped_inside_a_checkpoint_write_does_not_lock_its_session(
         victim.thread.join(timeout=90)
 
         if bounded:
-            holder = _rows(
+            holder = rows(
                 "SELECT holder FROM session_turns WHERE session_id = %s", victim.session_id
             )
             assert holder == [("taker:1",)], "the stopped pod took its lapsed claim back"
-            assert _rows(
+            assert rows(
                 "SELECT count(*) FROM checkpoints WHERE thread_id = %s", victim.session_id
             ) == [(0,)], "the stopped pod's write was committed"
-            assert _costs(victim.correlation) == [], "the stopped pod booked a turn it lost"
-            assert "answer" not in _types(victim.events)
-
-
-def _latest_thread(session_id: str) -> list[tuple[str, str]]:
-    """The thread the next turn loads: the newest checkpoint's messages, as (type, text)."""
-
-    async def read() -> list[tuple[str, str]]:
-        from chemclaw.agent.checkpointer import checkpointer
-
-        try:
-            saver = await checkpointer()
-            assert saver is not None
-            found = await saver.aget_tuple(turn_config(session_id))  # type: ignore[arg-type]
-            assert found is not None
-            messages = found.checkpoint["channel_values"]["messages"]
-            return [
-                (m.type + ("+call" if getattr(m, "tool_calls", None) else ""), str(m.content))
-                for m in messages
-            ]
-        finally:
-            await close_checkpointer()
-
-    return asyncio.run(read())
+            assert costs(victim.correlation) == [], "the stopped pod booked a turn it lost"
+            assert "answer" not in types_of(victim.events)
 
 
 def _latest_checkpoint(session_id: str) -> str:
     """The id of the newest checkpoint of the thread — the one the next turn loads."""
     return str(
-        _rows(
+        rows(
             "SELECT checkpoint_id FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = '' "
             "ORDER BY checkpoint_id DESC LIMIT 1",
             session_id,
@@ -600,7 +583,7 @@ def _latest_checkpoint(session_id: str) -> str:
 
 def _thread_questions(session_id: str) -> list[str]:
     """The chemist's messages in the session's checkpointed thread, as the model will read them."""
-    return [text for kind, text in _latest_thread(session_id) if kind == "human"]
+    return [text for kind, text in latest_thread(session_id) if kind == "human"]
 
 
 def _checkpoints_settled(session_id: str, quiet: float = 1.0) -> None:
@@ -609,7 +592,7 @@ def _checkpoints_settled(session_id: str, quiet: float = 1.0) -> None:
     since = time.monotonic()
     deadline = since + 60
     while time.monotonic() < deadline:
-        now = _rows(
+        now = rows(
             "SELECT (SELECT count(*) FROM checkpoints WHERE thread_id = %s), "
             "(SELECT count(*) FROM checkpoint_writes WHERE thread_id = %s)",
             session_id,
@@ -663,11 +646,11 @@ def test_a_member_presenting_the_senders_correlation_id_does_not_overwrite_the_q
         ).json()["waiting"]:  # Ben's message is in the line behind Ana's running turn
             assert time.monotonic() < deadline, "Ben's message never joined the line"
             time.sleep(0.05)
-        _open_gate(work, "ow1")
+        open_gate(work, "ow1")
         assert ana.thread is not None
         ana.thread.join(timeout=60)
         sending.join(timeout=60)
 
-    assert _types(ben_events)[-1] == "answer", ben_events
+    assert types_of(ben_events)[-1] == "answer", ben_events
     asked = _thread_questions(ana.session_id)
     assert [text.split(" steps=")[0] for text in asked] == ["first", "second"], asked

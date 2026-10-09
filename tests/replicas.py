@@ -6,6 +6,7 @@ claim is about. The processes inherit the test's redirected DSN, so they share t
 """
 
 import contextlib
+import ctypes
 import os
 import signal
 import socket
@@ -20,6 +21,24 @@ from typing import Any
 import httpx
 
 from chemclaw.core.config import settings
+
+#: The marker the lane puts in the reason of a skip, so `tests/conftest.py` can count it.
+LANE_SKIP = "Multi-replica lane unavailable"
+
+#: How long a started process has to answer its readiness probe before the lane gives up on it.
+READY_SECONDS = 90.0
+
+#: `PR_SET_PDEATHSIG` from `<linux/prctl.h>`.
+_PR_SET_PDEATHSIG = 1
+
+
+def die_with_parent() -> None:
+    """Run in the child between fork and exec: SIGKILL it when the process that started it dies.
+
+    A test runner that is itself SIGKILLed runs no `finally`, and a replica or worker left behind
+    holds a port and a database connection for as long as nobody notices.
+    """
+    ctypes.CDLL(None).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
 class Replica:
@@ -95,13 +114,19 @@ def _spawn(
     else:
         command.append(str(port))
     with log.open("wb") as sink:
-        process = subprocess.Popen(command, env=env, stdout=sink, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            preexec_fn=die_with_parent,
+        )
     return Replica(process, port, log)
 
 
 def _await_ready(started: Replica, path: str = "/healthz") -> None:
     """Block until the process answers `path`, or fail with what it wrote."""
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + READY_SECONDS
     while True:
         if started.process.poll() is not None:
             raise RuntimeError(f"the replica exited at start:\n{started.output()}")

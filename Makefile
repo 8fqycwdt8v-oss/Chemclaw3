@@ -409,6 +409,9 @@ live-soak:  ## Repeat the storm for hours and fit what drifts; checkpointed, so 
 live-soak-report:  ## Fit every series in the soak record so far.
 	bash infra/live/soak.sh report
 
+# Under `make ci` the lane may skip, named and counted, where its prerequisites are absent; asked for
+# directly, or by CI's `replicas` job, it fails instead (infra/live/replicas.sh).
+live-replicas: export LIVE_REPLICAS_OPTIONAL := $(if $(filter ci,$(MAKECMDGOALS)),1,)
 live-replicas:  ## Three front doors + two background and two calc workers on one database: limits, resume, single-flight (no model key).
 	bash infra/live/replicas.sh $(ARGS)
 

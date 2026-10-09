@@ -6,6 +6,7 @@ Shared by `tests/test_turn_survives_pod.py` and the multi-replica lane
 read the transcript and cost rows from outside every replica.
 """
 
+import asyncio
 import json
 import threading
 import time
@@ -16,6 +17,8 @@ from typing import Any
 import httpx
 import psycopg
 
+from chemclaw.agent.checkpointer import close_checkpointer
+from chemclaw.agent.state import turn_config
 from chemclaw.core.config import settings
 from tests.replicas import Replica
 
@@ -87,6 +90,17 @@ class Victim:
             assert time.monotonic() < deadline, f"never reached {mark}:\n{self.server.output()}"
             time.sleep(0.05)
 
+    def checkpointed(self, tool_results: int, seconds: float = 30) -> None:
+        """Wait until the thread's newest checkpoint holds `tool_results` tool results.
+
+        A process killed before its last step reached the database loses that step; waiting on the
+        rows, not on a margin of time, is what makes the kill point the test names the one it gets.
+        """
+        deadline = time.monotonic() + seconds
+        while sum(kind == "tool" for kind, _ in latest_thread(self.session_id)) < tool_results:
+            assert time.monotonic() < deadline, f"{tool_results} tool results never checkpointed"
+            time.sleep(0.1)
+
     def kill(self, *, keep_parked: bool = False) -> None:
         """SIGKILL the process, wait until its claim has lapsed for everybody else, open the gate.
 
@@ -100,10 +114,16 @@ class Victim:
         if not keep_parked:
             open_gate(self.work, self.tag)
 
-    def dies_at(self, plan: str, mark: str, *, keep_parked: bool = False) -> "Victim":
-        """Run `plan` to `mark`, kill the process there, and return once the claim has lapsed."""
+    def dies_at(
+        self, plan: str, mark: str, *, keep_parked: bool = False, tool_results: int = 0
+    ) -> "Victim":
+        """Run `plan` to `mark`, kill the process there, and return once the claim has lapsed.
+
+        `tool_results` is how many tool results must be in the checkpoint before the kill.
+        """
         self.start(plan)
         self.reached(mark)
+        self.checkpointed(tool_results)
         self.kill(keep_parked=keep_parked)
         return self
 
@@ -172,3 +192,29 @@ def costs(correlation: str) -> list[tuple[Any, ...]]:
         "WHERE correlation_id = %s",
         correlation,
     )
+
+
+def latest_thread(session_id: str) -> list[tuple[str, str]]:
+    """The thread the next turn loads: the newest checkpoint's messages, as (type, text).
+
+    Empty while the session has no checkpoint.
+    """
+
+    async def read() -> list[tuple[str, str]]:
+        from chemclaw.agent.checkpointer import checkpointer
+
+        try:
+            saver = await checkpointer()
+            assert saver is not None
+            found = await saver.aget_tuple(turn_config(session_id))  # type: ignore[arg-type]
+            if found is None:
+                return []
+            messages = found.checkpoint["channel_values"]["messages"]
+            return [
+                (m.type + ("+call" if getattr(m, "tool_calls", None) else ""), str(m.content))
+                for m in messages
+            ]
+        finally:
+            await close_checkpointer()
+
+    return asyncio.run(read())

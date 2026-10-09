@@ -302,19 +302,27 @@ ask this one what drifts when it is not.
 
 **`make live-replicas` asks the question the storm cannot: does anything depend on there being one
 process?** It starts three front-door replicas, two background workers and two calc workers on one
-database and asserts that the per-person request budget, the fleet ceiling on concurrent turns and
-the per-person turn cap admit what is configured rather than that times three; that a replica
-SIGKILLed between two model calls has its turn resumed once, as its sender, from another replica,
-with one cost row (and not resumed after a state-changing call); and that eight identical calc jobs
-on two calc workers reach the physics server once. Each claim runs first on processes that keep the
-state per process (`CHEMCLAW_SESSION_STORE=memory`), where the count must come out multiplied, so a
-pass is not a lane that measured nothing. It needs only Postgres (`make up`, or any server at
-`CHEMCLAW_POSTGRES_DSN`): the lane creates and drops a database of its own, starts a private
-Temporal dev server, and its model is a function of the thread (`tests/replica_graph.py`), so there
-is no credential and no `make live-up`. `make live-replicas ARGS='-k resumes'` runs one claim. What
-it does not exercise: the front doors authenticate by a test header and bind no connectors, and the
-calc workers dial an in-process stand-in for the physics server, so Entra, the connector sweep and a
-front door's own tool path to `calc` are `make live-up`'s.
+database and asserts that the per-person request budget, the fleet ceiling on concurrent turns, the
+per-person turn cap and the per-person turn budget admit what is configured rather than that times
+three; that a replica SIGKILLed between two model calls has its turn resumed once, as its sender, by
+two simultaneous attaches on the other replicas, with one cost row; and that eight identical calc
+jobs on two calc workers reach the physics stand-in once, with the claim ledger's counters showing
+one winner and at least one waiter. Every limit and the calc claim also run first on processes that
+keep the state per process (`CHEMCLAW_SESSION_STORE=memory`), where the count must come out
+multiplied; the resume's control is the same kill after a state-changing call, which is not
+resumed. The background workers are started and checked for polling and nothing more: no job of
+theirs is asserted on (the exclusive-job lock is held by `tests/test_job_lock.py`).
+
+It needs only Postgres (`make up`, or any server at `CHEMCLAW_POSTGRES_DSN`): the lane creates and
+drops a database of its own, starts a private Temporal dev server, and its model is a function of
+the thread (`tests/replica_graph.py`), so there is no credential and no `make live-up`.
+`make live-replicas ARGS='-k resumes'` runs one claim. Asked for directly it fails when it cannot
+run; under `make ci` a missing psql, a Postgres that does not answer or a Temporal binary that
+cannot be fetched is a named skip that the test epilogue counts, because the gate must not be red
+for a prerequisite an offline runner never had, nor green over nothing. What it does not exercise:
+the front doors authenticate by a test header and bind no connectors, and the calc workers dial an
+in-process stand-in for the physics server, so Entra, the connector sweep and a front door's own
+tool path to `calc` are `make live-up`'s.
 
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
