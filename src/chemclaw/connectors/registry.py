@@ -645,6 +645,19 @@ def state_changing_tool_names() -> list[str]:
     return sorted(names)
 
 
+def read_only_tool_names() -> list[str]:
+    """Every enabled connector tool its manifest classifies `read_only`, sorted.
+
+    The positive half of `state_changing_tool_names`: a tool of a connector that is not enabled in
+    this process, or one a manifest does not classify, is in neither.
+    """
+    names: set[str] = set()
+    for manifest in enabled():
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.read_only)
+    return sorted(names)
+
+
 def knowledge_read_tool_names() -> list[str]:
     """Every enabled connector tool that consults the record, sorted.
 

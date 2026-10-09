@@ -14,7 +14,7 @@ import math
 import random
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from typing import Any, Literal
 
 import psycopg
@@ -25,7 +25,9 @@ from starlette.types import Receive, Scope, Send
 
 from chemclaw.agent.exhibit_notes import resolve_exhibit_refs
 from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
+from chemclaw.agent.session_store import owner_permits
 from chemclaw.agent.turn_remotes import Holding
+from chemclaw.agent.turn_resume import ResumePoint, log_refusal, resume_point
 from chemclaw.api.auth import (
     DEV_PRINCIPAL_OID,
     AuthError,
@@ -46,6 +48,7 @@ from chemclaw.api.runner import (
 )
 from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
+    _CLAIM_REFRESHES_PER_LEASE,
     FrontDoorState,
     LiveSession,
     SessionTurns,
@@ -53,6 +56,7 @@ from chemclaw.api.state import (
     _actor_turns_in_flight,
     _claim_turn_slot,
     _hold_turn_claim,
+    _owned_or_renewed,
     _release_turn_claim,
     _release_turn_slot,
     _start_turn_lease,
@@ -65,7 +69,8 @@ from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
-from chemclaw.exhibits.models import UnknownExhibit
+from chemclaw.core.turn_fence import Claim, TurnFence
+from chemclaw.exhibits.models import ExhibitRef, UnknownExhibit
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +203,39 @@ async def post_message(
     (`_refusal_at_the_head`) and runs as its sender. 409 for a full line or a sender already
     waiting; 429 at the process's waiter budget.
     """
+    return await _start_turn(
+        request,
+        session_id,
+        principal,
+        live,
+        message=body.message,
+        dry_run=body.dry_run,
+        exhibit_refs=body.exhibit_refs,
+    )
+
+
+class _ResumeDeclined(Exception):
+    """The turn this attach would have resumed is somebody else's to take, or yielded to a line."""
+
+
+async def _start_turn(
+    request: Request,
+    session_id: str,
+    principal: Principal,
+    live: LiveSession,
+    *,
+    message: str,
+    dry_run: bool,
+    exhibit_refs: Sequence[ExhibitRef],
+    resume: ResumePoint | None = None,
+) -> EventSourceResponse:
+    """Claim the session and run one turn on a detachable pump; `post_message` and a resume's body.
+
+    A resume (`resume` set, `message` its question) takes the dead turn's place under the same
+    claims, permits and limits as any turn, runs as `principal` (the route has checked that is the
+    turn's sender) and keeps the turn's correlation id. It never queues: when a line, another
+    claim or another replica's resume stands in the way it raises `_ResumeDeclined`.
+    """
     front = state(request)
     active_turns: dict[str, TurnLease] = front.active_turns
     claims: SessionTurns | None = front.turn_claims
@@ -208,7 +246,7 @@ async def post_message(
     # jittered `Retry-After` (without it the UI shows an exhausted budget). It sits above
     # `_claim_turn_slot`, so it cannot leak a slot, and is inert under the shared dev principal.
     # Messages waiting in other lines count.
-    if body.exhibit_refs and not settings.agent_exhibits_enabled:
+    if exhibit_refs and not settings.agent_exhibits_enabled:
         # Refused rather than dropped: with artefacts off the reference would reach nobody.
         raise HTTPException(
             status_code=422,
@@ -217,9 +255,9 @@ async def post_message(
                 "exhibit_refs"
             ),
         )
-    if body.exhibit_refs:
+    if exhibit_refs and resume is None:
         try:
-            await resolve_exhibit_refs(session_id, body.exhibit_refs)
+            await resolve_exhibit_refs(session_id, exhibit_refs)
         except UnknownExhibit as exc:
             raise HTTPException(status_code=422, detail=_invalid_exhibit_ref(str(exc))) from exc
     actor_cap = settings.service_max_concurrent_turns_per_actor
@@ -282,7 +320,7 @@ async def post_message(
 
     # The id the header, the audit trail and `turn_costs` are keyed on, read once here so every
     # `ErrorEvent` this module builds carries this request's correlation id.
-    correlation_id = get_current_correlation_id() or ""
+    correlation_id = resume.correlation_id if resume else get_current_correlation_id() or ""
 
     # Held out here because two endings release it: the turn's own `finally`, and the detach hook,
     # since a detached turn has no waiting client to be fair to. The flag makes release idempotent,
@@ -293,6 +331,34 @@ async def post_message(
     queued_announced = False
     fleet_slot = False
     admission = front.turn_admission
+
+    # Whether the turn got as far as running a step. A resume that is shed, refused by the budget
+    # or fails before that gives its claim back with its one resume (`_give_up_the_claim`).
+    ran = False
+
+    async def _give_up_the_claim(held: str) -> None:
+        """Release the durable claim; a resume that never ran also takes its mark back."""
+        if resume is not None and not ran:
+            history = front.history
+
+            async def _give_back() -> None:
+                try:
+                    await history.give_back_resume(session_id, resume.row_id, held)
+                except Exception:
+                    logger.warning(
+                        "could not give back session %s's resume; the claim expires on its own",
+                        session_id,
+                        exc_info=True,
+                    )
+
+            await asyncio.shield(_give_back())
+        elif claims is not None:
+            await _release_turn_claim(claims, session_id, held)
+
+    def _started() -> None:
+        """The turn has passed its point of no return: a resume past here is not given back."""
+        nonlocal ran
+        ran = True
 
     def _release_permit() -> None:
         """Give the process's admission permit back, exactly once, whoever gets here first."""
@@ -494,6 +560,7 @@ async def post_message(
         # durable claim, the line place and (unless detach already did) the permit, so the session
         # stays claimed exactly while work is in flight.
         heartbeat: asyncio.Task[None] | None = None
+        fence: TurnFence | None = None
         nonlocal permit, queued_announced
         # Counts the turn, not its error events: one turn can yield two errors, and the timeout
         # branch sits outside the loop. One increment in the `finally` keeps the failure ratio at
@@ -505,7 +572,21 @@ async def post_message(
             if slot is None:
                 return  # withdrawn while it waited; `_wait_in_line` said so
             if holder is not None and claims is not None:
-                heartbeat = asyncio.create_task(_hold_turn_claim(claims, session_id, lease, holder))
+                owns = getattr(claims, "owns", None)
+                pump = asyncio.current_task()
+                if owns is not None and pump is not None:
+                    # Cancelling the pump ends the turn through its ordinary teardown.
+                    margin = lease / _CLAIM_REFRESHES_PER_LEASE
+                    held_session, held_by = session_id, holder
+                    fence = TurnFence(
+                        Claim(held_session, held_by),
+                        lambda: _owned_or_renewed(claims, held_session, held_by, lease, margin),
+                        pump.cancel,
+                        quiet_seconds=margin,
+                    )
+                heartbeat = asyncio.create_task(
+                    _hold_turn_claim(claims, session_id, lease, holder, fence)
+                )
             # `locked()` is false exactly when `acquire()` will not suspend, and nothing can
             # interleave before the acquire, so an uncontended turn emits no `queued` event.
             if semaphore.locked():
@@ -546,20 +627,22 @@ async def post_message(
                 )
                 yield sse_frame(refused)
                 return
-            METRICS.increment("chemclaw_turns_started_total")
+            # A resumed turn was counted by the attempt that began it.
+            if resume is None:
+                METRICS.increment("chemclaw_turns_started_total")
             try:
                 # Covers the whole streamed run: a stall in `run_turn` surfaces as `TimeoutError`,
                 # one error event. The transport is bounded by `_TurnStream`'s `send_timeout`.
                 async with asyncio.timeout(settings.service_turn_timeout_seconds) as deadline:
                     async for event in run_turn(
                         current.session,
-                        body.message,
+                        message,
                         # The sender, always — for a message that waited, the principal its own
                         # request authenticated.
                         actor=runner.oid,
                         roles=runner.roles,
                         budget=front.budget,
-                        dry_run=body.dry_run,
+                        dry_run=dry_run,
                         # The profile picks both the graph and its connectors; selecting one without
                         # the other would advertise a narrowed toolset over the full connector set.
                         connectors=front.connector_factory(current.profile),
@@ -570,7 +653,10 @@ async def post_message(
                         # `abandoned`: inside `run_turn` a timeout is indistinguishable from a Stop,
                         # and the `except` below runs after the turn has booked itself.
                         deadline=deadline.when(),
-                        exhibit_refs=body.exhibit_refs,
+                        exhibit_refs=exhibit_refs,
+                        resume=resume,
+                        fence=fence,
+                        on_started=_started,
                     ):
                         if event.type == "error":
                             turn_failed = True
@@ -627,7 +713,7 @@ async def post_message(
                 if slot is not None:
                     _release_turn_slot(active_turns, session_id, slot)
                     if holder is not None and claims is not None:
-                        await _release_turn_claim(claims, session_id, holder)
+                        await _give_up_the_claim(holder)
                 # Whatever ended — a turn, or a place in line — the next message may now be up.
                 signal.notify()
 
@@ -637,8 +723,8 @@ async def post_message(
         # list. Here because the message is still a plain string; before the stream, so a failed
         # turn still names it; a no-op once a title exists. Inside this `try` because the store
         # round trip can raise or be cancelled, and the `finally` must still return the slot.
-        if front.session_owners is not None:
-            await front.session_owners.set_title_if_absent(session_id, session_title(body.message))
+        if front.session_owners is not None and resume is None:
+            await front.session_owners.set_title_if_absent(session_id, session_title(message))
         # Budget fast path: refuse with a clean 429 before taking a permit if the budget is already
         # exhausted. The binding check is inside the stream.
         try:
@@ -651,12 +737,22 @@ async def post_message(
         # shed as a 503 (fail closed, retryably). A turn on another replica sends this message into
         # the line below.
         if slot is not None and claims is not None:
-            if await claims.claim(session_id, claim_holder(slot), lease, actor=principal.oid):
+            if resume is not None:
+                taken = await front.history.claim_to_resume(
+                    session_id, resume.row_id, claim_holder(slot), lease, principal.oid or ""
+                )
+            else:
+                taken = await claims.claim(
+                    session_id, claim_holder(slot), lease, actor=principal.oid
+                )
+            if taken:
                 holder = claim_holder(slot)
             else:
                 _release_turn_slot(active_turns, session_id, slot)
                 slot = None
                 busy = "durable"
+        if slot is None and resume is not None:
+            raise _ResumeDeclined
         if slot is None:
             METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": busy or "queue"})
             # Refused only for a full line, a sender already waiting, or a process at its waiter
@@ -707,6 +803,9 @@ async def post_message(
             session_id=session_id,
             ping=settings.service_sse_ping_seconds,
             send_timeout=settings.service_sse_send_timeout_seconds,
+            # A resumed turn is followed like any running turn, which a page tells from another
+            # participant's by this header.
+            headers={TURN_CORRELATION_HEADER: correlation_id} if resume else None,
         )
         handed_off = True
         return response
@@ -719,7 +818,7 @@ async def post_message(
             if slot is not None:
                 _release_turn_slot(active_turns, session_id, slot)
             if holder is not None and claims is not None:
-                await _release_turn_claim(claims, session_id, holder)
+                await _give_up_the_claim(holder)
             if ticket is not None:
                 await _leave_line(queue, session_id, ticket)
             _left_line()
@@ -756,7 +855,9 @@ async def stop_turn(
 ) -> dict[str, bool]:
     """Stop the session's running turn — the one way to cancel work in flight.
 
-    A member stops only their own turn, the owner any. 404 when nothing is running. A turn held by
+    A member stops only their own turn, the owner any. 404 when nothing is running, except that a
+    Stop from the sender or the owner on a turn whose process died and that is waiting to be resumed
+    ends it for good (200 `{"stopped": true}`, the question settles `interrupted`). A turn held by
     another replica is authorized here and relayed to its holder (`_stop_elsewhere`), 503 if it does
     not answer in `service_turn_relay_lease_seconds`. `?reason=unload` defers: the turn stops only
     if neither its sender nor the requester reattaches within `service_turn_unload_grace_seconds`
@@ -829,6 +930,13 @@ async def _stop_elsewhere(
     """
     holding = await _held_elsewhere(front, session_id)
     relay = front.turn_relay
+    # An unload stop is a page being discarded, not a decision: the reload that follows is what
+    # resumes a dead turn.
+    if holding is None and reason != "unload":
+        if await _stop_dead_turn(front, session_id, principal, live):
+            return {"stopped": True}
+        # Nothing was there to end, or a resume took it first: look again before saying 404.
+        holding = await _held_elsewhere(front, session_id)
     if holding is None or relay is None:
         raise HTTPException(status_code=404, detail="no turn is running for this session")
     if holding.actor is None or holding.actor != principal.oid:
@@ -846,6 +954,36 @@ async def _stop_elsewhere(
         return {"stopped": False, "deferred": True}
     logger.info("session %s's turn on another replica was stopped by request", session_id)
     return {"stopped": True}
+
+
+async def _stop_dead_turn(
+    front: FrontDoorState, session_id: str, principal: Principal, live: LiveSession
+) -> bool:
+    """End the session's dead turn for good, if `principal` may stop it: its sender or the owner.
+
+    A Stop that finds no live turn but a dead one that could be resumed is the chemist declining the
+    resume: the turn is marked `interrupted` and is not offered again. Anyone else's Stop is a 404.
+    """
+    lapsed_turns = getattr(front.history, "lapsed_turns", None)
+    if lapsed_turns is None:
+        return False
+    try:
+        lapsed = await lapsed_turns(session_id)
+    except (ConnectionError, psycopg.Error):
+        logger.warning(
+            "could not read session %s's dead turns for a Stop", session_id, exc_info=True
+        )
+        return False
+    if not any(
+        turn.actor == principal.oid or owner_permits(live.owner, principal.oid) for turn in lapsed
+    ):
+        return False
+    # Truthful: a resume that committed first leaves nothing to mark, and the Stop then finds the
+    # turn running.
+    marked = await settle_interrupted_turns(
+        front.history, session_id, state=live.session.state, spare_resumable=False
+    )
+    return marked > 0
 
 
 async def session_queue(
@@ -915,18 +1053,47 @@ async def watch_turn(
     """Follow the session's running turn live — any participant, from this moment on.
 
     Each watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on
-    another replica is relayed by its holder (`_watch_elsewhere`). 404 when nothing is running; 410
-    `turn_interrupted` when the latest turn died with its process; 429 at
-    `service_turn_max_watchers` or the caller's stream cap, held until the socket closes.
-    `TURN_CORRELATION_HEADER` names the turn; the sender reattaching cancels a pending unload stop;
-    membership is re-read while watching.
+    another replica is relayed by its holder (`_watch_elsewhere`). A turn whose process died between
+    two steps, whose calls were all repeatable reads, is resumed from its checkpoint when its sender
+    attaches (`_resume_dead_turn`); the stream is then the resumed turn: it runs under the same
+    limits as a new turn (429 at the caller's turn cap or budget; it may open with a `queued` frame
+    and end on `at_capacity` or `budget_exhausted`, after which the same attach can try again) and
+    carries what happens from the moment of attaching, not the events the dead attempt had already
+    sent. 404 when nothing is running; 410 `turn_interrupted` when the latest turn died with its
+    process and cannot be resumed; 429 at `service_turn_max_watchers` or the caller's stream cap,
+    held until the socket closes. `TURN_CORRELATION_HEADER` names the turn; the sender reattaching
+    cancels a pending unload stop; membership is re-read while watching.
     """
+    return await _watch(request, session_id, principal, live, may_resume=True)
+
+
+async def _watch(
+    request: Request,
+    session_id: str,
+    principal: Principal,
+    live: LiveSession,
+    *,
+    may_resume: bool,
+) -> EventSourceResponse:
+    """`watch_turn`'s body; a second pass, after losing a resume, does not try to resume again."""
     front = state(request)
     turn = front.running_turns.get(session_id)
     if turn is None:
         holding = await _held_elsewhere(front, session_id)
         if holding is not None:
             return await _watch_elsewhere(request, session_id, principal, holding)
+        if may_resume:
+            try:
+                resumed = await _resume_dead_turn(request, session_id, principal, live)
+            except _ResumeDeclined:
+                # Another attach resumed it first: follow that one.
+                await _until_the_starting_turn_registers(front, session_id, declined=True)
+                return await _watch(request, session_id, principal, live, may_resume=False)
+            if resumed is not None:
+                return resumed
+            # Or one that resumed it a moment ago, so that its claim is already visible here.
+            if await _until_the_starting_turn_registers(front, session_id):
+                return await _watch(request, session_id, principal, live, may_resume=False)
         if await _interrupted(front.history, session_id, live.session.state):
             raise HTTPException(
                 status_code=410,
@@ -977,6 +1144,74 @@ async def watch_turn(
     )
 
 
+async def _until_the_starting_turn_registers(
+    front: FrontDoorState, session_id: str, *, declined: bool = False
+) -> bool:
+    """Wait, briefly, for a turn that holds this session's claim here to become watchable.
+
+    True when there was such a turn and it is now running here or visibly held elsewhere; False
+    when no turn is starting, so there is nothing to wait for. `declined` says a turn is starting
+    (this attach lost the race to it), including before its claim is visible.
+    """
+    relay = front.turn_relay
+    poll = settings.service_turn_relay_poll_seconds
+    deadline = time.monotonic() + settings.service_turn_relay_lease_seconds
+    while True:
+        if front.running_turns.get(session_id) is not None:
+            return True
+        holding = None if relay is None else await relay.holding(session_id)
+        if holding is None and not declined:
+            return False
+        if holding is not None and holding.holder not in _local_holders(front, session_id):
+            return True
+        if time.monotonic() >= deadline:
+            return True
+        # Woken the moment a turn here registers; a turn on another replica is looked for again
+        # after one relay poll.
+        await front.running_turns.wait_registered(session_id, poll)
+
+
+async def _resume_dead_turn(
+    request: Request, session_id: str, principal: Principal, live: LiveSession
+) -> EventSourceResponse | None:
+    """Continue the session's dead turn from its checkpoint, if `principal` sent it and it may be.
+
+    The turn runs as `principal`, who is its sender and holds a current credential: a turn is never
+    run on a stored identity, and a participant who did not send it cannot start it. A waiting
+    message is ahead of it and supersedes it. `None` when there is nothing to resume;
+    `_ResumeDeclined` when another replica or a line took the turn first.
+    """
+    front = state(request)
+    lapsed_turns = getattr(front.history, "lapsed_turns", None)
+    if lapsed_turns is None or await front.turn_queue.waiting(session_id):
+        return None
+    try:
+        lapsed = await lapsed_turns(session_id)
+    except (ConnectionError, psycopg.Error):
+        logger.warning(
+            "could not read session %s's dead turns to resume", session_id, exc_info=True
+        )
+        return None
+    for turn in reversed(lapsed):
+        if turn.actor is None or turn.actor != principal.oid:
+            continue
+        verdict = await resume_point(session_id, turn)
+        if not isinstance(verdict, ResumePoint):
+            log_refusal(verdict, session_id, turn)
+            continue
+        return await _start_turn(
+            request,
+            session_id,
+            principal,
+            live,
+            message=verdict.question,
+            dry_run=verdict.dry_run,
+            exhibit_refs=(),
+            resume=verdict,
+        )
+    return None
+
+
 async def _watch_elsewhere(
     request: Request, session_id: str, principal: Principal, holding: Holding
 ) -> EventSourceResponse:
@@ -998,7 +1233,19 @@ async def _watch_elsewhere(
             headers={"Retry-After": "1"},
         )
     try:
-        request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
+        deadline = time.monotonic() + settings.service_turn_relay_lease_seconds
+        while True:
+            request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
+            if answer.state not in (None, "gone"):
+                break
+            # The holder may have taken its claim a moment before it registers the turn it
+            # answers for; while the same claim stands, ask again before saying nothing runs.
+            current = await relay.holding(session_id)
+            if current is None or current.holder != holding.holder:
+                break
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(settings.service_turn_relay_poll_seconds)
     except BaseException:
         release_slot()
         raise

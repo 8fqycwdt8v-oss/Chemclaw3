@@ -19,14 +19,15 @@ the text the model then produced.
 
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
+from chemclaw.agent.tool_authz import FAILED_CALL_MARK
 from chemclaw.agent.tool_result_size import full_result_ref, stored_result_ref, was_cut
 from chemclaw.api.events import (
     Event,
@@ -102,6 +103,8 @@ async def graph_events(
     usage: Any,
     exchanges: list[Any] | None = None,
     carry: dict[str, Any] | None = None,
+    message_id: str | None = None,
+    continue_thread: bool = False,
 ) -> AsyncIterator[Event]:
     """Drive one turn on a compiled graph, yielding the turn's events in order.
 
@@ -122,6 +125,11 @@ async def graph_events(
             into this run's input and updated from it, so the caps span a mid-turn resume — the one
             case where a turn is two graph invocations and untracked channels would restart at 0.
             `None` for one invocation per turn.
+        message_id: The id the message has in the thread, minted by the server and kept with the
+            question's row, so a dead turn's start can be found again (`agent/turn_resume.py`);
+            `None` lets the graph mint one.
+        continue_thread: Continue a dead turn from its checkpoint instead of starting one:
+            `message` is ignored and the graph resumes the node the kill interrupted.
 
     Yields:
         `Event`s in the order and with the meanings `api/events.py` declares.
@@ -143,10 +151,11 @@ async def graph_events(
     # re-deriving it 400 times a turn would be the same answer 400 times.
     depth = root_depth(graph)
     failure: list[Exception] = []
+    graph_input: dict[str, Any] | None = (
+        None if continue_thread else {**turn_input(message, message_id), **(carry or {})}
+    )
     async for namespace, mode, payload in _until_failure(
-        graph.astream(
-            {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
-        ),
+        graph.astream(graph_input, config, stream_mode=_MODES, subgraphs=True),
         failure,
     ):
         if mode == "messages":
@@ -215,6 +224,36 @@ async def graph_events(
         yield exhibit
     if failure:
         raise failure[0]
+
+
+async def replayed_events(
+    tail: Sequence[BaseMessage],
+    *,
+    trace: ToolCallTrace,
+    exchanges: list[Any] | None,
+    usage: Any,
+) -> AsyncIterator[Event]:
+    """What a dead attempt had already done, as the events a live update of it would have raised.
+
+    The committed `tail` goes through the reader a live update goes through, so the trace, the
+    transcript's exchanges and the grounding evidence are what an uninterrupted turn would hold. A
+    call the thread marks failed or refused (`FAILED_CALL_MARK`, or an error status) stays out of
+    the evidence, as it does live. The model calls in it were paid for and never booked, so their
+    usage is added here, once. The caller counts these events and does not send them: a resumed
+    stream, like any attach, shows a turn from the moment of attaching.
+    """
+    failed = {
+        str(m.tool_call_id)
+        for m in tail
+        if isinstance(m, ToolMessage) and m.additional_kwargs.get(FAILED_CALL_MARK)
+    }
+    async for event in _from_update(
+        {"model": {"messages": list(tail)}}, "", trace, [], exchanges, failed
+    ):
+        yield event
+    for message in tail:
+        if isinstance(message, AIMessage):
+            usage.add(graph_usage_tokens(message))
 
 
 #: The two tools whose result names the artefact revision they wrote.

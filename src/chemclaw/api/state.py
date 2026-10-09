@@ -26,6 +26,7 @@ from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.turn_fence import TurnFence
 
 if TYPE_CHECKING:  # `api/turn_relay` reads this module's lease and holder identity at import
     from chemclaw.api.turn_relay import TurnRelay
@@ -319,29 +320,61 @@ def _release_turn_slot(active_turns: dict[str, TurnLease], session_id: str, toke
         del active_turns[session_id]
 
 
+async def _owned_or_renewed(
+    claims: Any, session_id: str, holder: str, lease_seconds: float, margin_seconds: float
+) -> bool | None:
+    """Whether this holder's claim is its own, renewing one that is live but short of `margin`.
+
+    A claim with less than its margin left is still this holder's: its refreshes are failing, which
+    says nothing about a takeover. One renewal is tried and the claim asked again. A renewal that
+    cannot be made raises (the caller retries, then `ClaimUnverifiable`); one that finds the claim
+    gone makes the answer `False`; `None` is what stays short after a renewal that matched.
+    """
+    owned: bool | None = await claims.owns(session_id, holder, margin_seconds)
+    if owned is None:
+        await claims.refresh(session_id, holder, lease_seconds)
+        owned = await claims.owns(session_id, holder, margin_seconds)
+    return owned
+
+
 async def _hold_turn_claim(
-    claims: SessionTurns, session_id: str, lease_seconds: float, holder: str
+    claims: SessionTurns,
+    session_id: str,
+    lease_seconds: float,
+    holder: str,
+    fence: TurnFence | None = None,
 ) -> None:
     """Keep this turn's claim alive for as long as the turn streams.
 
-    Cancelled by the stream's `finally`. A failed refresh is logged and counted, not fatal: killing
-    a turn over one UPDATE is worse than the race it guards against, and a guard that quietly stops
-    working must be visible.
+    Cancelled by the stream's `finally`. A failed refresh is logged and counted, not fatal until a
+    whole lease has passed without a successful one: then, like a refresh that shows another worker
+    took the session, it loses the `fence`, which ends the turn — a turn that cannot show it holds
+    its session must not go on beside whoever resumed it. A refresh is bounded to one interval, so
+    that loss comes at most a lease and two intervals after the last success (the lease is counted
+    from the refresh that succeeded, the database's expiry from the one before it). This timer ends
+    a turn that is doing nothing; an effect is stopped by the ownership check before it and a
+    checkpoint by the lock on the claim row, neither of which waits for the timer.
     """
     interval = lease_seconds / _CLAIM_REFRESHES_PER_LEASE
+    last_refreshed = time.monotonic()
     while True:
         await asyncio.sleep(interval)
         try:
-            if not await claims.refresh(session_id, holder, lease_seconds):
-                # The claim lapsed and another worker took the session (the UPDATE matched no row).
-                # Stop refreshing, since no later refresh can succeed; the turn itself continues.
+            if not await asyncio.wait_for(
+                claims.refresh(session_id, holder, lease_seconds), timeout=interval
+            ):
+                # The claim lapsed, or another worker took the session (the UPDATE matched no
+                # row). No later refresh can succeed.
                 METRICS.increment("chemclaw_turn_claims_lost_total")
                 logger.warning(
-                    "the turn claim for session %s was taken over while the turn was running; "
-                    "another worker may already have started a turn on this session",
+                    "the turn claim for session %s lapsed or was taken over while the turn was "
+                    "running; the turn is ended",
                     session_id,
                 )
+                if fence is not None:
+                    fence.lose()
                 return
+            last_refreshed = time.monotonic()
         except Exception:
             # Broad: this task is only ever cancelled, never awaited, so an unnamed exception (e.g.
             # `psycopg.Error`) would kill the heartbeat silently and surface as an
@@ -354,6 +387,9 @@ async def _hold_turn_claim(
                 lease_seconds,
                 exc_info=True,
             )
+            if fence is not None and time.monotonic() - last_refreshed >= lease_seconds:
+                fence.lose()
+                return
 
 
 async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str) -> None:

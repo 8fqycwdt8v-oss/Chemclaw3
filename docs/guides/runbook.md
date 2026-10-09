@@ -1264,6 +1264,23 @@ What *does* decide it on OpenShift is a cluster-wide switch that is off by defau
 check `networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the
 connector port and the worker probe port.
 
+**A pod that stopped mid-turn (a node drain, a frozen container, a blocked event loop).** Its turn is
+resumed by its sender's next attach if it only read (`D-2026-10-09-a-turn-whose-pod-died-resumes-until-it-has-acted`),
+and the pod is fenced if it wakes after that: `chemclaw_turn_claims_lost_total` counts turns ended
+because their claim lapsed or was taken. Three timings, all derived from
+`CHEMCLAW_SERVICE_TURN_CLAIM_LEASE_SECONDS` (no setting of their own): a checkpoint write under a
+claim is cut off by the database after a third of the lease (`idle_in_transaction_session_timeout`,
+`statement_timeout`, `lock_timeout`, all set inside the write's own transaction, so a pooler in
+transaction mode is unaffected); a takeover waits for such a write at most half a lease and then
+answers "held", so an attach during that window is told the turn is running and succeeds on the
+next; and an effect is refused when the claim has less than a third of the lease left, which a
+holder refreshing every third never has. A fenced write costs a transaction instead of a pipeline:
+on loopback, 500 write pairs on one session took p50 4.3 ms unfenced and 5.1 ms fenced, and eight
+sessions at once 30.6 ms and 42.5 ms (about +30 to 40 % wall), writes still serialising under the
+saver's one lock. If a deployment sees `canceling statement due to lock timeout` or
+`terminating connection due to idle-in-transaction timeout` from the checkpointer, a write outlived
+a third of the lease: look at the database's latency before raising the lease.
+
 ## (x-a) Run more than one background worker
 
 `workers.background.replicas` ships at 2 with a `minAvailable: 1` PodDisruptionBudget, so a node
@@ -2454,6 +2471,8 @@ nothing", not "the database matches this image".
 | 120 | uploads go back to the pod's memory: a file uploaded before the rollback **cannot be read** by the restored image, and one uploaded during it is visible only on the replica that took it (the affinity gap 120 closed). And since uploads have no foreign key to `session_owners`, the restored image **deletes a session, erases a leaver and forgets an empty session without their uploads** | **no — this one is silent.** Ask chemists to re-attach files they need. After rolling forward, run `DELETE FROM session_attachments a WHERE NOT EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = a.session_id)` on the session database, then re-run every erasure requested during the rollback window (`(xv)`, *Offboard: erase their data*) so a leaver's uploads to other people's sessions go too |
 
 119 needs no row: it adds a nullable column the restored image never names, and a person's revision written during the window records no introduced figures, which the newer image derives from the revision and its parent exactly as it did before the column existed.
+
+126 needs no row either: it adds two nullable columns (127 a third) the restored image never names, and a turn that image starts records no `question_id`, so a turn that died under it is never resumed after the roll forward — it ends `interrupted` as before.
 
 058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 

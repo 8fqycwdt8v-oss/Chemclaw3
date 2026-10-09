@@ -9,6 +9,9 @@ test header (`x-test-user`) put through the real rate-limit step; the model is a
 - `boom …` fails mid-reply, the way a model call that raises does;
 - anything else answers at once, reporting `REPLICA_TOKENS` tokens of usage.
 
+`REPLICA_GRAPH=real` swaps the scripted turn for the real compiled agent graph over the model and
+tools of `tests/replica_graph.py`: a turn then has a Postgres checkpoint and the middleware chain.
+
 `REPLICA_WRITE_DELAY` seconds are added before every cost-ledger and budget write, which makes the
 window between "the client has the answer" and "the bookkeeping has landed" wide enough to hit
 deterministically.
@@ -16,6 +19,7 @@ deterministically.
 
 import asyncio
 import os
+import signal
 import sys
 import uuid
 from collections.abc import AsyncIterator
@@ -77,12 +81,72 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
     return []
 
 
+def _apply_fence_controls() -> None:
+    """Switch off, one at a time or together, the parts of the fence a test needs a control for.
+
+    - `REPLICA_NO_SAVER_FENCE`: the checkpointer's write no longer asks for the claim row.
+    - `REPLICA_NO_HEARTBEAT`: the turn never refreshes its claim, so nothing cancels it on a timer.
+    - `REPLICA_NO_FENCE`: no part of the fence asks anything, the two above included.
+    - `REPLICA_NO_WRITE_BOUND`: a write may hold the claim row for ten minutes.
+    - `REPLICA_STALL_IN_WRITE=<file>`: the first fenced write stops its own process (SIGSTOP)
+      inside its transaction, once the claim row is held, and leaves the file as the sign.
+    """
+    from chemclaw.agent import checkpointer as checkpointer_module
+    from chemclaw.api.routes import turns
+    from chemclaw.core import turn_fence
+
+    permissive = "SELECT 1 WHERE (%(session)s::text || %(holder)s::text) IS NOT NULL"
+    if os.environ.get("REPLICA_NO_SAVER_FENCE") or os.environ.get("REPLICA_NO_FENCE"):
+        checkpointer_module._HOLD_CLAIM = permissive
+    if os.environ.get("REPLICA_NO_HEARTBEAT") or os.environ.get("REPLICA_NO_FENCE"):
+
+        async def _never_beats(*_args: Any, **_kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        vars(turns)["_hold_turn_claim"] = _never_beats
+    if os.environ.get("REPLICA_NO_FENCE"):
+
+        async def _always_held(self: Any) -> bool:
+            return True
+
+        turn_fence.TurnFence.hold = _always_held  # type: ignore[method-assign]
+        turn_fence.TurnFence.lose = lambda self: None  # type: ignore[method-assign]
+    if os.environ.get("REPLICA_NO_WRITE_BOUND"):
+        vars(checkpointer_module)["fenced_write_bound"] = lambda lease: 600.0
+    if sign := os.environ.get("REPLICA_STALL_IN_WRITE"):
+        opened: Any = checkpointer_module._FencedWrite._open
+
+        def _first_to_stall() -> bool:
+            if Path(sign).exists():
+                return False
+            Path(sign).write_text(str(os.getpid()))
+            return True
+
+        async def _stall_once(self: Any) -> Any:
+            first = self._cursor is None
+            cursor = await opened(self)
+            if first and _first_to_stall():
+                os.kill(os.getpid(), signal.SIGSTOP)
+            return cursor
+
+        checkpointer_module._FencedWrite._open = _stall_once  # type: ignore[method-assign]
+
+
 def main() -> None:
     """Serve one replica on the port given as the first argument."""
     delay = float(os.environ.get("REPLICA_WRITE_DELAY", "0"))
     if delay:
         _delay_writes(delay)
-    app = create_app(graph_factory=_Replica().graph_factory, connector_factory=_no_connectors)
+    if os.environ.get("REPLICA_GRAPH") == "real":
+        from tests import replica_graph
+
+        replica_graph.classify_probe_tools()
+        _apply_fence_controls()
+
+        factory: Any = replica_graph.graph_factory
+    else:
+        factory = _Replica().graph_factory
+    app = create_app(graph_factory=factory, connector_factory=_no_connectors)
     app.dependency_overrides[require_principal] = _as_header_user
     uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")
 

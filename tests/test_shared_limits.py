@@ -306,11 +306,12 @@ async def test_a_slot_is_freed_by_release_and_by_a_lapsed_lease() -> None:
     await asyncio.gather(*(claims.release(s, f"h-{s}") for s in (third, fourth)))
 
 
-async def test_a_lease_that_lapsed_comes_back_without_its_slot() -> None:
-    """A holder whose refresh lands after its lease lapsed keeps the session but not the slot.
+async def test_a_lease_that_lapsed_is_not_refreshed_and_does_not_take_the_slot_back() -> None:
+    """A holder whose refresh lands after its lease lapsed gets neither the session nor the slot.
 
-    While the lease was lapsed the slot was free and another turn took it; if the late refresh
-    re-asserted `admitted`, the count would pass the ceiling and stay there until the turn ended.
+    While the lease was lapsed the slot was free and another turn took it; a late refresh that
+    re-asserted `admitted` would pass the ceiling, and one that re-extended the lease would take
+    the session from whoever is about to resume it. It is refused, and the holder's turn ends.
     """
     from chemclaw.agent.session_store import SessionTurnClaims
 
@@ -326,8 +327,7 @@ async def test_a_lease_that_lapsed_comes_back_without_its_slot() -> None:
 
     await _expire(slow)  # the database was unreachable for longer than a lease
     assert await admit(other)
-    assert await claims.refresh(slow, f"h-{slow}", 60.0), "the session must stay the holder's"
-    assert await _admitted(slow) is False
+    assert not await claims.refresh(slow, f"h-{slow}", 60.0), "a lapsed lease was extended"
     assert await _admitted(other) is True
     (third,) = await _claimed(1)
     assert not await admit(third), "the ceiling of one was passed"

@@ -128,7 +128,8 @@ async def memory_store() -> AsyncPostgresStore:
         return _store
     # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
     # config, and a module-scope import would put this module in that cycle for one call.
-    from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock
+    from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock, _setup_once
+    from chemclaw.agent.session_store import _session_dsn
 
     # Awaited outside the lock, and it must stay outside: `_checkpoint_pool` takes the same lock,
     # and `asyncio.Lock` is not reentrant. Holding it across that call deadlocks every cold start.
@@ -136,7 +137,9 @@ async def memory_store() -> AsyncPostgresStore:
     async with _initialization_lock():
         if _store is None:
             store = AsyncPostgresStore(pool)
-            await store.setup()
+            # Under the checkpointer's cross-pod lock: two replicas' first turns on a fresh
+            # database collide on `store_migrations_pkey` otherwise.
+            await _setup_once(store, _session_dsn())
             _store = store
             # No table count: `STORE_TABLES` names both tables the store may create, and this build
             # creates only `store`.

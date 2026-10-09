@@ -35,7 +35,7 @@ import functools
 import logging
 import time
 from collections.abc import AsyncIterator, Iterable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
@@ -51,17 +51,24 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg import AsyncConnection
-from psycopg.rows import DictRow, tuple_row
+from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg_pool import AsyncConnectionPool
 
-from chemclaw.agent.session_store import _session_dsn
+from chemclaw.agent.session_store import (
+    _session_dsn,
+    fenced_write_bound,
+    milliseconds,
+)
 from chemclaw.agent.state import ChemclawState
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.db import register_pool, unregister_pool
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.turn_fence import TurnFence, TurnFenceLost, current_turn_fence
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +550,81 @@ def _refuse_if_values_are_missing(stored: CheckpointTuple) -> None:
     )
 
 
+# A fenced turn's write takes a share lock on the turn's claim row before it writes, in the
+# transaction that writes. A takeover's claim (`INSERT … ON CONFLICT DO UPDATE` on that row) waits
+# for the lock, so no other replica can have taken the thread between the check and the commit; and
+# a claim that is gone or lapsed finds no row, so a process that woke after its turn was resumed
+# writes nothing.
+#
+# The same statement bounds the transaction, because a writer that stalls inside it (a stopped
+# process, a dead node) would hold the row until TCP noticed: the database cuts it off after
+# `fenced_write_bound`, which releases the row and rolls the write back, so a takeover waits for
+# that and not for a TCP timeout. `set_config` is volatile, so the join evaluates it before the row
+# is locked and the lock's own wait is bounded too.
+_HOLD_CLAIM = (
+    "SELECT 1 FROM session_turns t, (SELECT "
+    "set_config('idle_in_transaction_session_timeout', %(bound)s, true), "
+    "set_config('statement_timeout', %(bound)s, true), "
+    "set_config('lock_timeout', %(bound)s, true)) AS bounded "
+    "WHERE t.session_id = %(session)s AND t.holder = %(holder)s AND t.expires_at > now() "
+    "FOR SHARE OF t"
+)
+
+
+class _FencedWrite:
+    """The cursor of a checkpoint write made under a claim.
+
+    Its transaction opens at the first statement, not on entry: upstream serialises the values
+    after entering and before executing, and that work stays outside the lock on the claim row.
+    From the first statement the process-wide saver lock, a pooled connection and the share lock on
+    the claim row are held until the commit, in one pipeline: the claim is asked, and the writes
+    sent, without a round trip each.
+    """
+
+    def __init__(
+        self, saver: "SchemaStampedSaver", fence: TurnFence, stack: AsyncExitStack, started: float
+    ) -> None:
+        """A write by `saver` for `fence`'s turn, whose resources `stack` releases."""
+        self._saver = saver
+        self._fence = fence
+        self._stack = stack
+        self._started = started
+        self._cursor: Any = None
+
+    async def _open(self) -> Any:
+        """Open the transaction, hold the claim row, and return the cursor; once."""
+        if self._cursor is not None:
+            return self._cursor
+        fence = self._fence
+        pool = cast(AsyncConnectionPool[AsyncConnection[DictRow]], self._saver.conn)
+        await self._stack.enter_async_context(self._saver.lock)
+        conn = await self._stack.enter_async_context(pool.connection())
+        await self._stack.enter_async_context(conn.transaction())
+        bound = milliseconds(fenced_write_bound(settings.service_turn_claim_lease_seconds))
+        held = await conn.execute(
+            _HOLD_CLAIM,
+            {"bound": bound, "session": fence.claim.session_id, "holder": fence.claim.holder},
+        )
+        if await held.fetchone() is None:
+            fence.lose()
+            raise TurnFenceLost
+        METRICS.observe(
+            "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - self._started
+        )
+        self._cursor = await self._stack.enter_async_context(
+            conn.cursor(binary=True, row_factory=dict_row)
+        )
+        return self._cursor
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        """Upstream's `cursor.execute`, inside the fenced transaction."""
+        return await (await self._open()).execute(*args, **kwargs)
+
+    async def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        """Upstream's `cursor.executemany`, inside the fenced transaction."""
+        return await (await self._open()).executemany(*args, **kwargs)
+
+
 class SchemaStampedSaver(AsyncPostgresSaver):
     """`AsyncPostgresSaver` that records the channels it writes and refuses a thread missing one.
 
@@ -550,6 +632,16 @@ class SchemaStampedSaver(AsyncPostgresSaver):
     `alist` renders history and is unguarded. Outage translation covers all four statements, and
     `_cursor` counts the wait on the saver's lock.
     """
+
+    def __init__(self, conn: Any, *args: Any, **kwargs: Any) -> None:
+        """Wrap `conn`, which must be a pool: a fenced write opens its own transaction on one."""
+        if not isinstance(conn, AsyncConnectionPool):
+            raise ChemclawError(
+                f"the checkpointer wants an AsyncConnectionPool, got {type(conn).__name__}: a "
+                "write made under a session claim runs in a transaction of its own, which a single "
+                "connection shared with other statements cannot give it"
+            )
+        super().__init__(conn, *args, **kwargs)
 
     @asynccontextmanager
     async def _cursor(self, *, pipeline: bool = False) -> AsyncIterator[Any]:
@@ -566,14 +658,22 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         global _statements_waiting
         started = time.perf_counter()
         _statements_waiting += 1
+        fence = current_turn_fence() if pipeline else None
         try:
-            async with super()._cursor(pipeline=pipeline) as cur:
-                # Sampled here, not in a `finally`, so it measures the wait alone, not the
-                # statement.
-                METRICS.observe(
-                    "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
-                )
-                yield cur
+            if fence is None:
+                async with super()._cursor(pipeline=pipeline) as cur:
+                    # Sampled here, not in a `finally`, so it measures the wait alone, not the
+                    # statement.
+                    METRICS.observe(
+                        "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
+                    )
+                    yield cur
+                return
+            # A write by a turn that holds a claim: upstream's own pipeline, but inside a
+            # transaction that first holds the claim row (`_HOLD_CLAIM`). `pipeline=True` is how
+            # upstream marks a write; reads never reach here.
+            async with AsyncExitStack() as stack:
+                yield _FencedWrite(self, fence, stack, started)
         finally:
             _statements_waiting -= 1
 
@@ -781,8 +881,8 @@ _SETUP_LOCK_POLL_SECONDS = 0.1
 _SETUP_LOCK_POLLS = 100
 
 
-async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
-    """Migrate the checkpoint tables under an advisory lock, so two pods cannot race each other.
+async def _setup_once(saver: AsyncPostgresSaver | AsyncPostgresStore, dsn: str) -> None:
+    """Migrate the checkpoint or store tables under an advisory lock, so two pods cannot race.
 
     `setup()` is not race-safe across processes (concurrent runs collide on
     `checkpoint_migrations_pkey`), and a retry alone collides again while the winner is mid-run. The
@@ -792,7 +892,8 @@ async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
     runs `setup()` anyway after the timeout rather than run without a checkpointer.
 
     Args:
-        saver: The saver whose `setup()` to run.
+        saver: The saver (or the memory store, whose `setup()` races the same way on
+            `store_migrations_pkey`) whose `setup()` to run.
         dsn: The database to take the advisory lock on — the saver's own.
 
     Raises:

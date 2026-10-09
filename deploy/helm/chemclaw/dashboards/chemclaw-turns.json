@@ -603,6 +603,16 @@
           "expr": "sum(rate(chemclaw_turn_claims_lost_total[5m]))",
           "legendFormat": "claim lost",
           "refId": "I"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_resumed_total[5m]))",
+          "legendFormat": "dead turn resumed from its checkpoint",
+          "refId": "N"
+        },
+        {
+          "expr": "sum by (reason) (rate(chemclaw_turn_resume_refused_total[5m]))",
+          "legendFormat": "dead turn left interrupted: {{reason}}",
+          "refId": "O"
         }
       ]
     },

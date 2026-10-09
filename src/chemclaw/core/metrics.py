@@ -635,6 +635,16 @@ _COUNTERS: dict[str, str] = {
         "`turn_costs.completed` collapsed into a boolean — and `interrupted`, a turn whose own "
         "process died mid-turn, counted by whichever process noticed it."
     ),
+    "chemclaw_turns_resumed_total": (
+        "Turns whose pod died mid-turn and that their sender's reattach continued from the last "
+        "checkpoint. Each is also counted once as started by the attempt that died."
+    ),
+    "chemclaw_turn_resume_refused_total": (
+        "Dead turns that ended `interrupted` instead of being resumed, by reason, counted once "
+        "when the turn is marked — `acted` is a turn with a call that is not on the repeatable "
+        "list (a write, an unknown tool, a helper), the rest are a thread or checkpoint that does "
+        "not support continuing."
+    ),
     # --- the durable tier ----------------------------------------------------------------------
     # Completions by outcome, the counterpart to `chemclaw_jobs_started_total`, so a connector whose
     # every job fails is distinguishable from an idle one.
@@ -983,6 +993,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),
     "chemclaw_turns_finished_total": ("outcome",),
+    # A closed set fixed in source: `agent/turn_resume.Refusal`.
+    "chemclaw_turn_resume_refused_total": ("reason",),
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
     # A bundle name from the connector registry, matching the `chemclaw_connector_unhealthy` gauge's

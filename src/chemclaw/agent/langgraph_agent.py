@@ -93,9 +93,11 @@ from chemclaw.agent.subagents import (
 )
 from chemclaw.agent.text_overlay import overlaid
 from chemclaw.agent.tool_authz import (
+    HoldClaimBeforeModel,
     announce_tool_failures,
     enforce_tool_authz,
     refuse_undeclared_writes,
+    refuse_when_claim_lost,
     refuse_writes_on_dry_run,
     surface_authorization_denials,
     surface_domain_errors,
@@ -748,7 +750,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """
     # `AnswerAtTheCap` sits with the hook whose mark it reads: `enforce_loop_cap` authorises one
     # tool-less call per graph past the cap, and this is what makes that call an answer.
-    caps = [enforce_loop_cap, enforce_spend_cap, AnswerAtTheCap(), MeterTurnSpend()]
+    caps = [
+        HoldClaimBeforeModel(),
+        enforce_loop_cap,
+        enforce_spend_cap,
+        AnswerAtTheCap(),
+        MeterTurnSpend(),
+    ]
     if not harness_enabled_for(profile):
         return caps
     return [ScopedTodoListMiddleware(), *caps]
@@ -992,6 +1000,8 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # and hash for launchers to stamp onto jobs. Attached whenever the harness runs, in any
         # autonomy mode.
         *([stamp_plan_link] if harness_enabled_for(profile) else []),
+        # Innermost of all: the ownership check sits as close to the effect as the chain allows.
+        refuse_when_claim_lost,
     ]
 
 

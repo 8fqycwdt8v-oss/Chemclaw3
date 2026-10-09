@@ -211,6 +211,21 @@ async def _expire_claim(session_id: str) -> None:
         await conn.commit()
 
 
+async def _resumed_already(session_id: str) -> None:
+    """Mark the session's question as taken over once before: it may not be resumed again.
+
+    A turn that dies a first time between steps is resumable (`tests/test_turn_survives_pod.py`),
+    so the tests here that read a dead turn as ended put it where the second death leaves it.
+    """
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        await conn.execute(
+            "UPDATE session_messages SET resumed_at = now() - interval '1 minute' "
+            "WHERE session_id = %s AND turn_status = 'running'",
+            (session_id,),
+        )
+        await conn.commit()
+
+
 async def _a_turn_whose_process_dies(session_id: str, question: str, correlation_id: str) -> None:
     """Start a real turn under a claim, let it reach the model, then kill it with no teardown."""
     assert await SessionTurnClaims().claim(session_id, "pod-killed:turn-1", 60)
@@ -318,7 +333,8 @@ async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next
 
     While the lease runs nothing may call it interrupted, since that looks like a slow turn on
     another replica. Once it lapses the reattach answers 410 `turn_interrupted`, the question is
-    marked `interrupted`, the outcome is booked exactly once, and the two records agree.
+    marked `interrupted`, the outcome is booked exactly once, and the two records agree. The turn is
+    one that was resumed once already (`_resumed_already`), so it is past resuming.
     """
     # The reattach inside the lease asks the claim's holder for a view
     # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`); a short relay
@@ -339,6 +355,7 @@ async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next
             assert [row["turn_status"] for row in listed] == ["running"], listed
 
             await _expire_claim(session_id)
+            await _resumed_already(session_id)
 
             reattach = await client.get(f"/sessions/{session_id}/turn/stream")
             assert reattach.status_code == 410, reattach.text

@@ -294,6 +294,37 @@ def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
     return name in side_effecting_tools() or writes_durable_memory(name, arguments)
 
 
+#: Tools `READ_ONLY_TOOLS` lets run without an approved plan that are still not safe to run again
+#: after a cut-off. The artefact writers write rows, and a second run would leave a second artefact;
+#: an artefact is part of the answer, so the plan gate is right not to see them.
+#: `condense_protocols` makes model calls the thread does not record, so a dead attempt's
+#: finished call would be spend nobody booked.
+NOT_REPEATABLE_READS: frozenset[str] = frozenset(
+    {"create_exhibit", "revise_exhibit", "condense_protocols"}
+)
+
+
+def repeatable_call(name: str, arguments: Mapping[str, Any]) -> bool:
+    """Whether this call may be run again after being cut off — a positive list, not a negation.
+
+    True only for the harness's own planning and filesystem verbs (a write under `/memories` is
+    not), the in-process reads of `READ_ONLY_TOOLS` except `NOT_REPEATABLE_READS`, and the tools an
+    enabled connector's manifest classifies `read_only`. Everything else is false: an unknown name,
+    a `task` helper (its own thread of calls), a job launcher, a handoff, a tool of a connector this
+    process does not have enabled. The resume rule and the ownership check ask this one question.
+    """
+    from chemclaw.agent.scratchpad import scratchpad_tools
+    from chemclaw.connectors.registry import read_only_tool_names
+
+    if writes_durable_memory(name, arguments):
+        return False
+    if name == "write_todos" or name in scratchpad_tools():
+        return True
+    if name in READ_ONLY_TOOLS:
+        return name not in NOT_REPEATABLE_READS
+    return name in read_only_tool_names()
+
+
 def changes_the_conversation(name: str) -> bool:
     """Whether this call moves the conversation to another agent — what dry-run must also refuse.
 

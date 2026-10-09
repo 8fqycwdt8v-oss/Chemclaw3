@@ -112,6 +112,8 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         # never reach the plan gate. Pinned as a relation in `tests/test_invalid_tool_calls.py`.
         "enforce_plan_approval",
         "stamp_plan_link",
+        # Innermost of all: the session-ownership check next to the effect.
+        "refuse_when_claim_lost",
     ]
     assert enforce_tool_authz in middleware
     assert refuse_writes_on_dry_run in middleware
