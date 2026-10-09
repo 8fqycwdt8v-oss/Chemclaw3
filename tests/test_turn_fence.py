@@ -22,6 +22,7 @@ from langgraph.errors import NodeCancelledError
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.checkpointer import checkpointer, close_checkpointer
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
@@ -165,13 +166,19 @@ def _executed(marks: Path) -> list[str]:
     return sorted(path.name.split(".")[1] for path in marks.iterdir())
 
 
-async def _drive(plan: str, fence: TurnFence | None) -> BaseException | None:
-    """One real graph turn of `plan` under `fence`; the exception that ended it, if any."""
-    graph = build_turn_agent(
+async def _drive(
+    plan: str, fence: TurnFence | None, *, helper: bool = False
+) -> BaseException | None:
+    """One real graph turn of `plan` under `fence`; the exception that ended it, if any.
+
+    With `helper`, the graph is the one a `task` call runs: the same chain, compiled as a helper.
+    """
+    graph = build_langgraph_agent(
         ProbeModel(),
         connectors=probe_tools(),
         checkpointer=InMemorySaver(),
         audit_sink=NullAuditSink(),
+        helper=helper,
     )
     token = set_turn_fence(fence)
     try:
@@ -210,6 +217,20 @@ async def test_a_lost_claim_ends_a_turn_before_its_model_call(probes: Path) -> N
 
     assert isinstance(ended, _ENDED), ended
     assert _executed(probes) == [], "the model was asked after the turn lost its session"
+
+
+async def test_a_helper_is_stopped_by_a_lost_claim_before_its_model_call(probes: Path) -> None:
+    """A `task` helper is compiled with the same chain, so it asks the claim too."""
+    ended = await _drive("q steps=read", _fence(False), helper=True)
+
+    assert isinstance(ended, _ENDED), ended
+    assert _executed(probes) == [], "a helper's model was asked after the turn lost its session"
+
+
+async def test_a_helper_under_a_held_claim_runs_its_reads(probes: Path) -> None:
+    """The control for the test above."""
+    assert await _drive("q steps=read", _fence(True), helper=True) is None
+    assert _executed(probes), "the helper ran nothing, so the test above proves nothing"
 
 
 async def test_a_claim_that_cannot_be_confirmed_does_not_stop_the_model(probes: Path) -> None:

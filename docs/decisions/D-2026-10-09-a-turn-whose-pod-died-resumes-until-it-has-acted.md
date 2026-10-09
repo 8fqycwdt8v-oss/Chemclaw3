@@ -88,23 +88,47 @@ sender. The rule, and where each part lives:
   admission, the budget check, the plan gate, authorization and audit see an ordinary turn.
   `claim_to_resume` takes the session claim and sets `resumed_at` in one transaction: two attaches at
   once resume it once and the loser follows the winner, on this replica or another. A reader that
-  was waiting on the question's row lock (`_LOCK_LAPSED`) marks nothing from its old snapshot.
+  was waiting on the question's row lock (`_LOCK_LAPSED`) marks nothing from its old snapshot. The
+  verdict that decided to resume may be up to `service_readiness_cache_seconds` old, so the thread
+  is judged again after the claim (`resume_point_fresh`): from the claim on the old holder cannot
+  write to it (below), so what is read then cannot change, and a thread that is no longer
+  resumable is given back like any other resume that did not run.
   A resume that is shed, refused by the budget or fails before its first step gives the claim back
   *and* its mark (`give_back_resume`, one transaction), so the attach can be tried again: the claim
   is in effect taken for admission and returned if admission fails.
 - **The old holder is fenced.** A pod that stalls past its lease (a blocked loop, a stopped
   container) wakes after another replica resumed the thread. Without a fence both drive one
   checkpoint: a state-changing call after the judgement runs twice, there are two answers and two
-  cost rows (reproduced: the call ran twice and both processes took the final step). Now the
-  heartbeat loses the turn's `TurnFence` when a refresh matches no row or no refresh has succeeded
-  for a lease, and the tool chain asks the claim store, immediately before every call that is not
-  repeatable, whether the claim is still this holder's and live (`refuse_when_claim_lost`, innermost
-  in the chain; a store that cannot answer is a no). A lost fence cancels the turn's pump; the
-  teardown then settles nothing, books nothing and spends no approval, and `run_turn` looks once
-  more before it writes its ending. What the fence cannot cover: an effect already issued when the
-  claim was lost (a request on the wire, a job started), and the one round trip between the check
-  and the effect. A claim live at the check means no other replica can have taken the thread before
-  the lease runs out; an effect that outlasts it is the exposure the lease has always had.
+  cost rows, and a model call that was in flight in the stalled pod completes and LangGraph writes
+  its checkpoint, newest by id, from a background executor that nothing cancels, so the next turn
+  loads the stalled pod's fork. The fence has four consumers, one `TurnFence` (`core/turn_fence.py`)
+  per turn:
+  - **Checkpoint writes.** `SchemaStampedSaver` runs every write in one transaction that first takes
+    `SELECT … FROM session_turns WHERE holder = … AND expires_at > now() FOR SHARE`. A takeover is an
+    `INSERT … ON CONFLICT DO UPDATE` of that row and waits for the lock, so a write either commits
+    before the takeover (the new holder then reads it) or finds no row and is refused with
+    `TurnFenceLost`: there is no gap between the check and the write. Reads are not fenced.
+  - **Every model call** asks the claim before it is made (`HoldClaimBeforeModel`), so a woken pod
+    stops before it spends.
+  - **Every call that is not repeatable**, including each of several in parallel and those of a
+    `task` helper, asks immediately before it runs (`refuse_when_claim_lost`, innermost in the
+    chain), with a margin: the claim must outlive the check by a third of the lease
+    (`_TURN_OWNS`), which a healthy holder always has since it refreshes three times per lease.
+  - **The heartbeat** loses the fence when a refresh matches no row, or when no refresh has
+    succeeded for a lease. It bounds a pod that is doing nothing effectful (a stuck read), at about
+    a lease plus two refresh intervals after the last success; effects and checkpoints are stopped
+    by the two checks above, which do not depend on that timer.
+  A fence is lost only on an answer, never on an error. `hold()` distinguishes *taken over* (the
+  claim names someone else, or no row: the fence is lost, the pump cancelled, the teardown settles
+  nothing, books nothing and spends no approval) from *could not ask* (the store raised; one retry,
+  then `ClaimUnverifiable`). For the second, the call is refused with a message the model can
+  read (fail closed for effects) and the turn is not discarded: it books its spend and settles
+  honestly, because a store outage is not evidence of a takeover. `run_turn` looks once more before
+  it writes its ending, and a lost fence also skips `_escalate_exhausted_review`. What the fence
+  cannot cover: an effect already issued when the claim was lost (a request on the wire, a job
+  started). A claim live with that margin at the check means no replica can have taken the thread
+  before the call returns, unless it outlasts the remaining lease, which is the exposure the lease
+  has always had.
 - **What it re-executes**: `astream(None, config)` runs the pending node. The committed tail is
   read as a live update is (`replayed_events`): the trace, the grounding evidence, the transcript's
   tool exchanges and the spend are what an uninterrupted turn would hold, and the events are
@@ -124,7 +148,10 @@ sender. The rule, and where each part lives:
   counts of the earlier part. A `task` helper and `condense_protocols` are not on the list, so a
   turn that used them is not resumed rather than under-booked. The one-resume bound makes the
   compaction residual a single attempt's worth, and the resumed run is under the caps and the
-  per-user window as any turn (the per-turn counters restart for it). `dry_run` is kept.
+  per-user window as any turn; the runaway cap counts the thread's assistant messages, so the
+  earlier part still counts against it. `dry_run` is kept. The notice that tells the model which
+  artefacts the chemist edited (`mark_told`) is skipped on a resume, so those edits are told again
+  at the next turn rather than lost.
 
 Not taken here: the simplification of `turn_relay.py`, `detach.py`, `turn_remotes.py` and
 `session_queue.py` that W3.6 names. Measured on the polling relay (defaults, two processes): an idle
@@ -173,9 +200,13 @@ call and after a finished one (not repeated, `interrupted`), inside a read (repe
 a member's attach (left alone — the control), two attaches at once on one replica and on two (one
 run, the other follows to the answer), a Stop (never resumed), a new message (supersedes), a live
 turn followed from another replica (unaffected), a turn that dies again (not resumed twice), a pod
-stopped past its lease and woken after its turn was resumed (its state-changing call does not run,
-nothing is booked; the control: a shorter stall is not fenced) and a member presenting the sender's
-correlation id (both questions stay in the thread). `tests/test_turn_resume.py` holds the thread
-rules (the positive list, fail closed), the claim, window, give-back and booking rules, the race of
-a reader against a resume on two connections (with the bare statement as the control) and the
-replay.
+stopped past its lease and woken after its turn was resumed *and finished* while it sat mid-model-call
+(its state-changing call does not run, nothing is booked, and the newest checkpoint, which the next
+turn loads, is still the resumed turn's; the control strips every fence from that pod and the
+thread forks; a shorter stall is not fenced either) and a member presenting the sender's correlation
+id (both questions stay in the thread). `tests/test_turn_resume.py` holds the thread rules (the
+positive list, fail closed), the claim, window, give-back and booking rules, the race of a reader
+against a resume on two connections (with the bare statement as the control), the saver against a
+held, a taken-over and a lapsed claim (with the permissive statement as the control) and the replay.
+`tests/test_turn_fence.py` holds the fence: the tri-state `hold()`, a refused call on an error, each
+of parallel calls and a helper's calls checked, and the heartbeat's two ways to lose.
