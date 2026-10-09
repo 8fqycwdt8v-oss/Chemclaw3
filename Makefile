@@ -55,7 +55,7 @@ SHELL := bash
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
-  live-soak-report live-leak-probe \
+  live-soak-report live-leak-probe live-replicas \
   retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval
 
 help:  ## List every target, grouped by section.
@@ -83,7 +83,7 @@ cov:  ## Run the test suite with coverage (first-party packages; report missing 
 check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
 
 # deps-audit runs last: a supply-chain finding must not mask a broken test.
-ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate kind-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate kind-validate live-replicas deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 deps-audit:  ## Check the locked dependency closure for known vulnerabilities (supply chain).
 	@# Audits the lockfile export, not the venv; classifies output because pip-audit exits 1 for both a
@@ -408,6 +408,12 @@ live-soak:  ## Repeat the storm for hours and fit what drifts; checkpointed, so 
 
 live-soak-report:  ## Fit every series in the soak record so far.
 	bash infra/live/soak.sh report
+
+# Under `make ci` the lane may skip, named and counted, where its prerequisites are absent; asked for
+# directly, or by CI's `replicas` job, it fails instead (infra/live/replicas.sh).
+live-replicas: export LIVE_REPLICAS_OPTIONAL := $(if $(filter ci,$(MAKECMDGOALS)),1,)
+live-replicas:  ## Three front doors + two background and two calc workers on one database: limits, resume, single-flight (no model key).
+	bash infra/live/replicas.sh $(ARGS)
 
 live-leak-probe:  ## Drive real turns in one process and report what each one retains (needs `make live-up`).
 	uv run python -m chemclaw.cli.leak_probe $(ARGS)

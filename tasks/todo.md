@@ -345,7 +345,7 @@ shared state the parallel failures come from.
       `sum(chemclaw_pg_pool_max_size) > max_connections * 0.8`. Document PgBouncer (transaction mode)
       as the deployment default for more than 3 replicas, with the checkpointer's autocommit pool on
       session mode.
-- [ ] **W3.9 Multi-replica test lane.** A `make live-replicas` (or a kind lane) that runs 3 service
+- [x] **W3.9 Multi-replica test lane.** A `make live-replicas` (or a kind lane) that runs 3 service
       replicas plus 2 background workers and asserts: limits hold globally, a killed pod's turn
       resumes, and one calc miss computes once.
 - [ ] **W3.10 Parallel gate: collect the failure set.** Run `make cov PYTEST_WORKERS=4` 10 times
