@@ -62,7 +62,7 @@ from chemclaw.agent.tool_result_size import (
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
-from chemclaw.agent.turn_resume import ResumePoint, refused, resume_point
+from chemclaw.agent.turn_resume import Refusal, ResumePoint, count_refusal, resume_point
 from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
@@ -77,9 +77,10 @@ from chemclaw.api.events import (
     ToolCallEvent,
     ToolFailedEvent,
 )
-from chemclaw.api.graph_stream import graph_events
+from chemclaw.api.graph_stream import graph_events, replayed_events
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace
+from chemclaw.api.schemas import message_text
 from chemclaw.api.tool_results import full_result_sink, session_sink
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core import bookkeeping
@@ -103,6 +104,7 @@ from chemclaw.core.session_context import (
 )
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
+from chemclaw.core.turn_fence import TurnFence, reset_turn_fence, set_turn_fence
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal, SkillLoadedSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
@@ -186,6 +188,7 @@ async def run_turn(
     deadline: float | None = None,
     exhibit_refs: Sequence[ExhibitRef] = (),
     resume: ResumePoint | None = None,
+    fence: TurnFence | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then an answer or an error).
 
@@ -207,6 +210,9 @@ async def run_turn(
             correlation id, question, written-ahead row and dry-run flag replace this call's, and
             `user_message`, `dry_run` and `exhibit_refs` are ignored. The route has checked that the
             caller is the turn's sender (`agent/turn_resume.py`).
+        fence: The turn's hold on its session claim. A turn that loses it is ended without booking,
+            settling its question or spending its approval: the replica that took the session over
+            owns all three (`core/turn_fence.py`).
 
     Yields:
         `chemclaw.api.events.Event` values, ending with an `AnswerEvent` or an `ErrorEvent`.
@@ -245,6 +251,7 @@ async def run_turn(
             ledger.correlation_id,
             ledger.usage,
             [*earlier_said, user_message],
+            fence,
         ),
         start_span(
             "chemclaw.turn",
@@ -281,10 +288,15 @@ async def run_turn(
             # process dies still shows the chemist the question the model will read next turn.
             # Inside the ambient, which stamps the row with this turn's correlation id and sender.
             # A resumed turn's question was written by the attempt that died.
+            # The question's id in the thread is the server's own, kept with the row: a caller's
+            # correlation id can repeat, and a message with a repeated id replaces the first.
+            question_id = resume.question_id if resume else uuid.uuid4().hex
             turn_row = (
                 resume.row_id
                 if resume
-                else await _begin_transcript_turn(history, session, user_message, dry_run)
+                else await _begin_transcript_turn(
+                    history, session, user_message, dry_run, question_id
+                )
             )
             async with AsyncExitStack() as stack:
                 turn_tools, unreachable = await _open_turn_surface(stack, connectors)
@@ -353,6 +365,24 @@ async def run_turn(
                 # channels, so a resume would otherwise start both caps from zero. Sharing the dict
                 # makes the caps per turn, not per invocation.
                 cap_carry: dict[str, Any] = {}
+                if resume is not None:
+                    # What the dead attempt did enters the trace, the exchanges, the evidence and
+                    # the spend, and is counted; it is not sent, since an attach shows a turn from
+                    # the moment of attaching.
+                    async for _ in _stream_into(
+                        replayed_events(
+                            resume.tail,
+                            trace=tool_trace,
+                            exchanges=ledger.exchanges,
+                            usage=ledger.usage,
+                        ),
+                        ledger,
+                    ):
+                        pass
+                    last = resume.tail[-1] if resume.tail else None
+                    if isinstance(last, AIMessage) and not last.tool_calls:
+                        # The graph had finished: the answer is written and was never delivered.
+                        ledger.answer_parts.append(message_text(last))
                 async for event in _stream_into(
                     graph_events(
                         graph,
@@ -363,8 +393,8 @@ async def run_turn(
                         usage=ledger.usage,
                         exchanges=ledger.exchanges,
                         carry=cap_carry,
-                        question_id=ledger.correlation_id,
-                        resume=resume,
+                        message_id=question_id,
+                        continue_thread=resume is not None,
                     ),
                     ledger,
                 ):
@@ -514,6 +544,10 @@ async def run_turn(
             # flag, so each cap is announced once.
             for event in _cap_events(session, ledger):
                 yield event
+            # The last look before the turn writes its ending: one that lost its session must not
+            # write a second answer beside the replica that took it over.
+            if fence is not None and not await fence.hold():
+                raise asyncio.CancelledError
             await _record_transcript(
                 history, session, user_message, ledger.answer_text, ledger.exchanges, turn=turn_row
             )
@@ -542,6 +576,11 @@ async def run_turn(
             # First in this clause: `_book_turn_spend` reads it, and must not depend on the rollback
             # having run.
             ledger.cancelled = True
+            if fence is not None and fence.lost:
+                # Nothing below is this turn's to write any more; `booked` makes `_book_turn_spend`
+                # a no-op.
+                ledger.superseded = True
+                ledger.booked = True
             # Sampled now, the only instant the reading is exact (see `_TurnLedger.timed_out`).
             ledger.timed_out = _deadline_passed(ledger.deadline)
             _roll_back_unfinished(session, state_snapshot, ledger)
@@ -550,9 +589,16 @@ async def run_turn(
             # task, since an `await` here would skip the teardown (`spend_approval_after_teardown`).
             # A turn that only read keeps its approval.
             if plan_gated and tool_trace is not None and _turn_acted(tool_trace):
-                spend_approval_after_teardown(session.session_id)
+                if not ledger.superseded:
+                    spend_approval_after_teardown(session.session_id)
             raise
         except Exception as exc:
+            if fence is not None and fence.lost:
+                # A failure that is the fence's own consequence (a cancelled call, a closed
+                # connection) belongs to a turn that is no longer this one's to report.
+                ledger.superseded = True
+                ledger.booked = True
+                raise asyncio.CancelledError from exc
             failure = _failure_event(exc, session, ledger)
             if not transcript_settled:
                 await _settle_transcript_turn(history, session, turn_row, "failed")
@@ -570,7 +616,7 @@ async def run_turn(
             _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
             # Settle the torn-down turn's question off this frame. A Stop is `stopped`; the clock
             # is a failure.
-            if turn_row is not None and not transcript_settled:
+            if turn_row is not None and not transcript_settled and not ledger.superseded:
                 _settle_after_teardown(
                     history,
                     session,
@@ -623,6 +669,8 @@ class _TurnLedger:
     answered: bool = False
     # Whether the turn's spend is already booked (`_finish_turn`), so the teardown books it once.
     booked: bool = False
+    # Whether another replica took the turn's session over: the turn then writes nothing more.
+    superseded: bool = False
     run_complete: bool = False
     answer_parts: list[str] = field(default_factory=list)
     # Durable jobs this turn launched, for the optional mid-turn resume.
@@ -790,6 +838,7 @@ def _turn_ambient(
     correlation_id: str,
     usage: TurnUsage,
     user_texts: Sequence[str],
+    fence: TurnFence | None = None,
 ) -> Iterator[None]:
     """Stamp the ambients only a request can supply, and unstamp every one on the way out.
 
@@ -806,12 +855,14 @@ def _turn_ambient(
     correlation_token = set_current_correlation_id(correlation_id)
     dry_run_token = set_dry_run(dry_run)
     full_results_token = set_full_result_sink(full_result_sink(session_id, correlation_id))
+    fence_token = set_turn_fence(fence)
     try:
         # The cap ambients come from `turn_caps`, shared by every turn driver, so no driver can open
         # only some of them.
         with turn_caps(usage, closing=f"session {session_id}"):
             yield
     finally:
+        _unstamp(session_id, reset_turn_fence, fence_token)
         _unstamp(session_id, reset_full_result_sink, full_results_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
         _unstamp(session_id, reset_current_user_texts, user_texts_token)
@@ -1812,7 +1863,11 @@ async def _record_transcript(
 
 
 async def _begin_transcript_turn(
-    history: Any | None, session: TurnSession, user_message: str, dry_run: bool
+    history: Any | None,
+    session: TurnSession,
+    user_message: str,
+    dry_run: bool,
+    question_id: str,
 ) -> int | None:
     """Write this turn's question ahead of it, `running`; the row to settle, or `None`.
 
@@ -1833,6 +1888,7 @@ async def _begin_transcript_turn(
             HumanMessage(content=user_message),
             state=session.state,
             dry_run=dry_run,
+            question_id=question_id,
         )
     except (ConnectionError, psycopg.Error) as exc:
         degraded(
@@ -1936,7 +1992,7 @@ async def settle_interrupted_turns(
     if mark is None:
         return 0
     try:
-        spare = await _resumable_rows(history, session_id) if spare_resumable else []
+        spare, reasons = await _resumable_rows(history, session_id) if spare_resumable else ([], {})
         interrupted: list[InterruptedTurn] = await mark(session_id, state=state, spare=spare)
     except (ConnectionError, psycopg.Error) as exc:
         degraded(
@@ -1950,22 +2006,30 @@ async def settle_interrupted_turns(
     # Waited for: the question was flipped exactly once, here, so this booking is the only chance a
     # turn that died mid-flight has of a cost row.
     await bookkeeping.settle([_book_interrupted(session_id, turn) for turn in interrupted])
+    for turn in interrupted:
+        if turn.correlation_id in reasons:
+            count_refusal(reasons[turn.correlation_id])
     return len(interrupted)
 
 
-async def _resumable_rows(history: Any, session_id: str) -> list[int]:
-    """The question rows of this session's dead turns that can still be resumed."""
+async def _resumable_rows(history: Any, session_id: str) -> tuple[list[int], dict[str, Refusal]]:
+    """The question rows of this session's dead turns that can be resumed, and why not the rest.
+
+    The reasons are by correlation id, for the caller to count the turns it then marks: every
+    reader that touches the session judges them again, and one turn is one refusal.
+    """
     lapsed = getattr(history, "lapsed_turns", None)
     if lapsed is None:
-        return []
+        return [], {}
     rows: list[int] = []
+    reasons: dict[str, Refusal] = {}
     for turn in await lapsed(session_id):
         verdict = await resume_point(session_id, turn)
         if isinstance(verdict, ResumePoint):
             rows.append(turn.row_id)
         else:
-            refused(verdict, session_id, turn)
-    return rows
+            reasons[turn.correlation_id] = verdict
+    return rows, reasons
 
 
 def _book_interrupted(session_id: str, turn: InterruptedTurn) -> asyncio.Task[None] | None:

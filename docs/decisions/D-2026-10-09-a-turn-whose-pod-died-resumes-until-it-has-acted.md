@@ -52,36 +52,79 @@ sender. The rule, and where each part lives:
   that covers a question is the one taken at or before `COALESCE(resumed_at, created_at)`
   (`session_store.COVERED`).
 - **Eligible** (`LapsedTurn.eligible`): never resumed (`session_messages.resumed_at IS NULL`), younger
-  than `service_turn_timeout_seconds` (a turn that old would have timed out), and no outcome booked
-  for its correlation id. Migration 126 adds `resumed_at` and `dry_run`.
-- **Judged** (`turn_resume.judge`) on the checkpointed thread: the question is found by its message id
-  (`q:<correlation id>`, which `run_turn` now gives the chemist's message), and after it there are
-  only the model's tool calls and their results, the last assistant message possibly still waiting for
-  results. **No call, finished or in flight, is side-effecting** (`authz.side_effecting_call`, the
-  predicate the plan gate and dry-run use, plus a handoff). A turn that acted ends `interrupted`: an
-  in-flight call may have taken effect, and the audit rows of the calls that finished (batched
-  until the turn's end) and the turn's spent approval (`D-2026-10-08` records that window) died with
-  the pod. Calls that only read are
-  repeated; durable jobs and the calculation cache already make a repeated read cheap.
-- **Who**: only the person who sent the turn (`session_messages.actor`), and the turn runs as that
-  person on the attach request's own credential, with the roles that token carries now. A participant
-  who did not send it gets the 404 an ended turn gets and leaves it alone. A waiting message in the
-  line goes first and supersedes it; so does any new message (`settle_interrupted_turns(spare_resumable=False)`).
-  A Stop on a dead turn ends it for good, as the chemist declining.
+  than `service_turn_timeout_seconds` (a turn that old would have timed out), no outcome booked for
+  its correlation id, and a recorded `question_id`. Migrations 126 and 127 add `resumed_at`,
+  `dry_run` and `question_id`.
+- **The question's identity is the server's.** `run_turn` mints the message id the chemist's message
+  has in the thread, keeps it on the question's row, and a resume finds the question by it. It is
+  not the correlation id: a client may present any well-formed `X-Chemclaw-Correlation-Id`, and the
+  thread replaces a message that repeats an id, so a member presenting the sender's turn id would
+  have overwritten the sender's question in what the model reads. This holds for every turn, not
+  only a resumed one. A turn begun by the previous image has no recorded id and is never resumed;
+  transcripts and checkpoints written before keep loading unchanged.
+- **Judged** (`turn_resume.judge`) on the checkpointed thread: the question is found by that id, and
+  after it there are only the model's tool calls and their results, the last assistant message
+  possibly still waiting for results. **Every call, finished or in flight, must be on a positive
+  list** (`authz.repeatable_call`): the harness's planning and filesystem verbs (not a write under
+  `/memories`), the in-process reads of `READ_ONLY_TOOLS` except `NOT_REPEATABLE_READS`, and the
+  tools an enabled manifest of this process classifies `read_only`. Anything else is `acted` and the
+  turn ends `interrupted`: an unknown name, a `task` helper (a thread of calls of its own), a job
+  launcher, a handoff, a tool of a connector this process does not have. An in-flight call may have
+  taken effect, and the audit rows of the calls that finished (batched until the turn's end) and the
+  turn's spent approval (`D-2026-10-08` records that window) died with the pod.
+  `NOT_REPEATABLE_READS` is `create_exhibit` and `revise_exhibit`, which write rows and which the
+  plan gate rightly lets run (`D-2026-10-02`: an artefact is part of the answer, not an effect), and
+  `condense_protocols`, which spends model calls the thread does not record. They are listed there
+  and not reclassified as state-changing, because that would put artefacts behind plan approval,
+  which is a different decision.
+- **Who**: only the person who sent the turn (`session_messages.actor`), on the attach request's own
+  credential, with the roles that token carries now. A participant who did not send it gets the
+  404 an ended turn gets and leaves it alone. A waiting message in the line goes first and
+  supersedes it; so does any new message (`settle_interrupted_turns(spare_resumable=False)`). A Stop
+  from the sender or the owner on a dead turn ends it for good (200, the question `interrupted`) and
+  answers truthfully: a resume that committed first leaves nothing to mark and the Stop then finds
+  the turn running. An unload stop does not end it: the reload that follows is what resumes it.
 - **How**: the attach calls the same `_start_turn` a `POST …/messages` does, so claim, heartbeat,
   admission, the budget check, the plan gate, authorization and audit see an ordinary turn.
-  `claim_to_resume` takes the session claim and sets `resumed_at` in one transaction: two replicas
-  attaching at once resume it once, the other follows the first through the relay. One resume per
-  turn: a step that kills its pod twice ends `interrupted`.
+  `claim_to_resume` takes the session claim and sets `resumed_at` in one transaction: two attaches at
+  once resume it once and the loser follows the winner, on this replica or another. A reader that
+  was waiting on the question's row lock (`_LOCK_LAPSED`) marks nothing from its old snapshot.
+  A resume that is shed, refused by the budget or fails before its first step gives the claim back
+  *and* its mark (`give_back_resume`, one transaction), so the attach can be tried again: the claim
+  is in effect taken for admission and returned if admission fails.
+- **The old holder is fenced.** A pod that stalls past its lease (a blocked loop, a stopped
+  container) wakes after another replica resumed the thread. Without a fence both drive one
+  checkpoint: a state-changing call after the judgement runs twice, there are two answers and two
+  cost rows (reproduced: the call ran twice and both processes took the final step). Now the
+  heartbeat loses the turn's `TurnFence` when a refresh matches no row or no refresh has succeeded
+  for a lease, and the tool chain asks the claim store, immediately before every call that is not
+  repeatable, whether the claim is still this holder's and live (`refuse_when_claim_lost`, innermost
+  in the chain; a store that cannot answer is a no). A lost fence cancels the turn's pump; the
+  teardown then settles nothing, books nothing and spends no approval, and `run_turn` looks once
+  more before it writes its ending. What the fence cannot cover: an effect already issued when the
+  claim was lost (a request on the wire, a job started), and the one round trip between the check
+  and the effect. A claim live at the check means no other replica can have taken the thread before
+  the lease runs out; an effect that outlasts it is the exposure the lease has always had.
 - **What it re-executes**: `astream(None, config)` runs the pending node. The committed tail is
-  replayed through the reader a live update goes through, so the client, the trace, the grounding
-  evidence and the transcript's tool exchanges are what an uninterrupted turn would hold.
+  read as a live update is (`replayed_events`): the trace, the grounding evidence, the transcript's
+  tool exchanges and the spend are what an uninterrupted turn would hold, and the events are
+  counted but **not sent**. An attach shows a turn from the moment of attaching, as a local watcher
+  does; the page that was cut off already has the earlier frames, which carry no ids a client could
+  de-duplicate them by, and a page that reloaded has none to repeat. The answer's text arrives whole
+  in the `answer` frame. A call the thread marks failed or refused (`FAILED_CALL_MARK`, stamped
+  where this system answers a failure) stays out of the evidence, as it does live. No `plan` event
+  is replayed: the plan card is read from the checkpoint by its route, and the approval request is
+  raised at the end of the turn, as for any turn.
 - **Spend is booked once.** The dead attempt booked nothing (it died before `_finish_turn`, which
   precedes the answer), and the resumed turn books one row for the whole turn under the original
   correlation id: the model calls the dead attempt completed are in the checkpoint with their usage
-  and are added; the call it died inside reported nothing. `dry_run` is kept from the original.
-- **What is not preserved**: the per-turn counters of the loop and spend caps are untracked channels
-  and restart for the resumed run; the one-resume bound caps that at one extra cap's worth.
+  and are added; the call it died inside reported nothing. What the thread cannot show is
+  under-booked, and the bound is stated: the in-flight call; the model calls of a compaction the
+  dead attempt ran (a turn on a context near the compaction threshold); and the failure and refusal
+  counts of the earlier part. A `task` helper and `condense_protocols` are not on the list, so a
+  turn that used them is not resumed rather than under-booked. The one-resume bound makes the
+  compaction residual a single attempt's worth, and the resumed run is under the caps and the
+  per-user window as any turn (the per-turn counters restart for it). `dry_run` is kept.
 
 Not taken here: the simplification of `turn_relay.py`, `detach.py`, `turn_remotes.py` and
 `session_queue.py` that W3.6 names. Measured on the polling relay (defaults, two processes): an idle
@@ -94,18 +137,27 @@ of `D-2026-10-04`). It is a BACKLOG row with these numbers.
 
 ## Consequences
 
-- No model-facing text and no wire shape changed: the resumed turn streams the events of any turn on
-  the attach's response, under `X-Chemclaw-Turn-Correlation-Id` of the original turn. Only
-  `watch_turn`'s description changed (contract 1.0.1). `Chemclaw3_ui` follows a reloaded turn through
-  the same route and needs nothing, but a client whose stream just dropped **polls the transcript
-  instead of attaching**, so the resume starts when the page reloads or the UI attaches after a
-  drop; a UI change to attach after a cut stream is what makes it prompt.
+- No model-facing text and no event shape changed. `GET …/turn/stream` can now answer with the
+  limits of a new turn (429, `queued`, `at_capacity`, `budget_exhausted`) and `POST …/turn/stop` can
+  answer 200 for a dead turn where it answered 404; both are in the routes' descriptions
+  (contract 1.0.1) and add no field. A resumed turn is under `X-Chemclaw-Turn-Correlation-Id` of the
+  original. `Chemclaw3_ui` follows a reloaded turn through the same route and needs nothing, but a
+  client whose stream just dropped **polls the transcript instead of attaching**, so the resume
+  starts when the page reloads or the UI attaches after a drop.
 - A turn the sender never returns to stays `running` for up to `service_turn_timeout_seconds`, then
   ends `interrupted` for the next toucher as before; a non-sender sees it `running` meanwhile.
+- A turn that lost its session is ended by the pod that lost it, whether or not it was ever
+  resumed: a lease that lapses under a live pod now ends that turn instead of letting it run beside
+  whoever started the next one. `chemclaw_turn_claims_lost_total` counts it.
 - A resumed turn's audit trail has no rows for the reads the dead attempt made.
-- Counters: `chemclaw_turns_resumed_total`, `chemclaw_turn_resume_refused_total{reason}`.
-- Mixed versions: a turn started by a pod without this change has no question id in its thread and is
-  never resumed.
+- Counters: `chemclaw_turns_resumed_total`, `chemclaw_turn_resume_refused_total{reason}` (once per
+  turn, when it is marked). `chemclaw_turns_started_total` counts a turn once, at its first attempt.
+- **Rolling update.** A pod still on the previous image has neither the lock nor `resumed_at` in its
+  predicate (`claimed_at <= created_at`): it does not spare a resumable turn, and it can mark a
+  resumed turn `interrupted` while the resume runs. The resumed turn then finishes and its answer
+  overrides the mark (`D-2026-10-03`: an answer overrides), so the cost is a transcript that reads
+  `interrupted` for the length of the turn. A turn that pod began has no question id and is never
+  resumed. Exact once every pod runs this image.
 
 Revisit when: a deployment's `chemclaw_turn_resume_refused_total{reason="acted"}` is a large share of
 `chemclaw_turns_finished_total{outcome="interrupted"}` (state-changing tools that are idempotent by
@@ -115,10 +167,15 @@ needs a stored identity first).
 
 ## What keeps it true
 
-`tests/test_turn_survives_pod.py` kills real processes at named points: between model calls (resumed
-once, final answer once, one cost row, the sender's identity), inside a state-changing call and after
-a finished one (not repeated, `interrupted`), inside a read (repeated — the control), a member's attach
-(left alone — the control), two attaches at once (one run), a Stop (never resumed), a new message
-(supersedes), a live turn followed from another replica (unaffected) and a turn that dies again
-(not resumed twice). `tests/test_turn_resume.py` holds the thread rules and the claim, window and
-booking rules on a migrated database.
+`tests/test_turn_survives_pod.py` kills and stops real processes at named points: between model
+calls (resumed once, final answer once, one cost row, the sender's identity), inside a state-changing
+call and after a finished one (not repeated, `interrupted`), inside a read (repeated — the control),
+a member's attach (left alone — the control), two attaches at once on one replica and on two (one
+run, the other follows to the answer), a Stop (never resumed), a new message (supersedes), a live
+turn followed from another replica (unaffected), a turn that dies again (not resumed twice), a pod
+stopped past its lease and woken after its turn was resumed (its state-changing call does not run,
+nothing is booked; the control: a shorter stall is not fenced) and a member presenting the sender's
+correlation id (both questions stay in the thread). `tests/test_turn_resume.py` holds the thread
+rules (the positive list, fail closed), the claim, window, give-back and booking rules, the race of
+a reader against a resume on two connections (with the bare statement as the control) and the
+replay.

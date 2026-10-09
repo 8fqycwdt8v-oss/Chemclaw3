@@ -8,12 +8,15 @@ runner the messages the dead attempt had already committed.
 A turn is resumable when every one of these holds, and a refusal says which did not:
 
 - its lease lapsed with no successor, it has not been resumed before, it is younger than
-  `service_turn_timeout_seconds`, and nothing booked its outcome (`LapsedTurn.eligible`);
-- its question is still in the checkpointed thread, identified by `question_message_id`, with
-  nothing after it but the model's tool calls and their results;
-- **it has not acted**: no call in the thread, finished or in flight, is side-effecting. A call in
-  flight at the kill may or may not have taken effect and its audit row died with the pod, so the
-  turn ends as `interrupted` instead of repeating it. Calls that only read are repeated freely.
+  `service_turn_timeout_seconds`, nothing booked its outcome, and its question has a recorded
+  message id (`LapsedTurn.eligible`);
+- that message is still in the checkpointed thread, with nothing after it but the model's tool calls
+  and their results;
+- **every call in the thread, finished or in flight, is on the positive list of repeatable ones**
+  (`authz.repeatable_call`). A call in flight at the kill may or may not have taken effect and its
+  audit row died with the pod, so anything the list does not name (a write, an unknown tool, a
+  `task` helper, a job launcher, a tool this process has no manifest for) ends the turn as
+  `interrupted` instead of being repeated.
 
 Pure judgement is `judge`; the store reads are on the history provider.
 """
@@ -25,7 +28,7 @@ from typing import Literal, NamedTuple, cast
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from chemclaw.agent.authz import changes_the_conversation, side_effecting_call
+from chemclaw.agent.authz import repeatable_call
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.session_store import LapsedTurn
 from chemclaw.agent.state import turn_config
@@ -50,28 +53,23 @@ class ResumePoint(NamedTuple):
 
     row_id: int
     correlation_id: str
+    #: The id the question has in the thread, read off its row.
+    question_id: str
     question: str
     dry_run: bool
     #: The messages the dead attempt committed after the question, oldest first.
     tail: tuple[BaseMessage, ...]
 
 
-def question_message_id(correlation_id: str) -> str:
-    """The id a turn gives the chemist's message in the thread, so a later reader can find it."""
-    return f"q:{correlation_id}"
-
-
-def judge(
-    messages: Sequence[BaseMessage], correlation_id: str
-) -> tuple[BaseMessage, ...] | Refusal:
+def judge(messages: Sequence[BaseMessage], question_id: str) -> tuple[BaseMessage, ...] | Refusal:
     """The turn's committed tail if it may be resumed, else the first reason it may not.
 
     Only the thread decides: the tail after the question must be tool calls and their results, the
-    last assistant message may still wait for results, and no call may be side-effecting.
+    last assistant message may still wait for results, and every call must be repeatable.
     """
-    wanted = question_message_id(correlation_id)
     index = next(
-        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage) and m.id == wanted), None
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage) and m.id == question_id),
+        None,
     )
     if index is None:
         return "question_not_in_thread"
@@ -79,13 +77,13 @@ def judge(
     answered = {m.tool_call_id for m in tail if isinstance(m, ToolMessage)}
     assistant = [m for m in tail if isinstance(m, AIMessage)]
     for message in tail:
-        if isinstance(message, HumanMessage) or not isinstance(message, AIMessage | ToolMessage):
+        if not isinstance(message, AIMessage | ToolMessage):
             return "thread_moved_on"
         if not isinstance(message, AIMessage):
             continue
         for call in message.tool_calls:
             name, arguments = str(call.get("name") or ""), call.get("args") or {}
-            if side_effecting_call(name, arguments) or changes_the_conversation(name):
+            if not repeatable_call(name, arguments):
                 return "acted"
             if call.get("id") not in answered and message is not assistant[-1]:
                 return "unpaired_tool_calls"
@@ -112,17 +110,27 @@ async def resume_point(session_id: str, turn: LapsedTurn) -> ResumePoint | Refus
     if found is None:
         return "no_checkpoint"
     messages = found.checkpoint.get("channel_values", {}).get("messages") or []
-    verdict = judge(messages, turn.correlation_id)
+    verdict = judge(messages, turn.question_id)
     if isinstance(verdict, str):
         return verdict
-    return ResumePoint(turn.row_id, turn.correlation_id, turn.question, turn.dry_run, verdict)
-
-
-def refused(reason: Refusal, session_id: str, turn: LapsedTurn) -> None:
-    """Count and log a turn that stays `interrupted`, unless it was never a candidate."""
-    if reason == "ineligible":
-        return
-    METRICS.increment("chemclaw_turn_resume_refused_total", labels={"reason": reason})
-    logger.info(
-        "session %s's turn %s will not be resumed: %s", session_id, turn.correlation_id, reason
+    return ResumePoint(
+        turn.row_id, turn.correlation_id, turn.question_id, turn.question, turn.dry_run, verdict
     )
+
+
+def count_refusal(reason: Refusal) -> None:
+    """Count a dead turn that has ended `interrupted` for want of a way to continue it.
+
+    Called where the turn is marked, once, not where it is judged: a judgement is repeated by every
+    reader that touches the session before the mark.
+    """
+    if reason != "ineligible":
+        METRICS.increment("chemclaw_turn_resume_refused_total", labels={"reason": reason})
+
+
+def log_refusal(reason: Refusal, session_id: str, turn: LapsedTurn) -> None:
+    """Say why a dead turn will not be resumed (nothing for one that was never a candidate)."""
+    if reason != "ineligible":
+        logger.info(
+            "session %s's turn %s will not be resumed: %s", session_id, turn.correlation_id, reason
+        )

@@ -8,6 +8,7 @@ unconditionally (`authorize_tool` is a no-op unless `entra_required`). Attach th
 middleware so a denied attempt is still recorded.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -20,6 +21,7 @@ from chemclaw.agent.authz import (
     AuthorizationError,
     authorize_tool,
     changes_the_conversation,
+    repeatable_call,
     side_effecting_call,
     side_effecting_tools,
 )
@@ -28,6 +30,7 @@ from chemclaw.agent.refusal_route import routed, sentence_of
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.turn_fence import current_turn_fence
 from chemclaw.core.turn_flags import is_dry_run
 from chemclaw.core.turn_signals import record_tool_failure
 
@@ -205,7 +208,12 @@ def answered_failure(message: ToolMessage) -> ToolMessage:
     the MCP seam. `api/graph_stream.py` reads the same `status`, so a connector failure now reaches
     the trace as a `tool_result` beside the `tool_failed`, as raised failures already did.
     """
-    return message.model_copy(update={"status": "success"})
+    return message.model_copy(
+        update={
+            "status": "success",
+            "additional_kwargs": {**message.additional_kwargs, FAILED_CALL_MARK: True},
+        }
+    )
 
 
 def transport_error_result(name: str, exc: BaseException) -> str:
@@ -240,6 +248,12 @@ def unexpected_error_result() -> str:
 # `_refusal_message`.
 
 
+#: Stamped on a result this system answered a failed or refused call with. The result itself reads
+#: as an answer (never `status="error"`), so the thread would otherwise lose the difference, and a
+#: resumed turn replays the dead attempt's results into its grounding evidence.
+FAILED_CALL_MARK = "chemclaw_tool_failed"
+
+
 def _refusal_message(request: Any, text: str, *, marked: bool = False) -> ToolMessage:
     """A tool result the model reads as this call's answer, carrying the id it must reply to.
 
@@ -261,6 +275,7 @@ def _refusal_message(request: Any, text: str, *, marked: bool = False) -> ToolMe
         content=bounded_for_batch(request, defang(text) + marker),
         tool_call_id=request.tool_call["id"],
         name=str(request.tool_call["name"]),
+        additional_kwargs={FAILED_CALL_MARK: True},
     )
 
 
@@ -299,6 +314,25 @@ async def refuse_writes_on_dry_run(request: Any, handler: Callable[[Any], Any]) 
     refusal = dry_run_refusal(request.tool_call["name"], request.tool_call.get("args") or {})
     if refusal is not None:
         raise refusal
+    return await handler(request)
+
+
+@wrap_tool_call
+async def refuse_when_claim_lost(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """End the turn instead of running a call that could change something, if it lost its session.
+
+    A turn whose claim another replica took over (it stalled past the lease and the thread was
+    resumed) must not act: the check runs immediately before every call outside the positive list
+    of repeatable ones, and a claim it cannot prove is a lost one. It cancels rather than refuses,
+    because a refusal would be read by the model, which would go on. Covers the window to the
+    check, not past it: a request already on the wire cannot be recalled.
+    """
+    fence = current_turn_fence()
+    if fence is not None and not repeatable_call(
+        request.tool_call["name"], request.tool_call.get("args") or {}
+    ):
+        if not await fence.hold():
+            raise asyncio.CancelledError
     return await handler(request)
 
 

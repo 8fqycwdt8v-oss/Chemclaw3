@@ -167,10 +167,14 @@ def probe_tools() -> list[StructuredTool]:
 
 
 def classify_probe_tools() -> None:
-    """Declare `probe_act` state-changing the way a connector manifest would."""
+    """Declare the probes as a connector manifest would; a tool no manifest classifies is acted.
+
+    `probe_act` changes state and `probe_read` is `read_only`.
+    """
     from chemclaw.connectors import registry
 
     registry.state_changing_tool_names = lambda: [ACTING_TOOL]
+    registry.read_only_tool_names = lambda: [READING_TOOL]
 
 
 def graph_factory(**kwargs: Any) -> Any:

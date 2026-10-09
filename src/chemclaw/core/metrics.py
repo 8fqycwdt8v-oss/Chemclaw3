@@ -640,9 +640,10 @@ _COUNTERS: dict[str, str] = {
         "checkpoint. Each is also counted once as started by the attempt that died."
     ),
     "chemclaw_turn_resume_refused_total": (
-        "Dead turns that were left to end `interrupted` instead of being resumed, by reason — "
-        "`acted` is a turn that had made a state-changing call, the rest are a thread or a "
-        "checkpoint that does not support continuing."
+        "Dead turns that ended `interrupted` instead of being resumed, by reason, counted once "
+        "when the turn is marked — `acted` is a turn with a call that is not on the repeatable "
+        "list (a write, an unknown tool, a helper), the rest are a thread or checkpoint that does "
+        "not support continuing."
     ),
     # --- the durable tier ----------------------------------------------------------------------
     # Completions by outcome, the counterpart to `chemclaw_jobs_started_total`, so a connector whose

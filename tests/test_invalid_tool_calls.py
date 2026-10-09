@@ -465,14 +465,21 @@ def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() 
     ):
         assert gated.index(gate) < guard, f"{gate} nests inside the guard, so it never sees a call"
 
-    # And the two that are inside it, named rather than assumed absent.
-    assert gated[guard + 1 :] == ["enforce_plan_approval", "stamp_plan_link"], (
+    # And the three that are inside it, named rather than assumed absent. The last is the
+    # ownership check, which sits as close to the effect as the chain allows and is no decision a
+    # promoted call could be refused by.
+    assert gated[guard + 1 :] == [
+        "enforce_plan_approval",
+        "stamp_plan_link",
+        "refuse_when_claim_lost",
+    ], (
         "the entries below the guard changed; the plan gate not seeing a promoted call is a "
         "property this test exists to keep deliberate"
     )
     ungated = AgentProfile(name="ungated", harness_enabled=False)
-    assert names(ungated)[-1] == "refuse_unparsed_arguments", (
-        "without the harness it *is* last, which is why the false claim survived review"
+    assert names(ungated)[-2:] == ["refuse_unparsed_arguments", "refuse_when_claim_lost"], (
+        "without the harness the guard is the last decision, which is why the false claim "
+        "survived review"
     )
 
 

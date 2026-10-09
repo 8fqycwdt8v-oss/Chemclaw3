@@ -2455,7 +2455,7 @@ nothing", not "the database matches this image".
 
 119 needs no row: it adds a nullable column the restored image never names, and a person's revision written during the window records no introduced figures, which the newer image derives from the revision and its parent exactly as it did before the column existed.
 
-126 needs no row either: it adds two nullable columns the restored image never names, and a turn that image starts carries no question id in its thread (`agent/turn_resume.question_message_id`), so a turn that died under it is never resumed after the roll forward — it ends `interrupted` as before.
+126 needs no row either: it adds two nullable columns (127 a third) the restored image never names, and a turn that image starts records no `question_id`, so a turn that died under it is never resumed after the roll forward — it ends `interrupted` as before.
 
 058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 

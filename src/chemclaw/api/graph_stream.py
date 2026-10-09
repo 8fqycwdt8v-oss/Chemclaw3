@@ -19,16 +19,16 @@ the text the model then produced.
 
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
+from chemclaw.agent.tool_authz import FAILED_CALL_MARK
 from chemclaw.agent.tool_result_size import full_result_ref, stored_result_ref, was_cut
-from chemclaw.agent.turn_resume import ResumePoint, question_message_id
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
@@ -103,8 +103,8 @@ async def graph_events(
     usage: Any,
     exchanges: list[Any] | None = None,
     carry: dict[str, Any] | None = None,
-    question_id: str | None = None,
-    resume: ResumePoint | None = None,
+    message_id: str | None = None,
+    continue_thread: bool = False,
 ) -> AsyncIterator[Event]:
     """Drive one turn on a compiled graph, yielding the turn's events in order.
 
@@ -125,12 +125,11 @@ async def graph_events(
             into this run's input and updated from it, so the caps span a mid-turn resume — the one
             case where a turn is two graph invocations and untracked channels would restart at 0.
             `None` for one invocation per turn.
-        question_id: The turn's correlation id, which names the message in the thread
-            (`agent/turn_resume.question_message_id`) so a dead turn can be resumed; `None` leaves
-            the message unnamed.
-        resume: A dead turn to continue instead of starting one. `message` is then ignored: the
-            graph continues from its checkpoint, after the committed `resume.tail` is replayed as
-            the events and the spend it already produced.
+        message_id: The id the message has in the thread, minted by the server and kept with the
+            question's row, so a dead turn's start can be found again (`agent/turn_resume.py`);
+            `None` lets the graph mint one.
+        continue_thread: Continue a dead turn from its checkpoint instead of starting one:
+            `message` is ignored and the graph resumes the node the kill interrupted.
 
     Yields:
         `Event`s in the order and with the meanings `api/events.py` declares.
@@ -152,18 +151,9 @@ async def graph_events(
     # re-deriving it 400 times a turn would be the same answer 400 times.
     depth = root_depth(graph)
     failure: list[Exception] = []
-    graph_input: dict[str, Any] | None
-    if resume is None:
-        graph_input = {
-            **turn_input(
-                message, None if question_id is None else question_message_id(question_id)
-            ),
-            **(carry or {}),
-        }
-    else:
-        graph_input = None
-        async for replayed in _replayed(resume, trace, todos, exchanges, failed_calls, usage):
-            yield replayed
+    graph_input: dict[str, Any] | None = (
+        None if continue_thread else {**turn_input(message, message_id), **(carry or {})}
+    )
     async for namespace, mode, payload in _until_failure(
         graph.astream(graph_input, config, stream_mode=_MODES, subgraphs=True),
         failure,
@@ -236,32 +226,34 @@ async def graph_events(
         raise failure[0]
 
 
-async def _replayed(
-    resume: ResumePoint,
+async def replayed_events(
+    tail: Sequence[BaseMessage],
+    *,
     trace: ToolCallTrace,
-    todos: list[str],
     exchanges: list[Any] | None,
-    failed_calls: set[str],
     usage: Any,
 ) -> AsyncIterator[Event]:
-    """What the dead attempt had already done, as the events and spend of this one.
+    """What a dead attempt had already done, as the events a live update of it would have raised.
 
-    The committed tail goes through the reader a live update goes through, so the trace, the
-    transcript's exchanges and the grounding evidence are what an uninterrupted turn would hold. Its
-    model calls were paid for and never booked, so their usage is added here, once. A tail ending
-    in prose is a finished graph whose answer was never delivered: its text is replayed as the
-    answer's tokens.
+    The committed `tail` goes through the reader a live update goes through, so the trace, the
+    transcript's exchanges and the grounding evidence are what an uninterrupted turn would hold. A
+    call the thread marks failed or refused (`FAILED_CALL_MARK`, or an error status) stays out of
+    the evidence, as it does live. The model calls in it were paid for and never booked, so their
+    usage is added here, once. The caller counts these events and does not send them: a resumed
+    stream, like any attach, shows a turn from the moment of attaching.
     """
+    failed = {
+        str(m.tool_call_id)
+        for m in tail
+        if isinstance(m, ToolMessage) and m.additional_kwargs.get(FAILED_CALL_MARK)
+    }
     async for event in _from_update(
-        {"model": {"messages": list(resume.tail)}}, "", trace, todos, exchanges, failed_calls
+        {"model": {"messages": list(tail)}}, "", trace, [], exchanges, failed
     ):
         yield event
-    for message in resume.tail:
+    for message in tail:
         if isinstance(message, AIMessage):
             usage.add(graph_usage_tokens(message))
-    last = resume.tail[-1] if resume.tail else None
-    if isinstance(last, AIMessage) and not last.tool_calls and (text := message_text(last)):
-        yield TokenEvent(text=text)
 
 
 #: The two tools whose result names the artefact revision they wrote.

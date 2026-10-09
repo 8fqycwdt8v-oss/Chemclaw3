@@ -127,9 +127,11 @@ class LapsedTurn(NamedTuple):
     #: Who sent it; only they may resume it.
     actor: str | None
     question: str
+    #: The id the question has in the checkpointed thread; empty on a turn the previous image began.
+    question_id: str
     dry_run: bool
-    #: Fresh, never resumed and not booked: worth reading its checkpoint
-    #: (`agent/turn_resume.py`).
+    #: Fresh, never resumed, not booked and with a recorded `question_id`: worth reading its
+    #: checkpoint (`agent/turn_resume.py`).
     eligible: bool
 
 
@@ -306,8 +308,8 @@ SELECT_SESSION_ROWS = (
 # The checkpointer holds the message from the graph's first step, so the transcript must too.
 _INSERT_TURN = (
     "INSERT INTO session_messages "
-    "(session_id, message, message_shape, correlation_id, actor, agent, turn_status, dry_run) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 'running', %s) RETURNING id"
+    "(session_id, message, message_shape, correlation_id, actor, agent, turn_status, dry_run, "
+    "question_id) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s) RETURNING id"
 )
 # Settling a turn's question, in two forms. An answer overrides whatever the row says, including an
 # `interrupted` written by another process while this one was still alive. A turn that ended without
@@ -346,8 +348,8 @@ _MARK_INTERRUPTED = (
 # the window a turn may run (`%s` seconds), and no outcome booked for it.
 _LAPSED_TURNS = (
     "SELECT m.id, COALESCE(m.correlation_id, ''), m.actor, m.message, m.message_shape, "
-    "COALESCE(m.dry_run, false), "
-    "(m.resumed_at IS NULL AND COALESCE(m.correlation_id, '') <> '' "
+    "COALESCE(m.question_id, ''), COALESCE(m.dry_run, false), "
+    "(m.resumed_at IS NULL AND COALESCE(m.correlation_id, '') <> '' AND m.question_id IS NOT NULL "
     " AND m.created_at > now() - make_interval(secs => %s) "
     " AND NOT EXISTS (SELECT 1 FROM turn_costs c WHERE c.correlation_id = m.correlation_id)) "
     "FROM session_messages m WHERE m.session_id = %s AND m.turn_status = 'running' "
@@ -356,11 +358,27 @@ _LAPSED_TURNS = (
 # Taking a dead turn over is two writes in one transaction: the successor's session claim, which is
 # refused while any live claim stands, and the question's `resumed_at`, which is set once. In one
 # transaction `now()` is one instant, so the new claim (`claimed_at`) covers the question
-# (`resumed_at`) from the moment either is visible, and no noticer can mark a running turn
-# `interrupted` between them. Two replicas attaching at once: one claim wins, the other is refused.
+# (`resumed_at`) as soon as both are visible. Two replicas attaching at once: one claim wins, the
+# other is refused.
+#
+# A noticer that read the question before the commit would still mark it from its old snapshot, so
+# `_LOCK_LAPSED` takes the question's row lock first, in the noticer's own transaction: it waits for
+# the resume to commit, and the `_MARK_INTERRUPTED` that follows is a new statement with a new
+# snapshot that sees the claim. A pod still on the previous image has no such lock and no
+# `resumed_at` in its predicate; it can mark a resumed turn dead until it is replaced.
 _RESUME_MARK = (
     "UPDATE session_messages SET resumed_at = now() "
     "WHERE id = %s AND session_id = %s AND turn_status = 'running' AND resumed_at IS NULL"
+)
+# Giving a resume back: the claim and the mark in one transaction, for a turn that was refused or
+# shed before it ran a step, so a refusal does not use up the turn's one resume.
+_UNRESUME_MARK = (
+    "UPDATE session_messages SET resumed_at = NULL "
+    "WHERE id = %s AND session_id = %s AND turn_status = 'running'"
+)
+_LOCK_LAPSED = (
+    "SELECT m.id FROM session_messages m WHERE m.session_id = %s AND m.turn_status = 'running' "
+    f"AND NOT {COVERED} FOR UPDATE OF m"
 )
 # The newest turn's status, for the reattach route's "what happened to the turn I was following".
 _LATEST_TURN_STATUS = (
@@ -439,6 +457,11 @@ _TURN_REFRESH = (
     "WHERE session_id = %s AND holder = %s"
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
+# Whether this holder's claim is live now, on the database's clock: what a turn asks before it
+# acts.
+_TURN_OWNS = (
+    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s AND expires_at > now()"
+)
 
 # The same three operations over a set of sessions, one statement each.
 #
@@ -795,19 +818,24 @@ class PostgresHistoryProvider:
         *,
         state: dict[str, Any] | None = None,
         dry_run: bool = False,
+        question_id: str | None = None,
     ) -> int | None:
         """Write the chemist's message ahead of its turn, `running`; return the row to settle.
 
         The checkpointer holds the message from the graph's first step, so writing it here keeps the
         transcript in step, and how the turn ended becomes a column rather than an absence. The sort
-        key moves in the same transaction. `dry_run` is recorded so a resumed turn keeps it. `None`
-        for no session, which the caller reads as "settle nothing, write the exchange whole".
+        key moves in the same transaction. `dry_run` and `question_id` (the message's id in the
+        checkpointed thread) are recorded so a resumed turn keeps the one and finds the other.
+        `None` for no session, which the caller reads as "settle nothing, write the exchange
+        whole".
         """
         if not session_id:
             return None
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_INSERT_TURN, (*_rows(session_id, [message])[0], dry_run))
+                await cur.execute(
+                    _INSERT_TURN, (*_rows(session_id, [message])[0], dry_run, question_id)
+                )
                 row = await cur.fetchone()
                 await cur.execute(_OWNER_TOUCH, (session_id,))
             await conn.commit()
@@ -858,6 +886,8 @@ class PostgresHistoryProvider:
             return []
         async with self._connection() as conn:
             async with conn.cursor() as cur:
+                await cur.execute(_LOCK_LAPSED, (session_id,))
+                await cur.fetchall()
                 await cur.execute(_MARK_INTERRUPTED, (session_id, list(spare)))
                 rows = await cur.fetchall()
             await conn.commit()
@@ -879,8 +909,9 @@ class PostgresHistoryProvider:
                 str(row[1]),
                 row[2],
                 str(message_from_row(row[3], row[4]).content),
-                bool(row[5]),
+                str(row[5]),
                 bool(row[6]),
+                bool(row[7]),
             )
             for row in rows
         ]
@@ -906,6 +937,19 @@ class PostgresHistoryProvider:
                 return True
             await conn.rollback()
         return False
+
+    async def give_back_resume(self, session_id: str, row_id: int, holder: str) -> None:
+        """Undo `claim_to_resume` for a turn that ended before it ran a step.
+
+        The claim is released and the question's `resumed_at` cleared in one transaction, so the
+        turn stays resumable (a shed or refused attach does not use up its one resume) and there is
+        no instant at which a live claim and no mark, or a mark and no claim, can be read.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_RELEASE, (session_id, holder))
+                await cur.execute(_UNRESUME_MARK, (row_id, session_id))
+            await conn.commit()
 
     async def latest_turn_status(
         self, session_id: str | None, *, state: dict[str, Any] | None = None
@@ -1198,6 +1242,13 @@ class SessionTurnClaims:
             await conn.commit()
         return still_ours
 
+    async def owns(self, session_id: str, holder: str) -> bool:
+        """Whether `holder`'s claim on the session is live: not taken over, not lapsed."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_OWNS, (session_id, holder))
+                return await cur.fetchone() is not None
+
     async def release(self, session_id: str, holder: str) -> None:
         """Give the slot back at the end of the turn (idempotent; only this holder's row goes)."""
         async with self._connection() as conn:
@@ -1322,6 +1373,7 @@ class InMemoryHistoryProvider:
         *,
         state: dict[str, Any] | None = None,
         dry_run: bool = False,
+        question_id: str | None = None,
     ) -> int | None:
         """The durable provider's write-ahead, over the thread kept in `state`; its index back."""
         if state is None:

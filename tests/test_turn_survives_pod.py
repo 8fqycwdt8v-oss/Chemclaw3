@@ -11,6 +11,8 @@ not, the sender against the member, the killed turn against the stopped one.
 
 import asyncio
 import json
+import os
+import signal
 import threading
 import time
 from collections import Counter
@@ -21,13 +23,16 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
+from langchain_core.messages import HumanMessage
 
+from chemclaw.agent.checkpointer import close_checkpointer
+from chemclaw.agent.state import turn_config
 from chemclaw.core.config import settings
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 from tests.replicas import Replica, replica, replica_env, replicas
 
 #: The claim lease of the replicas: a killed turn is dead for the others after this long.
-LEASE = 3.0
+LEASE = 5.0
 ANA = {"x-test-user": "ana"}
 BEN = {"x-test-user": "ben"}
 FINAL = "final after {} tool results"
@@ -232,13 +237,18 @@ def test_a_turn_killed_between_two_model_calls_is_resumed_once_by_its_sender(
     assert _rows("SELECT turns FROM budget_usage WHERE actor = 'ana'") == [(1,)]
 
 
+@pytest.mark.parametrize("same_replica", [False, True], ids=["other-replica", "same-replica"])
 def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
-    work: Path, env: dict[str, str], survivors: list[Replica]
+    work: Path, env: dict[str, str], survivors: list[Replica], same_replica: bool
 ) -> None:
-    """A member attaching leaves it alone (control); two attaches of the sender run it once."""
+    """A member attaching leaves it alone (control); two attaches of the sender run it once.
+
+    The attach that loses the race follows the winner to its answer, on this replica or another.
+    """
     b, c = survivors
+    tag = f"resume2{int(same_replica)}"
     with replica(env) as a:
-        dead = Victim(a, work, ANA, "resume2")
+        dead = Victim(a, work, ANA, tag)
         members = httpx.put(
             f"{a.base}/sessions/{dead.session_id}/members/ben", headers=ANA, timeout=30
         )
@@ -248,23 +258,23 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     # Control: Ben is a participant but did not send the turn. Nothing is resumed, nothing marked.
     status, _, _ = attach(b, dead.session_id, BEN)
     assert status == 404
-    assert _executions(work, "resume2")["model-3"] == 0
+    assert _executions(work, tag)["model-3"] == 0
     assert _question_status(dead.session_id) == "running"
 
     results: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
     threads = [
         threading.Thread(target=lambda s=s: results.append(attach(s, dead.session_id, ANA)))
-        for s in (b, c)
+        for s in ((b, b) if same_replica else (b, c))
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=120)
 
-    assert sorted(status for status, _, _ in results)[0] == 200
-    assert any(_types(events)[-1:] == ["answer"] for _, _, events in results)
-    assert _executions(work, "resume2")["model-3"] == 1, "the turn ran twice"
-    assert _executions(work, "resume2")["tool-probe_read-2"] == 1
+    assert [status for status, _, _ in results] == [200, 200], results
+    assert all(_types(events)[-1:] == ["answer"] for _, _, events in results), results
+    assert _executions(work, tag)["model-3"] == 1, "the turn ran twice"
+    assert _executions(work, tag)["tool-probe_read-2"] == 1
     assert _answers(dead.session_id) == [FINAL.format(2)]
     assert len(_costs(dead.correlation)) == 1
 
@@ -458,3 +468,146 @@ def test_a_turn_that_dies_again_is_not_resumed_a_second_time(
         assert _executions(work, "twice")["model-2"] == 2
         assert _executions(work, "twice")["model-3"] == 0
         assert _question_status(dead.session_id) == "interrupted"
+
+
+def _stall(server: Replica) -> None:
+    """Stop the process as a blocked event loop or a frozen container is stopped.
+
+    It keeps its memory and its connections, does nothing, and wakes believing no time has passed.
+    """
+    os.kill(server.process.pid, signal.SIGSTOP)
+
+
+def _wake(server: Replica) -> None:
+    os.kill(server.process.pid, signal.SIGCONT)
+
+
+def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_nothing(
+    work: Path, env: dict[str, str], survivors: list[Replica]
+) -> None:
+    """The old holder is fenced: it stalls past its lease, B resumes, A wakes and goes to act.
+
+    A's model call returns after B has taken the thread; its next step is a state-changing call.
+    That call must not run on A (it runs once, on B), A must book and write nothing for the turn,
+    and the transcript holds one answer. The control below is the same stall that ends inside the
+    lease: nothing is taken over, and A finishes its own turn and acts.
+    """
+    b, _ = survivors
+    with replica(env) as a:
+        victim = Victim(a, work, ANA, "fence1")
+        victim.start("q steps=read,act park-model-2")
+        victim.reached("model-2")
+        _stall(a)
+        time.sleep(LEASE + 1.5)
+
+        resumed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
+        attaching = threading.Thread(
+            target=lambda: resumed.append(attach(b, victim.session_id, ANA)), daemon=True
+        )
+        attaching.start()
+        deadline = time.monotonic() + 60
+        while _executions(work, "fence1")["model-2"] < 2:  # B is in the step A is parked in
+            assert time.monotonic() < deadline, b.output()
+            time.sleep(0.05)
+        _open_gate(work, "fence1")
+        _wake(a)
+        attaching.join(timeout=120)
+        assert victim.thread is not None
+        victim.thread.join(timeout=60)
+        time.sleep(3)  # A has had every chance to carry on
+
+        status, _, events = resumed[0]
+        assert status == 200 and _types(events)[-1] == "answer", events
+        executed = _executions(work, "fence1")
+        assert executed["tool-probe_act-2"] == 1, f"the state-changing call ran twice: {executed}"
+        assert executed["model-3"] == 1, f"both processes drove the thread: {executed}"
+        assert _answers(victim.session_id) == [FINAL.format(2)]
+        assert _question_status(victim.session_id) == "done"
+        assert len(_costs(victim.correlation)) == 1
+        assert httpx.get(f"{a.base}/healthz", timeout=10).status_code == 200
+
+
+def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
+    work: Path, env: dict[str, str]
+) -> None:
+    """Control for the fence: nobody took the turn over, so the stalled pod acts and answers."""
+    with replica(env) as a:
+        victim = Victim(a, work, ANA, "fence0")
+        victim.start("q steps=read,act park-model-2")
+        victim.reached("model-2")
+        _stall(a)
+        time.sleep(1.0)
+        _open_gate(work, "fence0")
+        _wake(a)
+        assert victim.thread is not None
+        victim.thread.join(timeout=90)
+
+        executed = _executions(work, "fence0")
+        assert executed["tool-probe_act-2"] == 1 and executed["model-3"] == 1, executed
+        assert _types(victim.events)[-1] == "answer"
+        assert _answers(victim.session_id) == [FINAL.format(2)]
+        assert [row[0] for row in _costs(victim.correlation)] == ["answered"]
+
+
+def _thread_questions(session_id: str) -> list[str]:
+    """The chemist's messages in the session's checkpointed thread, as the model will read them."""
+
+    async def read() -> list[str]:
+        from chemclaw.agent.checkpointer import checkpointer
+
+        try:
+            saver = await checkpointer()
+            assert saver is not None
+            found = await saver.aget_tuple(turn_config(session_id))  # type: ignore[arg-type]
+            assert found is not None
+            messages = found.checkpoint["channel_values"]["messages"]
+            return [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+        finally:
+            await close_checkpointer()
+
+    return asyncio.run(read())
+
+
+def test_a_member_presenting_the_senders_correlation_id_does_not_overwrite_the_question(
+    work: Path, env: dict[str, str], survivors: list[Replica]
+) -> None:
+    """The correlation id is a header any client sets; it is not the question's identity.
+
+    Ben sends a message under Ana's turn's correlation id (visible to him in its response header).
+    Both questions stay in the thread the model reads. The thread keeps one message per id, which
+    `tests/test_turn_resume.py` shows as the control, so the id must be the server's.
+    """
+    del survivors  # the shared replicas are not needed; the victim's replica serves both
+    with replica(env) as a:
+        ana = Victim(a, work, ANA, "ow1")
+        added = httpx.put(
+            f"{a.base}/sessions/{ana.session_id}/members/ben", headers=ANA, timeout=30
+        )
+        assert added.status_code == 204, added.text
+        ana.start("first steps=read park-model-2")
+        ana.reached("model-2")
+        ben_events: list[dict[str, Any]] = []
+
+        def ben() -> None:
+            with httpx.stream(
+                "POST",
+                f"{a.base}/sessions/{ana.session_id}/messages",
+                json={"message": "second steps=read tag=ow2"},
+                headers={**BEN, "X-Chemclaw-Correlation-Id": ana.correlation},
+                timeout=120,
+            ) as response:
+                for line in response.iter_lines():
+                    if line.startswith("data:"):
+                        ben_events.append(json.loads(line.removeprefix("data:")))
+
+        sending = threading.Thread(target=ben, daemon=True)
+        sending.start()
+        time.sleep(1.5)  # Ben's message is in the line behind Ana's running turn
+        _open_gate(work, "ow1")
+        assert ana.thread is not None
+        ana.thread.join(timeout=60)
+        sending.join(timeout=60)
+
+    assert _types(ben_events)[-1] == "answer", ben_events
+    asked = _thread_questions(ana.session_id)
+    assert [text.split(" steps=")[0] for text in asked] == ["first", "second"], asked

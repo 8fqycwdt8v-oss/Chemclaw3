@@ -95,6 +95,7 @@ from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
     refuse_undeclared_writes,
+    refuse_when_claim_lost,
     refuse_writes_on_dry_run,
     surface_authorization_denials,
     surface_domain_errors,
@@ -992,6 +993,8 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # and hash for launchers to stamp onto jobs. Attached whenever the harness runs, in any
         # autonomy mode.
         *([stamp_plan_link] if harness_enabled_for(profile) else []),
+        # Innermost of all: the ownership check sits as close to the effect as the chain allows.
+        refuse_when_claim_lost,
     ]
 
 
