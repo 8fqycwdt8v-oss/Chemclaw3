@@ -708,15 +708,41 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
+        """Write the checkpoint, and if the caller is cancelled meanwhile, finish it and then say so.
+
+        The turn awaits this write before its next step (`api/graph_stream.TURN_DURABILITY`), so a
+        Stop or a disconnect reaches the write through that wait. A write cancelled half-way in
+        psycopg's pipeline can absorb the cancellation and return normally, which loses the Stop:
+        the turn would go on, tools included. The write therefore runs apart from the caller's
+        cancellation, which is held until the write is whole (or failed) and then re-raised.
+
+        Raises:
+            ConnectionError: The checkpoint could not be written.
+            asyncio.CancelledError: The caller was cancelled; the write has finished by then.
+        """
+        write = asyncio.ensure_future(self._write(config, checkpoint, metadata, new_versions))
+        try:
+            return await asyncio.shield(write)
+        except asyncio.CancelledError:
+            if not write.done():
+                await asyncio.wait({write})
+            if not write.cancelled():
+                write.exception()  # retrieved, so a failure the cancellation outran is not logged
+            raise
+
+    async def _write(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
         """Write the checkpoint with this build's channel names, and the values it holds, stamped.
 
         `STATE_CHANNELS_KEY` is what this build declared; `CHECKPOINT_VALUES_KEY` is what this
         checkpoint held, read before `super().aput` splits values across stores. Once per turn the
         write is followed by `_prune_superseded`, after the write so a thread is never smaller than
         the checkpoint replacing it.
-
-        Raises:
-            ConnectionError: The checkpoint could not be written.
         """
         stamped = cast(
             CheckpointMetadata,
