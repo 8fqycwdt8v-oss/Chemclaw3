@@ -49,6 +49,9 @@ _EXPECTED_ORDER = (
     # `write_todos`. The plan gate must nest inside it, because `enforce_plan_approval` reads
     # `request.state["todos"]`.
     "ScopedTodoListMiddleware",
+    # A `before_model` hook, ahead of the caps: a turn that lost its session makes no further model
+    # call, so nothing downstream is counted or billed for it.
+    "HoldClaimBeforeModel",
     "enforce_loop_cap",
     "enforce_spend_cap",
     # The other half of `enforce_loop_cap`: that hook authorises one call per graph past the cap
@@ -87,6 +90,9 @@ _EXPECTED_ORDER = (
     # args)` reads arguments settled by everything above.
     "enforce_plan_approval",
     "stamp_plan_link",
+    # Innermost of every tool gate: the ownership check sits as close to the effect as the chain
+    # allows, so a call a gate refused never costs a claim lookup.
+    "refuse_when_claim_lost",
     # Above the compaction group, so the preferences it appends to the system message are charged
     # as prefix by `MeasureRequestPrefix` rather than missed by it (`agent/preferences.py`).
     "StandingPreferences",

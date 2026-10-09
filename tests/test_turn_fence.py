@@ -33,6 +33,7 @@ from chemclaw.agent.state import turn_config
 from chemclaw.agent.tool_authz import refuse_when_claim_lost
 from chemclaw.agent.turn_graph import build_turn_agent
 from chemclaw.agent.turn_resume import ResumePoint, judge
+from chemclaw.api import runner
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
 from chemclaw.api.state import _hold_turn_claim
@@ -312,7 +313,16 @@ async def test_one_failed_refresh_among_good_ones_loses_nothing() -> None:
 
 @pytest.fixture
 def durable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """The Postgres store, migrated, with the checkpointer's tables."""
+    """The Postgres store, migrated, with the checkpointer's tables.
+
+    The durable subsystem is held up: no Temporal runs here, and a turn would announce its outage
+    ahead of the events these tests count.
+    """
+
+    async def _reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_durable_subsystem_reachable", _reachable)
     monkeypatch.setattr(settings, "session_store", "postgres")
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
