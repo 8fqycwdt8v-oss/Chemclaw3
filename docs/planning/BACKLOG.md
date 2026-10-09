@@ -35,6 +35,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
   clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
+- [ ] **The turn relay polls Postgres 8 times a second per held turn and per remote watcher** [L] — measured (two processes, defaults): idle holder 0.4 → 8.3 xact/s, +8.0 per remote watcher; remote attach 0.35 s vs 0.05 s local, remote Stop 0.32 s vs 0.07 s;
+  a payload-free `LISTEN` wake-up before the same rows needs one session-mode connection per replica (`science/calc/flight.py::_Listener`, the `tests/test_db.py` allow-list, `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`); then `api/turn_relay.py::TurnRelay.run`, `agent/session_queue.py` can poll rarely.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised

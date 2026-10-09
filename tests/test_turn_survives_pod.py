@@ -358,6 +358,16 @@ def test_a_stop_sent_to_a_dead_turn_ends_it_and_it_is_not_resumed_afterwards(
     with replica(env) as a:
         dead = Victim(a, work, ANA, "stopdead").dies_at("q steps=read,read park-model-2", "model-2")
 
+    # A page being discarded is not a decision to stop; the turn stays there for the reload.
+    unload = httpx.post(
+        f"{b.base}/sessions/{dead.session_id}/turn/stop",
+        params={"reason": "unload"},
+        headers=ANA,
+        timeout=30,
+    )
+    assert unload.status_code == 404
+    assert _question_status(dead.session_id) == "running"
+
     stop = httpx.post(f"{b.base}/sessions/{dead.session_id}/turn/stop", headers=ANA, timeout=30)
     status, _, _ = attach(b, dead.session_id, ANA)
 

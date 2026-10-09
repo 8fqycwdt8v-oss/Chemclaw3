@@ -8,15 +8,23 @@ process does with them is `tests/test_turn_survives_pod.py`.
 import asyncio
 import uuid
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
+from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
-from chemclaw.agent.turn_resume import judge, question_message_id
+from chemclaw.agent.turn_graph import build_turn_agent
+from chemclaw.agent.turn_resume import ResumePoint, judge, question_message_id
+from chemclaw.agent.turn_usage import TurnUsage
+from chemclaw.api.graph_stream import graph_events
+from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
@@ -26,6 +34,7 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from tests.pg import migrated_db_or_skip
+from tests.replica_graph import INPUT_TOKENS, OUTPUT_TOKENS, ProbeModel, probe_tools
 
 CID = "resume-unit-1"
 
@@ -206,3 +215,54 @@ async def test_a_turn_past_the_window_or_already_booked_is_not_eligible(
     )
     (booked,) = await history.lapsed_turns(session_id)
     assert booked.eligible is False, "a turn whose outcome is booked was offered"
+
+
+async def test_a_finished_graph_resumed_delivers_its_answer_without_asking_the_model_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pod died after the last model call and before the answer left: nothing is re-run.
+
+    The committed tail is replayed as the events and the spend of the turn, and the final prose is
+    replayed as its answer's tokens; the model and the tools run zero more times.
+    """
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    monkeypatch.setenv("REPLICA_MARKS", str(marks))
+    monkeypatch.setenv("REPLICA_GATE", str(tmp_path))
+    graph = build_turn_agent(
+        ProbeModel(),
+        connectors=probe_tools(),
+        checkpointer=InMemorySaver(),
+        audit_sink=NullAuditSink(),
+    )
+    config = turn_config("resume-finished")
+    first = HumanMessage(content="q steps=read tag=fin", id=question_message_id("fin"))
+    async for _ in graph.astream({"messages": [first]}, config, stream_mode=["updates"]):
+        pass
+    before = sorted(path.name.split(".")[1] for path in marks.iterdir())
+    tail = judge((await graph.aget_state(config)).values["messages"], "fin")
+    assert not isinstance(tail, str), tail
+
+    usage = TurnUsage()
+    trace = ToolCallTrace()
+    exchanges: list[Any] = []
+    events = [
+        event
+        async for event in graph_events(
+            graph,
+            "",
+            config=config,
+            trace=trace,
+            on_signal=lambda _signal: None,
+            usage=usage,
+            exchanges=exchanges,
+            resume=ResumePoint(1, "fin", "q", False, tail),
+        )
+    ]
+
+    assert [event.type for event in events] == ["tool_call", "tool_result", "token"]
+    assert getattr(events[-1], "text", "") == "final after 1 tool results"
+    assert sorted(path.name.split(".")[1] for path in marks.iterdir()) == before
+    assert (usage.input, usage.output) == (2 * INPUT_TOKENS, 2 * OUTPUT_TOKENS)
+    assert trace.called_tools == ["probe_read"] and len(trace.outputs) == 1
+    assert len(exchanges) == 2, "the transcript would lose the tool exchange"

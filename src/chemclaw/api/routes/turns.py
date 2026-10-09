@@ -878,8 +878,11 @@ async def _stop_elsewhere(
     """
     holding = await _held_elsewhere(front, session_id)
     relay = front.turn_relay
-    if holding is None and await _stop_dead_turn(front, session_id, principal, live):
-        return {"stopped": True}
+    # An unload stop is a page being discarded, not a decision: the reload that follows is what
+    # resumes a dead turn.
+    if holding is None and reason != "unload":
+        if await _stop_dead_turn(front, session_id, principal, live):
+            return {"stopped": True}
     if holding is None or relay is None:
         raise HTTPException(status_code=404, detail="no turn is running for this session")
     if holding.actor is None or holding.actor != principal.oid:
@@ -907,7 +910,8 @@ async def _stop_dead_turn(
     A Stop that finds no live turn but a dead one that could be resumed is the chemist declining the
     resume: the turn is marked `interrupted` and is not offered again. Anyone else's Stop is a 404.
     """
-    lapsed = await front.history.lapsed_turns(session_id)
+    lapsed_turns = getattr(front.history, "lapsed_turns", None)
+    lapsed = [] if lapsed_turns is None else await lapsed_turns(session_id)
     if not any(
         turn.actor == principal.oid or owner_permits(live.owner, principal.oid) for turn in lapsed
     ):
@@ -1080,9 +1084,10 @@ async def _resume_dead_turn(
     `_ResumeDeclined` when another replica or a line took the turn first.
     """
     front = state(request)
-    if await front.turn_queue.waiting(session_id):
+    lapsed_turns = getattr(front.history, "lapsed_turns", None)
+    if lapsed_turns is None or await front.turn_queue.waiting(session_id):
         return None
-    for turn in reversed(await front.history.lapsed_turns(session_id)):
+    for turn in reversed(await lapsed_turns(session_id)):
         if turn.actor is None or turn.actor != principal.oid:
             continue
         verdict = await resume_point(session_id, turn)
