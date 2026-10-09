@@ -92,7 +92,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - The background worker runs at any replica count: periodic jobs are Schedules under `SKIP`, and a pass that must not overlap itself takes a session-level advisory lock and skips when it is held — [D-2026-10-08-a-single-instance-job-holds-a-session-lock-or-does-nothing](D-2026-10-08-a-single-instance-job-holds-a-session-lock-or-does-nothing.md).
 - The front door keeps three pools and a worker one; an early alert fires at 80% of the declared connection ceiling, and PgBouncer's transaction mode serves only connections with no session state — [D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint](D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint.md).
 - The suite gate goes parallel; a parallel-only failure is a defect to root-cause, and until W3.12 flips the default the gate stays serial — [D-2026-10-08-the-test-gate-runs-in-parallel](D-2026-10-08-the-test-gate-runs-in-parallel.md).
-- Model-facing text changes one batch at a time, behind an offline and a live A/B eval — [D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation](D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation.md).
+- Model-facing text changes one batch at a time, behind an offline and a live A/B eval — [D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation](D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation.md); the evaluation ships only on five runs per arm, states its power, and holds the prefix to the batch's claim — [D-2026-10-08-the-text-evaluation-states-its-power-and-holds-the-prefix-to-its-claim](D-2026-10-08-the-text-evaluation-states-its-power-and-holds-the-prefix-to-its-claim.md).
 
 ## Record and process
 

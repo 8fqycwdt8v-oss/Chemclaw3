@@ -23,7 +23,11 @@ from fastapi.staticfiles import StaticFiles
 
 from chemclaw.agent.audit import NullAuditSink, default_audit_sink
 from chemclaw.agent.checkpointer import close_checkpointer
-from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
+from chemclaw.agent.chemclaw_agent import (
+    connector_specs,
+    history_provider,
+    refuse_a_misapplied_overlay,
+)
 from chemclaw.agent.durable_tools import cancel_job, job_status
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -199,6 +203,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Likewise the peer roster: one typo can make the mesh indistinguishable from the feature being
     # off.
     refuse_an_unknown_peer_roster(registered_profile_names())
+    # A candidate arm's overlay that applies nowhere would make it a second control.
+    refuse_a_misapplied_overlay()
     # After logging is configured and profiles load, so a malformed profile fails first.
     _report_inventory()
     # Before anything offloads. Every `asyncio.to_thread` here (token validation, retrieval,

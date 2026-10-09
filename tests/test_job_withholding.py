@@ -9,9 +9,9 @@ earlier build in the process registered it. Uses the shipped `results` bundle, n
 import pytest
 
 from chemclaw.agent.chemclaw_agent import (
-    _withheld_tool_names,
     available_tool_names,
     declared_tool_names,
+    withheld_tool_names,
 )
 from chemclaw.connectors.jobs import ConnectorJobError, prepare_job_launch, unavailable_reason
 from chemclaw.connectors.registry import find_job, job_names, job_tools, withheld_job_names
@@ -84,6 +84,6 @@ def test_a_launcher_registered_under_another_configuration_is_still_withheld(
     (launcher,) = [tool for tool in job_tools() if tool.__name__ == _JOB]
     monkeypatch.setitem(tool_registry._REGISTRY, _JOB, launcher)
     _publishing_nowhere(monkeypatch)
-    assert _JOB in _withheld_tool_names()
+    assert _JOB in withheld_tool_names()
     assert _JOB not in available_tool_names()
     assert _JOB not in surface(None).tool_names

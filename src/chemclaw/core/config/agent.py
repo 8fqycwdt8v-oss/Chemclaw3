@@ -37,6 +37,10 @@ class AgentSettings(BaseSettings):
     # Skills actually advertised, pathsep-delimited; empty means every discovered skill. Only
     # narrows (role gates still apply); `make skill-validate` reports unknown names.
     skills_enabled: str = ""
+    # A directory of replacement model-facing text (`agent/text_overlay.py`) that a candidate front
+    # door runs under in a model-text evaluation, so a batch is measured before it is committed.
+    # Empty (the default) is off; an operator sets it only on the candidate arm's process.
+    model_text_overlay_dir: str = ""
     # Skill name → Entra app-roles allowed to see it; unlisted skills are visible to everyone. JSON
     # in the env, e.g. CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)

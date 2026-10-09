@@ -610,7 +610,7 @@ def withheld_job_names() -> list[str]:
     """The enabled jobs this deployment declares and cannot run, so binds no launcher for, sorted.
 
     Decided now by the manifest's `unavailable_reason`. Still declared (validators keep it), but
-    subtracted from the bound surface here and in `chemclaw_agent._withheld_tool_names`, since the
+    subtracted from the bound surface here and in `chemclaw_agent.withheld_tool_names`, since the
     tool registry only grows.
     """
     return sorted(

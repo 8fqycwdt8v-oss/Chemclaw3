@@ -140,7 +140,7 @@ of `D-2026-10-04`). It is a BACKLOG row with these numbers.
 - No model-facing text and no event shape changed. `GET …/turn/stream` can now answer with the
   limits of a new turn (429, `queued`, `at_capacity`, `budget_exhausted`) and `POST …/turn/stop` can
   answer 200 for a dead turn where it answered 404; both are in the routes' descriptions
-  (contract 1.0.1) and add no field. A resumed turn is under `X-Chemclaw-Turn-Correlation-Id` of the
+  (contract 1.0.2) and add no field. A resumed turn is under `X-Chemclaw-Turn-Correlation-Id` of the
   original. `Chemclaw3_ui` follows a reloaded turn through the same route and needs nothing, but a
   client whose stream just dropped **polls the transcript instead of attaching**, so the resume
   starts when the page reloads or the UI attaches after a drop.

@@ -271,6 +271,10 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "unused, and what is left of agent's HTTP is one lazy client factory"
     ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
+    ("chemclaw.cli", "mcp"): (
+        "cli/model_text_inventory serves each in-repo bundle's FastMCP server over an in-memory "
+        "session inside `_served_in_process`, to read the `tools/list` a pod would answer with"
+    ),
     ("chemclaw.ingest", "warehouse"): (
         "both warehouse drivers are imported inside their own connect call, so a deployment that "
         "binds no warehouse never needs either installed (D-2026-08-04: the schema is a file, not "

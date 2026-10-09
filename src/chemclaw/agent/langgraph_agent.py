@@ -91,6 +91,7 @@ from chemclaw.agent.subagents import (
     helper_profile,
     specialist_override,
 )
+from chemclaw.agent.text_overlay import overlaid
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -720,9 +721,8 @@ def _bound_surface(
     """
     # Handoff tools join `first_party` before the name check, so a connector tool named
     # `transfer_to_<peer>` cannot take over a handoff.
-    first_party = [described_for_deployment(as_structured_tool(fn)) for fn in tools] + list(
-        handoffs or []
-    )
+    described = [described_for_deployment(as_structured_tool(fn)) for fn in tools]
+    first_party = overlaid(described) + list(handoffs or [])
     claimed = {tool.name for tool in first_party}
     for tool in connectors or []:
         if tool.name in claimed:
@@ -732,7 +732,7 @@ def _bound_surface(
                 "name, because the name is the authorization key and the model has only one of "
                 "them to call"
             )
-    return [*first_party, *(connectors or [])]
+    return [*first_party, *overlaid(list(connectors or []))]
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
