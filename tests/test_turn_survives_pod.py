@@ -253,7 +253,8 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
             f"{a.base}/sessions/{dead.session_id}/members/ben", headers=ANA, timeout=30
         )
         assert members.status_code == 204, members.text
-        dead.dies_at("q steps=read,read park-model-2", "model-2")
+        # The gate stays shut, so the resumed turn is still running when the second attach arrives.
+        dead.dies_at("q steps=read,read park-model-2", "model-2", keep_parked=True)
 
     # Control: Ben is a participant but did not send the turn. Nothing is resumed, nothing marked.
     status, _, _ = attach(b, dead.session_id, BEN)
@@ -268,6 +269,12 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     ]
     for thread in threads:
         thread.start()
+    deadline = time.monotonic() + 60
+    while _executions(work, tag)["model-2"] < 2:  # the winner is in the step the dead one was in
+        assert time.monotonic() < deadline, "no attach resumed the turn"
+        time.sleep(0.05)
+    time.sleep(2.5)  # the other attach has lost the race and is following the winner
+    _open_gate(work, tag)
     for thread in threads:
         thread.join(timeout=120)
 

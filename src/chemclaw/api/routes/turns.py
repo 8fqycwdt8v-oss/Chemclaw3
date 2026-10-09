@@ -1220,7 +1220,16 @@ async def _watch_elsewhere(
             headers={"Retry-After": "1"},
         )
     try:
-        request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
+        for _ in range(_START_RACE_POLLS):
+            request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
+            if answer.state not in (None, "gone"):
+                break
+            # The holder may have taken its claim a moment before it registers the turn it
+            # answers for; while the same claim stands, ask again before saying nothing runs.
+            current = await relay.holding(session_id)
+            if current is None or current.holder != holding.holder:
+                break
+            await asyncio.sleep(_START_RACE_POLL_SECONDS)
     except BaseException:
         release_slot()
         raise
