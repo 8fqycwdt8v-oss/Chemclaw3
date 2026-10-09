@@ -83,9 +83,14 @@ def _rows(statement: str, *params: Any) -> list[tuple[Any, ...]]:
         return conn.execute(statement, params).fetchall()
 
 
+def _marks(work: Path, tag: str) -> Counter[str]:
+    """Every mark turn `tag` left, in every process."""
+    return Counter(path.name.split(".")[1] for path in (work / "marks").glob(f"{tag}.*"))
+
+
 def _executions(work: Path, tag: str) -> Counter[str]:
     """How many times each model call and tool body of turn `tag` ran, in every process."""
-    return Counter(path.name.split(".")[1] for path in (work / "marks").glob(f"{tag}.*"))
+    return Counter({k: n for k, n in _marks(work, tag).items() if not k.endswith("-woke")})
 
 
 def _open_gate(work: Path, tag: str) -> None:
@@ -597,7 +602,7 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
 
         _wake(a)
         deadline = time.monotonic() + 60
-        while _executions(work, tag)["model-2-woke"] < 2:  # A's model call has returned
+        while _marks(work, tag)["model-2-woke"] < 2:  # A's model call has returned
             assert time.monotonic() < deadline, a.output()
             time.sleep(0.05)
         assert victim.thread is not None

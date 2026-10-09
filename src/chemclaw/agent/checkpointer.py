@@ -49,7 +49,6 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
 )
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.postgres import _ainternal
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg import AsyncConnection
@@ -593,7 +592,10 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             # A write by a turn that holds a claim: upstream's own pipeline, but inside a
             # transaction that first holds the claim row (`_HOLD_CLAIM`). `pipeline=True` is how
             # upstream marks a write; reads never reach here.
-            async with self.lock, _ainternal.get_connection(self.conn) as conn:
+            pool = self.conn
+            if not isinstance(pool, AsyncConnectionPool):
+                raise TypeError(f"the fenced write wants this module's pool, got {type(pool)}")
+            async with self.lock, pool.connection() as conn:
                 async with conn.transaction():
                     held = await conn.execute(
                         _HOLD_CLAIM, (fence.claim.session_id, fence.claim.holder)
