@@ -18,7 +18,7 @@ turns a compiled graph's stream into the turn event contract, `detach.py` lets a
 client (it stops only on request), `turn_relay.py` lets any replica follow or stop a turn another
 one holds, `tool_results.py` stores a turn's full tool output for
 `GET /sessions/{id}/tool-results/{ref}`, `exhibit_drafts.py` streams a `document` artefact while the
-model is still writing it, and `rate_limit.py` is the per-principal request budget. `mcp_face.py` is
+model is still writing it, and `rate_limit.py` is the per-principal request budget, shared by every replica through `rate_limit_store.py`. `mcp_face.py` is
 the read-only MCP face — this system as a tool somebody else's agent can call — and `static/` the
 browser front end `create_app` serves. The
 Prometheus registry the `/metrics` route renders is **not** here — it is `core/metrics.py`, because

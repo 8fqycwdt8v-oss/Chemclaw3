@@ -445,6 +445,61 @@
         "x": 0,
         "y": 28
       }
+    },
+    {
+      "type": "graph",
+      "title": "Shared limits degraded, bookkeeping behind the answer",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "ops",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_rate_limit_shared_unavailable_total[15m]))",
+          "legendFormat": "requests limited by one replica's own bucket (database unreachable)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_bookkeeping_unsettled_total[15m]))",
+          "legendFormat": "cost/budget/approval writes still running when the answer left",
+          "refId": "B"
+        }
+      ],
+      "id": 12,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      }
     }
   ],
   "refresh": "30s",

@@ -66,6 +66,12 @@ class ServiceSettings(BaseSettings):
     # Lifetime of a relay request without refresh, and how long the asker waits for the holder's
     # first answer before 503. Must exceed the poll interval (checked at startup).
     service_turn_relay_lease_seconds: float = Field(default=10.0, gt=0)
+    # How long a finished turn waits for its bookkeeping (cost row, budget booking, spent approval)
+    # before it tells the client it is done, and a shutdown waits for the rest. The wait is the
+    # answer's added latency when the database is slow; a write past it finishes in the background
+    # and is counted, never failing the turn. Above a healthy database's write, below the client's
+    # patience.
+    service_turn_bookkeeping_timeout_seconds: float = Field(default=2.0, gt=0)
     # Max characters in one chat message; larger is a clean 422.
     service_max_message_chars: int = Field(default=100_000, gt=0)
     # Security headers on every response: a CSP scoped to the self-served chat UI, nosniff,
@@ -94,12 +100,14 @@ class ServiceSettings(BaseSettings):
     # waiting on the model). The fleet ceiling below is where the endpoint's real capacity is
     # stated.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
+    # Under `postgres` it also bounds the wait for a deployment-wide slot, taken after the permit
+    # and with the permit held, so a turn can wait up to twice this before it is shed.
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
     # Per-actor cap on simultaneous turns across their sessions, so one principal cannot hold every
     # permit (the rate limit meters rate, not concurrency). 0 disables, the code default, so
-    # `chemclaw.cli.live_storm` can drive admission from one credential; the chart sets it. Per
-    # process; a fleet-wide per-actor limit belongs at the ingress. A value at or above
-    # `service_max_concurrent_turns` is refused.
+    # `chemclaw.cli.live_storm` can drive admission from one credential; the chart sets it. Under
+    # `session_store=postgres` it counts the actor's turns on every replica; under `memory`, this
+    # process's. A value at or above `service_max_concurrent_turns` is refused.
     service_max_concurrent_turns_per_actor: int = Field(default=0, ge=0)
     # Threads kept above what the admission caps can occupy in the shared `asyncio.to_thread` pool
     # (`core/executor.py`), so short calls (token validation, probes, reconnects) never queue behind
@@ -111,7 +119,9 @@ class ServiceSettings(BaseSettings):
     # `autoscaling.maxReplicas` (or `service.replicas`); 1 suits a CLI or dev run.
     #
     # `fleet_max_concurrent_turns` is the endpoint's permitted ceiling, declared by the operator;
-    # when set, startup refuses a product above it. 0 = undeclared.
+    # when set, startup refuses a product above it, and under `session_store=postgres` it is also
+    # enforced at admission as the number of turns running across all replicas, which catches a
+    # Deployment scaled past the replicas declared above. 0 = undeclared.
     service_fleet_replicas: int = Field(default=1, gt=0)
     # Front-door pods during a rolling update (chart's `chemclaw.frontDoorProcessesAtRolloutPeak`),
     # for the connection budget's per-pod readiness term. 0 falls back to the steady figures.
@@ -120,11 +130,13 @@ class ServiceSettings(BaseSettings):
     # Per-principal request budget (`api/rate_limit.py`), spent in `require_principal` so it covers
     # every authenticated route and no probes. A token bucket: `per_minute` refills, `burst` caps a
     # spend, so no window edge doubles the peak. 0 disables, the code default; the chart sets it.
-    # Per process; fleet-wide limits belong at the ingress.
+    # Under `session_store=postgres` the bucket is shared by every replica
+    # (`api/rate_limit_store.py`); under `memory` it is this process's.
     service_rate_limit_per_minute: float = Field(default=0.0, ge=0)
     service_rate_limit_burst: float = Field(default=30.0, gt=0)
-    # Principals the limiter remembers before evicting the least recent; the key is
+    # Principals the in-process limiter remembers before evicting the least recent; the key is
     # attacker-influenced, so the map must be bounded. Eviction gives that caller one free burst.
+    # Also bounds the shared limiter's local memory of refused principals.
     service_rate_limit_max_principals: int = Field(default=10_000, gt=0)
     # Hard ceiling on a request body, refused with 413 before anything reads it
     # (`core.asgi.BodySizeLimit`); otherwise multipart parsing spools the whole body first. Above

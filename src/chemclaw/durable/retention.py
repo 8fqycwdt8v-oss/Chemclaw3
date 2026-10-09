@@ -152,6 +152,11 @@ _NOT_PRUNED: dict[str, str] = {
         "refused: one row per principal, reset in place rather than appended, so a clock would "
         "reclaim nothing; erased with its subject instead (`agent/leaver.py::_ERASE`)"
     ),
+    # One row per principal, updated in place by every authenticated request; a bucket idle long
+    # enough to be full is the same as no row, so the only removal that matters is erasure.
+    "request_buckets": "refused: one row per principal, updated in place rather than appended, so "
+    "its size is the number of people served and a clock would reclaim only departed users; "
+    "erased with its subject (`agent/leaver.py::_ERASE`)",
     "job_records": "refused: a durable run's evaluation record, which used to expire with "
     "Temporal's history and take a campaign's results with it (D-157)",
     "calculation_results": "refused: evicting a cached result converts a hit into a "

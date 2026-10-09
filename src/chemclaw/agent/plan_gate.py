@@ -25,6 +25,7 @@ from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.session_store import owner_permits
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
 from chemclaw.core.identity_context import get_current_actor
@@ -251,19 +252,14 @@ async def consume_turn_approval(session_id: str) -> None:
         )
 
 
-#: Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING` :
-#: shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
-_PENDING_SPENDS: set[Any] = set()
-
-
-def spend_approval_after_teardown(session_id: str) -> None:
+def spend_approval_after_teardown(session_id: str) -> "asyncio.Task[None] | None":
     """Spend the session's approvals from a teardown path where awaiting is forbidden.
 
     A turn torn down after issuing a state-changing call has used its authorization (jobs and writes
     are not rolled back), so its approval is spent; otherwise dropping the connection would allow
     acting twice under one approval. Synchronous like `turn_cost.record_turn_cost`: the write runs
-    on its own task, swallows its failure, and is held in `_PENDING_SPENDS`. The caller decides
-    whether the turn acted.
+    on its own tracked task and swallows its failure; the task is returned for a caller that can
+    wait. The caller decides whether the turn acted.
     """
 
     async def _spend() -> None:
@@ -278,13 +274,10 @@ def spend_approval_after_teardown(session_id: str) -> None:
                 session_id,
             )
 
-    try:
-        task = asyncio.get_running_loop().create_task(_spend())
-    except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
+    task = bookkeeping.schedule(_spend())
+    if task is None:
         logger.warning("no event loop to spend session %s's approval after teardown", session_id)
-        return
-    _PENDING_SPENDS.add(task)
-    task.add_done_callback(_PENDING_SPENDS.discard)
+    return task
 
 
 # --- the LangGraph wiring ------------------------------------------------------------------------

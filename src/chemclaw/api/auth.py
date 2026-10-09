@@ -397,7 +397,7 @@ async def require_principal(request: Request) -> Principal:
     if not settings.entra_required:
         _refuse_exposed_dev_principal(request)
         return _bind(
-            request, _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
+            request, await _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
         )
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
@@ -424,7 +424,7 @@ async def require_principal(request: Request) -> Principal:
         _count_auth_failure("invalid")
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc
-    return _bind(request, _within_budget(principal))
+    return _bind(request, await _within_budget(principal))
 
 
 async def reauthorize(request: Request, principal: Principal) -> Principal:
@@ -510,7 +510,7 @@ def _bind(request: Request, principal: Principal) -> Principal:
     return principal
 
 
-def _within_budget(principal: Principal) -> Principal:
+async def _within_budget(principal: Principal) -> Principal:
     """Spend one request against this principal's rate budget, or 429.
 
     Here because every authenticated route funnels through `require_principal`, so a new route
@@ -518,7 +518,7 @@ def _within_budget(principal: Principal) -> Principal:
     person, not per credential. Probe routes do not depend on this and are never limited.
     """
     try:
-        enforce_request_budget(principal.oid)
+        await enforce_request_budget(principal.oid)
     except RateLimited as exc:
         raise HTTPException(
             status_code=429,

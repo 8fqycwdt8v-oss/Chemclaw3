@@ -617,6 +617,7 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         "subscriptions",
         "user_preferences",
         "budget_usage",
+        "request_buckets",
         # Composed workflows are erased like preferences: a working procedure cites no evidence, so
         # it is part of the conversation, not the record.
         "composed_workflows",

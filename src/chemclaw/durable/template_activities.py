@@ -33,6 +33,7 @@ from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
@@ -594,12 +595,18 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
             # three model calls still spent them. Only an in-flight call at cancellation goes
             # unbooked. Inside `turn_caps`, because the row reads the context watch the manager
             # tears down on exit.
-            _book_step_spend(step, meter.usage, time.perf_counter() - started, answered, outcome)
+            await bookkeeping.settle(
+                [
+                    _book_step_spend(
+                        step, meter.usage, time.perf_counter() - started, answered, outcome
+                    )
+                ]
+            )
 
 
 def _book_step_spend(
     step: AgentStepInput, usage: TurnUsage, duration_seconds: float, answered: bool, outcome: str
-) -> None:
+) -> asyncio.Task[None] | None:
     """Publish one agent step's spend: the five counters, and the durable per-turn cost row.
 
     The same instruments and labels as the chat path: counters for the fleet-wide rate, `turn_costs`
@@ -614,10 +621,12 @@ def _book_step_spend(
         duration_seconds: Wall clock for the step, for the ledger's duration column.
         answered: Whether the step produced its answer. Recorded, not filtered — see `TurnCost`.
         outcome: How the step ended, in `turn_costs.outcome`'s vocabulary.
+
+    Returns the cost row's write, for the step to wait on before it reports itself finished.
     """
     labels = {"profile": step.profile or "default"}
     context = current_context()
-    record_turn_cost(
+    cost_row = record_turn_cost(
         TurnCost(
             correlation_id=(
                 f"{step.identity.correlation_id}:{step.step_id}"
@@ -648,6 +657,7 @@ def _book_step_spend(
     ):
         if value:
             METRICS.increment(name, float(value), labels)
+    return cost_row
 
 
 def step_profile(profile: str | None, write_tools: Sequence[str]) -> AgentProfile:

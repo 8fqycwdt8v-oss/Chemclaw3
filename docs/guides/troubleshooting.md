@@ -179,7 +179,7 @@ dotenv file).
 | 403 | `only the session's owner may <act>` and other ownership/role sentences | authorization | `authz.refused` log event; `chemclaw_authz_refusals_total{resource}`. Role assignment ([runbook § (xv)](runbook.md#xv-onboard-entitle-and-offboard-a-person)). |
 | 403 | `cancelling a durable job is an operator action …` | caller lacks a privileged role | `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` |
 | 413 | `{"detail":…}` before any log of the body | body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES` | WARNING `refused a request body over the <n> byte limit with 413`; `chemclaw_requests_too_large_total`. Keep it above `CHEMCLAW_ATTACHMENT_MAX_BYTES`. |
-| 429 + `Retry-After` | `too many requests` | per-principal rate limit | `chemclaw_requests_rate_limited_total`; `CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` / `_BURST` (per process) |
+| 429 + `Retry-After` | `too many requests` | per-principal rate limit | `chemclaw_requests_rate_limited_total`; `CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` / `_BURST` (shared by all replicas under Postgres) |
 | 429 + `Retry-After` | `too many concurrent turns for this user; wait for one to finish` | per-actor turn cap | `chemclaw_turns_refused_actor_cap_total` (not the rate-limit counter) |
 | 429 | `<session\|user> <turn\|token> budget exhausted (<n> …)` / `This conversation has reached its size limit …` | budgets | [§15](#15-budget-and-spend-cap-refusals) |
 | 429 | `too many concurrent event streams; close one and retry` | stream caps | `chemclaw_event_streams_rejected_total`; `CHEMCLAW_SERVICE_MAX_EVENT_STREAMS_PER_USER` / `_TOTAL` |

@@ -325,9 +325,11 @@ does not create it.
   the environment. (Only a key in a *dotenv file* is rejected.)
 - **`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` is the ceiling the whole deployment may put on the
   shared LLM endpoint** (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down).
-  The admission cap is per-process by design, so the load the endpoint really sees is
+  The admission cap is per-process (it bounds a pod's CPU), so the load the endpoint can see is
   `maxReplicas × uvicorn workers × CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`, and the chart renders
-  that product into every pod. A configuration whose product exceeds the declared ceiling
+  that product into every pod. Under `CHEMCLAW_SESSION_STORE=postgres` the ceiling is also enforced
+  as a live count of admitted turns across all replicas, so a hand-scaled Deployment cannot exceed
+  it. A configuration whose product exceeds the declared ceiling
   **refuses to start**, in every pod, naming the product and each factor. Raising
   `service.autoscaling.maxReplicas` or the per-process cap therefore means raising this too, with a
   number from the endpoint's throughput budget; the repository's own tests fail on a chart whose

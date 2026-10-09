@@ -61,12 +61,17 @@ from chemclaw.api.state import (
     claim_holder,
     state,
 )
+from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 from chemclaw.exhibits.models import UnknownExhibit
 
 logger = logging.getLogger(__name__)
+
+# How many times a turn asks for a deployment-wide slot within the admission timeout: a polling
+# cadence of the window, not a limit.
+_ADMISSION_POLLS_PER_WINDOW = 20
 
 #: On a watch response: the correlation id of the turn being watched (its sender's own
 #: `POST …/messages` id), distinct from the watch request's `X-Chemclaw-Correlation-Id`.
@@ -128,6 +133,24 @@ def _retry_after_hint() -> str:
     """
     base = settings.service_turn_admission_timeout_seconds
     return str(max(1, math.ceil(base + random.random() * base)))
+
+
+async def _actor_turns_held(front: FrontDoorState, actor: str, *, besides: str) -> int:
+    """How many turns `actor` is running or about to run on sessions other than `besides`.
+
+    This process's own leases and, where the claim store is shared, every replica's: the larger of
+    the two, since this process's lease exists a moment before its durable claim does. Unreadable
+    shared state falls back to this process's count; the claim that follows fails closed on its own.
+    """
+    local = _actor_turns_in_flight(front.active_turns, actor, besides=besides)
+    admission = front.turn_admission
+    if admission is None:
+        return local
+    try:
+        return max(local, await admission.actor_turns(actor, besides))
+    except (ConnectionError, psycopg.Error):
+        logger.warning("could not read %s's turns across replicas; counting this process's", actor)
+        return local
 
 
 def _invalid_exhibit_ref(message: str) -> dict[str, str]:
@@ -202,7 +225,7 @@ async def post_message(
     actor_cap = settings.service_max_concurrent_turns_per_actor
     front_waiters = front.queue_waiters
     held = (
-        _actor_turns_in_flight(active_turns, principal.oid, besides=session_id)
+        await _actor_turns_held(front, principal.oid, besides=session_id)
         + _waiting_besides(front_waiters, principal.oid, besides=session_id)
         if actor_cap and principal.oid != DEV_PRINCIPAL_OID
         else 0
@@ -265,6 +288,11 @@ async def post_message(
     # since a detached turn has no waiting client to be fair to. The flag makes release idempotent,
     # and nothing between test and release can suspend.
     permit = False
+    # Whether the turn has told its client it is waiting, and whether it holds a deployment-wide
+    # slot (the claim's `admitted` flag, freed with the claim).
+    queued_announced = False
+    fleet_slot = False
+    admission = front.turn_admission
 
     def _release_permit() -> None:
         """Give the process's admission permit back, exactly once, whoever gets here first."""
@@ -366,7 +394,7 @@ async def post_message(
         if (
             cap_now
             and principal.oid != DEV_PRINCIPAL_OID
-            and _actor_turns_in_flight(active_turns, principal.oid, besides=session_id) >= cap_now
+            and await _actor_turns_held(front, principal.oid, besides=session_id) >= cap_now
         ):
             METRICS.increment("chemclaw_turns_refused_actor_cap_total")
             return (
@@ -404,12 +432,69 @@ async def post_message(
                 yield sse_frame(QueuedEvent(ticket=ticket, position=place))
             await signal.wait(settings.service_turn_queue_poll_seconds)
 
+    def _shed() -> dict[str, str]:
+        """The frame a turn that found no free slot ends on, counted so shedding is visible.
+
+        Shedding is admission control working as designed. Retryable: it says "not now".
+        `at_capacity`, not `budget_exhausted`, so a surface can tell "busy, retry shortly" from
+        "budget gone, stop".
+        """
+        METRICS.increment("chemclaw_turns_shed_total")
+        return sse_frame(
+            ErrorEvent(
+                message=AT_CAPACITY,
+                code="at_capacity",
+                retryable=True,
+                correlation_id=correlation_id,
+            )
+        )
+
+    async def _wait_for_a_fleet_slot() -> AsyncIterator[dict[str, str]]:
+        """Take a deployment-wide turn slot, polling until the admission timeout; sets `fleet_slot`.
+
+        Yields one `queued` frame if the turn has to wait and none was sent for the process permit.
+        The process permit stays held while it polls, so a turn can wait up to the admission
+        timeout for the permit and again for the slot: a bound of twice
+        `service_turn_admission_timeout_seconds`, and the permit is the cheaper thing to hold (a
+        turn that has not started occupies no model capacity).
+        Inert (the slot is taken) when no shared limit is configured or the claim store cannot
+        share one. A database that cannot answer is not a full deployment: it raises, and the
+        stream ends on the failure frame like any other store error.
+        """
+        nonlocal fleet_slot, queued_announced
+        fleet_cap = settings.service_fleet_max_concurrent_turns
+        actor_cap = settings.service_max_concurrent_turns_per_actor
+        if principal.oid == DEV_PRINCIPAL_OID:
+            actor_cap = 0
+        if admission is None or holder is None or not (fleet_cap or actor_cap):
+            fleet_slot = True
+            return
+        window = settings.service_turn_admission_timeout_seconds
+        deadline = time.monotonic() + window
+        while True:
+            if await admission.admit(
+                session_id,
+                holder,
+                fleet_cap=fleet_cap,
+                actor=principal.oid,
+                actor_cap=actor_cap,
+            ):
+                fleet_slot = True
+                return
+            if time.monotonic() >= deadline:
+                return
+            if not queued_announced:
+                METRICS.increment("chemclaw_turns_queued_total")
+                queued_announced = True
+                yield sse_frame(QueuedEvent())
+            await asyncio.sleep(window / _ADMISSION_POLLS_PER_WINDOW * (0.5 + random.random()))
+
     async def _turn_events() -> AsyncIterator[dict[str, str]]:
         # When the turn ends — completion, error, timeout or stop — release the turn slot, the
         # durable claim, the line place and (unless detach already did) the permit, so the session
         # stays claimed exactly while work is in flight.
         heartbeat: asyncio.Task[None] | None = None
-        nonlocal permit
+        nonlocal permit, queued_announced
         # Counts the turn, not its error events: one turn can yield two errors, and the timeout
         # branch sits outside the loop. One increment in the `finally` keeps the failure ratio at
         # most 1.
@@ -425,29 +510,26 @@ async def post_message(
             # interleave before the acquire, so an uncontended turn emits no `queued` event.
             if semaphore.locked():
                 METRICS.increment("chemclaw_turns_queued_total")
-                queued_event = QueuedEvent()
-                yield sse_frame(queued_event)
+                queued_announced = True
+                yield sse_frame(QueuedEvent())
                 try:
                     await asyncio.wait_for(
                         semaphore.acquire(),
                         timeout=settings.service_turn_admission_timeout_seconds,
                     )
                 except TimeoutError:
-                    # Shedding is admission control working as designed; count it so it is visible.
-                    METRICS.increment("chemclaw_turns_shed_total")
-                    # Retryable: shedding says "not now". `at_capacity`, not `budget_exhausted`, so
-                    # a surface can tell "busy, retry shortly" from "budget gone, stop".
-                    shed = ErrorEvent(
-                        message=AT_CAPACITY,
-                        code="at_capacity",
-                        retryable=True,
-                        correlation_id=correlation_id,
-                    )
-                    yield sse_frame(shed)
+                    yield _shed()
                     return
             else:
                 await semaphore.acquire()
             permit = True
+            # The deployment-wide limits, after the process's own: this process's permit is cheap to
+            # test and bounds its CPU, the shared slot bounds what the model endpoint sees.
+            async for frame in _wait_for_a_fleet_slot():
+                yield frame
+            if not fleet_slot:
+                yield _shed()
+                return
             # The binding budget check: the pre-response check runs before a concurrent burst has
             # booked, while here the turn holds a permit, bounding overshoot to the permits plus
             # detached turns. An event, since the response is open; not retryable.
@@ -513,6 +595,10 @@ async def post_message(
                     retryable=False,
                     correlation_id=correlation_id,
                 )
+                # The timed-out turn booked itself on tracked tasks while it was cancelled; wait
+                # for them (and, harmlessly, for any other write in flight on this loop) before
+                # the terminal frame, as an answered or failed turn does. Bounded.
+                await bookkeeping.settle(bookkeeping.pending())
                 yield sse_frame(timeout_event)
         except Exception as exc:
             # The stream's catch-all for failures above `run_turn`'s own guard (the factories) or

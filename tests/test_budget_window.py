@@ -12,7 +12,7 @@ import pytest
 
 from chemclaw.api import budget_store
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.core import db
+from chemclaw.core import bookkeeping, db
 from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
@@ -235,15 +235,13 @@ async def test_an_unwritten_turn_inside_the_window_still_binds_after_reconciling
 
 
 async def _drain() -> None:
-    """Let the fire-and-forget durable write finish before reading it back.
+    """Let the durable write finish before reading it back.
 
-    `record` schedules the write as a task (it runs from teardown); awaiting the module's pending
+    `record` schedules the write as a tracked task (it runs from teardown); awaiting the pending
     set avoids racing it.
     """
-    from chemclaw.api.budget import _PENDING
-
-    while _PENDING:
-        await asyncio.gather(*tuple(_PENDING), return_exceptions=True)
+    while bookkeeping.pending():
+        await asyncio.gather(*bookkeeping.pending(), return_exceptions=True)
 
 
 async def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(
