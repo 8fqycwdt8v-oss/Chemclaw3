@@ -6,6 +6,7 @@ claim is about. The processes inherit the test's redirected DSN, so they share t
 """
 
 import contextlib
+import ctypes
 import os
 import signal
 import socket
@@ -13,13 +14,31 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from chemclaw.core.config import settings
+
+#: The marker the lane puts in the reason of a skip, so `tests/conftest.py` can count it.
+LANE_SKIP = "Multi-replica lane unavailable"
+
+#: How long a started process has to answer its readiness probe before the lane gives up on it.
+READY_SECONDS = 90.0
+
+#: `PR_SET_PDEATHSIG` from `<linux/prctl.h>`.
+_PR_SET_PDEATHSIG = 1
+
+
+def die_with_parent() -> None:
+    """Run in the child between fork and exec: SIGKILL it when the process that started it dies.
+
+    A test runner that is itself SIGKILLed runs no `finally`, and a replica or worker left behind
+    holds a port and a database connection for as long as nobody notices.
+    """
+    ctypes.CDLL(None).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
 class Replica:
@@ -46,7 +65,7 @@ class Replica:
         return self.log.read_text(errors="replace")
 
 
-def _free_port() -> int:
+def free_port() -> int:
     """An ephemeral loopback port, released for the child to claim."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -79,43 +98,54 @@ def replica_env(work: Path, **overrides: Any) -> dict[str, str]:
     return env
 
 
-def _spawn(env: dict[str, str]) -> Replica:
-    """Start one replica process; it is not ready until `_await_ready` says so."""
-    port = _free_port()
+def _spawn(
+    env: dict[str, str], module: str = "tests.replica_process", *, port_env: str = ""
+) -> Replica:
+    """Start one process of `module` on a free port; it is not ready until `_await_ready` says so.
+
+    A front-door replica takes the port as its argument; a worker (`port_env` names the setting)
+    serves its probes on it.
+    """
+    port = free_port()
     log = Path(tempfile.mkstemp(prefix="replica-", suffix=".log")[1])
+    command = [sys.executable, "-m", module]
+    if port_env:
+        env = {**env, port_env: str(port)}
+    else:
+        command.append(str(port))
     with log.open("wb") as sink:
         process = subprocess.Popen(
-            [sys.executable, "-m", "tests.replica_process", str(port)],
+            command,
             env=env,
             stdout=sink,
             stderr=subprocess.STDOUT,
+            preexec_fn=die_with_parent,
         )
     return Replica(process, port, log)
 
 
-def _await_ready(started: Replica) -> None:
-    """Block until the replica answers `/healthz`, or fail with what it wrote."""
-    deadline = time.monotonic() + 90
+def _await_ready(started: Replica, path: str = "/healthz") -> None:
+    """Block until the process answers `path`, or fail with what it wrote."""
+    deadline = time.monotonic() + READY_SECONDS
     while True:
         if started.process.poll() is not None:
             raise RuntimeError(f"the replica exited at start:\n{started.output()}")
         try:
-            if httpx.get(f"{started.base}/healthz", timeout=1).status_code == 200:
+            if httpx.get(f"{started.base}{path}", timeout=1).status_code == 200:
                 return
         except httpx.TransportError:
             pass
         if time.monotonic() > deadline:
-            raise RuntimeError(f"the replica never answered /healthz:\n{started.output()}")
+            raise RuntimeError(f"the replica never answered {path}:\n{started.output()}")
         time.sleep(0.1)
 
 
 @contextlib.contextmanager
-def replicas(env: dict[str, str], count: int) -> Iterator[list[Replica]]:
-    """Start `count` replicas together (their imports overlap), wait for all, kill them on exit."""
-    started = [_spawn(env) for _ in range(count)]
+def _running(started: list[Replica], ready_path: str) -> Iterator[list[Replica]]:
+    """Wait for every process in `started` to answer `ready_path`; kill them all on exit."""
     try:
         for each in started:
-            _await_ready(each)
+            _await_ready(each, ready_path)
         yield started
     finally:
         for each in started:
@@ -123,6 +153,24 @@ def replicas(env: dict[str, str], count: int) -> Iterator[list[Replica]]:
                 each.process.send_signal(signal.SIGKILL)
                 each.process.wait(timeout=10)
             each.log.unlink(missing_ok=True)
+
+
+def replicas(env: dict[str, str], count: int) -> contextlib.AbstractContextManager[list[Replica]]:
+    """Start `count` replicas together (their imports overlap), wait for all, kill them on exit."""
+    return _running([_spawn(env) for _ in range(count)], "/healthz")
+
+
+def workers(
+    env: dict[str, str], modules: Sequence[str]
+) -> contextlib.AbstractContextManager[list[Replica]]:
+    """Start one Temporal worker per entry of `modules` (repeat a name for replicas of it).
+
+    Each serves `/readyz` on its own port, and is ready once it answers. Killed on exit.
+    """
+    return _running(
+        [_spawn(env, module, port_env="CHEMCLAW_WORKER_METRICS_PORT") for module in modules],
+        "/readyz",
+    )
 
 
 @contextlib.contextmanager

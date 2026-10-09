@@ -34,6 +34,10 @@ from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 # honours `pytest_plugins` in the rootdir conftest. Used by `tests/test_suite_timeouts.py`.
 pytest_plugins = ["pytester"]
 
+# The multi-replica lane starts a dozen processes and its own Temporal broker, so the unit gate does
+# not collect it; `make live-replicas` names it with this variable (`tests/live_replicas/`).
+collect_ignore = [] if os.environ.get("CHEMCLAW_LIVE_REPLICAS") else ["live_replicas"]
+
 
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
@@ -405,6 +409,30 @@ def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_lane_skips(terminalreporter: TerminalReporter) -> None:
+    """Say plainly that the multi-replica lane did not run, and what that leaves unchecked.
+
+    Under `make ci` the lane skips where it has no database to create or no psql to create it with
+    (`infra/live/replicas.sh`); asked for directly, or by CI's `replicas` job, it fails instead.
+    Matched on `tests.replicas.LANE_SKIP`.
+    """
+    from tests.replicas import LANE_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if LANE_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Multi-replica lane did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped, so this run is not evidence that limits hold across "
+        "replicas, that a killed pod's turn resumes, or that one calculation miss computes once. "
+        "Run `make live-replicas` where Postgres and psql are available."
+    )
+
+
 def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
     """Say plainly that the cross-repository checks did not run, and what that leaves unchecked.
 
@@ -471,6 +499,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """
     _report_postgres_skips(terminalreporter)
     _report_temporal_skips(terminalreporter)
+    _report_lane_skips(terminalreporter)
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     _report_sibling_skips(terminalreporter)
