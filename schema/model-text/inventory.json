@@ -3,6 +3,7 @@
   "python": "3.11",
   "environment": {
     "connectors_dirs": [
+      "chemclaw-contracts:manifests",
       "src/chemclaw/connectors"
     ],
     "connectors_enabled": "",
