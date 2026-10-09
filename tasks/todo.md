@@ -348,17 +348,30 @@ shared state the parallel failures come from.
 - [x] **W3.9 Multi-replica test lane.** A `make live-replicas` (or a kind lane) that runs 3 service
       replicas plus 2 background workers and asserts: limits hold globally, a killed pod's turn
       resumes, and one calc miss computes once.
-- [ ] **W3.10 Parallel gate: collect the failure set.** Run `make cov PYTEST_WORKERS=4` 10 times
+- [x] **W3.10 Parallel gate: collect the failure set.** Run `make cov PYTEST_WORKERS=4` 10 times
       on an otherwise idle runner (CI's runner class), after the W3.2–W3.7 changes have landed.
       Record every test that fails in any run, with its failure. Each one is a concurrency defect:
       shared state between xdist workers, timing assumptions, or a shared database horizon (the
       retention VACUUM case is the worked example). Among them is
       `test_context_budget::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`.
-- [ ] **W3.11 Root-cause each one.** Isolate the state per worker: schema, database, Temporal
+      *Review:* ten runs on CI's runner class, three red; five tests failed once each, and the
+      burst test did not fail. The wall time (15:40 to 24:23) is not the ≤10 minute target, which
+      is W3.12's to restate.
+- [x] **W3.11 Root-cause each one.** Isolate the state per worker: schema, database, Temporal
       namespace and task queue, temp directories, ports. Replace wall-clock sleeps with events, or
       fix the product code when the defect is real. **Never skip, retry-decorate or quarantine.** A
       test that is in principle about global state (one Postgres server's settings) gets an
       `xdist_group` so it runs on one worker, and the test file argues why.
+      *Review:* all five root-caused, none skipped or retried. A gauge test waited on the
+      execution, not on the broker's visibility; two plan assertions ran over tables other tests
+      had left; a page-budget test sized itself from a timing taken at import; checkpointer
+      singletons stayed pinned to a closed loop (16 tests left them behind); and one was a real
+      hazard, a state-changing call repeated after a pod died, because LangGraph's default
+      `durability="async"` does not commit a step before the next starts
+      (`D-2026-10-09-each-step-commits-its-checkpoint-before-the-next-step-starts`). Fixing that
+      exposed two more defects, a nested graph without a checkpointer failing under `"sync"` and a
+      `psycopg-pool` that absorbed cancellations. Not yet shown: ten consecutive green parallel
+      runs after these changes, which W3.12 needs.
 - [ ] **W3.12 Flip the gate.** Make `PYTEST_WORKERS ?= 4` the default for `test` and `cov`, and run
       CI the same way. Keep a nightly serial `make cov` as a cross-check, which reports a failure that
       only shows up serially. Write `D-2026-10-08-the-test-gate-runs-in-parallel`'s measurement into
