@@ -16,7 +16,9 @@ A turn is resumable when every one of these holds, and a refusal says which did 
   (`authz.repeatable_call`). A call in flight at the kill may or may not have taken effect and its
   audit row died with the pod, so anything the list does not name (a write, an unknown tool, a
   `task` helper, a job launcher, a tool this process has no manifest for) ends the turn as
-  `interrupted` instead of being repeated.
+  `interrupted` instead of being repeated. This reads the call off the committed thread, so a
+  step's checkpoint must be stored before the tools it asks for start
+  (`api/graph_stream.TURN_DURABILITY`).
 
 Pure judgement is `judge`; the store reads are on the history provider.
 """

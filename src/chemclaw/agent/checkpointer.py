@@ -708,7 +708,7 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Write the checkpoint, and if the caller is cancelled meanwhile, finish it and then say so.
+        """Write the checkpoint; a caller cancelled meanwhile waits for the write, then stops.
 
         The turn awaits this write before its next step (`api/graph_stream.TURN_DURABILITY`), so a
         Stop or a disconnect reaches the write through that wait. A write cancelled half-way in

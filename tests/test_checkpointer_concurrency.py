@@ -315,4 +315,4 @@ async def test_a_cancelled_checkpoint_write_never_absorbs_the_cancellation() -> 
         await SessionTurnClaims().release(session, "holder")
 
     assert ours == 0, f"{ours} of 200 cancelled writes returned as if nothing had happened"
-    assert control > 0, "upstream's write absorbed none in 600, so this test no longer shows the gap"
+    assert control > 0, "upstream absorbed none in 600 cancellations: the gap this guards is gone"

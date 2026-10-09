@@ -23,6 +23,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langgraph.types import Durability
 
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_scope import declared_scope
@@ -66,6 +67,14 @@ logger = logging.getLogger(__name__)
 # `UntrackedValue`s, absent from `aget_state` and not reconstructible from `updates`. Its payload
 # references the channels' objects, so the cost does not grow with the thread.
 _MODES = ["messages", "updates", "custom", "values"]
+
+# When a step's checkpoint is committed: before the next step starts. Upstream's default writes it
+# while the next step already runs, so a pod killed inside a tool body can leave the model message
+# that made the call uncommitted; `agent/turn_resume.judge` then reads a thread in which the call
+# never happened and lets the dead turn run it again. Waiting costs one checkpoint write per step,
+# between a model call and the tools it asked for. Asked only of a graph that has a checkpointer:
+# upstream's `"sync"` waits on a write that a graph without one never starts and raises.
+TURN_DURABILITY: Durability = "sync"
 
 # The node `create_agent` runs tools in. A model call made inside a tool body inherits the graph's
 # callbacks and streams under the same empty namespace as the answer, so the node name is what tells
@@ -155,7 +164,13 @@ async def graph_events(
         None if continue_thread else {**turn_input(message, message_id), **(carry or {})}
     )
     async for namespace, mode, payload in _until_failure(
-        graph.astream(graph_input, config, stream_mode=_MODES, subgraphs=True),
+        graph.astream(
+            graph_input,
+            config,
+            stream_mode=_MODES,
+            subgraphs=True,
+            durability=TURN_DURABILITY if getattr(graph, "checkpointer", None) else None,
+        ),
         failure,
     ):
         if mode == "messages":
