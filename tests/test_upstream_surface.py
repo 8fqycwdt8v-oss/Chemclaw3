@@ -1952,6 +1952,11 @@ async def test_a_cancelled_connect_is_not_absorbed_by_psycopg() -> None:
     )
 
 
+# 500 cancellations absorb about 15 on psycopg-pool 3.3.1 (3 in 100) and a residual of about 0.1 on
+# the floor (1 in 4000, in psycopg's own pipeline); 3 separates the two with odds beyond 1 in 10^4.
+_ABSORBED_CHECKOUTS_AT_FLOOR = 3
+
+
 async def test_a_cancelled_pool_checkout_is_not_absorbed() -> None:
     """A task cancelled while it checks a connection out of a pool built with `check=` is cancelled.
 
@@ -1984,7 +1989,7 @@ async def test_a_cancelled_pool_checkout_is_not_absorbed() -> None:
         absorbed = await cancels_absorbed(checkout, 500)
     finally:
         await pool.close()
-    assert absorbed == 0, (
+    assert absorbed <= _ABSORBED_CHECKOUTS_AT_FLOOR, (
         f"{absorbed} of 500 cancelled checkouts returned as if nothing had happened; see the "
         "psycopg-pool floor in pyproject.toml"
     )

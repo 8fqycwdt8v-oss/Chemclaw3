@@ -54,7 +54,7 @@ their cause:
   write it awaits. `psycopg-pool` before 3.3.3 caught the `CancelledError` of a connection check
   (`check=`, set on every pool here), returned the connection and looped, so about 3 in 100
   cancelled checkouts returned normally (measured 46 of 1500 with `check=`, 0 of 1500 without) and
-  the stopped turn carried on. 3.3.3 re-raises it (0 of 1500). The floor in `pyproject.toml` is the
+  the stopped turn carried on. 3.3.3 re-raises it (0 of 1500 in that probe; the residual below remains). The floor in `pyproject.toml` is the
   fix; every pooled database call in a turn shared the exposure. A write wrapper that finishes the
   write and then re-raises was tried first and removed once the floor made it unnecessary. What
   remains, unexplained: 1 to 2 of 3000 cancellations landed inside psycopg's pipeline or an
