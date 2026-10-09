@@ -13,7 +13,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from langchain.agents.middleware import before_model, wrap_tool_call
+from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from langchain_core.messages import ToolMessage
 
 from chemclaw.agent.audit import refusal_reason, returned_failure
@@ -345,16 +345,24 @@ async def refuse_when_claim_lost(request: Any, handler: Callable[[Any], Any]) ->
     return await handler(request)
 
 
-@before_model
-async def hold_claim_before_model(state: Any, runtime: Any) -> None:
+class HoldClaimBeforeModel(AgentMiddleware):
     """End the turn instead of making a model call once it has lost its session.
 
     A model call is repeatable, but its answer is checkpointed and paid for, and a process that woke
     after its turn was resumed has nothing to add. A claim that cannot be confirmed does not stop
-    the call: only a takeover does.
+    the call: only a takeover does. The synchronous hook does nothing: a fence exists only on the
+    front door's asynchronous path.
     """
-    fence = current_turn_fence()
-    if fence is not None:
+
+    def before_model(self, state: Any, runtime: Any) -> None:
+        """Nothing to check off the front door's path."""
+        return None
+
+    async def abefore_model(self, state: Any, runtime: Any) -> None:
+        """Ask the claim store before the model is called."""
+        fence = current_turn_fence()
+        if fence is None:
+            return
         try:
             owned = await fence.hold()
         except ClaimUnverifiable:
