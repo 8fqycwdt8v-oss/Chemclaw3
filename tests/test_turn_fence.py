@@ -55,20 +55,24 @@ from tests.replica_graph import ProbeModel, probe_tools
 _ENDED = (asyncio.CancelledError, NodeCancelledError)
 
 
-def _fence(*answers: bool | Exception, session: str = "s", holder: str = "h") -> TurnFence:
+def _fence(
+    *answers: bool | Exception | None, session: str = "s", holder: str = "h", quiet: float = 0.0
+) -> TurnFence:
     """A fence whose store answers `answers` in turn, then the last one for ever."""
     queue = list(answers)
     cancelled: list[int] = []
     asked: list[int] = []
 
-    async def owns() -> bool:
+    async def owns() -> bool | None:
         asked.append(1)
         answer = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(answer, Exception):
             raise answer
         return answer
 
-    fence = TurnFence(Claim(session, holder), owns, lambda: cancelled.append(1))
+    fence = TurnFence(
+        Claim(session, holder), owns, lambda: cancelled.append(1), quiet_seconds=quiet
+    )
     fence.cancelled = cancelled  # type: ignore[attr-defined]
     fence.asked = asked  # type: ignore[attr-defined]
     return fence
@@ -396,10 +400,10 @@ async def test_the_ownership_check_wants_a_margin_of_the_lease_left(durable: Non
     session_id = await _held_session("pod-a:1", lease=6)
     claims = SessionTurnClaims()
 
-    assert await claims.owns(session_id, "pod-a:1")
-    assert await claims.owns(session_id, "pod-a:1", margin_seconds=2.0), "two thirds are left"
-    assert not await claims.owns(session_id, "pod-a:1", margin_seconds=30.0)
-    assert not await claims.owns(session_id, "someone-else:1")
+    assert await claims.owns(session_id, "pod-a:1") is True
+    assert await claims.owns(session_id, "pod-a:1", margin_seconds=2.0) is True, "two thirds left"
+    assert await claims.owns(session_id, "pod-a:1", margin_seconds=30.0) is None, "live but short"
+    assert await claims.owns(session_id, "someone-else:1") is False
 
 
 def _factory(model: Any = None, **extra: Any) -> Any:

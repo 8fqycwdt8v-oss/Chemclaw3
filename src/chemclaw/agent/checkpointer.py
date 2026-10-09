@@ -35,7 +35,7 @@ import functools
 import logging
 import time
 from collections.abc import AsyncIterator, Iterable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
@@ -55,14 +55,19 @@ from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg_pool import AsyncConnectionPool
 
-from chemclaw.agent.session_store import _session_dsn
+from chemclaw.agent.session_store import (
+    _session_dsn,
+    fenced_write_bound,
+    milliseconds,
+)
 from chemclaw.agent.state import ChemclawState
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.db import register_pool, unregister_pool
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
-from chemclaw.core.turn_fence import TurnFenceLost, current_turn_fence
+from chemclaw.core.turn_fence import TurnFence, TurnFenceLost, current_turn_fence
 
 logger = logging.getLogger(__name__)
 
@@ -549,10 +554,74 @@ def _refuse_if_values_are_missing(stored: CheckpointTuple) -> None:
 # for the lock, so no other replica can have taken the thread between the check and the commit; and
 # a claim that is gone or lapsed finds no row, so a process that woke after its turn was resumed
 # writes nothing.
+#
+# The same statement bounds the transaction, because a writer that stalls inside it (a stopped
+# process, a dead node) would hold the row until TCP noticed: the database cuts it off after
+# `fenced_write_bound`, which releases the row and rolls the write back, so a takeover waits for
+# that and not for a TCP timeout. `set_config` is volatile, so the join evaluates it before the row
+# is locked and the lock's own wait is bounded too.
 _HOLD_CLAIM = (
-    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s AND expires_at > now() "
-    "FOR SHARE"
+    "SELECT 1 FROM session_turns t, (SELECT "
+    "set_config('idle_in_transaction_session_timeout', %(bound)s, true), "
+    "set_config('statement_timeout', %(bound)s, true), "
+    "set_config('lock_timeout', %(bound)s, true)) AS bounded "
+    "WHERE t.session_id = %(session)s AND t.holder = %(holder)s AND t.expires_at > now() "
+    "FOR SHARE OF t"
 )
+
+
+class _FencedWrite:
+    """The cursor of a checkpoint write made under a claim.
+
+    Its transaction opens at the first statement, not on entry: upstream serialises the values
+    after entering and before executing, and that work stays outside the lock on the claim row.
+    From the first statement the process-wide saver lock, a pooled connection and the share lock on
+    the claim row are held until the commit, in one pipeline: the claim is asked, and the writes
+    sent, without a round trip each.
+    """
+
+    def __init__(
+        self, saver: "SchemaStampedSaver", fence: TurnFence, stack: AsyncExitStack, started: float
+    ) -> None:
+        """A write by `saver` for `fence`'s turn, whose resources `stack` releases."""
+        self._saver = saver
+        self._fence = fence
+        self._stack = stack
+        self._started = started
+        self._cursor: Any = None
+
+    async def _open(self) -> Any:
+        """Open the transaction, hold the claim row, and return the cursor; once."""
+        if self._cursor is not None:
+            return self._cursor
+        fence = self._fence
+        pool = cast(AsyncConnectionPool[AsyncConnection[DictRow]], self._saver.conn)
+        await self._stack.enter_async_context(self._saver.lock)
+        conn = await self._stack.enter_async_context(pool.connection())
+        await self._stack.enter_async_context(conn.transaction())
+        bound = milliseconds(fenced_write_bound(settings.service_turn_claim_lease_seconds))
+        held = await conn.execute(
+            _HOLD_CLAIM,
+            {"bound": bound, "session": fence.claim.session_id, "holder": fence.claim.holder},
+        )
+        if await held.fetchone() is None:
+            fence.lose()
+            raise TurnFenceLost
+        METRICS.observe(
+            "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - self._started
+        )
+        self._cursor = await self._stack.enter_async_context(
+            conn.cursor(binary=True, row_factory=dict_row)
+        )
+        return self._cursor
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        """Upstream's `cursor.execute`, inside the fenced transaction."""
+        return await (await self._open()).execute(*args, **kwargs)
+
+    async def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        """Upstream's `cursor.executemany`, inside the fenced transaction."""
+        return await (await self._open()).executemany(*args, **kwargs)
 
 
 class SchemaStampedSaver(AsyncPostgresSaver):
@@ -562,6 +631,16 @@ class SchemaStampedSaver(AsyncPostgresSaver):
     `alist` renders history and is unguarded. Outage translation covers all four statements, and
     `_cursor` counts the wait on the saver's lock.
     """
+
+    def __init__(self, conn: Any, *args: Any, **kwargs: Any) -> None:
+        """Wrap `conn`, which must be a pool: a fenced write opens its own transaction on one."""
+        if not isinstance(conn, AsyncConnectionPool):
+            raise ChemclawError(
+                f"the checkpointer wants an AsyncConnectionPool, got {type(conn).__name__}: a "
+                "write made under a session claim runs in a transaction of its own, which a single "
+                "connection shared with other statements cannot give it"
+            )
+        super().__init__(conn, *args, **kwargs)
 
     @asynccontextmanager
     async def _cursor(self, *, pipeline: bool = False) -> AsyncIterator[Any]:
@@ -592,22 +671,8 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             # A write by a turn that holds a claim: upstream's own pipeline, but inside a
             # transaction that first holds the claim row (`_HOLD_CLAIM`). `pipeline=True` is how
             # upstream marks a write; reads never reach here.
-            pool = self.conn
-            if not isinstance(pool, AsyncConnectionPool):
-                raise TypeError(f"the fenced write wants this module's pool, got {type(pool)}")
-            async with self.lock, pool.connection() as conn:
-                async with conn.transaction():
-                    held = await conn.execute(
-                        _HOLD_CLAIM, (fence.claim.session_id, fence.claim.holder)
-                    )
-                    if await held.fetchone() is None:
-                        fence.lose()
-                        raise TurnFenceLost
-                    METRICS.observe(
-                        "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
-                    )
-                    async with conn.cursor(binary=True, row_factory=dict_row) as cur:
-                        yield cur
+            async with AsyncExitStack() as stack:
+                yield _FencedWrite(self, fence, stack, started)
         finally:
             _statements_waiting -= 1
 

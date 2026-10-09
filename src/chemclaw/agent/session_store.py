@@ -420,6 +420,33 @@ _TURN_CLAIM = (
     "WHERE session_turns.expires_at <= now() "
     "RETURNING holder"
 )
+# Bounds what a claim takeover waits for (`SessionTurnClaims.claim`): the lock a checkpoint write
+# under the lapsed claim still holds.
+_SET_LOCK_TIMEOUT = "SELECT set_config('lock_timeout', %s, true)"
+
+
+def fenced_write_bound(lease_seconds: float) -> float:
+    """How long a checkpoint write under a claim may take, whole or between its statements.
+
+    A third of the lease: it ends well inside it, and well before a takeover stops waiting for it.
+    """
+    return lease_seconds / 3
+
+
+def takeover_wait(lease_seconds: float) -> float:
+    """How long a takeover waits for the write a lapsed claim still holds: longer than that write.
+
+    Half the lease, so a stalled writer is cut off by the database (`fenced_write_bound`) before
+    the takeover gives up, and a takeover never waits for a lease.
+    """
+    return lease_seconds / 2
+
+
+def milliseconds(seconds: float) -> str:
+    """`seconds` as a Postgres timeout setting; never `0`, which would switch the bound off."""
+    return f"{max(1, round(seconds * 1000))}ms"
+
+
 # Serialises admissions across replicas; released with the transaction, so no connection holds it
 # between turns.
 _ADMISSION_LOCK = (
@@ -447,22 +474,22 @@ _ACTOR_TURNS = (
     "WHERE actor = %s AND session_id <> %s AND expires_at > now()"
 )
 # Guarded by `holder` so a worker whose lease already lapsed and was taken by someone else cannot
-# extend — or delete — the new owner's claim. A lease that lapsed before this refresh (the database
-# was unreachable for longer than the lease) is extended, so the session stays ours, but it comes
-# back without its turn slot: while it was lapsed the slot was free and others may have taken it, so
-# re-asserting `admitted` would put the count over the ceiling. The turn finishes unadmitted.
+# extend — or delete — the new owner's claim, and by `expires_at > now()` so a lease that lapsed is
+# over for its holder too: while it was lapsed the slot was free, a takeover may be waiting on a
+# lock this holder's last write took, and a holder that woke late must not take the session back
+# from the replica that is about to resume it. Its turn ends (`api/state._hold_turn_claim`).
 _TURN_REFRESH = (
-    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s), "
-    "admitted = admitted AND expires_at > now() "
-    "WHERE session_id = %s AND holder = %s"
+    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s) "
+    "WHERE session_id = %s AND holder = %s AND expires_at > now()"
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
-# Whether this holder's claim is live now, on the database's clock, with `margin` seconds still to
-# run: what a turn asks before it acts. A healthy holder refreshes every third of its lease, so it
-# always has two thirds left; a claim with less is one a takeover could be about to follow.
+# Whether this holder's claim is live now, on the database's clock, and whether it has `margin`
+# seconds still to run: what a turn asks before it acts. No row is a claim that is gone, taken or
+# lapsed. A healthy holder refreshes every third of its lease, so it always has two thirds left; a
+# claim with less is one whose refreshes are failing, which is not a takeover.
 _TURN_OWNS = (
-    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s "
-    "AND expires_at > now() + make_interval(secs => %s)"
+    "SELECT expires_at > now() + make_interval(secs => %s) FROM session_turns "
+    "WHERE session_id = %s AND holder = %s AND expires_at > now()"
 )
 
 # The same three operations over a set of sessions, one statement each.
@@ -1186,12 +1213,23 @@ class SessionTurnClaims:
         """Take the session's turn slot for `lease_seconds`; False if someone else holds it.
 
         One statement, so no process observes a gap between check and take. `actor` records who sent
-        the turn for replicas that do not hold it (`agent/turn_remotes.py`).
+        the turn for replicas that do not hold it (`agent/turn_remotes.py`). The statement waits
+        for a checkpoint write in flight under the lapsed claim (it holds the row); the wait is
+        bounded (`takeover_wait`) and a bounded-out wait answers False, as a held slot does: the
+        caller asks again, and by then the write has committed or been cut off.
         """
         async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds, actor))
-                taken = await cur.fetchone() is not None
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        _SET_LOCK_TIMEOUT,
+                        (milliseconds(takeover_wait(settings.service_turn_claim_lease_seconds)),),
+                    )
+                    await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds, actor))
+                    taken = await cur.fetchone() is not None
+            except psycopg.errors.LockNotAvailable:
+                await conn.rollback()
+                return False
             await conn.commit()
         return taken
 
@@ -1244,12 +1282,20 @@ class SessionTurnClaims:
             await conn.commit()
         return still_ours
 
-    async def owns(self, session_id: str, holder: str, margin_seconds: float = 0.0) -> bool:
-        """Whether `holder`'s claim is live with `margin_seconds` to spare, not taken or lapsing."""
+    async def owns(self, session_id: str, holder: str, margin_seconds: float = 0.0) -> bool | None:
+        """Whether `holder`'s claim is still its own, on the database's clock.
+
+        `True`: live with `margin_seconds` to spare. `None`: live with less, which a holder whose
+        refreshes are failing has and a taken-over one does not. `False`: no such claim — gone,
+        another holder's, or lapsed.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_TURN_OWNS, (session_id, holder, margin_seconds))
-                return await cur.fetchone() is not None
+                await cur.execute(_TURN_OWNS, (margin_seconds, session_id, holder))
+                row = await cur.fetchone()
+        if row is None:
+            return False
+        return True if row[0] else None
 
     async def release(self, session_id: str, holder: str) -> None:
         """Give the slot back at the end of the turn (idempotent; only this holder's row goes)."""

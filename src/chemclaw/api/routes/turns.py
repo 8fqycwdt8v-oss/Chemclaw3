@@ -56,6 +56,7 @@ from chemclaw.api.state import (
     _actor_turns_in_flight,
     _claim_turn_slot,
     _hold_turn_claim,
+    _owned_or_renewed,
     _release_turn_claim,
     _release_turn_slot,
     _start_turn_lease,
@@ -576,10 +577,12 @@ async def _start_turn(
                 if owns is not None and pump is not None:
                     # Cancelling the pump ends the turn through its ordinary teardown.
                     margin = lease / _CLAIM_REFRESHES_PER_LEASE
+                    held_session, held_by = session_id, holder
                     fence = TurnFence(
-                        Claim(session_id, holder),
-                        lambda: owns(session_id, holder, margin),
+                        Claim(held_session, held_by),
+                        lambda: _owned_or_renewed(claims, held_session, held_by, lease, margin),
                         pump.cancel,
+                        quiet_seconds=margin,
                     )
                 heartbeat = asyncio.create_task(
                     _hold_turn_claim(claims, session_id, lease, holder, fence)

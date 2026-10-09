@@ -320,6 +320,23 @@ def _release_turn_slot(active_turns: dict[str, TurnLease], session_id: str, toke
         del active_turns[session_id]
 
 
+async def _owned_or_renewed(
+    claims: Any, session_id: str, holder: str, lease_seconds: float, margin_seconds: float
+) -> bool | None:
+    """Whether this holder's claim is its own, renewing one that is live but short of `margin`.
+
+    A claim with less than its margin left is still this holder's: its refreshes are failing, which
+    says nothing about a takeover. One renewal is tried and the claim asked again. A renewal that
+    cannot be made raises (the caller retries, then `ClaimUnverifiable`); one that finds the claim
+    gone makes the answer `False`; `None` is what stays short after a renewal that matched.
+    """
+    owned: bool | None = await claims.owns(session_id, holder, margin_seconds)
+    if owned is None:
+        await claims.refresh(session_id, holder, lease_seconds)
+        owned = await claims.owns(session_id, holder, margin_seconds)
+    return owned
+
+
 async def _hold_turn_claim(
     claims: SessionTurns,
     session_id: str,
@@ -346,12 +363,12 @@ async def _hold_turn_claim(
             if not await asyncio.wait_for(
                 claims.refresh(session_id, holder, lease_seconds), timeout=interval
             ):
-                # The claim lapsed and another worker took the session (the UPDATE matched no row).
-                # No later refresh can succeed.
+                # The claim lapsed, or another worker took the session (the UPDATE matched no
+                # row). No later refresh can succeed.
                 METRICS.increment("chemclaw_turn_claims_lost_total")
                 logger.warning(
-                    "the turn claim for session %s was taken over while the turn was running; "
-                    "the turn is ended",
+                    "the turn claim for session %s lapsed or was taken over while the turn was "
+                    "running; the turn is ended",
                     session_id,
                 )
                 if fence is not None:

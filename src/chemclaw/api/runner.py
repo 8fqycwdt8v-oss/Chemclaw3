@@ -629,6 +629,10 @@ async def run_turn(
                     spend_approval_after_teardown(session.session_id)
             raise
         except Exception as exc:
+            if fence is not None and not fence.lost:
+                # Asked first: a write cut off by its own bound (a pod that stalled inside it) is
+                # the fence's consequence too, and the answer is a takeover or it is not.
+                await _holds_the_session(fence)
             if fence is not None and fence.lost:
                 # A failure that is the fence's own consequence (a cancelled call, a closed
                 # connection) belongs to a turn that is no longer this one's to report.

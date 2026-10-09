@@ -19,6 +19,7 @@ deterministically.
 
 import asyncio
 import os
+import signal
 import sys
 import uuid
 from collections.abc import AsyncIterator
@@ -80,6 +81,57 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
     return []
 
 
+def _apply_fence_controls() -> None:
+    """Switch off, one at a time or together, the parts of the fence a test needs a control for.
+
+    - `REPLICA_NO_SAVER_FENCE`: the checkpointer's write no longer asks for the claim row.
+    - `REPLICA_NO_HEARTBEAT`: the turn never refreshes its claim, so nothing cancels it on a timer.
+    - `REPLICA_NO_FENCE`: no part of the fence asks anything, the two above included.
+    - `REPLICA_NO_WRITE_BOUND`: a write may hold the claim row for ten minutes.
+    - `REPLICA_STALL_IN_WRITE=<file>`: the first fenced write stops its own process (SIGSTOP)
+      inside its transaction, once the claim row is held, and leaves the file as the sign.
+    """
+    from chemclaw.agent import checkpointer as checkpointer_module
+    from chemclaw.api.routes import turns
+    from chemclaw.core import turn_fence
+
+    permissive = "SELECT 1 WHERE (%(session)s::text || %(holder)s::text) IS NOT NULL"
+    if os.environ.get("REPLICA_NO_SAVER_FENCE") or os.environ.get("REPLICA_NO_FENCE"):
+        checkpointer_module._HOLD_CLAIM = permissive
+    if os.environ.get("REPLICA_NO_HEARTBEAT") or os.environ.get("REPLICA_NO_FENCE"):
+
+        async def _never_beats(*_args: Any, **_kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        vars(turns)["_hold_turn_claim"] = _never_beats
+    if os.environ.get("REPLICA_NO_FENCE"):
+
+        async def _always_held(self: Any) -> bool:
+            return True
+
+        turn_fence.TurnFence.hold = _always_held  # type: ignore[method-assign]
+        turn_fence.TurnFence.lose = lambda self: None  # type: ignore[method-assign]
+    if os.environ.get("REPLICA_NO_WRITE_BOUND"):
+        vars(checkpointer_module)["fenced_write_bound"] = lambda lease: 600.0
+    if sign := os.environ.get("REPLICA_STALL_IN_WRITE"):
+        opened: Any = checkpointer_module._FencedWrite._open
+
+        def _first_to_stall() -> bool:
+            if Path(sign).exists():
+                return False
+            Path(sign).write_text(str(os.getpid()))
+            return True
+
+        async def _stall_once(self: Any) -> Any:
+            first = self._cursor is None
+            cursor = await opened(self)
+            if first and _first_to_stall():
+                os.kill(os.getpid(), signal.SIGSTOP)
+            return cursor
+
+        checkpointer_module._FencedWrite._open = _stall_once  # type: ignore[method-assign]
+
+
 def main() -> None:
     """Serve one replica on the port given as the first argument."""
     delay = float(os.environ.get("REPLICA_WRITE_DELAY", "0"))
@@ -89,18 +141,7 @@ def main() -> None:
         from tests import replica_graph
 
         replica_graph.classify_probe_tools()
-        if os.environ.get("REPLICA_NO_FENCE"):
-            # The control for the fence: a process that never asks whether it still holds its
-            # turn, in the tool chain, the model chain, the heartbeat or the checkpointer.
-            from chemclaw.agent import checkpointer as checkpointer_module
-            from chemclaw.core import turn_fence
-
-            async def _always_held(self: Any) -> bool:
-                return True
-
-            turn_fence.TurnFence.hold = _always_held  # type: ignore[method-assign]
-            turn_fence.TurnFence.lose = lambda self: None  # type: ignore[method-assign]
-            checkpointer_module._HOLD_CLAIM = "SELECT 1 WHERE (%s::text || %s::text) IS NOT NULL"
+        _apply_fence_controls()
 
         factory: Any = replica_graph.graph_factory
     else:

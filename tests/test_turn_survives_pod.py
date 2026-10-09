@@ -25,6 +25,7 @@ import psycopg
 import pytest
 
 from chemclaw.agent.checkpointer import close_checkpointer
+from chemclaw.agent.session_store import SessionTurnClaims
 from chemclaw.agent.state import turn_config
 from chemclaw.core.config import settings
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
@@ -558,25 +559,37 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         assert httpx.get(f"{a.base}/healthz", timeout=10).status_code == 200
 
 
-@pytest.mark.parametrize("fenced", [True, False], ids=["fenced", "unfenced-control"])
+#: What is switched off in the stalled pod, and whether the thread then forks (`replica_process`).
+_FORK_CASES = {
+    "fenced": ({}, False),
+    "saver-fenced-alone": ({"REPLICA_NO_HEARTBEAT": "1"}, False),
+    "saver-unfenced-control": ({"REPLICA_NO_HEARTBEAT": "1", "REPLICA_NO_SAVER_FENCE": "1"}, True),
+    "unfenced-control": ({"REPLICA_NO_FENCE": "1"}, True),
+}
+
+
+@pytest.mark.parametrize("case", list(_FORK_CASES))
 def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_finished(
-    work: Path, env: dict[str, str], survivors: list[Replica], fenced: bool
+    work: Path, env: dict[str, str], survivors: list[Replica], case: str
 ) -> None:
     """The checkpoint a woken pod writes must not become the thread the next turn loads.
 
     A is stopped inside its second model call; B resumes the turn and finishes it, answer and all;
     A is continued. A's model node completes and LangGraph submits that step's checkpoint from a
     background task, with an id newer than B's last, so the newest checkpoint would be A's fork:
-    the thread without B's answer, ending on a call nothing ran. The checkpointer's write holds the
-    claim row, so A's write finds none and the newest checkpoint stays B's. The control strips that
-    lock from A and shows the fork, so the assertion is about the fence and not about timing.
-    The control strips every fence from A (the checkpointer's lock included); the lock alone is
-    shown against a held claim in `tests/test_turn_resume.py`, where no timing is involved.
+    the thread without B's answer, ending on a call nothing ran.
+
+    Four pods, so each part of the fence is shown to be the one that matters. `fenced`: all of it.
+    `saver-fenced-alone`: the heartbeat never beats, so nothing cancels the turn on a timer and
+    only the checkpointer's lock on the claim row stands between A and the fork. The two controls
+    take that lock away, from a pod that otherwise asks everywhere (`saver-unfenced-control`: the
+    fork appears and the next model call is stopped by the model-chain check, so one answer) and
+    from one that asks nowhere (`unfenced-control`: the fork appears and both answer).
     """
     b, _ = survivors
-    tag = f"fork{int(fenced)}"
-    a_env = env if fenced else {**env, "REPLICA_NO_FENCE": "1"}
-    with replica(a_env) as a:
+    tag = "fork" + case.replace("-", "")
+    switches, forks = _FORK_CASES[case]
+    with replica({**env, **switches}) as a:
         victim = Victim(a, work, ANA, tag)
         victim.start("q steps=read,read park-model-2")
         victim.reached("model-2")
@@ -609,14 +622,15 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         victim.thread.join(timeout=60)
         _checkpoints_settled(victim.session_id)
 
-        if fenced:
+        if forks:
+            assert _latest_checkpoint(victim.session_id) != newest, "the control did not fork"
+            answered = 1 if case == "saver-unfenced-control" else 2
+            assert _executions(work, tag)["model-3"] == answered, _executions(work, tag)
+        else:
             assert _latest_checkpoint(victim.session_id) == newest, (
                 "the woken pod forked the thread"
             )
             assert _latest_thread(victim.session_id) == finished
-        else:
-            assert _latest_checkpoint(victim.session_id) != newest, "the control did not fork"
-            assert _executions(work, tag)["model-3"] == 2, "the control stopped itself"
 
 
 def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
@@ -639,6 +653,58 @@ def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
         assert _types(victim.events)[-1] == "answer"
         assert _answers(victim.session_id) == [FINAL.format(2)]
         assert [row[0] for row in _costs(victim.correlation)] == ["answered"]
+
+
+@pytest.mark.parametrize("bounded", [True, False], ids=["bounded", "unbounded-control"])
+def test_a_pod_stopped_inside_a_checkpoint_write_does_not_lock_its_session(
+    work: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, bounded: bool
+) -> None:
+    """The write holds the claim row; stopped inside it, the pod must not hold the session.
+
+    A stops itself inside its first checkpoint write, claim row held, and its claim lapses. The
+    database ends the idle transaction after a third of the lease, so the takeover is granted at
+    once and, when A wakes, its write finds its connection gone: nothing of A is committed, no cost
+    row is written and its heartbeat cannot take the lapsed claim back. The control gives the write
+    ten minutes: the row stays held and the takeover is refused, which is what the bound is for.
+    """
+    monkeypatch.setattr(settings, "service_turn_claim_lease_seconds", LEASE)
+    tag = f"inwrite{int(bounded)}"
+    sign = work / f"stalled-{tag}"
+    switches = {"REPLICA_STALL_IN_WRITE": str(sign)}
+    if not bounded:
+        switches["REPLICA_NO_WRITE_BOUND"] = "1"
+    with replica({**env, **switches}) as a:
+        victim = Victim(a, work, ANA, tag)
+        victim.start("q steps=read")
+        deadline = time.monotonic() + 60
+        while not sign.exists():  # A is stopped, inside the transaction, holding the row
+            assert time.monotonic() < deadline, a.output()
+            time.sleep(0.05)
+        _wait_claim_lapsed(victim.session_id)
+
+        started = time.monotonic()
+        taken = asyncio.run(SessionTurnClaims().claim(victim.session_id, "taker:1", 60.0))
+        waited = time.monotonic() - started
+
+        if bounded:
+            assert taken is True, "a pod stopped inside its write kept the session"
+            assert waited < LEASE / 2, f"the takeover waited {waited:.1f}s for the stopped pod"
+        else:
+            assert taken is False, "the control: the takeover passed a write that still held"
+        _wake(a)
+        assert victim.thread is not None
+        victim.thread.join(timeout=90)
+
+        if bounded:
+            holder = _rows(
+                "SELECT holder FROM session_turns WHERE session_id = %s", victim.session_id
+            )
+            assert holder == [("taker:1",)], "the stopped pod took its lapsed claim back"
+            assert _rows(
+                "SELECT count(*) FROM checkpoints WHERE thread_id = %s", victim.session_id
+            ) == [(0,)], "the stopped pod's write was committed"
+            assert _costs(victim.correlation) == [], "the stopped pod booked a turn it lost"
+            assert "answer" not in _types(victim.events)
 
 
 def _latest_thread(session_id: str) -> list[tuple[str, str]]:
