@@ -119,6 +119,20 @@ class InterruptedTurn(NamedTuple):
     booked: bool
 
 
+class LapsedTurn(NamedTuple):
+    """A written-ahead question whose turn has no live owner, as the transcript records it."""
+
+    row_id: int
+    correlation_id: str
+    #: Who sent it; only they may resume it.
+    actor: str | None
+    question: str
+    dry_run: bool
+    #: Fresh, never resumed and not booked: worth reading its checkpoint
+    #: (`agent/turn_resume.py`).
+    eligible: bool
+
+
 #: Where a stored message carries its turn's status, stamped as the correlation id is.
 STORED_TURN_STATUS = "chemclaw_turn_status"
 
@@ -288,12 +302,12 @@ SELECT_SESSION_ROWS = (
 )
 
 # The chemist's message, written ahead of the turn it opens: `_INSERT` plus `turn_status =
-# 'running'`, returning its id so the turn can settle this row. The checkpointer holds the message
-# from the graph's first step, so the transcript must too.
+# 'running'` and whether the turn is a dry run, returning its id so the turn can settle this row.
+# The checkpointer holds the message from the graph's first step, so the transcript must too.
 _INSERT_TURN = (
     "INSERT INTO session_messages "
-    "(session_id, message, message_shape, correlation_id, actor, agent, turn_status) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 'running') RETURNING id"
+    "(session_id, message, message_shape, correlation_id, actor, agent, turn_status, dry_run) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 'running', %s) RETURNING id"
 )
 # Settling a turn's question, in two forms. An answer overrides whatever the row says, including an
 # `interrupted` written by another process while this one was still alive. A turn that ended without
@@ -304,23 +318,49 @@ _SETTLE_UNANSWERED = (
     "UPDATE session_messages SET turn_status = %s "
     "WHERE id = %s AND session_id = %s AND turn_status = 'running'"
 )
+# The claim that covers a question: a live one taken at or before the instant the turn last began,
+# which is `resumed_at` for a turn a successor took over and `created_at` otherwise. A refresh moves
+# `expires_at` and never `claimed_at`, so only a successor's claim fails the test.
+COVERED = (
+    "EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = m.session_id "
+    "AND t.expires_at > now() AND t.claimed_at <= COALESCE(m.resumed_at, m.created_at))"
+)
 # A turn whose owner is gone: a question still `running` with no live claim covering it — the claim
-# is absent, expired, or taken after the question was written (`claimed_at <= created_at` fails only
-# for a successor, since a turn claims before writing its question and refreshes never move
-# `claimed_at`).
+# is absent, expired, or taken after the turn began (`COVERED`).
 #
 # One statement, so exactly one process flips the row and gets it back from `RETURNING`, which is
-# what the caller books the `interrupted` outcome from. Served by a partial index.
+# what the caller books the `interrupted` outcome from. `spare` names the rows the caller found
+# resumable and leaves alone. Served by a partial index.
 _MARK_INTERRUPTED = (
     "UPDATE session_messages m SET turn_status = 'interrupted' "
-    "WHERE m.session_id = %s AND m.turn_status = 'running' "
-    "AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = m.session_id "
-    "AND t.expires_at > now() AND t.claimed_at <= m.created_at) "
+    "WHERE m.session_id = %s AND m.turn_status = 'running' AND NOT (m.id = ANY(%s::bigint[])) "
+    f"AND NOT {COVERED} "
     "RETURNING m.correlation_id, m.actor, "
     # Whether the turn already booked its own outcome (its process was alive but the settle failed):
     # the question is still marked, but the outcome is not booked twice.
     "EXISTS (SELECT 1 FROM turn_costs c "
     "WHERE c.correlation_id = m.correlation_id AND m.correlation_id <> '') AS booked"
+)
+# The questions `_MARK_INTERRUPTED` would mark, read first so the ones that can still be resumed are
+# spared. `eligible` is the part of resumability the row itself answers: never resumed, still inside
+# the window a turn may run (`%s` seconds), and no outcome booked for it.
+_LAPSED_TURNS = (
+    "SELECT m.id, COALESCE(m.correlation_id, ''), m.actor, m.message, m.message_shape, "
+    "COALESCE(m.dry_run, false), "
+    "(m.resumed_at IS NULL AND COALESCE(m.correlation_id, '') <> '' "
+    " AND m.created_at > now() - make_interval(secs => %s) "
+    " AND NOT EXISTS (SELECT 1 FROM turn_costs c WHERE c.correlation_id = m.correlation_id)) "
+    "FROM session_messages m WHERE m.session_id = %s AND m.turn_status = 'running' "
+    f"AND NOT {COVERED} ORDER BY m.id"
+)
+# Taking a dead turn over is two writes in one transaction: the successor's session claim, which is
+# refused while any live claim stands, and the question's `resumed_at`, which is set once. In one
+# transaction `now()` is one instant, so the new claim (`claimed_at`) covers the question
+# (`resumed_at`) from the moment either is visible, and no noticer can mark a running turn
+# `interrupted` between them. Two replicas attaching at once: one claim wins, the other is refused.
+_RESUME_MARK = (
+    "UPDATE session_messages SET resumed_at = now() "
+    "WHERE id = %s AND session_id = %s AND turn_status = 'running' AND resumed_at IS NULL"
 )
 # The newest turn's status, for the reattach route's "what happened to the turn I was following".
 _LATEST_TURN_STATUS = (
@@ -754,19 +794,20 @@ class PostgresHistoryProvider:
         message: BaseMessage,
         *,
         state: dict[str, Any] | None = None,
+        dry_run: bool = False,
     ) -> int | None:
         """Write the chemist's message ahead of its turn, `running`; return the row to settle.
 
         The checkpointer holds the message from the graph's first step, so writing it here keeps the
         transcript in step, and how the turn ended becomes a column rather than an absence. The sort
-        key moves in the same transaction. `None` for no session, which the caller reads as "settle
-        nothing, write the exchange whole".
+        key moves in the same transaction. `dry_run` is recorded so a resumed turn keeps it. `None`
+        for no session, which the caller reads as "settle nothing, write the exchange whole".
         """
         if not session_id:
             return None
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_INSERT_TURN, _rows(session_id, [message])[0])
+                await cur.execute(_INSERT_TURN, (*_rows(session_id, [message])[0], dry_run))
                 row = await cur.fetchone()
                 await cur.execute(_OWNER_TOUCH, (session_id,))
             await conn.commit()
@@ -800,22 +841,71 @@ class PostgresHistoryProvider:
             await conn.commit()
 
     async def mark_interrupted(
-        self, session_id: str | None, *, state: dict[str, Any] | None = None
+        self,
+        session_id: str | None,
+        *,
+        state: dict[str, Any] | None = None,
+        spare: Sequence[int] = (),
     ) -> list[InterruptedTurn]:
         """Mark this session's turns whose owner is gone `interrupted`; return the ones marked now.
 
         Each turn is returned by exactly one call across every process (`_MARK_INTERRUPTED`), so its
         outcome is booked once; `booked` says whether the turn's own process already booked it.
-        Called by whoever touches the session next.
+        Called by whoever touches the session next. `spare` holds the question rows to leave
+        `running` because their turn can still be resumed (`agent/turn_resume.py`).
         """
         if not session_id:
             return []
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_MARK_INTERRUPTED, (session_id,))
+                await cur.execute(_MARK_INTERRUPTED, (session_id, list(spare)))
                 rows = await cur.fetchall()
             await conn.commit()
         return [InterruptedTurn(str(row[0] or ""), row[1], bool(row[2])) for row in rows]
+
+    async def lapsed_turns(self, session_id: str | None) -> list[LapsedTurn]:
+        """The session's `running` questions that no live claim covers, oldest first."""
+        if not session_id:
+            return []
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    _LAPSED_TURNS, (settings.service_turn_timeout_seconds, session_id)
+                )
+                rows = await cur.fetchall()
+        return [
+            LapsedTurn(
+                int(row[0]),
+                str(row[1]),
+                row[2],
+                str(message_from_row(row[3], row[4]).content),
+                bool(row[5]),
+                bool(row[6]),
+            )
+            for row in rows
+        ]
+
+    async def claim_to_resume(
+        self, session_id: str, row_id: int, holder: str, lease_seconds: float, actor: str
+    ) -> bool:
+        """Take the session's turn slot for the dead turn whose question is `row_id`, once.
+
+        False when a live claim stands or another replica resumed the turn first; nothing is
+        written then.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds, actor))
+                claimed = await cur.fetchone() is not None
+                resumed = False
+                if claimed:
+                    await cur.execute(_RESUME_MARK, (row_id, session_id))
+                    resumed = cur.rowcount == 1
+            if claimed and resumed:
+                await conn.commit()
+                return True
+            await conn.rollback()
+        return False
 
     async def latest_turn_status(
         self, session_id: str | None, *, state: dict[str, Any] | None = None
@@ -1231,6 +1321,7 @@ class InMemoryHistoryProvider:
         message: BaseMessage,
         *,
         state: dict[str, Any] | None = None,
+        dry_run: bool = False,
     ) -> int | None:
         """The durable provider's write-ahead, over the thread kept in `state`; its index back."""
         if state is None:
@@ -1263,9 +1354,17 @@ class InMemoryHistoryProvider:
         stored.extend(_copies(messages))
 
     async def mark_interrupted(
-        self, session_id: str | None, *, state: dict[str, Any] | None = None
+        self,
+        session_id: str | None,
+        *,
+        state: dict[str, Any] | None = None,
+        spare: Sequence[int] = (),
     ) -> list[InterruptedTurn]:
         """Nothing, ever: an in-memory transcript dies with the process whose turn it would mark."""
+        return []
+
+    async def lapsed_turns(self, session_id: str | None) -> list[LapsedTurn]:
+        """None: an in-memory turn dies with the process that holds its transcript."""
         return []
 
     async def latest_turn_status(

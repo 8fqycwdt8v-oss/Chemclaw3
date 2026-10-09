@@ -62,6 +62,7 @@ from chemclaw.agent.tool_result_size import (
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
+from chemclaw.agent.turn_resume import ResumePoint, refused, resume_point
 from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
@@ -184,6 +185,7 @@ async def run_turn(
     graph_factory: Callable[..., Any] = build_turn_agent,
     deadline: float | None = None,
     exhibit_refs: Sequence[ExhibitRef] = (),
+    resume: ResumePoint | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then an answer or an error).
 
@@ -201,6 +203,10 @@ async def run_turn(
         deadline: Loop-clock time the caller's whole-turn timeout fires, to tell a timeout from a
             stop; `None` treats every cancellation as an abandonment.
         exhibit_refs: Artefacts the message points at, already resolved by the route.
+        resume: A turn whose process died, to continue from its checkpoint as the turn it was: its
+            correlation id, question, written-ahead row and dry-run flag replace this call's, and
+            `user_message`, `dry_run` and `exhibit_refs` are ignored. The route has checked that the
+            caller is the turn's sender (`agent/turn_resume.py`).
 
     Yields:
         `chemclaw.api.events.Event` values, ending with an `AnswerEvent` or an `ErrorEvent`.
@@ -208,8 +214,12 @@ async def run_turn(
     # Adopt the request's correlation id (the pump task copies the request's context), so the
     # response header, access log, audit trail and cost ledger share one id. Off the request path a
     # fresh one is minted.
+    if resume is not None:
+        user_message, dry_run = resume.question, resume.dry_run
     ledger = _TurnLedger(
-        correlation_id=get_current_correlation_id() or uuid.uuid4().hex,
+        correlation_id=(
+            resume.correlation_id if resume else get_current_correlation_id() or uuid.uuid4().hex
+        ),
         usage=TurnUsage(),
         deadline=deadline,
     )
@@ -254,8 +264,9 @@ async def run_turn(
         try:
             log_event(
                 logger,
-                "turn.started",
-                "turn started for session %s",
+                "turn.resumed" if resume else "turn.started",
+                "turn %s for session %s",
+                "resumed" if resume else "started",
                 session.session_id,
                 session_id=session.session_id,
                 actor=actor or "",
@@ -264,10 +275,17 @@ async def run_turn(
                 model=_resolved_model(),
                 dry_run=dry_run,
             )
+            if resume is not None:
+                METRICS.increment("chemclaw_turns_resumed_total")
             # Write the question into the transcript before the model sees it, so a turn whose
             # process dies still shows the chemist the question the model will read next turn.
             # Inside the ambient, which stamps the row with this turn's correlation id and sender.
-            turn_row = await _begin_transcript_turn(history, session, user_message)
+            # A resumed turn's question was written by the attempt that died.
+            turn_row = (
+                resume.row_id
+                if resume
+                else await _begin_transcript_turn(history, session, user_message, dry_run)
+            )
             async with AsyncExitStack() as stack:
                 turn_tools, unreachable = await _open_turn_surface(stack, connectors)
                 if unreachable:
@@ -318,14 +336,19 @@ async def run_turn(
                 # Durable job results that finished meanwhile are claimed into the model's input, so
                 # the model learns of them even with no tab open; the claim is atomic, so a live
                 # tab's tailer and this turn never both deliver one row.
-                user_input = await _with_pushed_job_results(session.session_id, user_message)
-                # The artefact note — what the chemist changed and what this message points at — is
-                # news for this turn, told once and framed as data. Which artefacts exist reaches
-                # every model call through the instructions instead
-                # (`agent/exhibit_notes.ExhibitListing`).
-                note = await exhibit_turn_note(session.session_id, exhibit_refs)
-                if note.text:
-                    user_input = f"{user_input}\n\n{note.text}"
+                # A resumed turn's message is already in the thread, with whatever the dead attempt
+                # told the model about jobs and artefacts.
+                user_input = user_message
+                note = None
+                if resume is None:
+                    user_input = await _with_pushed_job_results(session.session_id, user_message)
+                    # The artefact note — what the chemist changed and what this message points at
+                    # — is news for this turn, told once and framed as data. Which artefacts exist
+                    # reaches every model call through the instructions instead
+                    # (`agent/exhibit_notes.ExhibitListing`).
+                    note = await exhibit_turn_note(session.session_id, exhibit_refs)
+                    if note.text:
+                        user_input = f"{user_input}\n\n{note.text}"
                 # One carry for the whole turn: `model_calls` and `billed_tokens` are untracked
                 # channels, so a resume would otherwise start both caps from zero. Sharing the dict
                 # makes the caps per turn, not per invocation.
@@ -340,6 +363,8 @@ async def run_turn(
                         usage=ledger.usage,
                         exchanges=ledger.exchanges,
                         carry=cap_carry,
+                        question_id=ledger.correlation_id,
+                        resume=resume,
                     ),
                     ledger,
                 ):
@@ -349,7 +374,8 @@ async def run_turn(
                 # verifier call away.
                 ledger.run_complete = True
                 # Mark the note's edits told only now that the graph has run over them.
-                await mark_told(session.session_id, note.told)
+                if note is not None:
+                    await mark_told(session.session_id, note.told)
                 # No trace flush: every call is announced by the `updates` stream that carried it.
                 async for event in _resume_on_job_results(
                     graph,
@@ -1786,7 +1812,7 @@ async def _record_transcript(
 
 
 async def _begin_transcript_turn(
-    history: Any | None, session: TurnSession, user_message: str
+    history: Any | None, session: TurnSession, user_message: str, dry_run: bool
 ) -> int | None:
     """Write this turn's question ahead of it, `running`; the row to settle, or `None`.
 
@@ -1798,10 +1824,15 @@ async def _begin_transcript_turn(
     begin = getattr(history, "begin_turn", None)
     if begin is None:
         return None
-    await settle_interrupted_turns(history, session.session_id, state=session.state)
+    await settle_interrupted_turns(
+        history, session.session_id, state=session.state, spare_resumable=False
+    )
     try:
         turn: int | None = await begin(
-            session.session_id, HumanMessage(content=user_message), state=session.state
+            session.session_id,
+            HumanMessage(content=user_message),
+            state=session.state,
+            dry_run=dry_run,
         )
     except (ConnectionError, psycopg.Error) as exc:
         degraded(
@@ -1887,20 +1918,26 @@ async def transcript_settled(session_id: str) -> None:
 
 
 async def settle_interrupted_turns(
-    history: Any | None, session_id: str, *, state: dict[str, Any] | None = None
+    history: Any | None,
+    session_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+    spare_resumable: bool = True,
 ) -> int:
     """Mark the session's turns whose owner died `interrupted`, and book each one's outcome once.
 
     A killed pod runs no teardown, so the next to touch the session (its next turn, a reattach, a
     transcript read) asks; the provider marks only questions whose claim lapsed, exactly once across
-    processes, so the zero-spend booking is once too. Best-effort. Returns how many turns this call
-    marked.
+    processes, so the zero-spend booking is once too. A turn that can still be resumed is left
+    `running` for its sender's next attach (`spare_resumable`); a new turn passes `False`, since its
+    question supersedes. Best-effort. Returns how many turns this call marked.
     """
     mark = getattr(history, "mark_interrupted", None)
     if mark is None:
         return 0
     try:
-        interrupted: list[InterruptedTurn] = await mark(session_id, state=state)
+        spare = await _resumable_rows(history, session_id) if spare_resumable else []
+        interrupted: list[InterruptedTurn] = await mark(session_id, state=state, spare=spare)
     except (ConnectionError, psycopg.Error) as exc:
         degraded(
             logger,
@@ -1914,6 +1951,21 @@ async def settle_interrupted_turns(
     # turn that died mid-flight has of a cost row.
     await bookkeeping.settle([_book_interrupted(session_id, turn) for turn in interrupted])
     return len(interrupted)
+
+
+async def _resumable_rows(history: Any, session_id: str) -> list[int]:
+    """The question rows of this session's dead turns that can still be resumed."""
+    lapsed = getattr(history, "lapsed_turns", None)
+    if lapsed is None:
+        return []
+    rows: list[int] = []
+    for turn in await lapsed(session_id):
+        verdict = await resume_point(session_id, turn)
+        if isinstance(verdict, ResumePoint):
+            rows.append(turn.row_id)
+        else:
+            refused(verdict, session_id, turn)
+    return rows
 
 
 def _book_interrupted(session_id: str, turn: InterruptedTurn) -> asyncio.Task[None] | None:

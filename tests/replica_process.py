@@ -9,6 +9,9 @@ test header (`x-test-user`) put through the real rate-limit step; the model is a
 - `boom …` fails mid-reply, the way a model call that raises does;
 - anything else answers at once, reporting `REPLICA_TOKENS` tokens of usage.
 
+`REPLICA_GRAPH=real` swaps the scripted turn for the real compiled agent graph over the model and
+tools of `tests/replica_graph.py`: a turn then has a Postgres checkpoint and the middleware chain.
+
 `REPLICA_WRITE_DELAY` seconds are added before every cost-ledger and budget write, which makes the
 window between "the client has the answer" and "the bookkeeping has landed" wide enough to hit
 deterministically.
@@ -82,7 +85,14 @@ def main() -> None:
     delay = float(os.environ.get("REPLICA_WRITE_DELAY", "0"))
     if delay:
         _delay_writes(delay)
-    app = create_app(graph_factory=_Replica().graph_factory, connector_factory=_no_connectors)
+    if os.environ.get("REPLICA_GRAPH") == "real":
+        from tests import replica_graph
+
+        replica_graph.classify_probe_tools()
+        factory: Any = replica_graph.graph_factory
+    else:
+        factory = _Replica().graph_factory
+    app = create_app(graph_factory=factory, connector_factory=_no_connectors)
     app.dependency_overrides[require_principal] = _as_header_user
     uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")
 
