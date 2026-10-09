@@ -8,8 +8,10 @@ no schema parameter in product code; `tests/conftest.py::redirect_dsns_to_test_s
 list of settings, including the migration DSN.
 """
 
+import asyncio
+import random
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -167,6 +169,9 @@ async def planned_index(
         await conn.execute(seed)
         await conn.execute(f"ANALYZE {table}")
         await conn.execute("SET LOCAL enable_seqscan = off")
+        setting = await (await conn.execute("SHOW enable_seqscan")).fetchone()
+        if setting is None or setting[0] != "off":  # a no-op outside a transaction block
+            raise AssertionError(f"enable_seqscan is {setting}, so the plan would not be asked")
         cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", params)
         row = await cursor.fetchone()
         await conn.rollback()
@@ -177,3 +182,23 @@ async def planned_index(
             return str(node["Index Name"])
         nodes.extend(node.get("Plans", []))
     return ""
+
+
+async def cancels_absorbed(make: Callable[[], Awaitable[object]], attempts: int) -> int:
+    """How many of `attempts` runs of `make()` returned normally though their task was cancelled.
+
+    Each is cancelled after a random few milliseconds, which lands the cancellation at every stage
+    of a database call: waiting for a connection, sending, waiting for the result, finished. A
+    task that swallows its cancellation is a Stop that a turn does not obey.
+    """
+    absorbed = 0
+    for _ in range(attempts):
+        task = asyncio.ensure_future(make())
+        await asyncio.sleep(random.uniform(0, 0.012))
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            continue
+        absorbed += bool(task.cancelling())
+    return absorbed

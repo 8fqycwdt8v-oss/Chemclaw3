@@ -122,11 +122,11 @@ def _initialization_lock() -> asyncio.Lock:
 def _forget_what_an_ended_loop_owned() -> None:
     """Drop the pool, saver and memory store when the loop that opened the pool has closed.
 
-    They are pinned to that loop, and every call through them from a later loop fails with "Event
-    loop is closed". Dropped rather than closed, which needs the dead loop (as in
-    `close_checkpointer`); the connections go when the last reference does, as `core/db` does for
-    its pools. A server has one loop for its whole life, so this changes nothing there; it is for
-    what runs `asyncio.run` more than once in a process.
+    They are pinned to that loop, and a call through them from a later loop fails with "Event loop
+    is closed". Dropped rather than closed, which needs the dead loop; the connections go with the
+    last reference. Only an ended loop is detected: a second loop that is still running gets the
+    first one's pool (`core/db` keys its pools on the running loop and so serves both). A server
+    has one loop, so nothing changes there; this is for what runs `asyncio.run` more than once.
     """
     global _saver, _pool, _pool_loop, _init_lock
     if _pool_loop is None or not _pool_loop.is_closed():
@@ -708,41 +708,15 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Write the checkpoint; a caller cancelled meanwhile waits for the write, then stops.
-
-        The turn awaits this write before its next step (`api/graph_stream.TURN_DURABILITY`), so a
-        Stop or a disconnect reaches the write through that wait. A write cancelled half-way in
-        psycopg's pipeline can absorb the cancellation and return normally, which loses the Stop:
-        the turn would go on, tools included. The write therefore runs apart from the caller's
-        cancellation, which is held until the write is whole (or failed) and then re-raised.
-
-        Raises:
-            ConnectionError: The checkpoint could not be written.
-            asyncio.CancelledError: The caller was cancelled; the write has finished by then.
-        """
-        write = asyncio.ensure_future(self._write(config, checkpoint, metadata, new_versions))
-        try:
-            return await asyncio.shield(write)
-        except asyncio.CancelledError:
-            if not write.done():
-                await asyncio.wait({write})
-            if not write.cancelled():
-                write.exception()  # retrieved, so a failure the cancellation outran is not logged
-            raise
-
-    async def _write(
-        self,
-        config: RunnableConfig,
-        checkpoint: Checkpoint,
-        metadata: CheckpointMetadata,
-        new_versions: ChannelVersions,
-    ) -> RunnableConfig:
         """Write the checkpoint with this build's channel names, and the values it holds, stamped.
 
         `STATE_CHANNELS_KEY` is what this build declared; `CHECKPOINT_VALUES_KEY` is what this
         checkpoint held, read before `super().aput` splits values across stores. Once per turn the
         write is followed by `_prune_superseded`, after the write so a thread is never smaller than
         the checkpoint replacing it.
+
+        Raises:
+            ConnectionError: The checkpoint could not be written.
         """
         stamped = cast(
             CheckpointMetadata,

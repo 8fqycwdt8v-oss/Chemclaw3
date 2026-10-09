@@ -8,13 +8,10 @@
 """
 
 import asyncio
-import random
 from typing import Any
 
 import psycopg
 import pytest
-from langgraph.checkpoint.base import empty_checkpoint
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -27,11 +24,9 @@ from chemclaw.agent.checkpointer import (
     checkpointer_statements_waiting,
     close_checkpointer,
 )
-from chemclaw.agent.session_store import SessionTurnClaims
 from chemclaw.core.config import settings
 from chemclaw.core.db import _pool_for, connect
 from chemclaw.core.metrics import METRICS
-from chemclaw.core.turn_fence import Claim, TurnFence, reset_turn_fence, set_turn_fence
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 
@@ -259,60 +254,3 @@ async def test_the_checkpointer_pool_agrees_with_every_other_pool_in_the_process
         )
     finally:
         await close_checkpointer()
-
-
-async def _cancels_absorbed(saver: AsyncPostgresSaver, attempts: int, *, session: str) -> int:
-    """How many of `attempts` writes returned normally though their task had been cancelled.
-
-    Each write is cancelled after a random few milliseconds, which lands the cancellation at every
-    stage of the write: waiting, sending, committing and finished.
-    """
-
-    async def owns() -> bool:
-        return True
-
-    fence = TurnFence(Claim(session, "holder"), owns, lambda: None, quiet_seconds=0.0)
-    absorbed = 0
-    for step in range(attempts):
-        token = set_turn_fence(fence if isinstance(saver, SchemaStampedSaver) else None)
-        try:
-            config = {"configurable": {"thread_id": f"{session}-{step}", "checkpoint_ns": ""}}
-            metadata = {"source": "loop", "step": step, "parents": {}}
-            write = asyncio.create_task(
-                saver.aput(config, empty_checkpoint(), metadata, {})  # type: ignore[arg-type]
-            )
-        finally:
-            reset_turn_fence(token)
-        await asyncio.sleep(random.uniform(0, 0.012))
-        write.cancel()
-        try:
-            await write
-        except asyncio.CancelledError:
-            continue
-        if write.cancelling():
-            absorbed += 1
-    return absorbed
-
-
-async def test_a_cancelled_checkpoint_write_never_absorbs_the_cancellation() -> None:
-    """A write cancelled at any point ends cancelled, so a Stop that reaches it is not lost.
-
-    The turn awaits each checkpoint write before its next step, which hands the write the turn's
-    own cancellation. Upstream's `aput` returns normally for a few percent of cancellations (the
-    control: it does, here), and a turn that returned from that wait would carry on, tools
-    included, after the chemist stopped it.
-    """
-    await migrated_db_or_skip()
-    await create_checkpoint_tables()
-    session = "cancel-probe-session"
-    assert await SessionTurnClaims().claim(session, "holder", 600)
-    pool = await _checkpoint_pool()
-    try:
-        ours = await _cancels_absorbed(SchemaStampedSaver(pool), 200, session=session)
-        control = await _cancels_absorbed(AsyncPostgresSaver(pool), 600, session=session)
-    finally:
-        await close_checkpointer()
-        await SessionTurnClaims().release(session, "holder")
-
-    assert ours == 0, f"{ours} of 200 cancelled writes returned as if nothing had happened"
-    assert control > 0, "upstream absorbed none in 600 cancellations: the gap this guards is gone"
