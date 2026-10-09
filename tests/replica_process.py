@@ -89,11 +89,18 @@ def main() -> None:
         from tests import replica_graph
 
         replica_graph.classify_probe_tools()
-        if os.environ.get("REPLICA_NO_SAVER_FENCE"):
-            # The control for the fenced checkpointer: its write no longer asks for the claim.
+        if os.environ.get("REPLICA_NO_FENCE"):
+            # The control for the fence: a process that never asks whether it still holds its
+            # turn, in the tool chain, the model chain, the heartbeat or the checkpointer.
             from chemclaw.agent import checkpointer as checkpointer_module
+            from chemclaw.core import turn_fence
 
-            checkpointer_module._HOLD_CLAIM = "SELECT 1"
+            async def _always_held(self: Any) -> bool:
+                return True
+
+            turn_fence.TurnFence.hold = _always_held  # type: ignore[method-assign]
+            turn_fence.TurnFence.lose = lambda self: None  # type: ignore[method-assign]
+            checkpointer_module._HOLD_CLAIM = "SELECT 1 WHERE (%s::text || %s::text) IS NOT NULL"
 
         factory: Any = replica_graph.graph_factory
     else:

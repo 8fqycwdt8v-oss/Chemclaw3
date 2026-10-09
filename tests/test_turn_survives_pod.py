@@ -553,7 +553,7 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         assert httpx.get(f"{a.base}/healthz", timeout=10).status_code == 200
 
 
-@pytest.mark.parametrize("fenced", [True, False], ids=["fenced-saver", "unfenced-control"])
+@pytest.mark.parametrize("fenced", [True, False], ids=["fenced", "unfenced-control"])
 def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_finished(
     work: Path, env: dict[str, str], survivors: list[Replica], fenced: bool
 ) -> None:
@@ -565,10 +565,12 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
     the thread without B's answer, ending on a call nothing ran. The checkpointer's write holds the
     claim row, so A's write finds none and the newest checkpoint stays B's. The control strips that
     lock from A and shows the fork, so the assertion is about the fence and not about timing.
+    The control strips every fence from A (the checkpointer's lock included); the lock alone is
+    shown against a held claim in `tests/test_turn_resume.py`, where no timing is involved.
     """
     b, _ = survivors
     tag = f"fork{int(fenced)}"
-    a_env = env if fenced else {**env, "REPLICA_NO_SAVER_FENCE": "1"}
+    a_env = env if fenced else {**env, "REPLICA_NO_FENCE": "1"}
     with replica(a_env) as a:
         victim = Victim(a, work, ANA, tag)
         victim.start("q steps=read,read park-model-2")
@@ -591,6 +593,7 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         assert status == 200 and _types(events)[-1] == "answer", events
         finished = _latest_thread(victim.session_id)
         assert finished[-1] == ("ai", FINAL.format(2)), finished
+        newest = _latest_checkpoint(victim.session_id)
 
         _wake(a)
         deadline = time.monotonic() + 60
@@ -601,13 +604,14 @@ def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_fin
         victim.thread.join(timeout=60)
         _checkpoints_settled(victim.session_id)
 
-        after = _latest_thread(victim.session_id)
         if fenced:
-            assert after == finished, f"the woken pod forked the thread: {after}"
-        else:
-            assert after != finished and after[-1][0].endswith("+call"), (
-                f"the control did not fork the thread: {after}"
+            assert _latest_checkpoint(victim.session_id) == newest, (
+                "the woken pod forked the thread"
             )
+            assert _latest_thread(victim.session_id) == finished
+        else:
+            assert _latest_checkpoint(victim.session_id) != newest, "the control did not fork"
+            assert _executions(work, tag)["model-3"] == 2, "the control stopped itself"
 
 
 def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
@@ -652,6 +656,17 @@ def _latest_thread(session_id: str) -> list[tuple[str, str]]:
             await close_checkpointer()
 
     return asyncio.run(read())
+
+
+def _latest_checkpoint(session_id: str) -> str:
+    """The id of the newest checkpoint of the thread — the one the next turn loads."""
+    return str(
+        _rows(
+            "SELECT checkpoint_id FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = '' "
+            "ORDER BY checkpoint_id DESC LIMIT 1",
+            session_id,
+        )[0][0]
+    )
 
 
 def _thread_questions(session_id: str) -> list[str]:
