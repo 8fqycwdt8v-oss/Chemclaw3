@@ -5453,7 +5453,7 @@
   },
   "info": {
     "title": "Chemclaw",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -7626,7 +7626,7 @@
     },
     "/sessions/{session_id}/turn/stream": {
       "get": {
-        "description": "Follow the session's running turn live — any participant, from this moment on.\n\nEach watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on\nanother replica is relayed by its holder (`_watch_elsewhere`). 404 when nothing is running; 410\n`turn_interrupted` when the latest turn died with its process; 429 at\n`service_turn_max_watchers` or the caller's stream cap, held until the socket closes.\n`TURN_CORRELATION_HEADER` names the turn; the sender reattaching cancels a pending unload stop;\nmembership is re-read while watching.",
+        "description": "Follow the session's running turn live — any participant, from this moment on.\n\nEach watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on\nanother replica is relayed by its holder (`_watch_elsewhere`). A turn whose process died between\ntwo steps, that had made no state-changing call, is resumed from its checkpoint when its sender\nattaches (`_resume_dead_turn`); the stream is then the resumed turn. 404 when nothing is\nrunning; 410 `turn_interrupted` when the latest turn died with its process and cannot be\nresumed; 429 at `service_turn_max_watchers` or the caller's stream cap, held until the socket\ncloses. `TURN_CORRELATION_HEADER` names the turn; the sender reattaching cancels a pending\nunload stop; membership is re-read while watching.",
         "operationId": "watch_turn_sessions__session_id__turn_stream_get",
         "parameters": [
           {
