@@ -12,6 +12,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -145,6 +146,55 @@ async def test_two_pods_migrating_the_checkpoint_tables_at_once_do_not_fail_a_tu
                 )
                 row = await cur.fetchone()
         assert row is not None and int(row[0]) == 3, row
+    finally:
+        for pool in pools:
+            await pool.close()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            await conn.commit()
+
+
+@pytest.mark.parametrize("locked", [True, False], ids=["under-the-lock", "bare-setup-control"])
+async def test_replicas_migrating_the_memory_store_at_once_do_not_fail_a_turn(locked: bool) -> None:
+    """The memory store's `setup()` races on `store_migrations_pkey` as the saver's does.
+
+    Six replicas' first turns on a fresh database. Under the checkpointer's cross-pod lock none
+    fails; the control runs the bare `setup()` and shows the collision, so the lock is what keeps
+    a first turn from failing with an internal error.
+    """
+    schema = f"chemclaw_store_race_{int(locked)}"
+
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.execute(f'CREATE SCHEMA "{schema}"')
+        await conn.commit()
+    separator = "&" if "?" in settings.postgres_dsn else "?"
+    dsn = f"{settings.postgres_dsn}{separator}options=-c%20search_path%3D{schema}"
+    pools = [
+        AsyncConnectionPool[AsyncConnection[dict[str, Any]]](
+            conninfo=dsn,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            min_size=0,
+            max_size=2,
+            open=False,
+        )
+        for _ in range(6)
+    ]
+    try:
+        for pool in pools:
+            await pool.open()
+        stores = [AsyncPostgresStore(pool) for pool in pools]
+        results = await asyncio.gather(
+            *(_setup_once(store, dsn) if locked else store.setup() for store in stores),
+            return_exceptions=True,
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if locked:
+            assert not failures, f"a concurrent migrator's error reached a turn: {failures}"
+        else:
+            assert failures, "the control did not collide, so the lock is not shown to matter"
+            assert all(isinstance(f, psycopg.Error) for f in failures), failures
     finally:
         for pool in pools:
             await pool.close()

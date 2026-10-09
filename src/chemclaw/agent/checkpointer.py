@@ -51,6 +51,7 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg_pool import AsyncConnectionPool
@@ -880,8 +881,8 @@ _SETUP_LOCK_POLL_SECONDS = 0.1
 _SETUP_LOCK_POLLS = 100
 
 
-async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
-    """Migrate the checkpoint tables under an advisory lock, so two pods cannot race each other.
+async def _setup_once(saver: AsyncPostgresSaver | AsyncPostgresStore, dsn: str) -> None:
+    """Migrate the checkpoint or store tables under an advisory lock, so two pods cannot race.
 
     `setup()` is not race-safe across processes (concurrent runs collide on
     `checkpoint_migrations_pkey`), and a retry alone collides again while the winner is mid-run. The
@@ -891,7 +892,8 @@ async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
     runs `setup()` anyway after the timeout rather than run without a checkpointer.
 
     Args:
-        saver: The saver whose `setup()` to run.
+        saver: The saver (or the memory store, whose `setup()` races the same way on
+            `store_migrations_pkey`) whose `setup()` to run.
         dsn: The database to take the advisory lock on — the saver's own.
 
     Raises:
