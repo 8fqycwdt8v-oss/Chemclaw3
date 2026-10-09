@@ -211,7 +211,7 @@ def test_an_act_does_not_start_until_the_request_for_it_is_stored(
     with replica({**env, "REPLICA_HOLD_ACT_COMMIT": "1"}) as a:
         victim = _asks_for_an_act_unrecorded(a, work, "act3")
         time.sleep(1.0)  # far longer than the act takes to start when nothing holds it back
-        assert _executions(work, "act3")["tool-probe_act-2"] == 0, "the act started unrecorded"
+        assert executions(work, "act3")["tool-probe_act-2"] == 0, "the act started unrecorded"
         (work / "gate" / "commit-act3").write_text("")
         victim.reached("tool-probe_act-2")
         victim.kill()
@@ -219,8 +219,8 @@ def test_an_act_does_not_start_until_the_request_for_it_is_stored(
     status, _, body = attach(b, victim.session_id, ANA)
 
     assert status == 410 and "turn_interrupted" in body[0]["body"], (status, body)
-    assert _executions(work, "act3")["tool-probe_act-2"] == 1
-    assert _question_status(victim.session_id) == "interrupted"
+    assert executions(work, "act3")["tool-probe_act-2"] == 1
+    assert question_status(victim.session_id) == "interrupted"
 
 
 def test_with_the_checkpoint_written_beside_the_next_step_an_act_can_be_repeated(
@@ -241,8 +241,8 @@ def test_with_the_checkpoint_written_beside_the_next_step_an_act_can_be_repeated
 
     status, _, events = attach(b, victim.session_id, ANA)
 
-    assert status == 200 and _types(events)[-1] == "answer", (status, events)
-    assert _executions(work, "act4")["tool-probe_act-2"] == 2, "the act was not repeated"
+    assert status == 200 and types_of(events)[-1] == "answer", (status, events)
+    assert executions(work, "act4")["tool-probe_act-2"] == 2, "the act was not repeated"
 
 
 def test_a_turn_that_acted_earlier_is_not_resumed_even_between_steps(
