@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, get_type_hints
 
 import yaml
+from chemclaw_contracts import manifests_dir
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -119,16 +120,24 @@ def overlay_digest() -> str | None:
     return None if overlay is None else overlay.digest[:DIGEST_CHARS]
 
 
+#: How the inventory names the manifests of the installed `chemclaw-contracts` package.
+CONTRACTS_MANIFESTS = "chemclaw-contracts:manifests"
+
+
 def environment() -> dict[str, Any]:
     """The values of `SURFACE_SETTINGS` this process runs under, with paths made repo-relative.
 
     A path inside the repository is written relative to it, so a checkout elsewhere agrees; one
-    outside stays absolute and disagrees, which is the point.
+    outside stays absolute and disagrees, which is the point. The installed fleet manifests
+    (`chemclaw-contracts`) are named by `CONTRACTS_MANIFESTS`: where a package is installed depends
+    on the interpreter and the virtualenv, not on the text a model reads.
     """
 
     def relative(value: Any) -> Any:
         if isinstance(value, list):
             return [relative(one) for one in value]
+        if isinstance(value, str) and Path(value) == manifests_dir():
+            return CONTRACTS_MANIFESTS
         if isinstance(value, str) and value.startswith(str(_ROOT)):
             return Path(value).relative_to(_ROOT).as_posix()
         return value
