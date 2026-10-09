@@ -433,9 +433,8 @@ async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
     assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
 
 
-#: Ten thousand records over ten sources, the regime in which `ingest_source` is selective. Over one
-#: or two sources the source-scoped read is a near-tie between the primary key and the id index and
-#: flips with the table's size: a plan asserted there would be a coin toss, not a property.
+#: Ten thousand records over ten sources, so `ingest_source` is selective. With one or two the
+#: source-scoped read is a near-tie between the primary key and the id index.
 _RECORD_SEED = (
     "INSERT INTO reaction_records (reaction_id, body, source, ingest_source) "
     "SELECT 'idx-probe-' || n, 'body', 'eln:test', 'src-' || mod(n, 10) "

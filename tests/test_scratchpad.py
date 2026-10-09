@@ -294,9 +294,8 @@ def test_concurrent_first_turns_get_one_migrated_memory_store() -> None:
 def test_what_an_ended_loop_left_is_replaced_on_the_next_loop() -> None:
     """A store and a saver built on a loop that has ended are rebuilt, not handed to the next loop.
 
-    They sit on a pool pinned to the loop that opened it, so a later `asyncio.run` that reused them
-    failed with "Event loop is closed" on its first query. The first run ends without closing
-    anything, as a script or a test that never called `close_checkpointer` does.
+    They sit on a pool pinned to the loop that opened it, which fails every query from another
+    loop. The first run ends without closing anything, as a script does.
     """
     from chemclaw.agent.state import turn_config
 

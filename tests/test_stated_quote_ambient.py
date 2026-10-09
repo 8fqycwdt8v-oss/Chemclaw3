@@ -304,9 +304,8 @@ def test_the_ambient_read_is_bounded_by_the_session_and_not_by_the_table() -> No
 
     A plan assertion, since the row counts are stable and timings are not: the read must cost
     O(session), not O(table). The plan is asked of a copy of the table this test fills and analyses
-    itself (`tests.pg.planned_index`): over the shared table the choice between this index and the
-    session index turns on whatever rows and statistics earlier tests left. Without the partial
-    index the plan names another, so the assertion can fail.
+    itself (`tests.pg.planned_index`), since a shared table's statistics are whatever other tests
+    left. Without the partial index the plan names another, so the assertion can fail.
     """
     assert asyncio.run(_ambient_read_reaches()) == "session_messages_ambient_human_idx", (
         "the ambient read no longer plans through the partial index migration 098 added, so it is "

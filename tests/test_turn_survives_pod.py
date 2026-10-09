@@ -210,8 +210,8 @@ def test_an_act_does_not_start_until_the_request_for_it_is_stored(
     b, _ = survivors
     with replica({**env, "REPLICA_HOLD_ACT_COMMIT": "1"}) as a:
         victim = _asks_for_an_act_unrecorded(a, work, "act3")
-        time.sleep(1.0)  # far longer than the act takes to start when nothing holds it back
-        assert executions(work, "act3")["tool-probe_act-2"] == 0, "the act started unrecorded"
+        # An act that nothing holds back starts within milliseconds of its request being decided.
+        victim.never_reaches("tool-probe_act-2", seconds=3)
         (work / "gate" / "commit-act3").write_text("")
         victim.reached("tool-probe_act-2")
         victim.kill()

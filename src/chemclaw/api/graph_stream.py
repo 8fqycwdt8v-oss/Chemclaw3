@@ -71,9 +71,9 @@ _MODES = ["messages", "updates", "custom", "values"]
 # When a step's checkpoint is committed: before the next step starts. Upstream's default writes it
 # while the next step already runs, so a pod killed inside a tool body can leave the model message
 # that made the call uncommitted; `agent/turn_resume.judge` then reads a thread in which the call
-# never happened and lets the dead turn run it again. Waiting costs one checkpoint write per step,
-# between a model call and the tools it asked for. Asked only of a graph that has a checkpointer:
-# upstream's `"sync"` waits on a write that a graph without one never starts and raises.
+# never happened and lets the dead turn run it again. Every step waits for its own write: the same
+# number of writes as before, no longer overlapped with the next step. Asked only of a graph that
+# has a checkpointer; one without (`core/graph_durability.py`) would wait on a write it never made.
 TURN_DURABILITY: Durability = "sync"
 
 # The node `create_agent` runs tools in. A model call made inside a tool body inherits the graph's

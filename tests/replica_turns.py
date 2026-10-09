@@ -90,6 +90,20 @@ class Victim:
             assert time.monotonic() < deadline, f"never reached {mark}:\n{self.server.output()}"
             time.sleep(0.05)
 
+    def never_reaches(self, mark: str, seconds: float) -> None:
+        """Fail the moment the turn executes `mark`, or pass if it has not within `seconds`.
+
+        The only form an absence takes: the deadline bounds what a regression has to do to be
+        seen, and the failure is immediate, so a slow host can delay the verdict but never make a
+        bad turn pass sooner than it would have started.
+        """
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            assert executions(self.work, self.tag)[mark] == 0, (
+                f"{mark} ran:\n{self.server.output()}"
+            )
+            time.sleep(0.02)
+
     def checkpointed(self, tool_results: int, seconds: float = 30) -> None:
         """Wait until the thread's newest checkpoint holds `tool_results` tool results.
 

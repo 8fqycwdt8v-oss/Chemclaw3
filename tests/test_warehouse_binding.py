@@ -919,15 +919,20 @@ def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent(
     monkeypatch.setattr(expr, "monotonic", _BilledClock(cost))
     catastrophic = {"regex": {"pattern": r"(a+)+$"}}
 
+    searches = -1
     with pytest.raises(PatternBudgetError) as refused:
         with pattern_budget(3.5 * cost):
-            for _ in range(3):
-                apply_transforms("batch 4471 of 12", [_HONEST])
-            apply_transforms("a" * 4000 + "b", [catastrophic])
+            try:
+                for _ in range(3):
+                    apply_transforms("batch 4471 of 12", [_HONEST])
+                apply_transforms("a" * 4000 + "b", [catastrophic])
+            finally:
+                page = expr._page_budget.get()
+                searches = page.searches if page is not None else -1
 
     message = str(refused.value)
+    assert searches == 4, "three searches billed whole and the fourth cut short"
     assert "not established here" in message, message
-    assert "4 transform(s) ran" in message, message  # three billed whole, one cut short
     assert "No single one exceeded" not in message, (
         "the page refusal claimed every transform stayed inside its ceiling, about a pattern that "
         f"was never given its full allowance: {message}"
