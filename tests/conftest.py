@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
+from chemclaw.connectors.contract import forget_contract_findings as _forget_contract_findings
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
@@ -153,14 +154,16 @@ def _fresh_derived_tool_sets() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _fresh_connector_reachability() -> Iterator[None]:
-    """Forget the per-process connector reachability verdicts around every test.
+    """Forget the per-process connector reachability and contract findings around every test.
 
-    Otherwise one test's unreachable connector would stop the next test from dialling it,
-    order-dependently.
+    Otherwise one test's unreachable connector would stop the next test from dialling it, and one
+    test's logged finding would silence the next test's, order-dependently.
     """
     _forget_reachability()
+    _forget_contract_findings()
     yield
     _forget_reachability()
+    _forget_contract_findings()
 
 
 @pytest.fixture(autouse=True)

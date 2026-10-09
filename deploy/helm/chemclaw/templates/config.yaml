@@ -261,18 +261,19 @@
          Conditional on the list rather than always written, because setting it at all replaces the
          code's own default outright — `connectors_dir` is a plain pathsep list, not an extension
          point — so an unconditional value would be a second statement of the image's layout on
-         every release, including the ones that mount nothing. The mounted directory comes first:
-         earlier directories win a name collision, which is the precedence `registry._bundle_dirs`
-         documents and the fleet's `manifests/` relies on for `chem` and `safety`.
-
-         Mounted-first decides the tool surface and nothing else. A shadowed bundle's `skills/` and
-         `profiles/` directories are still read (`registry._bundle_content_dirs`), so an operator
-         who mounts the fleet's `safety` manifest — which declares no `skills:`, deliberately — does
-         not thereby lose `connectors/safety/skills/safety-screening/`. Deriving that directory from
-         the winning manifest alone did lose it, silently, and no chart value or document named the
-         `CHEMCLAW_SKILLS_DIR` that would have brought it back. */}}
+         every release, including the ones that mount nothing. Three directories, none shadowing
+         another: a connector name found in two of them is a startup error
+         (`registry._bundle_dirs`), so a mounted bundle can add a capability and never replace the
+         fleet's. A connector's `skills/` and `profiles/` are found by directory name in any of the
+         three (`registry._bundle_content_dirs`), so the judgment in the shipped directory still
+         loads beside a manifest the fleet owns. */}}
+  {{- range .Values.extraConnectors.bundles }}
+  {{- if has .name $.Values.extraConnectors.imageBundles }}
+  {{- fail (printf "extraConnectors.bundles[]: %q is a connector this image already ships, and a name declared in two directories is a startup error in every pod. Remove the mount and set connectors.%s.enabled instead; to dial it at another server set connectors.%s.url." .name .name .name) }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.extraConnectors.bundles }}
-  CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.shippedPath | quote }}
+  CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.contractsPath .Values.extraConnectors.shippedPath | quote }}
   {{- end }}
   {{- /* The same, for result sinks (`extraSinks`): `result_sinks_dir` is a plain pathsep list
          too, so the shipped directory is named again after the mounted one, and only when a sink

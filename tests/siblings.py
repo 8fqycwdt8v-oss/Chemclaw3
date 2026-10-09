@@ -128,6 +128,24 @@ def fleet_published_tool_names(root: Path) -> dict[str, frozenset[str]]:
     return declared
 
 
+def connector_manifest_files() -> list[Path]:
+    """Every `connector.yaml` the registry reads by default: the package's, then this tree's.
+
+    For the guards that check what every manifest says. The fleet's eight descriptions and its
+    ports are read from the package, so a guard globbing only `src/chemclaw/connectors` stopped
+    covering them when the copies were deleted.
+    """
+    import chemclaw_contracts
+
+    import chemclaw.connectors
+
+    root = Path(chemclaw.connectors.__file__).resolve().parent
+    return [
+        *sorted(chemclaw_contracts.manifests_dir().glob("*/connector.yaml")),
+        *sorted(root.glob("*/connector.yaml")),
+    ]
+
+
 def bundles_declared_here() -> dict[str, Path]:
     """The bundle manifests *this repository's own tree* holds, whatever the environment says.
 

@@ -116,7 +116,8 @@ class _ImportVisitor(ast.NodeVisitor):
             self.visit(stmt)
 
     def _record(self, target: str, lineno: int) -> None:
-        if not target.startswith("chemclaw"):
+        # `chemclaw_contracts` is the fleet's package, a third party here, not a layer of this one.
+        if target != "chemclaw" and not target.startswith("chemclaw."):
             return
         scope = (
             "type_checking"

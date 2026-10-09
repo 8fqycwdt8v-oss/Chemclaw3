@@ -28,6 +28,7 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
 )
 from tests.conftest import FakeWriter
+from tests.siblings import connector_manifest_files
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 # Taken from the registry rather than written out, so a new activity cannot be missing from this
@@ -395,11 +396,11 @@ def test_no_historical_gate_exemption_is_unspent() -> None:
 def _model_facing_text() -> list[pathlib.Path]:
     """Every file whose words reach the model: a tool description, or an injected skill.
 
-    The claim refused is not BO-specific, so the corpus is every `connector.yaml` description and
-    every root `skills/*/SKILL.md`.
+    The claim refused is not BO-specific, so the corpus is every `connector.yaml` description (the
+    fleet's, from the installed package, and this tree's) and every bundled or root `SKILL.md`.
     """
     return [
-        *sorted(_REPO.glob("src/chemclaw/connectors/*/connector.yaml")),
+        *connector_manifest_files(),
         *sorted(_REPO.glob("src/chemclaw/connectors/*/skills/**/SKILL.md")),
         *sorted(_REPO.glob("skills/**/SKILL.md")),
     ]

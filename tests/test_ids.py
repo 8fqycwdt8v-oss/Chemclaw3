@@ -5,6 +5,7 @@ order-independent: the two properties every content-addressed key relies on.
 """
 
 import pytest
+from chemclaw_contracts.calc import CALC_REQUESTS
 
 from chemclaw.connectors.calc.remote import cached_remote
 from chemclaw.core.chem import (
@@ -15,6 +16,7 @@ from chemclaw.core.chem import (
     require_standard_smiles,
 )
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.mcp_session import WireRequest
 from chemclaw.science.calc.store import CalculationKey, InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
 
@@ -113,6 +115,11 @@ def test_calc_cache_key_collapses_equivalent_smiles() -> None:
     assert k1.as_str() == k2.as_str()
 
 
+def _request(tool: str, smiles: str) -> WireRequest:
+    """The wire request the fleet's own model defines for `tool` over `smiles`."""
+    return CALC_REQUESTS[tool].model_validate({"smiles": smiles})
+
+
 @pytest.mark.parametrize(
     ("tool", "pair"),
     [
@@ -135,8 +142,8 @@ async def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_sto
 
     store = InMemoryStore()
     first, second = pair
-    _, cached_first = await cached_remote(store, tool, {"smiles": first})
-    _, cached_second = await cached_remote(store, tool, {"smiles": second})
+    _, cached_first = await cached_remote(store, _request(tool, first))
+    _, cached_second = await cached_remote(store, _request(tool, second))
     assert cached_first is False
     assert cached_second is True
 

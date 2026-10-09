@@ -9,12 +9,17 @@ per-file schema can make:
 - a `connector_urls` key naming no bundle, which would fall back to an unreachable dev default.
 """
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.cli.validate_connectors import _connector_urls_problems, _job_problems
+from chemclaw.cli.validate_connectors import (
+    _connector_urls_problems,
+    _job_problems,
+    _orphan_content_problems,
+)
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.core.config import settings
 
@@ -293,3 +298,25 @@ def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run
     assert set(unverified) == expected, unverified
     # One concrete tool, so the mapping is not merely present but populated.
     assert "screen_hazards" in unverified["safety"]
+
+
+def test_a_skills_directory_beside_no_connector_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Judgment kept beside a manifest someone else owns must name a connector that exists.
+
+    A directory with no `connector.yaml` of its own is found by name; if the manifest is renamed
+    or withdrawn there, its `skills/` would stop loading with no error. A directory holding
+    neither `skills/` nor `profiles/` is not a claim and is left alone.
+    """
+    (tmp_path / "alpha" / "skills" / "judgment").mkdir(parents=True)
+    (tmp_path / "ghost" / "skills" / "judgment").mkdir(parents=True)
+    (tmp_path / "ghost" / "profiles").mkdir()
+    (tmp_path / "notes").mkdir()
+    monkeypatch.setattr(settings, "connectors_dir", str(tmp_path))
+
+    problems = _orphan_content_problems({"alpha"})
+
+    assert len(problems) == 1, problems
+    assert str(tmp_path / "ghost") in problems[0]
+    assert "['skills', 'profiles']" in problems[0]

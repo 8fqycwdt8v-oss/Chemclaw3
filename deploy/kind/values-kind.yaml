@@ -79,9 +79,8 @@ connectors:
     interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
   unitops: {enabled: true}
   suitability: {enabled: true}
-  # The two bundles this image does not ship, attached through the four declarations
-  # deploy/README.md "Attaching a connector bundle this image does not ship" lists: this entry, the
-  # manifest ConfigMap under `extraConnectors`, the egress port, and the bearer slot under `secrets`.
+  # The fleet's Python sandbox: its manifest ships in the image with `chemclaw-contracts`, so this
+  # entry only turns it on (the egress port and the bearer slot are the chart's defaults).
   pyexec:
     enabled: true
     server: true
@@ -95,11 +94,11 @@ connectors:
     url: http://mock-vendor:8091/mcp
 
 extraConnectors:
-  # ConfigMaps `up.sh` creates from the sibling checkouts' own files, never copies kept here:
-  # `Chemclaw3-mcp/manifests/pyexec/` and `infra/live/e2e-full-stack/manifests/mock-vendor/`.
+  # The one bundle this image does not ship, attached through the four declarations deploy/README.md
+  # "Attaching a connector bundle this image does not ship" lists: the `connectors:` entry above,
+  # this manifest ConfigMap, the egress port, and the bearer slot under `secrets`. `up.sh` creates
+  # the ConfigMap from `infra/live/e2e-full-stack/manifests/mock-vendor/`, never a copy kept here.
   bundles:
-    - name: pyexec
-      configMap: chemclaw-connector-pyexec
     - name: mock-vendor
       configMap: chemclaw-connector-mock-vendor
 

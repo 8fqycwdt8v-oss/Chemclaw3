@@ -26,6 +26,7 @@ from chemclaw.durable.effect_ledger import (
     unsettled,
 )
 from tests.pg import migrated_db_or_skip
+from tests.siblings import connector_manifest_files
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
@@ -214,12 +215,10 @@ def test_no_job_in_this_repository_declares_an_effect() -> None:
     Every job here writes this system's own stores; the declaration is for a site with an external
     system to reach.
     """
-    manifests = list(SRC.rglob("connector.yaml"))
+    manifests = connector_manifest_files()
     assert manifests, "no connector manifests found — this test would assert nothing"
     declaring = [
-        path.relative_to(SRC).as_posix()
-        for path in manifests
-        if "effect:" in path.read_text(encoding="utf-8")
+        path.parent.name for path in manifests if "effect:" in path.read_text(encoding="utf-8")
     ]
     assert declaring == [], (
         f"{declaring} declare an effect. Every job in this repository writes this system's own "

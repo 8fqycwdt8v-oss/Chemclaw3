@@ -7,7 +7,8 @@ differ.
 `HeldConnectorSession` is the unit, because `load_mcp_tools` needs a live session. It holds the
 session inside a task of its own: the MCP session is an `anyio` cancel scope, which must be exited
 by the task that entered it, and that is what lets every connector open concurrently. A failed
-open contributes no tools and the next turn tries again, unless `connectors.reachability` says the
+open (or a connector whose server was built against another major of its contract)
+contributes no tools and the next turn tries again, unless `connectors.reachability` says the
 host was recently found down, in which case the dial is skipped and the connector is reported
 unreachable the same way. A call that exceeds `request_timeout` is cancelled on the server too
 (`core.mcp_session.cancel_on_timeout`).
@@ -24,6 +25,7 @@ from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.exceptions import McpError
 
+from chemclaw.connectors.contract import ContractMismatch, check_contract
 from chemclaw.connectors.manifest import QueuedDispatch
 from chemclaw.connectors.queued import queued_interceptor
 from chemclaw.connectors.reachability import recently_unreachable, record_reachability
@@ -93,6 +95,9 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     """
     if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
         raise exc
+    if isinstance(exc, ContractMismatch):
+        logger.warning("%s; its tools are unavailable this turn", exc)
+        return
     logger.warning(
         "connector %s is unreachable (%s); its tools are unavailable this turn",
         connector,
@@ -129,6 +134,10 @@ class ConnectorSpec:
     queued: QueuedDispatch | None = None
     #: How long one call may run once it has a slot — the queued call's `start_to_close`.
     request_timeout: float = 60.0
+    #: The `contract_version` the manifest declares, and where to ask the server for its own, so a
+    #: session open can refuse a major mismatch (`connectors.contract`). Both `None` when unknown.
+    contract_version: str | None = None
+    health_url: str | None = None
 
 
 class HeldConnectorSession:
@@ -203,7 +212,10 @@ class HeldConnectorSession:
             raise
         # Both outcomes are recorded, and the healthy one is not an optimisation: it is what lets a
         # connector that recovered be readmitted in a process whose readiness route never runs.
-        record_reachability(self._spec.name, reachable=self._failure is None, dialled=True)
+        # A refusal for its contract is not a reachability verdict: the server answered, and the
+        # breaker would otherwise stop the next turns dialling a host that is up.
+        if not isinstance(self._failure, ContractMismatch):
+            record_reachability(self._spec.name, reachable=self._failure is None, dialled=True)
         if self._failure is not None:
             absorb_connect_failure(self._spec.name, self._failure)
         return self._tools
@@ -249,6 +261,10 @@ class HeldConnectorSession:
         `_opened`, so a failed connector never leaves the turn waiting on an event nobody sets.
         """
         try:
+            # Before the dial: a connector built against another major is not opened at all.
+            await check_contract(
+                self._spec.name, self._spec.contract_version, self._spec.health_url
+            )
             async with create_session(self._spec.connection) as session:
                 handshake = await session.initialize()
                 # A call past `request_timeout` must tell the server to stop, since this session

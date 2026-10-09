@@ -24,7 +24,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | `agent/` | 1 | Conversation orchestration: the compiled graph (`agent/langgraph_agent.py`), its tool surface and middleware chain, the checkpointer, sessions, authorization, the plan gate and the turn's filesystem. |
 | `api/` | 1 | The FastAPI + SSE front door behind OIDC; `create_app` in `api/app.py` is the composition root and `api/routes/` holds one module per resource. |
 | `durable/` | 2 | Temporal workflows, activities and the `background-jobs` worker. |
-| `connectors/` | 2 + 3 | The capability seam: one bundle per `connector.yaml`, with its worker, its skills and, where this repo runs it, its MCP server. A bundle with an `endpoint:` and no `server/` declares a `Chemclaw3-mcp` server this repo does not run. |
+| `connectors/` | 2 + 3 | The capability seam: one bundle per `connector.yaml`, with its worker, its skills and, where this repo runs it, its MCP server. The manifest of a `Chemclaw3-mcp` server this repo does not run is not here: it arrives with the installed `chemclaw-contracts` package, and the directory beside it holds only the `skills/` for it. |
 | `science/` | — | Pure computation: `bo` (BoFire), `fingerprints`, `labels`, and `calc` (the result cache, calibration ledger and RRHO/Boltzmann arithmetic; the engines live in `Chemclaw3-mcp`). No Temporal, no MCP. |
 | `kg/` | 4 | The graph indexer, schema and link validators, and `kg/record.py`, the one path that writes a note. |
 | `ingest/` | — | Getting records in: the `DataSource` seam (`sources`), ELN adapters and transcriptions, commitments, mounted documents and the labelling drains. |

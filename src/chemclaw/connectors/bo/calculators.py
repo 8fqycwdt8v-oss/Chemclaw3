@@ -6,6 +6,8 @@ bound here because `chemclaw.science` may import only `chemclaw.core`, while the
 from the calculation store and never recomputed.
 """
 
+from chemclaw_contracts.calc import ComputeElectronicPropertiesRequest, PredictSolubilityRequest
+
 from chemclaw.connectors.calc.remote import cached_remote
 from chemclaw.science.bo.featurize import PropertiesFor
 from chemclaw.science.bo.objectives import LogSFor
@@ -23,7 +25,7 @@ def properties_for(store: ResultStore) -> PropertiesFor:
         an `experiment-proposal` note can cite it on a cache hit as well as a miss.
         """
         payload, _ = await cached_remote(
-            store, "compute_electronic_properties", {"smiles": smiles, "solvent": None}
+            store, ComputeElectronicPropertiesRequest(smiles=smiles, solvent=None)
         )
         calc_ref = payload.get("calc_key")
         if not isinstance(calc_ref, str) or not calc_ref:
@@ -40,7 +42,7 @@ def log_s_for(store: ResultStore) -> LogSFor:
     """Bind `science.bo.objectives`'s `LogSFor` to `store` and the calculation server."""
 
     async def score(smiles: str) -> float:
-        payload, _ = await cached_remote(store, "predict_solubility", {"smiles": smiles})
+        payload, _ = await cached_remote(store, PredictSolubilityRequest(smiles=smiles))
         return SolubilityResult.model_validate(payload).log_s_mol_per_l
 
     return score

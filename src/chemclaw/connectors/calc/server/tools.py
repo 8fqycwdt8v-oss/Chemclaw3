@@ -21,12 +21,29 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from chemclaw_contracts.calc import (
+    ComputeAtomicDescriptorsRequest,
+    ComputeElectronicPropertiesRequest,
+    ComputeFukuiAtRequest,
+    ComputePropertiesAtRequest,
+    ComputeSurfacePotentialRequest,
+    ComputeXtbEnergyRequest,
+    PredictDevelopabilityProfileRequest,
+    PredictPkaRequest,
+    PredictSiteReactivityRequest,
+    PredictSolubilityRequest,
+)
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
 from chemclaw.connectors.calc import compose
-from chemclaw.connectors.calc.remote import CalibratedTool, cached_remote, remote_version
+from chemclaw.connectors.calc.remote import (
+    CalibratedRequest,
+    cached_remote,
+    remote_version,
+    wire_structure,
+)
 from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
@@ -100,10 +117,11 @@ def _version_of(payload: ResultPayload, tool: str) -> str:
 
 
 # Which properties the ledger scores, the tool that answers each, and the unit it is stored in.
-# Typed `CalibratedTool`, so a row naming a tool `remote_version` does not accept is a type error.
-_CALIBRATED: dict[str, tuple[CalibratedTool, str]] = {
-    "solubility": ("predict_solubility", "log S"),
-    "pka": ("predict_pka", "pKa"),
+# Typed `CalibratedRequest`, so a row naming a request `remote_version` does not accept is a type
+# error.
+_CALIBRATED: dict[str, tuple[type[CalibratedRequest], str]] = {
+    "solubility": (PredictSolubilityRequest, "log S"),
+    "pka": (PredictPkaRequest, "pKa"),
 }
 
 
@@ -647,8 +665,8 @@ async def _calibrated(property_name: str) -> tuple[str, str]:
             f"{', '.join(sorted(_CALIBRATED))}). Only calculators that log their predictions can "
             "be scored against measurements."
         )
-    tool, unit = entry
-    version = await remote_version(tool, {"smiles": settings.calc_version_probe_smiles})
+    request, unit = entry
+    version = await remote_version(request(smiles=settings.calc_version_probe_smiles))
     return version, unit
 
 
@@ -871,7 +889,7 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
         The method, charge, and total energy in Hartree.
     """
     payload, _ = await cached_remote(
-        default_store(), "compute_xtb_energy", {"smiles": smiles, "charge": charge}
+        default_store(), ComputeXtbEnergyRequest(smiles=smiles, charge=charge)
     )
     return XtbResult.model_validate(payload)
 
@@ -890,7 +908,7 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     Returns:
         The predicted log solubility, its uncertainty, and the model used.
     """
-    payload, _ = await cached_remote(default_store(), "predict_solubility", {"smiles": smiles})
+    payload, _ = await cached_remote(default_store(), PredictSolubilityRequest(smiles=smiles))
     result = SolubilityResult.model_validate(payload)
     await _log_prediction(
         "solubility",
@@ -927,7 +945,7 @@ async def predict_pka(smiles: str) -> PkaResult:
         The predicted pKa, which site it describes, the protonation/deprotonation energy,
         and the uncertainty.
     """
-    payload, _ = await cached_remote(default_store(), "predict_pka", {"smiles": smiles})
+    payload, _ = await cached_remote(default_store(), PredictPkaRequest(smiles=smiles))
     result = PkaResult.model_validate(payload)
     await _log_prediction(
         "pka", _version_of(payload, "predict_pka"), smiles, result.pka, result.uncertainty, "pKa"
@@ -971,16 +989,13 @@ async def compute_electronic_properties(
     # `xtb.properties` row.
     if not structure_id:
         payload, _ = await cached_remote(
-            default_store(),
-            "compute_electronic_properties",
-            {"smiles": smiles, "solvent": solvent},
+            default_store(), ComputeElectronicPropertiesRequest(smiles=smiles, solvent=solvent)
         )
         return ElectronicProperties.model_validate(payload)
     structure = await _starting_geometry(smiles, structure_id)
     payload, _ = await cached_remote(
         default_store(),
-        "compute_properties_at",
-        {"structure": structure.model_dump(mode="json"), "solvent": solvent},
+        ComputePropertiesAtRequest(structure=wire_structure(structure), solvent=solvent),
     )
     return ElectronicProperties.model_validate(payload)
 
@@ -1015,8 +1030,7 @@ async def compute_atomic_descriptors(
     """
     payload, _ = await cached_remote(
         default_store(),
-        "compute_atomic_descriptors",
-        {"smiles": smiles, "solvent": solvent},
+        ComputeAtomicDescriptorsRequest(smiles=smiles, solvent=solvent),
         # Pinned to the `xtb` binary (see above), whose own timeout can run to 3600 s — see
         # `calc_atomic_timeout_seconds`'s docstring for why the client must wait at least that long.
         timeout_seconds=settings.calc_atomic_timeout_seconds,
@@ -1050,8 +1064,7 @@ async def compute_surface_potential(
     """
     payload, _ = await cached_remote(
         default_store(),
-        "compute_surface_potential",
-        {"smiles": smiles, "solvent": solvent},
+        ComputeSurfacePotentialRequest(smiles=smiles, solvent=solvent),
         # Pinned to the `xtb` binary (see above); see `calc_atomic_timeout_seconds`'s docstring.
         timeout_seconds=settings.calc_atomic_timeout_seconds,
     )
@@ -1114,20 +1127,18 @@ async def predict_site_reactivity(
         structure = await _starting_geometry(smiles, structure_id)
         payload, _ = await cached_remote(
             default_store(),
-            "compute_fukui_at",
             # `mode` and `top_n` withheld, as below.
-            {"structure": structure.model_dump(mode="json")},
+            ComputeFukuiAtRequest(structure=wire_structure(structure)),
         )
         result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
         limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
         return result.model_copy(update={"sites": result.sites[:limit]})
     payload, _ = await cached_remote(
         default_store(),
-        "predict_site_reactivity",
         # Neither `mode` nor `top_n` is sent: the server keys `xtb.fukui` without them and the row
         # holds every atom, so `ranked_for` re-ranks and re-slices locally and one row serves every
         # mode and size.
-        {"smiles": smiles},
+        PredictSiteReactivityRequest(smiles=smiles),
     )
     result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
     limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
@@ -1251,7 +1262,7 @@ async def predict_developability_profile(smiles: str) -> DescriptorProfile:
         The descriptor panel plus the two rule-of-thumb flags.
     """
     payload, _ = await cached_remote(
-        default_store(), "predict_developability_profile", {"smiles": smiles}
+        default_store(), PredictDevelopabilityProfileRequest(smiles=smiles)
     )
     return DescriptorProfile.model_validate(payload)
 
@@ -1293,5 +1304,5 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
     """
     # The expensive half is a cached pKa on the server's own key; the Crippen sum and the
     # Henderson-Hasselbalch term are local, so a repeat never recomputes.
-    payload, _ = await cached_remote(default_store(), "predict_pka", {"smiles": smiles})
+    payload, _ = await cached_remote(default_store(), PredictPkaRequest(smiles=smiles))
     return logd_from_pka(PkaResult.model_validate(payload), ph)

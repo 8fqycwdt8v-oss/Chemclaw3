@@ -16,6 +16,7 @@ import logging
 import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from datetime import timedelta
 from functools import cache, partial
 from pathlib import Path
@@ -80,10 +81,10 @@ class ConnectorError(ChemclawError):
 def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
     """Every connector bundle directory found across `dirs`, by name, in path order.
 
-    Every directory, not only the winner: a name collision decides which manifest describes the
-    capability, not which content exists on disk (see `_bundle_content_dirs`). Sorted by name so
-    tool order (part of the prompt) is identical on every machine; within a name, path order is the
-    precedence. Cached on `dirs`; `forget_discovered` clears it.
+    A bundle is a subdirectory holding a `connector.yaml`. Sorted by name so tool order (part of
+    the prompt) is identical on every machine. More than one directory per name is possible here and
+    refused by `_bundle_dirs`; the same directory reached twice (a repeated path entry) is one.
+    Cached on `dirs`; `forget_discovered` clears it.
     """
     found: dict[str, list[Path]] = {}
     for directory in dirs:
@@ -92,18 +93,33 @@ def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
             continue
         for path in sorted(root.iterdir()):
             if (path / MANIFEST_FILENAME).is_file() and within_root(root, path):
-                found.setdefault(path.name, []).append(path)
+                same = [
+                    seen for seen in found.get(path.name, []) if seen.resolve() == path.resolve()
+                ]
+                if not same:
+                    found.setdefault(path.name, []).append(path)
     return {name: tuple(found[name]) for name in sorted(found)}
 
 
 def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
-    """The directory that wins each bundle name, sorted by name.
+    """The directory of each bundle, sorted by name.
 
-    First dir wins, like `PATH`, so an operator's private dir can override a shipped bundle. A
-    shadowed manifest is never parsed, so an override cannot fail startup over a file the system
-    does not use.
+    One directory owns a connector name. A name declared in two directories is a startup error
+    naming both paths, not a precedence: which of two manifests described the capability would
+    otherwise depend on the order of a path list, with nothing logged about the one that lost.
     """
-    return [paths[0] for paths in _bundle_dirs_by_name(dirs).values()]
+    bundles: list[Path] = []
+    for name, paths in _bundle_dirs_by_name(dirs).items():
+        if len(paths) > 1:
+            raise ConnectorError(
+                f"connector {name!r} is declared in more than one directory: "
+                f"{' and '.join(str(path / MANIFEST_FILENAME) for path in paths)}. A connector "
+                "name has exactly one owner, so remove one of the two from CHEMCLAW_CONNECTORS_DIR "
+                "(the fleet's manifests arrive through the installed `chemclaw-contracts` "
+                "package). To point a connector at another server, set CHEMCLAW_CONNECTOR_URLS."
+            )
+        bundles.append(paths[0])
+    return bundles
 
 
 def _load_manifest(bundle: Path) -> ConnectorManifest:
@@ -231,8 +247,8 @@ def skills_dirs() -> list[str]:
 
     A connector's judgment ships with its capability; appended to `settings.skills_dirs`, so bundled
     skills are ordinary skills under every existing gate. Only existing directories are returned
-    (`make connector-validate` reports missing ones), and a shadowed bundle's directory is included
-    (see `_bundle_content_dirs`).
+    (`make connector-validate` reports missing ones); see `_bundle_content_dirs` for where a
+    directory may sit relative to the manifest.
     """
     return _bundle_content_dirs("skills", enabled())
 
@@ -397,6 +413,17 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
     return factory
 
 
+def _with_contract(spec: ConnectorSpec, manifest: ConnectorManifest) -> ConnectorSpec:
+    """`spec` plus what a session open needs to compare the manifest's contract with the server's.
+
+    The version the manifest declares and the route the server reports its own on, moved with
+    `connector_urls` like every other address (`health_url`).
+    """
+    return replace(
+        spec, contract_version=manifest.contract_version, health_url=health_url(manifest)
+    )
+
+
 def mcp_connections() -> list[ConnectorSpec]:
     """One connection spec per enabled connector that declares an endpoint (unopened).
 
@@ -404,7 +431,7 @@ def mcp_connections() -> list[ConnectorSpec]:
     turn, so a profile can never widen what the deployment enabled.
     """
     return [
-        _mcp_connection(manifest, manifest.endpoint)
+        _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
         for manifest in enabled()
         if manifest.endpoint is not None
     ]
@@ -421,7 +448,7 @@ def connector_spec(name: str) -> ConnectorSpec:
     """
     for manifest in enabled():
         if manifest.name == name and manifest.endpoint is not None:
-            return _mcp_connection(manifest, manifest.endpoint)
+            return _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
     raise ConnectorError(
         f"connector {name!r} is not enabled in this deployment, or declares no endpoint to call"
     )
@@ -472,32 +499,31 @@ async def open_connector_specs(
 def profiles_dirs() -> list[str]:
     """The `profiles/` directory of every enabled connector, wherever on the path it is found.
 
-    Same rule as `skills_dirs`. A shadowed bundle's profile cannot widen anything: a profile varies
-    only instructions and model route, and narrows itself to the tools the winning surface binds.
+    Same rule as `skills_dirs`. A profile cannot widen anything: it varies only instructions and
+    model route, and narrows itself to the tools the connector's manifest binds.
     """
     return _bundle_content_dirs("profiles", enabled())
 
 
 def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> list[str]:
-    """Every named bundle's `<kind>/` directory, across every directory carrying that name.
+    """Every named bundle's `<kind>/` directory, wherever on the path it sits.
 
-    The winning manifest decides the tool surface; the directories on disk decide the content. For
-    each enabled bundle, every directory carrying its name contributes an existing `<kind>/`, winner
-    first, so a same-name replacement manifest that declares no skills cannot silently delete the
-    shadowed bundle's judgment.
+    A connector's manifest and its judgment may live in different places: the fleet owns the
+    manifest (the `chemclaw-contracts` package) and this repository keeps the `skills/` beside a
+    directory of the same name. So the directories on the path decide the content and the manifests
+    decide which names are asked for; a directory with no `connector.yaml` of its own still
+    contributes. Non-existent paths are never returned, and a link out of its root is not followed.
 
-    A union rather than a startup refusal, so a deliberate replacement can still start; judgment
-    about tools the winner does not serve is hidden by `agent.skill_access.ToolScopedSkills`. The
-    manifest's declaration is not the gate: `cli/validate_connectors._bundle_content_problems`
-    already holds declarations and directories equal for every validated bundle. Non-existent paths
-    are never returned.
+    The manifest's declaration is not the gate: `cli/validate_connectors` holds declarations and
+    directories equal where a bundle declares them, and refuses a content directory that names no
+    discovered connector.
     """
     dirs: list[str] = []
-    by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
     for manifest in manifests:
-        for bundle in by_name.get(manifest.name, ()):
-            candidate = bundle / kind
-            if candidate.is_dir() and str(candidate) not in dirs:
+        for directory in settings.connectors_dirs:
+            root = Path(directory)
+            candidate = root / manifest.name / kind
+            if candidate.is_dir() and within_root(root, candidate) and str(candidate) not in dirs:
                 dirs.append(str(candidate))
     return dirs
 

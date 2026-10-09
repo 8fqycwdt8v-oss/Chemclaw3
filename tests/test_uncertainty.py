@@ -12,6 +12,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from chemclaw_contracts.calc import PredictSolubilityRequest
 
 from chemclaw.connectors.calc.remote import cached_remote
 from chemclaw.science.calc.models import SolubilityResult
@@ -72,8 +73,8 @@ async def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.Monk
     server.overrides["predict_solubility"] = lambda _arguments: salt_payload
 
     store = InMemoryStore()
-    fresh, _ = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
-    served, cached = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
+    fresh, _ = await cached_remote(store, PredictSolubilityRequest(smiles="CCN.Cl"))
+    served, cached = await cached_remote(store, PredictSolubilityRequest(smiles="CCN.Cl"))
     assert cached is True
     first = SolubilityResult.model_validate(fresh)
     second = SolubilityResult.model_validate(served)

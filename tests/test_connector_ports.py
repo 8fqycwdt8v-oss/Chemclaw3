@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import yaml
 
 from chemclaw.cli.connectors_dev import DEV_PORT
+from tests.siblings import connector_manifest_files
 
 _BUNDLES = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "connectors"
 
@@ -30,7 +31,7 @@ def _declared_ports() -> dict[str, int]:
     is absent, which is why this returns a mapping rather than a list.
     """
     ports: dict[str, int] = {}
-    for manifest_path in sorted(_BUNDLES.glob("*/connector.yaml")):
+    for manifest_path in connector_manifest_files():
         endpoint = yaml.safe_load(manifest_path.read_text(encoding="utf-8")).get("endpoint") or {}
         url = endpoint.get("url")
         if endpoint.get("transport") == "http" and url:

@@ -1,135 +1,185 @@
-"""Cross-repository agreement between this repository and a `Chemclaw3-mcp` checkout.
+"""The fleet's manifests reach this repository through one door: the installed contracts package.
 
-1. Bundles declared in both trees must agree on every key: the endpoint's tools, read-only
-   partition and token variable, and every bundle-level key (`skills`, `profiles`, `note_types`,
-   `relations`, `jobs`), since discovery is first-directory-wins and the loser is dropped
-   silently. Known differences live in `_ARGUED_DIVERGENCES`.
-2. Backend seams (`calc`, `rxnlabel`) have no manifest here, so every hardcoded call site is
-   checked against the fleet's `tool-surface.json`, in both directions: every name sent is
-   served, and every served tool is called or declined with a reason.
+`chemclaw-contracts` (`Chemclaw3-mcp`'s `packages/chemclaw_contracts`, pinned in `pyproject.toml`)
+owns every `connector.yaml` the fleet serves and the typed `calc` and `rxnlabel` request models
+this tree sends. These tests need no checkout and never skip: no second copy of a manifest exists in
+this tree, discovery reads the package, the validators pass against it, and every tool the package
+models is requested here or declined with a reason. The fleet's own `agreement` lane runs this
+module with its pull request's package installed over the pinned one, so a change this tree cannot
+read fails there, before it merges.
 
-Opt-in: each test needs a sibling checkout and skips without one; `tests/conftest.py` reports
-how many skipped.
+One test still reads a checkout and skips without one (`CHEMCLAW_SIBLINGS_REQUIRED` turns the skip
+into a failure in CI): the e2e lane's wiring.
 """
 
 from __future__ import annotations
 
 import ast
-import importlib
-import importlib.util
-import json
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, get_args, get_origin, get_type_hints
+from typing import Any, get_args
 
+import chemclaw_contracts as contracts
 import pytest
 import yaml
+from chemclaw_contracts.calc import CALC_REQUESTS
+from chemclaw_contracts.rxnlabel import RXNLABEL_REQUESTS
 
 from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.connectors.registry import ConnectorError, discovered, forget_discovered
+from chemclaw.core.config import Settings, settings
 from tests.siblings import (
     REPO_ROOT,
     SIBLING_SKIP,
     bundles_declared_here,
-    fleet_published_bundles,
     sibling_root,
 )
 
-#: The endpoint fields that decide what a turn may call and how it authenticates.
-#:
-#: `url` and `health_url` are deployment facts; `description` is prose bounded by
-#: `tests/test_context_floor.py`.
-_SURFACE_FIELDS = ("tools", "read_only", "state_changing")
+_CHART_VALUES = REPO_ROOT / "deploy" / "helm" / "chemclaw" / "values.yaml"
 
 
-#: The three keys `_SURFACE_FIELDS` and the `auth` assertion cover, or that decide nothing. Every
-#: other key of either manifest is bundle-level content and is compared.
-_NOT_CONTENT = frozenset({"name", "description", "endpoint"})
+def _default_connectors_dir() -> str:
+    """The code's own default for `connectors_dir`, whatever the environment says."""
+    default = Settings.model_fields["connectors_dir"].get_default(call_default_factory=True)
+    assert isinstance(default, str)
+    return default
 
 
-def _content_keys(mine: dict[str, Any], theirs: dict[str, Any], where: str) -> tuple[str, ...]:
-    """Every bundle-level key to compare for one pair of manifests.
+@pytest.fixture
+def default_path(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point discovery at the default path with an empty enable-list, and drop its cache."""
+    default = _default_connectors_dir()
+    monkeypatch.setattr(settings, "connectors_dir", default)
+    monkeypatch.setattr(settings, "connectors_enabled", "")
+    forget_discovered()
+    return default
 
-    The union of what `ConnectorManifest` declares and what either file declares: the model half
-    covers a newly added key before either file uses it, and the file half keeps a narrowed model
-    from emptying the comparison. A key neither model knows is refused, since the fleet's copy is
-    never loaded here.
+
+def test_no_second_copy_of_a_fleet_manifest_exists_in_this_tree() -> None:
+    """A bundle directory here never carries the name of a connector the package publishes.
+
+    A copy would be a collision at discovery (`registry._bundle_dirs`) and, before that, two files
+    that could disagree unseen: the defect the package was introduced to end. The package's
+    internal manifests (`calc`, `rxnlabel`) are not connectors and are deliberately outside this:
+    this tree's own `calc` bundle shares a name with the `calc` backend, and `mount: backend` is
+    what keeps the two apart (`test_a_backend_manifest_cannot_be_mounted`).
     """
-    declared = frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT
-    present = (frozenset(mine) | frozenset(theirs)) - _NOT_CONTENT
-    unknown = present - declared
-    assert not unknown, (
-        f"{where}: {sorted(unknown)} is declared in a manifest and is not a field of "
-        '`ConnectorManifest`. This repository\'s model is `extra="forbid"`, so such a key fails '
-        "at startup on this side and is simply unread on the other — which is a declaration one "
-        "repository believes it has made and the other cannot act on."
+    owned = set(contracts.manifest_names())
+    assert owned, "the installed package declares no manifest; has its layout changed?"
+    copies = sorted(set(bundles_declared_here()) & owned)
+    assert not copies, (
+        f"{copies} are declared by the fleet's package and by a connector.yaml in this tree. "
+        "Delete the copy (keep its skills/ beside a README); the package supplies the manifest."
     )
-    return tuple(sorted(declared | present))
 
 
-def _comparable(value: Any) -> Any:
-    """One manifest value in a form two files can be compared by, ignoring what decides nothing.
+def test_every_connector_the_package_declares_is_discovered_from_the_package(
+    default_path: str,
+) -> None:
+    """Each manifest the package publishes is the one discovery loads, field for field.
 
-    String lists are allow-lists compared as sets; `jobs:` mappings are keyed by `name`; a missing
-    key equals an empty list.
+    Read back through `ConnectorManifest`, so a key the model refuses fails here and not in a pod,
+    and a `contract_version` the package declares is the value the model holds.
     """
-    if value is None:
-        return frozenset()
-    if isinstance(value, list):
-        if all(isinstance(item, str) for item in value):
-            return frozenset(value)
-        if all(isinstance(item, dict) and "name" in item for item in value):
-            return {str(item["name"]): _comparable_mapping(item) for item in value}
-    return value
+    del default_path
+    found = discovered()
+    for name in contracts.manifest_names():
+        assert name in found, f"{name} is in the package and discovery did not find it"
+        bundle, manifest = found[name]
+        assert bundle.parent == contracts.manifests_dir(), (
+            f"{name} was discovered in {bundle.parent}, not in the installed package"
+        )
+        from_package = ConnectorManifest.model_validate(
+            yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))
+        )
+        assert manifest == from_package
+        assert manifest.contract_version == contracts.contract_version(name)
 
 
-def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
-    """One mapping as an order-free pair sequence, with its own list values normalised."""
-    return tuple(sorted((key, _comparable(value)) for key, value in mapping.items()))
+#: The packaged connectors this tree relies on being off until a deployment names them: their
+#: schemas ride on every model call (`tests/test_context_floor.py`), and `pyexec` runs model-written
+#: code. Their `default_enabled: false` is the fleet's to keep, and this tree's to notice losing.
+_OPT_IN = ("kinetics", "props", "pyexec", "suitability", "thermalsafety", "unitops")
 
 
-#: Bundle-level keys that legitimately differ between the two trees, keyed `(bundle, key)`, each
-#: with why the difference is harmless.
-_ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
-    ("safety", "skills"): (
-        "the fleet's manifest declares no `skills:` on purpose, and says so in its own header: a "
-        "SKILL.md is architecture layer 3 in *this* repository and that fleet has no equivalent "
-        "seam, so `connectors/safety/skills/safety-screening/SKILL.md` stays here. What makes it "
-        "harmless is `connectors/registry._bundle_content_dirs`, which reads every directory "
-        "carrying an enabled bundle's name rather than only the one whose manifest won the name — "
-        "so the skill is reachable in either wiring order. Before that it was not: the order both "
-        "that repository's README and its integration doc publish (`manifests/` first) dropped it "
-        "with no error, no warning and no log line."
-    ),
-    ("thermalsafety", "skills"): (
-        "the same split `safety` above records, for the same reason and with the same remedy: the "
-        "judgment about `thermalsafety`'s tools is architecture layer 3 and lives here, and that "
-        "fleet "
-        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
-        "carrying the bundle's name, so `thermal-safety-assessment` is reachable in either wiring "
-        "order."
-    ),
-    ("kinetics", "skills"): (
-        "the same split `safety` above records, for the same reason and with the same remedy: the "
-        "judgment about `kinetics`'s tools is architecture layer 3 and lives here, and that fleet "
-        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
-        "carrying the bundle's name, so `kinetics-and-reactor-choice` is reachable in either "
-        "wiring order."
-    ),
-    ("unitops", "skills"): (
-        "the same split `safety` above records, for the same reason and with the same remedy: the "
-        "judgment about `unitops`'s tools is architecture layer 3 and lives here, and that fleet "
-        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
-        "carrying the bundle's name, so `unit-operation-sizing` is reachable in either wiring "
-        "order."
-    ),
-    ("suitability", "skills"): (
-        "the same split `safety` above records, for the same reason and with the same remedy: the "
-        "judgment about `suitability`'s tools is architecture layer 3 and lives here, and that "
-        "fleet "
-        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
-        "carrying the bundle's name, so `system-suitability` is reachable in either wiring order."
-    ),
-}
+@pytest.mark.parametrize("name", _OPT_IN)
+def test_the_packaged_manifest_still_declares_the_bundle_off_by_default(name: str) -> None:
+    """Read from the installed package, so a fleet release that flips one fails here."""
+    declared = yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))
+    assert declared.get("default_enabled", True) is False, (
+        f"the installed chemclaw-contracts declares {name} on by default, so an empty "
+        "CHEMCLAW_CONNECTORS_ENABLED would bind its schemas on every model call"
+    )
+
+
+def test_an_empty_enable_list_binds_none_of_the_opt_in_bundles_or_their_tools(
+    default_path: str,
+) -> None:
+    """With nothing named, none of them is bound, and `run_python` is not on the agent's surface."""
+    del default_path
+    from chemclaw.connectors.registry import connector_tool_names, enabled
+
+    assert set(_OPT_IN).isdisjoint({manifest.name for manifest in enabled()})
+    assert "run_python" not in connector_tool_names()
+
+
+def test_the_connector_validators_pass_against_the_installed_package(default_path: str) -> None:
+    """`connector-validate`, `skill-validate` and `template-validate`, over the default path.
+
+    The three the fleet's `agreement` lane runs against its pull request's package: a manifest that
+    names a tool no validator can resolve, or a skill whose declared tools the package does not
+    serve, fails here.
+    """
+    del default_path
+    from chemclaw.cli.validate_connectors import validate_connectors
+    from chemclaw.cli.validate_skills import validate_skills
+    from chemclaw.cli.validate_templates import validate_templates
+    from chemclaw.connectors.registry import declared_skills_dirs
+
+    assert validate_connectors() == []
+    assert validate_skills([*settings.skills_dirs, *declared_skills_dirs()]) == []
+    assert validate_templates() == []
+
+
+@pytest.mark.parametrize("name", contracts.manifest_names(internal=True))
+def test_a_backend_manifest_cannot_be_mounted(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package's internal manifests (`mount: backend`) are refused by this tree's model.
+
+    Those servers are addressed by `CHEMCLAW_CALC_SERVER_URL` / `CHEMCLAW_RXNLABEL_SERVER_URL`;
+    mounting their directory would put internal primitives in the prompt.
+    """
+    monkeypatch.setattr(settings, "connectors_dir", str(contracts.internal_manifests_dir()))
+    forget_discovered()
+    with pytest.raises(ConnectorError, match="mount") as raised:
+        discovered()
+    assert f"{name}/connector.yaml" in str(raised.value) or "mount" in str(raised.value)
+
+
+def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
+    """Every server the package declares has an egress port and a token slot in the chart.
+
+    A NetworkPolicy restricts by port independently of its destinations, and without a
+    `secrets.optionalKeys` slot the bearer has nowhere to come from. Derived from the package, which
+    names both the port and `auth.token_env` of every connector and backend.
+    """
+    values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
+    ports = {int(port) for port in values["networkPolicy"]["egressPorts"].values()}
+    slots = set(values["secrets"]["optionalKeys"].values())
+    names = [*contracts.manifest_names(), *contracts.manifest_names(internal=True)]
+    assert names, "the installed package declares no manifest"
+    missing: list[str] = []
+    for name in names:
+        endpoint = yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8"))[
+            "endpoint"
+        ]
+        port = int(endpoint["url"].rsplit(":", 1)[1].split("/", 1)[0])
+        if port not in ports:
+            missing.append(f"{name}: port {port} is not in networkPolicy.egressPorts")
+        token_env = (endpoint.get("auth") or {}).get("token_env")
+        if token_env and token_env not in slots:
+            missing.append(f"{name}: {token_env} has no secrets.optionalKeys slot")
+    assert not missing, "\n".join(missing)
 
 
 def _sibling_or_skip() -> Path:
@@ -143,110 +193,15 @@ def _sibling_or_skip() -> Path:
     return root
 
 
-def _manifest(path: Path) -> dict[str, Any]:
-    """One `connector.yaml`, parsed."""
-    declared: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return declared
-
-
-def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
-    """A bundle name both trees declare must mean the same bundle in both — every key of it.
-
-    Compares `_SURFACE_FIELDS`, `auth.token_env` and every `_content_keys` key. Compared as sets,
-    since tool order differs and decides nothing. Bundles are derived from both trees, so a new
-    shared bundle is checked without editing this file.
-    """
-    root = _sibling_or_skip()
-    here = bundles_declared_here()
-    there = fleet_published_bundles(root)
-    shared = sorted(set(here) & set(there))
-    assert shared, (
-        f"no bundle name is declared in both trees ({sorted(here)} here, {sorted(there)} there), "
-        "so this test now checks nothing. If the ports were withdrawn, SERVED_ELSEWHERE in "
-        "tests/test_context_floor.py is charging an allowance for servers nobody serves."
-    )
-    for name in shared:
-        mine, theirs = _manifest(here[name]), _manifest(there[name])
-        assert theirs["name"] == name, (
-            f"{there[name]} declares name {theirs['name']!r} in a directory called {name!r}. "
-            "`registry._load_manifest` rejects that outright — the folder is authoritative — so "
-            "any deployment that puts the fleet's manifests on CHEMCLAW_CONNECTORS_DIR fails at "
-            "startup with a ConnectorError naming this file, not with a differently-named bundle."
-        )
-        # The bundle level first, because a divergence there is what nothing looked at. Read off
-        # the whole manifests, before the two names are rebound to the endpoint blocks below.
-        compared = _content_keys(mine, theirs, f"{here[name]} / {there[name]}")
-        # What the loop below actually looked at, rather than what it was handed. The two differ by
-        # exactly the mutation that emptied the loop and left the stale-row check reading the
-        # *intended* scope — driven, and green.
-        visited: set[str] = set()
-        for field in compared:
-            visited.add(field)
-            argued = _ARGUED_DIVERGENCES.get((name, field))
-            agrees = _comparable(mine.get(field)) == _comparable(theirs.get(field))
-            if argued is not None:
-                assert not agrees, (
-                    f"`{name}`'s `{field}` is recorded as an argued divergence and the two trees "
-                    f"now agree about it. Delete that row from `_ARGUED_DIVERGENCES`: a row that "
-                    "outlives its subject reads as a live exemption, and the reason written beside "
-                    f"it is about a difference that no longer exists.\n\nThe row said: {argued}"
-                )
-                continue
-            assert agrees, (
-                f"`{name}` declares a different `{field}` in the two repositories: "
-                f"{mine.get(field)!r} here against {theirs.get(field)!r} in {there[name]}. First "
-                "directory on CHEMCLAW_CONNECTORS_DIR wins the name outright, so one of these two "
-                "declarations is simply unread in any given deployment — and the keys at this "
-                "level are not the tool surface: `skills` and `profiles` decide what judgment and "
-                "which agent profiles a deployment can reach, `note_types` and `relations` decide "
-                "what `make kg-validate` accepts, and `jobs` decides which durable launchers and "
-                "`connector-<name>` queues exist. Make them agree, or add a row to "
-                "`_ARGUED_DIVERGENCES` saying why they may differ AND what makes that harmless."
-            )
-        # Every argued row for this bundle must have been *reached*, or the exemption is standing
-        # over a key nothing looked at. This is the half the first version of this loop lacked:
-        # narrowing the compared set silently retired the stale-row check along with the comparison.
-        argued_here = {field for (bundle, field) in _ARGUED_DIVERGENCES if bundle == name}
-        unreached = sorted(argued_here - visited)
-        assert not unreached, (
-            f"`{name}` has argued divergences for {unreached}, and those keys were not compared. "
-            "The exemption is therefore standing over nothing — widen `_content_keys` or delete "
-            "the rows."
-        )
-        # And the row's subject has to exist in a file. A row about a key neither manifest declares
-        # any more is a reason nobody can check, kept alive by a comparison that agrees trivially.
-        absent = sorted(field for field in argued_here if field not in mine and field not in theirs)
-        assert not absent, (
-            f"`{name}` has argued divergences for {absent}, which neither manifest declares any "
-            "more. Delete those rows — the difference they excuse is gone."
-        )
-        mine, theirs = mine["endpoint"], theirs["endpoint"]
-        for field in _SURFACE_FIELDS:
-            assert set(mine.get(field) or ()) == set(theirs.get(field) or ()), (
-                f"`{name}` declares a different {field} in the two repositories: "
-                f"{sorted(set(mine.get(field) or ()))} here against "
-                f"{sorted(set(theirs.get(field) or ()))} in {there[name]}. First directory on "
-                "CHEMCLAW_CONNECTORS_DIR wins the name outright, with no merge and no warning, so "
-                "one of these two surfaces is simply unreachable in any given deployment."
-            )
-        assert mine["auth"].get("token_env") == theirs["auth"].get("token_env"), (
-            f"`{name}` reads its bearer from {mine['auth'].get('token_env')} here and "
-            f"{theirs['auth'].get('token_env')} in {there[name]}. Both halves of that name matter "
-            "and they are set in two different places: the server verifies one, the front door "
-            "sends the other, and /healthz is unauthenticated — so a mismatch is a connector that "
-            "reports healthy while every call it makes is refused."
-        )
-
-
-#: The script whose directory order decides which copy of an opt-in bundle's manifest is read.
+#: The script whose directory order decides which manifests the four-repo lane reads.
 _E2E_UP = REPO_ROOT / "infra/live/e2e-full-stack/up.sh"
 
 
 def _e2e_connectors_dir(fleet: Path) -> str:
     """`CHEMCLAW_CONNECTORS_DIR` exactly as `up.sh` exports it, with its three variables bound.
 
-    Read off the script rather than transcribed, because the order *is* the claim: a transcription
-    would go on agreeing with itself after the script moved the fleet's `manifests/` first.
+    Read off the script rather than transcribed, because the wiring *is* the claim: a transcription
+    would go on agreeing with itself after the script changed.
     """
     import chemclaw.connectors
 
@@ -268,288 +223,54 @@ def _e2e_connectors_dir(fleet: Path) -> str:
     return value
 
 
-def _opt_in_here() -> set[str]:
-    """Every bundle this tree's own manifest declares `default_enabled: false`.
+def test_the_e2e_lane_reads_every_fleet_connector_and_binds_no_opt_in_one_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `up.sh`'s own wiring the registry discovers what the package declares, and only that.
 
-    Read from this repository, which owns the opt-in decision.
-    """
-    return {
-        name
-        for name, path in bundles_declared_here().items()
-        if _manifest(path).get("default_enabled", True) is False
-    }
-
-
-def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every bundle this tree declares opt-in is unbound under `up.sh`'s own wiring.
-
-    `up.sh` lists this tree's connectors first and discovery is first-directory-wins. Driven through
-    `registry.enabled()` with the exported order and no enable-list.
+    The lane puts the fleet *checkout's* `manifests/` on the path rather than the installed package,
+    so the manifests it reads and the servers it starts are one revision. Every connector the
+    package publishes must still be discovered there, and the ones the fleet declares
+    `default_enabled: false` must stay unbound with no enable-list: the lane's enable-list is
+    derived from discovery, and a lane that binds an opt-in bundle by silence pays its schemas on
+    every call.
     """
     from chemclaw.connectors import registry
-    from chemclaw.core.config import settings
 
     fleet = _sibling_or_skip()
-    opt_in = _opt_in_here()
+    opt_in = {
+        name
+        for name in contracts.manifest_names()
+        if yaml.safe_load(contracts.manifest_path(name).read_text(encoding="utf-8")).get(
+            "default_enabled", True
+        )
+        is False
+    }
+    assert opt_in, "no package manifest declares `default_enabled: false`, so this checks nothing"
     monkeypatch.setattr(settings, "connectors_dir", _e2e_connectors_dir(fleet))
     monkeypatch.setattr(settings, "connectors_enabled", "")
+    forget_discovered()
+    assert set(contracts.manifest_names()) <= set(registry.discovered()), (
+        f"the lane's wiring does not discover {sorted(set(contracts.manifest_names()))} "
+        "from the fleet checkout"
+    )
     bound = {manifest.name for manifest in registry.enabled()}
-    assert opt_in, "no manifest here declares `default_enabled: false`, so this test checks nothing"
     assert not opt_in & bound, (
-        f"{sorted(opt_in & bound)} bind in the e2e lane's wiring with no enable-list, so "
-        "the claim that this tree's copy wins the name in the lane — and with it this tree's "
-        f"`default_enabled: false` — is false. {_E2E_UP} has changed its CHEMCLAW_CONNECTORS_DIR "
-        "order."
+        f"{sorted(opt_in & bound)} bind in the e2e lane's wiring with no enable-list, although "
+        f"the fleet declares them `default_enabled: false`. {_E2E_UP} has changed its "
+        "CHEMCLAW_CONNECTORS_DIR."
     )
-
-
-def test_the_compared_key_set_is_anchored_in_both_the_model_and_the_two_files() -> None:
-    """The compared key set is anchored in both the model and the two files.
-
-    Needs no checkout. A model-only scope can be narrowed to nothing, and an intersection of the
-    files would miss a key only the fleet declares; the union feeds the unknown-key refusal.
-    """
-    known = sorted(frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT)
-    assert known, "ConnectorManifest declares no bundle-level content keys; the scope is now empty"
-
-    # A key only *one* side declares is still compared — the safety/skills shape.
-    one_sided = _content_keys({"name": "x", known[0]: ["a"]}, {"name": "x"}, "one-sided")
-    assert known[0] in one_sided
-
-    # A key this repository's model does not declare is refused rather than compared and agreed.
-    # `extra="forbid"` catches it on this side at load; the fleet's copy is never loaded here.
-    with pytest.raises(AssertionError, match="ConnectorManifest"):
-        _content_keys({"name": "x"}, {"name": "x", "mount": "backend"}, "unknown key")
-
-    # And the normaliser's own two rules, which decide whether a difference is one at all.
-    assert _comparable(None) == _comparable([]), (
-        "an absent key and an empty list are one declaration"
-    )
-    assert _comparable(["b", "a"]) == _comparable(["a", "b"]), (
-        "an allow-list's order decides nothing"
-    )
-    assert _comparable(["a"]) != _comparable(["a", "b"]), "a longer allow-list is a different one"
-    assert _comparable([{"name": "j", "queue": "q"}]) != _comparable(
-        [{"name": "j", "queue": "r"}]
-    ), "two jobs of one name on different queues must not compare equal"
 
 
 # ---------------------------------------------------------------------------------------------
-# The `calc` seam: a contract with no manifest on either side.
+# The `calc` and `rxnlabel` seams: typed requests from the same package.
 # ---------------------------------------------------------------------------------------------
 
 #: Where this repository's own package lives, so the callers below are found rather than listed.
 _SRC = REPO_ROOT / "src"
 
 
-class _Seam(NamedTuple):
-    """One MCP server this repository calls with tool names and argument keys typed into `src/`.
-
-    A value, so each seam is a row checked against its own `tool-surface.json`.
-
-    Attributes:
-        name: What this seam is called, for a failure message and for the declined table beside it.
-        module: The dotted module that defines the dispatchers, resolved through `find_spec` so a
-            rename fails loudly rather than emptying the caller set.
-        dispatchers: The function or method names that put `(tool, arguments)` on the wire.
-        surface: The fleet-relative path of the `tool-surface.json` that server records.
-        declined: Tools the fleet serves that nothing here calls, each with the reason.
-    """
-
-    name: str
-    module: str
-    dispatchers: frozenset[str]
-    surface: tuple[str, ...]
-    declined: Mapping[str, str]
-
-
-def _module_path(dotted: str) -> str:
-    """One dotted module as a repository-relative path, or a failure naming what moved.
-
-    `find_spec`, so a moved module fails rather than emptying a filter.
-    """
-    spec = importlib.util.find_spec(dotted)
-    assert spec is not None and spec.origin is not None, (
-        f"{dotted} does not resolve, so the seam it defines has no caller set and every check "
-        "over it would pass vacuously. If the module moved, move this name with it."
-    )
-    return str(Path(spec.origin).relative_to(REPO_ROOT))
-
-
-def _callers(seam: _Seam) -> tuple[str, ...]:
-    """Every module in `src/` that imports one of `seam`'s dispatchers, plus the module defining it.
-
-    Derived from imports, not names, so another module's same-named `_call` is not checked against
-    the wrong server. The defining module is added because it does not import what it defines.
-    """
-    definer = _module_path(seam.module)
-    found = [definer]
-    for path in sorted(_SRC.rglob("*.py")):
-        relative = str(path.relative_to(REPO_ROOT))
-        if relative == definer:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == seam.module:
-                if any(alias.name in seam.dispatchers for alias in node.names):
-                    found.append(relative)
-                    break
-    return tuple(sorted(found))
-
-
-_Bindings = dict[str, frozenset[str] | None]
-
-
-def _literal_strings(node: ast.AST, bound: _Bindings) -> frozenset[str] | None:
-    """The string values an expression can take, or `None` when that is not decidable here.
-
-    Decidable shapes: a literal, a ternary of literals, and a name bound to one of those. `None`
-    makes the caller fail rather than skip the site.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return frozenset({node.value})
-    if isinstance(node, ast.IfExp):
-        body = _literal_strings(node.body, bound)
-        orelse = _literal_strings(node.orelse, bound)
-        return None if body is None or orelse is None else body | orelse
-    if isinstance(node, ast.Name):
-        return bound.get(node.id)
-    return None
-
-
-def _bindings(tree: ast.Module) -> _Bindings:
-    """Every name in one module assigned a decidable set of tool-name strings.
-
-    Module-wide: an undecidable assignment anywhere maps the name to `None`, so ambiguity fails.
-    """
-    bound: _Bindings = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        values = _literal_strings(node.value, {})
-        for target in node.targets:
-            if not isinstance(target, ast.Name):
-                continue
-            if values is None or bound.get(target.id, values) is None:
-                bound[target.id] = None
-            else:
-                bound[target.id] = (bound.get(target.id) or frozenset()) | values
-    return bound
-
-
-def _typed_tools(seam: _Seam) -> dict[str, frozenset[str]]:
-    """Each module-level dispatcher whose `tool` parameter is a `Literal`, with its members.
-
-    For call sites whose tool expression is a table lookup, `mypy --strict` proves the value is a
-    member, so the members are what the site can send. Methods and plain-`str` dispatchers have no
-    entry.
-    """
-    module = importlib.import_module(seam.module)
-    typed: dict[str, frozenset[str]] = {}
-    for name in sorted(seam.dispatchers):
-        dispatcher = getattr(module, name, None)
-        if dispatcher is None:
-            continue
-        annotation = get_type_hints(dispatcher).get("tool")
-        if get_origin(annotation) is Literal:
-            typed[name] = frozenset(get_args(annotation))
-    return typed
-
-
-def _site_tools(
-    typed: Mapping[str, frozenset[str]], dispatcher: str, expression: ast.expr, bound: _Bindings
-) -> frozenset[str] | None:
-    """The tool names one call site can send: its literals, else its dispatcher's `Literal` type."""
-    literal = _literal_strings(expression, bound)
-    return literal if literal is not None else typed.get(dispatcher)
-
-
-_Site = tuple[str, str, ast.expr, frozenset[str], _Bindings]
-
-
-def _hardcoded_calls(seam: _Seam) -> list[_Site]:
-    """Each `(module, dispatcher, tool expression, argument keys, name bindings)` written there.
-
-    A site counts when its arguments are a dict literal; a pass-through of a caller's `arguments`
-    declares nothing.
-    """
-    sites: list[_Site] = []
-    for relative in _callers(seam):
-        tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
-        bound = _bindings(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            called = node.func
-            name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", None)
-            if name not in seam.dispatchers:
-                continue
-            for index, argument in enumerate(node.args[:-1]):
-                following = node.args[index + 1]
-                if not isinstance(following, ast.Dict):
-                    continue
-                keys = frozenset(
-                    key.value
-                    for key in following.keys
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                )
-                sites.append((relative, name, argument, keys, bound))
-    return sites
-
-
-def _recorded_surface(root: Path, seam: _Seam) -> dict[str, dict[str, Any]]:
-    """The `tool-surface.json` `seam`'s server records, from a `tools/list` against itself."""
-    path = root.joinpath(*seam.surface)
-    assert path.is_file(), (
-        f"Chemclaw3-mcp holds no {'/'.join(seam.surface)}, so the {seam.name} seam has no recorded "
-        "surface to check against. If that file moved, move this path with it — a missing surface "
-        "must not read as a seam with nothing to say."
-    )
-    recorded: dict[str, dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
-    return recorded
-
-
-def _assert_every_call_names_a_served_tool(seam: _Seam) -> None:
-    """Every hardcoded call on `seam` names a tool, and only arguments, its server declares.
-
-    A rename on either side fails here rather than at runtime against a pod.
-    """
-    root = _sibling_or_skip()
-    surface = _recorded_surface(root, seam)
-    sites = _hardcoded_calls(seam)
-    assert sites, (
-        f"no hardcoded {seam.name} call site was found, so this check is now vacuous. Either the "
-        f"dispatchers moved out of {seam.module} or they stopped taking a literal tool name."
-    )
-    typed = _typed_tools(seam)
-    for relative, dispatcher, expression, keys, bound in sites:
-        tools = _site_tools(typed, dispatcher, expression, bound)
-        assert tools is not None, (
-            f"{relative}:{expression.lineno} passes a tool expression this check cannot resolve to "
-            "string literals. Either name the tool literally, type the dispatcher's `tool` "
-            "parameter as a `Literal`, or teach `_literal_strings` the shape — passing over it "
-            "would leave the call unchecked while the file reported green."
-        )
-        for tool in sorted(tools):
-            assert tool in surface, (
-                f"{relative}:{expression.lineno} calls `{tool}`, which Chemclaw3-mcp's "
-                f"{'/'.join(seam.surface)} does not record serving: {sorted(surface)}."
-            )
-            declared = surface[tool]
-            assert keys <= set(declared), (
-                f"{relative}:{expression.lineno} passes {sorted(keys - set(declared))} to "
-                f"`{tool}`, which declares {sorted(declared)}. FastMCP rejects an undeclared "
-                "argument, so this is a refused call at runtime and nothing else in this "
-                "repository would have said so."
-            )
-            required = {name for name, spec in declared.items() if spec.get("required")}
-            assert required <= keys, (
-                f"{relative}:{expression.lineno} calls `{tool}` without "
-                f"{sorted(required - keys)}, which the server declares required."
-            )
-
-
-#: The fleet `calc` tools no hardcoded site here names, and the reason each is declined.
+#: The fleet `calc` tools no request built here names, and the reason each is declined.
 #:
 #: Reconciled in both directions against the derived difference, so a stale, missing or orphaned
 #: row fails.
@@ -572,7 +293,7 @@ _CALC_DECLINED: dict[str, str] = {
 }
 
 
-#: The fleet `rxnlabel` tools no hardcoded site here names, reconciled like `_CALC_DECLINED`.
+#: The fleet `rxnlabel` tools no request built here names, reconciled like `_CALC_DECLINED`.
 #:
 #: The drain calls only the batch tools; the single-reaction tools exist for interactive use, and a
 #: batch of one covers them.
@@ -591,110 +312,63 @@ _RXNLABEL_DECLINED: dict[str, str] = {
 }
 
 
-#: The two seams, each read against the surface its own server records.
-_CALC_SEAM = _Seam(
-    name="calc",
-    module="chemclaw.connectors.calc.remote",
-    # `remote_version` puts a tool name on the wire too — inside `calculation_key`'s arguments —
-    # and was outside this set, so the calibration table's names reached the server unchecked.
-    dispatchers=frozenset(
-        {"cached_remote", "remote_call", "remote_compute", "remote_version", "_call"}
-    ),
-    surface=("servers", "calc", "tool-surface.json"),
-    declined=_CALC_DECLINED,
-)
-
-#: `rxnlabel` is a backend like `calc`. Its dispatcher is a method, `RxnLabelServer._call`, which
-#: is why a seam names its defining module: `labeller.py` imports nothing an importer walk could
-#: see.
-_RXNLABEL_SEAM = _Seam(
-    name="rxnlabel",
-    module="chemclaw.ingest.labels.labeller",
-    dispatchers=frozenset({"_call"}),
-    surface=("servers", "rxnlabel", "tool-surface.json"),
-    declined=_RXNLABEL_DECLINED,
-)
+@cache
+def _names_used_in_src() -> frozenset[str]:
+    """Every identifier or attribute `src/` reads anywhere, so a class is "used" only if it is."""
+    names: set[str] = set()
+    for path in sorted(_SRC.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Name):
+                names.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                names.add(node.attr)
+    return frozenset(names)
 
 
-def _tools_named(seam: _Seam) -> set[str]:
-    """Every tool name `seam`'s hardcoded sites put on the wire.
+def _unbuilt(requests: Mapping[str, type[Any]]) -> set[str]:
+    """The tools whose request model nothing in `src/` ever names."""
+    used = _names_used_in_src()
+    return {tool for tool, model in requests.items() if model.__name__ not in used}
 
-    Unresolvable sites contribute nothing; the check above already fails on them.
+
+def test_every_calc_tool_the_fleet_serves_is_requested_here_or_declined_with_a_reason() -> None:
+    """A tool the fleet adds to `calc` is a decision here, not a silence.
+
+    The package's request models are the fleet's tool list. Sites that send one name its model, so
+    a tool no source line names is either declined below with a reason or newly served and unread.
     """
-    typed = _typed_tools(seam)
-    named: set[str] = set()
-    for _relative, dispatcher, expression, _keys, bound in _hardcoded_calls(seam):
-        named |= _site_tools(typed, dispatcher, expression, bound) or frozenset()
-    return named
-
-
-def _assert_every_served_tool_is_called_or_declined(seam: _Seam) -> None:
-    """Every tool the fleet serves on `seam` is called here or declined with a reason.
-
-    The other direction catches renames; this one catches the fleet growing, so a new tool is a
-    deliberate decision rather than silence.
-    """
-    root = _sibling_or_skip()
-    surface = _recorded_surface(root, seam)
-    unreached = set(surface) - _tools_named(seam)
-    assert unreached == set(seam.declined), (
-        f"{sorted(unreached - set(seam.declined))} are served by Chemclaw3-mcp's {seam.name} "
-        "server and named by no hardcoded call site here, with no reason recorded — call them, or "
-        f"add a row to the {seam.name} declined table saying why not. And "
-        f"{sorted(set(seam.declined) - unreached)} are recorded as declined while that is no "
-        "longer the state: either this repository now calls one (delete its row) or the fleet has "
-        "withdrawn one (the reason written beside it is about a tool that no longer exists, and "
-        "whatever else that reason justified needs re-reading)."
+    unbuilt = _unbuilt(CALC_REQUESTS)
+    assert unbuilt == set(_CALC_DECLINED), (
+        f"{sorted(unbuilt - set(_CALC_DECLINED))} are served by Chemclaw3-mcp's calc server and "
+        "named by no request built here, with no reason recorded: call them, or add a row to "
+        f"_CALC_DECLINED. And {sorted(set(_CALC_DECLINED) - unbuilt)} are recorded as declined "
+        "while some source line now names their request model (delete the row)."
     )
 
 
-def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """The `calc` seam calls only tools the fleet records serving."""
-    _assert_every_call_names_a_served_tool(_CALC_SEAM)
+def test_every_rxnlabel_tool_the_fleet_serves_is_requested_here_or_declined_with_a_reason() -> None:
+    """The `rxnlabel` seam's same accounting: its two single-reaction tools are declined."""
+    unbuilt = _unbuilt(RXNLABEL_REQUESTS)
+    assert unbuilt == set(_RXNLABEL_DECLINED), (
+        f"{sorted(unbuilt - set(_RXNLABEL_DECLINED))} are served by Chemclaw3-mcp's rxnlabel "
+        "server and named by no request built here, with no reason recorded. And "
+        f"{sorted(set(_RXNLABEL_DECLINED) - unbuilt)} are recorded as declined while a source "
+        "line now names their request model."
+    )
 
 
-def test_every_tool_the_calibration_table_names_is_one_the_calc_seam_checks() -> None:
-    """`_CALIBRATED`'s tool names are exactly what the seam walker reads at `remote_version`.
+def test_the_calibration_table_names_only_requests_remote_version_accepts() -> None:
+    """`_CALIBRATED` rows and `CalibratedRequest` are one set, so neither can outgrow the other.
 
-    Needs no checkout. Equality in both directions: an unlisted row would send an unchecked name,
-    and an unused `CalibratedTool` member would count as called and satisfy the declined accounting.
+    An unlisted request type would be a version probe the type checker does not see; an unused
+    union member would count as called.
     """
+    from chemclaw.connectors.calc.remote import CalibratedRequest
     from chemclaw.connectors.calc.server.tools import _CALIBRATED
 
-    typed = _typed_tools(_CALC_SEAM)
-    resolved = {
-        tool
-        for _relative, dispatcher, expression, _keys, bound in _hardcoded_calls(_CALC_SEAM)
-        if dispatcher == "remote_version"
-        for tool in _site_tools(typed, dispatcher, expression, bound) or ()
-    }
-    table = {tool for tool, _unit in _CALIBRATED.values()}
-
-    assert resolved, (
-        "no `remote_version` call site resolved to a tool name, so the calibration table's names "
-        "reach the fleet through a call this file does not check — `remote_version` left "
-        "`_CALC_SEAM.dispatchers`, or its `tool` parameter stopped being a `Literal`"
-    )
-    assert table == resolved, (
-        f"`_CALIBRATED` names {sorted(table - resolved)} that the seam walker does not attribute "
-        f"to `remote_version`, and the walker attributes {sorted(resolved - table)} that no table "
-        "row names. Keep `remote.CalibratedTool` and the table's tool column the same set."
-    )
-
-
-def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
-    """The `calc` seam's other direction — a tool the fleet adds is a decision, not a silence."""
-    _assert_every_served_tool_is_called_or_declined(_CALC_SEAM)
-
-
-def test_the_rxnlabel_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """`rxnlabel`, the second backend seam, calls only tools the fleet records serving."""
-    _assert_every_call_names_a_served_tool(_RXNLABEL_SEAM)
-
-
-def test_every_rxnlabel_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
-    """The `rxnlabel` seam's other direction — its two single-reaction tools are declined."""
-    _assert_every_served_tool_is_called_or_declined(_RXNLABEL_SEAM)
+    table = {request for request, _unit in _CALIBRATED.values()}
+    assert table == set(get_args(CalibratedRequest))
+    assert {request.tool_name for request in table} <= set(CALC_REQUESTS)
 
 
 def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet() -> None:
@@ -702,64 +376,25 @@ def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet
 
     A fleet copy would give the family two answers to one question.
     """
-    root = _sibling_or_skip()
-    surface: dict[str, dict[str, Any]] = json.loads(
-        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
-    )
-
-    assert "compute_thermochemistry" not in surface, (
+    assert "compute_thermochemistry" not in CALC_REQUESTS, (
         "Chemclaw3-mcp now serves `compute_thermochemistry`, which this repository composes from "
         "separately keyed primitives. Two live definitions of one calculation is the duplication "
         "both repositories' rules forbid — decide which one answers before either ships."
     )
 
 
-def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> None:
-    """`tests/calc_server_fake.py` serves exactly the surface the fleet records.
+def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_models() -> None:
+    """`tests/calc_server_fake.py` serves exactly the tools the package defines requests for.
 
     The fake cannot notice the real server changing, so the two are compared. `_KEYED` and
-    `_UNKEYED` are the fake's declaration of what it serves.
+    `_UNKEYED` are the fake's declaration of what it serves; the arguments it accepts are the
+    package's own models (`FakeCalcServer.call_tool`).
     """
-    root = _sibling_or_skip()
-    surface = json.loads(
-        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
-    )
     from tests.calc_server_fake import _KEYED, _UNKEYED
 
     fake = set(_KEYED) | set(_UNKEYED) | {"calculation_key"}
-    assert fake == set(surface), (
-        f"the fake serves {sorted(fake - set(surface))} that Chemclaw3-mcp's calc server does not "
-        f"record, and not {sorted(set(surface) - fake)} that it does. A fake that has drifted from "
-        "the server proves the suite runs, not that the seam works."
+    assert fake == set(CALC_REQUESTS), (
+        f"the fake serves {sorted(fake - set(CALC_REQUESTS))} that the fleet's package does not "
+        f"model, and not {sorted(set(CALC_REQUESTS) - fake)} that it does. A fake that has "
+        "drifted from the server proves the suite runs, not that the seam works."
     )
-
-
-#: `deploy/helm/chemclaw/values.yaml`, read for the two maps a fleet server needs to be reachable.
-_CHART_VALUES = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw" / "values.yaml"
-
-
-def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
-    """Every fleet server has an egress port and a token slot in the chart.
-
-    A NetworkPolicy restricts by port independently of its destinations, and without a
-    `secrets.optionalKeys` slot the bearer has nowhere to come from. Derived from the fleet's
-    `manifests/` and `manifests-internal/`, which name both the port and `auth.token_env`.
-    """
-    root = _sibling_or_skip()
-    values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
-    ports = {int(port) for port in values["networkPolicy"]["egressPorts"].values()}
-    slots = set(values["secrets"]["optionalKeys"].values())
-    manifests = sorted(root.glob("manifests/*/connector.yaml")) + sorted(
-        root.glob("manifests-internal/*/connector.yaml")
-    )
-    assert manifests, f"{root} holds no fleet manifest; the derivation is broken"
-    missing: list[str] = []
-    for path in manifests:
-        endpoint = _manifest(path)["endpoint"]
-        port = int(endpoint["url"].rsplit(":", 1)[1].split("/", 1)[0])
-        if port not in ports:
-            missing.append(f"{path.parent.name}: port {port} is not in networkPolicy.egressPorts")
-        token_env = (endpoint.get("auth") or {}).get("token_env")
-        if token_env and token_env not in slots:
-            missing.append(f"{path.parent.name}: {token_env} has no secrets.optionalKeys slot")
-    assert not missing, "\n".join(missing)

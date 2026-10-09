@@ -458,6 +458,7 @@ dependencies = [
     { name = "arize-phoenix-client" },
     { name = "bofire", extra = ["cheminfo", "optimization"] },
     { name = "charset-normalizer" },
+    { name = "chemclaw-contracts" },
     { name = "deepagents" },
     { name = "drfp" },
     { name = "fastapi" },
@@ -527,6 +528,7 @@ requires-dist = [
     { name = "arize-phoenix-client", specifier = ">=3.1" },
     { name = "bofire", extras = ["optimization", "cheminfo"], specifier = ">=0.4.1" },
     { name = "charset-normalizer", specifier = ">=3.4" },
+    { name = "chemclaw-contracts", git = "https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp?subdirectory=packages%2Fchemclaw_contracts&rev=1d551d40cdf1d1e13d5b86d85ee86fa91f41195f" },
     { name = "deepagents", specifier = ">=0.7.5,<0.8" },
     { name = "drfp", specifier = ">=0.3.7" },
     { name = "fastapi", specifier = ">=0.141.1" },
@@ -586,6 +588,15 @@ dev = [
     { name = "tblite", specifier = ">=0.7.0" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260518" },
     { name = "types-regex", specifier = ">=2026.7.19" },
+]
+
+[[package]]
+name = "chemclaw-contracts"
+version = "1.0.0"
+source = { git = "https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp?subdirectory=packages%2Fchemclaw_contracts&rev=1d551d40cdf1d1e13d5b86d85ee86fa91f41195f#1d551d40cdf1d1e13d5b86d85ee86fa91f41195f" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
 ]
 
 [[package]]

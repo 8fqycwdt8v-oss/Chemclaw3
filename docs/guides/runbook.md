@@ -647,12 +647,17 @@ door at. In a cluster, each such bundle is its own Deployment + Service
 Deployment with `worker: true`, and the chart *computes* `CHEMCLAW_CONNECTOR_URLS` from that same
 block, so addresses cannot drift from the pods that exist.
 
-**A bundle this image does not ship** — one of `Chemclaw3-mcp`'s `manifests/`, or a private one —
-is mounted rather than built in: put its folder in a ConfigMap and list it under
+**A bundle this image does not ship** — a private one; `Chemclaw3-mcp`'s own manifests are in the
+image — is mounted rather than built in: put its folder in a ConfigMap and list it under
 `extraConnectors.bundles` (`{name: <bundle>, configMap: <configmap>}`); the chart mounts each at
-`extraConnectors.mountPath/<name>` and prepends that directory to `CHEMCLAW_CONNECTORS_DIR`. Then
+`extraConnectors.mountPath/<name>` and puts that directory first on `CHEMCLAW_CONNECTORS_DIR`. Then
 give it a `connectors.<name>` entry (`enabled: true`, `server: true`, `url:`) and do the three
 steps below.
+
+**Upgrading a release that mounted `pyexec`.** `pyexec`'s manifest now ships in the image, so
+the old `extraConnectors.bundles` entry for it is a name declared twice: the chart refuses to
+render and names the bundle. Remove that entry and its ConfigMap, keep `connectors.pyexec`, and
+upgrade (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
 
 **A server somebody else runs** — a platform team's model endpoint, a vendor's FastAPI/MCP service.
 Everything above is unchanged (the manifest says what the capability *is*, and that does not depend
@@ -685,24 +690,33 @@ The tools such a server exposes are still read/compute only, still narrowed by `
 carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
 must never make an access decision on a header's word (`connectors/identity.py`).
 
-**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
-override a shipped one; setting it *replaces* the shipped default, so name the shipped directory
-too), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS` (a JSON object, bundle name → MCP
+**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — add a private bundle dir; a
+name found in two directories is a startup error, never an override; setting it *replaces* the
+default, which is the fleet's manifests and the shipped bundles, so name both too), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS` (a JSON object, bundle name → MCP
 URL), `CHEMCLAW_CONNECTORS_REQUIRED`, `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS`,
 `CHEMCLAW_CONNECTOR_JOB_TIMEOUT_SECONDS`. A connector's request timeout and auth mode are per-manifest
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
-**What a name collision on that path does and does not replace.** The first directory wins the name
-outright and the loser's manifest is not merged, not warned about and not logged — so the winning
-manifest is the whole of the **tool surface**. It is *not* the whole of the bundle: a bundle's
-`skills/` and `profiles/` directories are read from **every** directory carrying its name, winner
-first (`connectors/registry._bundle_content_dirs`). That matters for the fleet's own manifests:
-`Chemclaw3-mcp` publishes `chem` and `safety` under the same names and with no `skills:`, so when
-its directory is first, its manifest wins and this repository's `connectors/safety/skills/` judgment
-still loads — no `CHEMCLAW_SKILLS_DIR` workaround is needed.
-`tests/test_sibling_manifest_agreement.py` compares every bundle-level manifest key between the two
-trees.
+**A name declared in two directories on that path is a startup error.** It names both files; no
+directory wins. The default path is the fleet's manifests (the installed `chemclaw-contracts`
+package) and this image's own bundles, so a copy of a fleet manifest kept here, or a mounted bundle
+called `chem`, fails every pod at boot. To dial a connector at another server, set
+`CHEMCLAW_CONNECTOR_URLS`. A connector's judgment is not its manifest: its `skills/` and
+`profiles/` directories are found by connector name in **every** directory on the path, with or
+without a `connector.yaml` of their own (`connectors/registry._bundle_content_dirs`) — which is how
+`connectors/safety/skills/` loads beside a manifest `Chemclaw3-mcp` owns. `make connector-validate`
+refuses a `skills/` directory that names no discovered connector.
+`tests/test_sibling_manifest_agreement.py` holds that the installed package is the only source of
+those manifests.
+
+**A connector refused for its contract.** A manifest declares a `contract_version` (the fleet's, from
+the installed `chemclaw-contracts`) and its server reports its own on `/healthz`. When a session
+opens, a different **major** refuses that connector by name for the turn: it is announced as
+degraded, the log line says `connector <name> is refused` with both versions, and `/mcp` is not
+dialled. Align the package pinned in `pyproject.toml` with the server image the release runs. A
+different minor is logged once as a warning and the connector is used; a version missing on either
+side is logged once as unknown and never refuses.
 
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
@@ -743,17 +757,18 @@ thermal-hazard arithmetic from measured calorimetry), `kinetics` (isothermal rat
 arithmetic), `unitops` (scale-up and unit-operation sizing) and `suitability` (USP <621>
 chromatographic system suitability). These declare `default_enabled: false`, so an empty
 `CHEMCLAW_CONNECTORS_ENABLED` binds none of them and the chart ships all five at `enabled: false`
-(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests are
-here anyway because the declaration validators resolve tool names through them, which lets the
-judgment beside each one name the tools it is judgment about. Turning one on is the same three
+(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests
+come with the fleet's `chemclaw-contracts` package anyway because the declaration validators
+resolve tool names through them, which lets the judgment kept here beside each one name the tools
+it is judgment about. Turning one on is the same three
 obligations as the three above — host, port, bearer (`CHEMCLAW_PROPS_TOKEN`,
 `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`,
 `CHEMCLAW_SUITABILITY_TOKEN`) — plus a fourth that the other three do not have: it costs prefix on
 **every** model call, not only on the calls that use it, so enable the ones a site's chemists
 actually ask for rather than the set.
 
-**`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
-`servers/chem`, so this release renders no Deployment and no Service for it and dials the address
+**`chem` is declared by the fleet and served elsewhere.** Its capability and its manifest are
+`Chemclaw3-mcp`'s (`servers/chem`), so this release renders no Deployment and no Service for it and dials the address
 in `connectors.chem.url` instead (D-2026-08-09) — that value and its `networkPolicy.egressPorts`
 entry are where the port lives, because it is the sibling release's to choose. Two things that are the operator's,
 because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide

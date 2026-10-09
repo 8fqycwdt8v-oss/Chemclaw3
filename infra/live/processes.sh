@@ -379,11 +379,12 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
 # connector nobody had noticed was missing. A hardcoded list is a second declaration of a set that
 # already has two authorities, which is the failure this repository names in `manifests/`.
 #
-# So the set is the intersection of the two: a bundle whose manifest *here* declares an
-# `endpoint:` (so the front door will dial it) and which the fleet publishes a manifest for (so
-# this lane knows its port and its module). `bo`, `calc`, `molfp` and `rxnfp` declare an endpoint
-# too and are absent from the fleet's `manifests/`, which is exactly right — they are served by
-# this repository's own `connectors_dev` process, and the loop below rewrites their URLs.
+# So the set is the intersection of the two: a bundle the front door discovers with an `endpoint:`
+# (the fleet's manifests arrive through the installed `chemclaw-contracts` package, this tree's own
+# beside them) and which the fleet checkout publishes a manifest for (so this lane knows its port
+# and its module). `bo`, `calc`, `molfp` and `rxnfp` declare an endpoint too and are absent from the
+# fleet's `manifests/`, which is exactly right — they are served by this repository's own
+# `connectors_dev` process, and the loop below rewrites their URLs.
 #
 # **And the front door has to bind it**, asked of `registry.enabled()` — the function the front
 # door itself asks. Without this third term the lane started `props`, `kinetics`, `suitability`,
@@ -392,16 +393,15 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
 # wants them names them in `CHEMCLAW_CONNECTORS_ENABLED` (the four-repo lane does, for all of
 # them), and then they are started *and* bound.
 fleet_bundle_names() {
-  "$1" - "$REPO_ROOT" "$MCP_REPO" <<'PY'
-import pathlib, sys, yaml
+  "$1" - "$MCP_REPO" <<'PY'
+import pathlib, sys
 
-from chemclaw.connectors.registry import enabled
+from chemclaw.connectors.registry import discovered, enabled
 
-repo, fleet = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+fleet = pathlib.Path(sys.argv[1])
 bound = {manifest.name for manifest in enabled()}
-for manifest in sorted((repo / "src/chemclaw/connectors").glob("*/connector.yaml")):
-    name = manifest.parent.name
-    if not (yaml.safe_load(manifest.read_text()) or {}).get("endpoint"):
+for name, (_bundle, manifest) in sorted(discovered().items()):
+    if manifest.endpoint is None:
         continue
     if name in bound and (fleet / "manifests" / name / "connector.yaml").exists():
         print(name)
@@ -422,7 +422,7 @@ start_fleet_bundles() {
   # `fleet_port` below already uses.
   local names name port
   names="$(fleet_bundle_names "$python")" || die "could not derive the fleet bundle list from \
-$REPO_ROOT/src/chemclaw/connectors and $MCP_REPO/manifests"
+the registry and $MCP_REPO/manifests"
   # An empty derivation is a wrong checkout, not a lane with nothing to start. `fleet_checkout_python`
   # already refuses a missing `$MCP_REPO`; this catches one that exists and publishes no manifest
   # this repository declares an endpoint for - which would otherwise start no fleet server at all and

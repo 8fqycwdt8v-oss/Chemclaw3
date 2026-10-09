@@ -22,10 +22,26 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 import numpy as np
+from chemclaw_contracts.calc import (
+    CombineStructuresRequest,
+    ComputeFukuiAtRequest,
+    ComputeHessianRequest,
+    ComputePropertiesAtRequest,
+    EmbedStructureRequest,
+    RelaxStructureRequest,
+    ScanPointRequest,
+    SearchBindingModesRequest,
+    SearchConformerEnsembleRequest,
+)
 from pydantic import ValidationError
 from rdkit import Chem
 
-from chemclaw.connectors.calc.remote import CalcTimeBudgetError, cached_remote, remote_call
+from chemclaw.connectors.calc.remote import (
+    CalcTimeBudgetError,
+    cached_remote,
+    remote_call,
+    wire_structure,
+)
 from chemclaw.core.chem import require_canonical_smiles, require_molecule, torsion_handle
 from chemclaw.core.config import settings
 from chemclaw.core.config.calculators import PkaCalibration
@@ -217,12 +233,11 @@ async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
     """
     payload = await run(
         remote_call(
-            "embed_structure",
-            {
-                "smiles": smiles,
-                "multiplicity": radical_multiplicity(smiles),
-                "relax_with_force_field": True,
-            },
+            EmbedStructureRequest(
+                smiles=smiles,
+                multiplicity=radical_multiplicity(smiles),
+                relax_with_force_field=True,
+            )
         ),
         f"starting geometry for {smiles}",
     )
@@ -239,9 +254,7 @@ async def relax(
     """Relax one geometry to the nearest minimum, cached under the server's key."""
     payload, cached = await run(
         cached_remote(
-            store,
-            "relax_structure",
-            {"structure": structure.model_dump(mode="json"), "solvent": solvent},
+            store, RelaxStructureRequest(structure=wire_structure(structure), solvent=solvent)
         ),
         f"optimising {structure.smiles or structure.structure_id}",
     )
@@ -274,8 +287,7 @@ async def hessian(
     payload, cached = await run(
         cached_remote(
             ArrayOffloadingStore(store, blobs, HESSIAN_ARRAYS),
-            "compute_hessian",
-            {"structure": structure.model_dump(mode="json"), "solvent": solvent},
+            ComputeHessianRequest(structure=wire_structure(structure), solvent=solvent),
         ),
         f"second derivatives of {structure.smiles or structure.structure_id}",
     )
@@ -367,13 +379,12 @@ async def scan_profile(
         payload, _ = await run(
             cached_remote(
                 store,
-                "scan_point",
-                {
-                    "structure": structure.model_dump(mode="json"),
-                    "atoms": list(atoms),
-                    "value": value,
-                    "solvent": solvent,
-                },
+                ScanPointRequest(
+                    structure=wire_structure(structure),
+                    atoms=list(atoms),
+                    value=value,
+                    solvent=solvent,
+                ),
             ),
             f"{coordinate} at {value:g} {unit}",
         )
@@ -456,13 +467,12 @@ async def searched_members(
     payload, cached = await run(
         cached_remote(
             store,
-            "search_conformer_ensemble",
-            {
-                "structure": starting.model_dump(mode="json"),
-                "search": search,
-                "effort": effort or settings.crest_effort,
-                "solvent": solvent,
-            },
+            SearchConformerEnsembleRequest(
+                structure=wire_structure(starting),
+                search=search,
+                effort=effort or settings.crest_effort,
+                solvent=solvent,
+            ),
             # Conformer searches on drug-sized molecules exceed the default read bound, so they get
             # their own.
             timeout_seconds=settings.calc_sampling_timeout_seconds,
@@ -788,11 +798,10 @@ async def interaction(
     combined = Structure.model_validate(
         await run(
             remote_call(
-                "combine_structures",
-                {
-                    "first": monomers[0].structure.model_dump(mode="json"),
-                    "second": monomers[1].structure.model_dump(mode="json"),
-                },
+                CombineStructuresRequest(
+                    first=wire_structure(monomers[0].structure),
+                    second=wire_structure(monomers[1].structure),
+                )
             ),
             f"starting complex geometry for {smiles_a} and {smiles_b}",
         )
@@ -802,12 +811,11 @@ async def interaction(
     payload, _ = await run(
         cached_remote(
             store,
-            "search_binding_modes",
-            {
-                "structure": combined.model_dump(mode="json"),
-                "effort": effort or settings.crest_effort,
-                "solvent": solvent,
-            },
+            SearchBindingModesRequest(
+                structure=wire_structure(combined),
+                effort=effort or settings.crest_effort,
+                solvent=solvent,
+            ),
             # A wall-potential search over a *pair* is the other CREST call, and it is the more
             # expensive of the two — same budget, same reason.
             timeout_seconds=settings.calc_sampling_timeout_seconds,
@@ -1563,15 +1571,14 @@ async def ensemble_property(
     )
     chosen = ensemble.conformers[:keep]
 
-    tool = "compute_fukui_at" if prop == "fukui" else "compute_properties_at"
+    request_type = ComputeFukuiAtRequest if prop == "fukui" else ComputePropertiesAtRequest
     payloads: list[Any] = []
     for index, conformer in enumerate(chosen, start=1):
         progress(f"{prop} at conformer {index}/{len(chosen)} of {smiles}")
         payload, _ = await run(
             cached_remote(
                 store,
-                tool,
-                {"structure": conformer.structure.model_dump(mode="json"), "solvent": solvent},
+                request_type(structure=wire_structure(conformer.structure), solvent=solvent),
             ),
             f"{prop} of {smiles} conformer {index}",
         )
@@ -2427,13 +2434,12 @@ async def _driven(
         payload, _ = await run(
             cached_remote(
                 store,
-                "scan_point",
-                {
-                    "structure": structure.model_dump(mode="json"),
-                    "atoms": list(atoms),
-                    "value": value,
-                    "solvent": solvent,
-                },
+                ScanPointRequest(
+                    structure=wire_structure(structure),
+                    atoms=list(atoms),
+                    value=value,
+                    solvent=solvent,
+                ),
             ),
             f"dihedral at {value:g} degrees",
         )
@@ -2554,13 +2560,12 @@ async def _released_wells(
         point, _ = await run(
             cached_remote(
                 store,
-                "scan_point",
-                {
-                    "structure": structure.model_dump(mode="json"),
-                    "atoms": list(atoms),
-                    "value": angle,
-                    "solvent": solvent,
-                },
+                ScanPointRequest(
+                    structure=wire_structure(structure),
+                    atoms=list(atoms),
+                    value=angle,
+                    solvent=solvent,
+                ),
             ),
             f"well at {angle:g} degrees",
         )
@@ -2861,13 +2866,12 @@ async def _free_energy_barrier(
     point, _ = await run(
         cached_remote(
             store,
-            "scan_point",
-            {
-                "structure": structure.model_dump(mode="json"),
-                "atoms": list(atoms),
-                "value": peak,
-                "solvent": solvent,
-            },
+            ScanPointRequest(
+                structure=wire_structure(structure),
+                atoms=list(atoms),
+                value=peak,
+                solvent=solvent,
+            ),
         ),
         f"pass geometry at {peak:g} degrees",
     )

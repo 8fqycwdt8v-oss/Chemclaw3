@@ -4973,14 +4973,14 @@ def test_a_bundle_this_image_does_not_ship_can_be_mounted_and_discovered() -> No
     """
     rendered = _render(
         "--set",
-        "extraConnectors.bundles[0].name=props",
+        "extraConnectors.bundles[0].name=our-eln",
         "--set",
-        "extraConnectors.bundles[0].configMap=chemclaw-connector-props",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-our-eln",
     ).stdout
     documents = [document for document in yaml.safe_load_all(rendered) if document]
 
     values = _values()["extraConnectors"]
-    expected = f"{values['mountPath']}:{values['shippedPath']}"
+    expected = f"{values['mountPath']}:{values['contractsPath']}:{values['shippedPath']}"
     configmaps = [
         document
         for document in documents
@@ -4997,7 +4997,7 @@ def test_a_bundle_this_image_does_not_ship_can_be_mounted_and_discovered() -> No
             f"{configmap['data']['CHEMCLAW_CONNECTORS_DIR']!r}, not {expected!r}"
         )
 
-    mount = f"{values['mountPath']}/props"
+    mount = f"{values['mountPath']}/our-eln"
     exempt = {"chemclaw-migrate", "chemclaw-convert"}
     workloads = {
         f"{document['kind']}/{document['metadata']['name']}": spec
@@ -5010,7 +5010,7 @@ def test_a_bundle_this_image_does_not_ship_can_be_mounted_and_discovered() -> No
         name
         for name, spec in workloads.items()
         if any(
-            volume.get("configMap", {}).get("name") == "chemclaw-connector-props"
+            volume.get("configMap", {}).get("name") == "chemclaw-connector-our-eln"
             for volume in spec.get("volumes") or []
         )
     }
@@ -5074,6 +5074,89 @@ def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
         f"extraConnectors.shippedPath is {_values()['extraConnectors']['shippedPath']!r}; the "
         f"image puts the shipped bundles at {expected!r}"
     )
+
+
+def test_the_fleet_manifest_path_is_the_path_the_image_has() -> None:
+    """`extraConnectors.contractsPath` restates where the image installs `chemclaw-contracts`.
+
+    Setting `CHEMCLAW_CONNECTORS_DIR` replaces the default outright, so a release that mounts a
+    bundle must name the fleet's manifests again or lose every fleet connector. The image runs
+    `uv sync` in its `WORKDIR`, which builds `.venv` there for the base image's Python; the
+    package's own layout under a virtualenv supplies the rest.
+    """
+    import sys
+
+    import chemclaw_contracts
+
+    containerfile = (DEPLOY / "Containerfile").read_text(encoding="utf-8")
+    workdir = re.search(r"^WORKDIR (\S+)", containerfile, flags=re.MULTILINE)
+    assert workdir, "deploy/Containerfile declares no WORKDIR"
+    base = re.search(r"^ARG BASE_IMAGE=\S*python-(\d)(\d+)\b", containerfile, flags=re.MULTILINE)
+    assert base, "deploy/Containerfile's BASE_IMAGE no longer names a python-3NN image"
+    assert "UV_PROJECT_ENVIRONMENT" not in containerfile, (
+        "the image no longer builds its virtualenv at `.venv` in the workdir, which is where "
+        "`extraConnectors.contractsPath` is derived from"
+    )
+    assert re.search(r"^RUN uv sync --frozen\b", containerfile, flags=re.MULTILINE), (
+        "the image no longer installs with `uv sync --frozen`"
+    )
+    installed = chemclaw_contracts.manifests_dir().relative_to(Path(sys.prefix))
+    assert installed.parts[0] == "lib" and installed.parts[2:] == (
+        "site-packages",
+        "chemclaw_contracts",
+        "manifests",
+    ), f"the package no longer installs under <venv>/lib/python3.N/site-packages: {installed}"
+    expected = (
+        f"{workdir.group(1).rstrip('/')}/.venv/lib/python{base.group(1)}.{base.group(2)}"
+        "/site-packages/chemclaw_contracts/manifests"
+    )
+    assert _values()["extraConnectors"]["contractsPath"] == expected, (
+        f"extraConnectors.contractsPath is {_values()['extraConnectors']['contractsPath']!r}; the "
+        f"image installs the fleet's manifests at {expected!r}"
+    )
+
+
+def test_the_image_bundle_names_are_the_names_the_image_declares() -> None:
+    """`extraConnectors.imageBundles` is every connector name the image already declares.
+
+    The render refuses a mounted bundle with one of these names (a collision is a startup error in
+    every pod). Derived from the installed package and this tree's own bundles, so a connector
+    either side adds is refused the day it ships.
+    """
+    import chemclaw_contracts
+
+    import chemclaw.connectors
+
+    root = Path(chemclaw.connectors.__file__).resolve().parent
+    declared = set(chemclaw_contracts.manifest_names()) | {
+        path.parent.name for path in root.glob("*/connector.yaml")
+    }
+    assert set(_values()["extraConnectors"]["imageBundles"]) == declared
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_mounting_a_bundle_the_image_already_ships_is_refused_at_render() -> None:
+    """The upgrade trap: a release that mounted `pyexec` (it was not shipped then) fails at render.
+
+    Without the guard every pod crash-loops at boot on the collision. The message names the way
+    out. A bundle with a name the image does not declare still renders.
+    """
+    refused = _render(
+        "--set",
+        "extraConnectors.bundles[0].name=pyexec",
+        "--set",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-pyexec",
+    )
+    assert refused.returncode != 0
+    assert "pyexec" in refused.stderr
+    assert "connectors.pyexec.enabled" in refused.stderr
+    accepted = _render(
+        "--set",
+        "extraConnectors.bundles[0].name=our-eln",
+        "--set",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-our-eln",
+    )
+    assert accepted.returncode == 0, accepted.stderr[-500:]
 
 
 def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:

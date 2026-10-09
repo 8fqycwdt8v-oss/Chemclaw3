@@ -14,6 +14,11 @@ from typing import Any
 
 import httpx
 import pytest
+from chemclaw_contracts.calc import (
+    PredictLogdRequest,
+    PredictPkaRequest,
+    PredictSolubilityRequest,
+)
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
@@ -111,8 +116,8 @@ async def test_a_persisted_result_is_never_recomputed_across_the_wire(
     _session(monkeypatch, fake)
 
     store = InMemoryStore()
-    first, cached_first = await cached_remote(store, "predict_solubility", {"smiles": "c1ccccc1"})
-    second, cached_second = await cached_remote(store, "predict_solubility", {"smiles": "c1ccccc1"})
+    first, cached_first = await cached_remote(store, PredictSolubilityRequest(smiles="c1ccccc1"))
+    second, cached_second = await cached_remote(store, PredictSolubilityRequest(smiles="c1ccccc1"))
 
     assert (cached_first, cached_second) == (False, True)
     assert fake.compute_calls == 1, "a persisted result was recomputed"
@@ -133,7 +138,7 @@ async def test_a_version_carrying_both_delimiters_round_trips(
     from chemclaw.connectors.calc.remote import calc_session
 
     async with calc_session() as session:
-        identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+        identity = await remote_key(session, PredictSolubilityRequest(smiles="c1ccccc1"))
     assert identity is not None
     # A molecule-keyed calculator is about a compound, not a geometry, so it reports no structure
     # id.
@@ -165,7 +170,7 @@ async def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_rec
     _session(monkeypatch, fake)
 
     with pytest.raises(CalcToolError, match="no derivable cache key") as refused:
-        await cached_remote(InMemoryStore(), "predict_logd", {"smiles": "c1ccncc1"})
+        await cached_remote(InMemoryStore(), PredictLogdRequest(smiles="c1ccncc1"))
     # It names the tool and what to do instead, because the reader is whoever miswired it.
     assert "predict_logd" in str(refused.value)
     assert "remote_call" in str(refused.value)
@@ -191,7 +196,7 @@ async def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     _session(monkeypatch, _Failing(_KEY, {}))
 
     with pytest.raises(CalcToolError, match="calculation_key failed") as refused:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     # The server's own message is the whole content of a refusal — which solvent, which index.
     assert "unparameterised solvent" in str(refused.value)
 
@@ -218,7 +223,7 @@ async def test_a_key_answered_with_no_content_is_a_refusal_not_a_crash(
     _session(monkeypatch, _Silent(_KEY, {}))
 
     with pytest.raises(CalcToolError, match="calculation_key returned NoneType"):
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
 
 
 async def test_the_servers_internal_error_is_an_outage_not_bad_data(
@@ -240,7 +245,7 @@ async def test_the_servers_internal_error_is_an_outage_not_bad_data(
     _session(monkeypatch, _Broken(_KEY, {}))
 
     with pytest.raises(CalcServerError) as outage:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     assert "may work on a retry" in str(outage.value)
 
 
@@ -266,7 +271,7 @@ async def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.Monke
     _session(monkeypatch, _Full(_KEY, {}))
 
     with pytest.raises(CalcBusyError) as busy:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     # What the chemist reads must not sound like a problem with their molecule, and must not
     # repeat the server's advice to retry as if a person had to act on it.
     assert "the calculation service is busy" in str(busy.value)
@@ -305,7 +310,7 @@ async def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
     _session(monkeypatch, _Wordy(_KEY, {}))
 
     with pytest.raises(CalcToolError) as refused:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     assert not isinstance(refused.value, CalcBusyError)
 
 
@@ -335,7 +340,7 @@ async def test_the_marker_cannot_be_forged_from_a_tool_argument(
     before = METRICS.value("chemclaw_calc_backend_at_capacity_total")
 
     with pytest.raises(CalcToolError) as refused:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     assert not isinstance(refused.value, CalcBusyError), (
         "a marker echoed back inside a domain refusal is not the server saying it is full"
     )
@@ -462,7 +467,7 @@ async def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
     _real_session(monkeypatch, _Transport())
 
     with pytest.raises(expected) as caught:
-        await cached_remote(_RaisingStore(raised), "predict_solubility", {"smiles": "c1ccccc1"})
+        await cached_remote(_RaisingStore(raised), PredictSolubilityRequest(smiles="c1ccccc1"))
     assert not isinstance(caught.value, CalcServerError)
 
 
@@ -484,7 +489,7 @@ async def test_a_protocol_error_is_classified_by_who_is_at_fault(
     _real_session(monkeypatch, _Transport(McpError(ErrorData(code=code, message="refused"))))
 
     with pytest.raises(expected) as caught:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     # `ChemclawError` is the non-retryable hierarchy `durable/publish.py` matches on.
     assert isinstance(caught.value, ChemclawError) is not retryable
 
@@ -597,10 +602,10 @@ _IDENTITY_MODULES = (
 )
 
 # The client reads settings legitimately (URL, bearer env var, timeouts), so the rule there is
-# scoped to functions that hold an `arguments` payload, derived from their signatures so a new
-# payload path is covered automatically.
+# scoped to functions that hold a `request` (the tool's name and arguments), derived from their
+# signatures so a new payload path is covered automatically.
 _PAYLOAD_CLIENT = Path("connectors") / "calc" / "remote.py"
-_PAYLOAD_PARAMETER = "arguments"
+_PAYLOAD_PARAMETER = "request"
 
 
 def _settings_aliases(tree: ast.Module) -> set[str]:
@@ -755,7 +760,7 @@ def test_the_two_epochs_compose_rather_than_having_to_match(
         from chemclaw.connectors.calc.remote import calc_session
 
         async with calc_session() as session:
-            keyed = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+            keyed = await remote_key(session, PredictSolubilityRequest(smiles="c1ccccc1"))
         assert keyed is not None
         return keyed.key.params_hash
 
@@ -872,7 +877,7 @@ async def test_a_time_budget_stop_is_named_and_stays_a_refusal(
     _session(monkeypatch, _Stopped(_KEY, {}))
 
     with pytest.raises(CalcTimeBudgetError) as stopped:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     assert "inline budget" in str(stopped.value), "the server's own sentence reaches the chemist"
     assert issubclass(CalcTimeBudgetError, CalcToolError)
     assert not issubclass(CalcTimeBudgetError, SubsystemUnavailableError)
@@ -898,5 +903,5 @@ async def test_a_time_budget_marker_quoted_back_is_not_a_stop(
     _session(monkeypatch, _Echo(_KEY, {}))
 
     with pytest.raises(CalcToolError) as refused:
-        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
     assert not isinstance(refused.value, CalcTimeBudgetError)

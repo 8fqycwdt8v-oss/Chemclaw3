@@ -26,7 +26,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar, Protocol
 
 import httpx
 from mcp import ClientSession
@@ -46,6 +46,22 @@ from mcp.types import (
 )
 
 from chemclaw.core.http import default_ssl_context
+
+
+class WireRequest(Protocol):
+    """One typed request to a backend tool: its name and the exact argument dict to send.
+
+    The request models of `chemclaw_contracts` (the fleet's `calc` and `rxnlabel` wire) satisfy it,
+    so a caller names a tool and its arguments through a model the server's own schema is held
+    against, never through a string and a dict.
+    """
+
+    tool_name: ClassVar[str]
+
+    def wire(self) -> dict[str, Any]:
+        """The JSON argument dict to send: only the fields the caller set."""
+        ...
+
 
 # An `httpx` request hook: a coroutine taking the outbound request, called on every redirect hop.
 RequestHook = Callable[[httpx.Request], Awaitable[None]]

@@ -7,7 +7,7 @@ Everything a chemist asks of GFN2-xTB and CREST, as durable jobs. There is **no 
 | file | what it is |
 |---|---|
 | `connector.yaml` | every job this bundle declares, each going down one durable path |
-| `remote.py` | the client that reaches the calculation server — the only place this repo dials it |
+| `remote.py` | the client that reaches the calculation server — the only place this repo dials it; a request is one of `chemclaw_contracts.calc`'s models, so a tool name or an argument the server would refuse cannot be written |
 | `compose.py` | composition over the server's primitives, so every nested step is separately cached |
 | `activities.py` / `workflows.py` | `CalcJobWorkflow` and the activities it runs |
 | `specs.py`, `results.py` | the typed job inputs and the projection of what comes back |

@@ -424,12 +424,8 @@ apply_dependencies() {
   ensure_tls
   apply_auth_config
   apply_app_secret
-  # The two bundles this image does not ship, from the files their owners keep.
-  # The file named, not the directory: the fleet's `manifests/pyexec/connector.yaml` is a symlink
-  # into `servers/pyexec/`, and `--from-file=<dir>` skips symlinks — it built an empty ConfigMap,
-  # and every pod refused `pyexec` as an unknown connector.
-  k create configmap chemclaw-connector-pyexec --dry-run=client -o yaml \
-    --from-file=connector.yaml="$MCP_REPO/manifests/pyexec/connector.yaml" | k apply -f - >/dev/null
+  # The one bundle this image does not ship, from the file its owner keeps. The fleet's own
+  # manifests (`pyexec` among them) are in the image, with `chemclaw-contracts`.
   k create configmap chemclaw-connector-mock-vendor --dry-run=client -o yaml \
     --from-file=connector.yaml="$REPO_ROOT/infra/live/e2e-full-stack/manifests/mock-vendor/connector.yaml" \
     | k apply -f - >/dev/null

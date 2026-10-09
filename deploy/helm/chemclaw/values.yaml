@@ -366,8 +366,8 @@ connectors:
     # the manifest's loopback default. `test_a_connector_url_is_only_declared_beside_a_server`
     # exists for exactly that mistake, and caught it here.
     #
-    # The capability moved to `Chemclaw3-mcp`; the manifest stayed, because four validators resolve
-    # tool names through it (`connectors/chem/connector.yaml` says why).
+    # The capability and its manifest are `Chemclaw3-mcp`'s; the manifest arrives with the installed
+    # `chemclaw-contracts` package, which four validators resolve tool names through.
     #
     # Two things an operator must still do, per the note above: add this host to
     # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CHEM_TOKEN` — the server enforces a
@@ -394,7 +394,7 @@ connectors:
     enabled: true
     server: true
     url: http://chemclaw-mcp-rxnpredict:8857/mcp
-    # Its four predictions are queued (`connectors/rxnpredict/connector.yaml` `queued:`), so this
+    # Its four predictions are queued (the manifest's `queued:` block), so this
     # release runs their interactive worker even though the server is hosted elsewhere. 2 x 2 in
     # flight is the server's floor (2 pods x 2 admission slots); `maxReplicas` follows its HPA ceiling.
     interactive:
@@ -523,72 +523,88 @@ connectors:
     enabled: false
     server: true
     url: http://chemclaw-mcp-suitability:8892/mcp
+  pyexec:
+    # The fleet's bounded, offline Python sandbox (`Chemclaw3-mcp`'s `servers/pyexec`, port 8899).
+    # Its manifest arrives with the others through `chemclaw-contracts` and declares
+    # `default_enabled: false`: model-authored code is not something a release binds by silence.
+    # Same two operator obligations as the bundles above (a `networkPolicy.egressDestinations`
+    # entry for the host, and `CHEMCLAW_PYEXEC_TOKEN`).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-pyexec:8899/mcp
+    # `run_python` is queued, and a run is a whole core: 2 x 2 is the server's floor (2 pods x 2
+    # admission slots). Rendered only once the bundle is enabled.
+    interactive:
+      replicas: 2
+      maxReplicas: 4
+      maxConcurrentActivities: 2
 connectorPort: 8080
 
-# Connector bundles this image does **not** ship — `Chemclaw3-mcp`'s `manifests/` and any private
-# bundle a site keeps of its own (D-120, `D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`).
+# Connector bundles this image does **not** ship: a site's own, kept beside the release (D-120,
+# `D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`). The fleet's bundles are not mounted
+# here. Their manifests arrive in the image with the installed `chemclaw-contracts` package, and
+# switching one on is `connectors.<name>.enabled`.
 #
-# D-120 states the seam as "one `connector.yaml` folder plus its name in `CHEMCLAW_CONNECTORS_DIR`,
-# with zero core edits", and the fleet's `manifests/README.md` says the same from its side: "one
-# environment variable and no code change on either side". That was true of `make connectors` and
-# false of this chart, which set that variable nowhere and mounted nothing — so `props` and
-# `pyexec`, two real shipped capabilities, could not be reached from an OpenShift release at all.
-#
-# **And the failure was not a quiet absence.** `chemclaw.connectorsEnabled` derives from the
-# `connectors:` block above, so an operator who followed D-120 got `props` into
-# `CHEMCLAW_CONNECTORS_ENABLED` with no bundle behind it, and `registry.enabled()` refuses that by
-# design — `connectors_enabled names unknown connector(s) ['props']`, raised at import, in every
-# pod at once. The seam's own loud guard, reached through a door the chart left shut.
-#
-# Each entry is one ConfigMap mounted read-only at `mountPath/<name>`, so the ConfigMap's keys are
-# that bundle's files and `connector.yaml` is the one that has to be there. A ConfigMap rather than
-# a generic volume passthrough because it is the route the sibling's `docs/integration.md` already
-# documents ("mount `manifests/` as a ConfigMap and prepend it to `CHEMCLAW_CONNECTORS_DIR`"), and
-# because it keeps the two release cycles independent, which is the point of that repository
-# existing separately. Several bundles from one ConfigMap is the same object listed several times,
-# each entry naming the subdirectory it becomes.
+# The seam is one `connector.yaml` folder plus its name in `CHEMCLAW_CONNECTORS_DIR`, with zero core
+# edits. Each entry is one ConfigMap mounted read-only at `mountPath/<name>`, so the ConfigMap's keys
+# are that bundle's files and `connector.yaml` is the one that has to be there.
 #
 #   extraConnectors:
 #     bundles:
-#       - name: pyexec
-#         configMap: chemclaw-connector-pyexec
+#       - name: our-eln
+#         configMap: chemclaw-connector-our-eln
 #
-# `pyexec` and not `props`, although the history above names both: this image has since gained
-# `src/chemclaw/connectors/props/` (and the four other process-development bundles), so those are
-# switched on with `connectors.<name>.enabled` alone. Mounting one here as well would shadow the
-# shipped manifest — earlier directories win — which is a deliberate override, not a requirement.
+# **A name that two directories declare is a startup error**, not an override: mounting a bundle
+# called `chem` or `pyexec` fails every pod at boot, naming both files. To point a shipped connector
+# at another server, set its `url:` under `connectors:` (`CHEMCLAW_CONNECTOR_URLS`).
 #
-# **A bundle from here can queue its heavy tools too** — `pyexec`'s manifest queues `run_python` —
-# and its interactive worker is configured on the same `connectors:` entry that gives it its
-# address, exactly as for a shipped bundle:
-#
-#   connectors:
-#     pyexec:
-#       enabled: true
-#       server: true
-#       url: http://chemclaw-mcp-pyexec:8899/mcp
-#       interactive: {replicas: 2, maxReplicas: 6, maxConcurrentActivities: 2}
+# **And `connectors.<name>.enabled` without a mounted manifest is a crash loop, not a missing
+# tool.** `chemclaw.connectorsEnabled` derives from the `connectors:` block above, and
+# `registry.enabled()` refuses a name no bundle provides, in every pod at once.
 #
 # Three things go with the mount, exactly as they do for `connectors.chem` / `safety` /
 # `rxnpredict` — the entry under `connectors:` above that gives the bundle its `url:` and turns it
 # on, a `networkPolicy.egressPorts` entry carrying the port that address dials, and its bearer in
-# `secrets.optionalKeys`. For `pyexec` the last two ship (`egressPorts.pyexec`,
-# `optionalKeys.pyexecToken`); a site's own bundle adds its own. All three are map-valued and reach
-# the render on their own; only the manifest directory needed a value, and only the egress port
-# needed the rule to stop hand-naming its keys.
+# `secrets.optionalKeys`. A bundle that queues its heavy tools gets its interactive worker from the
+# same `connectors:` entry (`interactive: {replicas: 2, maxReplicas: 6, maxConcurrentActivities: 2}`).
 extraConnectors:
   bundles: []
-  # Where those ConfigMaps are assembled, and the directory prepended to CHEMCLAW_CONNECTORS_DIR.
-  # Earlier directories win a name collision (`registry._bundle_dirs`, "the same precedence a
-  # `PATH` entry has"), so a bundle here overrides a shipped one of the same name — which the
-  # fleet's `manifests/` uses on purpose for `chem` and `safety`, both complete ports carrying
-  # their bundle's name. That is a real capability and a real footgun, and it is stated here rather
-  # than left to be discovered from the ordering.
+  # Where those ConfigMaps are assembled, and the first directory of CHEMCLAW_CONNECTORS_DIR.
   mountPath: /etc/chemclaw/connectors
-  # Where the image keeps the bundles it *does* ship. `CHEMCLAW_CONNECTORS_DIR` replaces the code
-  # default outright rather than extending it (`connectors_dir` is a plain pathsep list), so the
-  # shipped directory has to be named again the moment the variable is set at all — leave it out
-  # and a release gains `props` and loses `calc`, `bo` and the rest.
+  # Where the image keeps the fleet's manifests: the installed `chemclaw-contracts` package, in the
+  # image's virtualenv. `CHEMCLAW_CONNECTORS_DIR` replaces the code default outright rather than
+  # extending it (`connectors_dir` is a plain pathsep list), so this directory has to be named again
+  # the moment the variable is set at all — leave it out and a release loses `chem`, `safety` and
+  # every other fleet connector.
+  #
+  # It is `WORKDIR` plus the virtualenv `uv sync` builds there for the base image's Python, which
+  # makes it a statement of something the image owns. So it is checked rather than trusted:
+  # `tests/test_deploy_chart.py::test_the_fleet_manifest_path_is_the_path_the_image_has` derives it
+  # from the Containerfile and the installed package's own layout.
+  contractsPath: /app/.venv/lib/python3.11/site-packages/chemclaw_contracts/manifests
+  # Every connector name the image already declares: the fleet's (`chemclaw-contracts`) and this
+  # tree's own. A mounted bundle with one of these names is a startup error in every pod
+  # (`registry._bundle_dirs`), so the render refuses it first and names the way out. A release that
+  # used to mount `pyexec` here (it was not shipped then) hits this on upgrade: drop the mount and
+  # set `connectors.pyexec.enabled: true`. Derived and checked by
+  # `tests/test_deploy_chart.py::test_the_image_bundle_names_are_the_names_the_image_declares`.
+  imageBundles:
+    - bo
+    - calc
+    - chem
+    - kinetics
+    - molfp
+    - props
+    - pyexec
+    - results
+    - rxnfp
+    - rxnpredict
+    - safety
+    - suitability
+    - thermalsafety
+    - unitops
+  # Where the image keeps the bundles it *does* ship (`calc`, `bo`, `molfp`, `rxnfp`, `results`, and
+  # the skills that go with the fleet's connectors), named again for the same reason.
   #
   # It is `WORKDIR` plus the layout `deploy/Containerfile` copies (`COPY src ./src`, an editable
   # install), which makes it a second statement of something the image owns. So it is checked
@@ -1449,8 +1465,8 @@ secrets:
     # variable, so a face deployed without this answers 401 rather than serving anonymously.
     mcpFaceToken: "CHEMCLAW_MCP_FACE_TOKEN"
     # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
-    # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s
-    # `token_env`) and `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They
+    # per request (the `token_env` of the `chem` and `safety` manifests in `chemclaw-contracts`) and
+    # `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They
     # land here for the *upgrade* reason `framingEnvelopeSecret` does, not the capability one:
     # `chemclaw.env` renders `secrets.keys` as a **required** `secretKeyRef` included by every
     # Deployment in the chart, so a required entry would take the front door and every worker into
@@ -1472,8 +1488,7 @@ secrets:
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
     # The same kind again, for the fleet bundles that ship **off**: the five process-development
     # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and
-    # `pyexec`, which this image does not ship at all and arrives through `extraConnectors`. Each
-    # name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
+    # `pyexec`. Each name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
     # although every one of those bundles is disabled by default, because `optional: true` makes an
     # absent key harmless — the variable is simply unset in a pod that never dials the bundle —
     # while a missing slot made "enable a bundle" a Secret-plumbing edit too: without it the bearer
@@ -2122,10 +2137,7 @@ networkPolicy:
     kinetics: 8852
     unitops: 8853
     suitability: 8892
-    # `pyexec`, the fleet's Python sandbox, on the same terms. It has no `connectors:` entry here
-    # because this image does not ship its manifest (it arrives through `extraConnectors`), which
-    # is exactly why its port was the one missing: every other fleet server in
-    # `Chemclaw3-mcp`'s `MODULES.md` port registry already had a line above.
+    # `pyexec`, the fleet's Python sandbox (`connectors.pyexec` above), on the same terms.
     pyexec: 8899
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is

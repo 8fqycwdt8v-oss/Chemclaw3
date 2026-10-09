@@ -205,11 +205,16 @@ def _interactive_names(**env: str) -> list[str]:
 
 
 def _shipped_queueing_bundles(*, opted_in: frozenset[str] = frozenset()) -> list[str]:
-    """Read independently of the registry: shipped bundles whose endpoint lists `queued:`."""
+    """Read independently of the registry: the bundles, here or the fleet's, that list `queued:`."""
+    import chemclaw_contracts
     import yaml
 
+    manifests = [
+        *(REPO_ROOT / "src/chemclaw/connectors").glob("*/connector.yaml"),
+        *chemclaw_contracts.manifests_dir().glob("*/connector.yaml"),
+    ]
     names = []
-    for manifest in sorted((REPO_ROOT / "src/chemclaw/connectors").glob("*/connector.yaml")):
+    for manifest in sorted(manifests, key=lambda path: path.parent.name):
         body = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
         on = body.get("default_enabled", True) or manifest.parent.name in opted_in
         if on and (body.get("endpoint") or {}).get("queued"):

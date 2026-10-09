@@ -555,10 +555,12 @@ More on what this file says:
 - **Turning on another fleet connector** (for example `props`) takes three things: set
   `connectors.props.enabled: true`, add its token to `chemclaw-secrets` (the `secrets.optionalKeys`
   slot and the `networkPolicy.egressPorts` entry already ship for every fleet server), and deploy
-  that server (§6). The image already ships the manifests for every fleet server listed in §1, so
-  you do not need `extraConnectors` for them. A server whose manifest the image does not ship (for
-  example `pyexec`) also needs an `extraConnectors.bundles` entry and a ConfigMap holding its
-  `connector.yaml` (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
+  that server (§6). The image already ships the manifests for every fleet server listed in §1
+  (they arrive with the `chemclaw-contracts` package), so you do not need `extraConnectors` for
+  them. A server whose manifest the image does not ship (a site's own) also needs an
+  `extraConnectors.bundles` entry and a ConfigMap holding its `connector.yaml`
+  (`deploy/README.md`, "Attaching a connector bundle this image does not ship"). A name the image
+  already declares cannot be mounted again: that is a startup error.
 - **The egress guard.** Each process also runs its own egress guard (`core/netguard.py`, plus an
   `LD_PRELOAD` layer armed by `deploy/entrypoint.sh`). The guard's allowlist is derived from the
   settings above. A host that comes only from a *manifest*, such as a warehouse ELN `connection:`
@@ -595,7 +597,7 @@ These five are the servers the shipped chart turns on. The off-by-default server
 `thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
 the same pattern with `CHEMCLAW_<NAME>_TOKEN`; switching one on also needs
 `connectors.<name>.enabled: true` and its token in `chemclaw-secrets` (the slot and the egress port
-ship, §5), and `pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
+ship, §5); its manifest is in the image like the others'. The full
 per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operations.md` §3.
 
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
@@ -663,16 +665,15 @@ no patch.
 
 - **Connectors** (`chem`, `safety`, `rxnpredict`, and any you enable later): set
   `connectors.<name>.url`. The chart folds it into `CHEMCLAW_CONNECTOR_URLS` and renders no pods
-  for that bundle. The manifest that declares the tool surface ships in the image under
-  `src/chemclaw/connectors/<name>/`.
+  for that bundle. The manifest that declares the tool surface ships in the image, installed with
+  the `chemclaw-contracts` package.
 - **Backends** (`calc`, `rxnlabel`): set `config.CHEMCLAW_CALC_SERVER_URL` and
   `config.CHEMCLAW_RXNLABEL_SERVER_URL`. The settings `calc_server_token_env` and
   `rxnlabel_server_token_env` name the bearer variables (`core/config/calculators.py`,
   `core/config/labels.py`).
 - **Never put `Chemclaw3-mcp:manifests-internal/` on `CHEMCLAW_CONNECTORS_DIR`**, not even through
-  `extraConnectors`. A `calc` manifest that is discovered there wins the name collision with this
-  repository's `calc` bundle, and that silently removes the calculation cache, the calibration
-  ledger and every durable calc job from the agent. The internal manifests declare
+  `extraConnectors`. Its `calc` manifest names a connector this repository already has, and it would
+  put the backend's internal primitives in the prompt. The internal manifests declare
   `mount: backend`, which this repository's manifest model refuses, so the mistake shows up as a
   start-up error that names the file.
 

@@ -147,6 +147,9 @@ RUN sh ./build-netguard-preload.sh \
 # `dist-info`/wheel naming convention that a line in a text file does not have — so "the scanner
 # contradicts the artifact" was the search being narrower than the scan, which is a different
 # problem and a fixable one.
+# `chemclaw-contracts` is a git dependency (`Chemclaw3-mcp`'s `packages/chemclaw_contracts`, pinned
+# by commit in `uv.lock`): this is the one step that needs `git` (installed above) and `github.com`.
+# Nothing at run time does; the manifests are read from site-packages.
 RUN uv sync --frozen --no-dev \
     && uv cache clean \
     # **Bake the BPE merge table, because the alternative is a request-time fetch.**

@@ -1,1 +1,0 @@
-"""The `kinetics` connector bundle."""

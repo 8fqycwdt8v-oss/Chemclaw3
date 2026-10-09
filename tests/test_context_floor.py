@@ -49,7 +49,6 @@ from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings, settings
 from tests.siblings import (
     SIBLING_SKIP,
-    bundles_declared_here,
     fleet_published_bundles,
     sibling_python,
     sibling_root,
@@ -160,8 +159,8 @@ def _tool_schema(tool: Any) -> str:
 #: and `chemclaw_connector_tool_schema_tokens` reports them at runtime. Named and asserted because a
 #: check that quietly shrinks is worse than one that says what it did not look at.
 #:
-#: Membership is two predicates: declared in both trees *and* bound by silence. Bundles declared
-#: here with `default_enabled: false` are charged to whoever enables them, not to this allowance;
+#: Membership is two predicates: published by the fleet *and* bound by silence. Bundles the fleet
+#: declares `default_enabled: false` are charged to whoever enables them, not to this allowance;
 #: flipping one to `default_enabled: true` without raising the allowance fails
 #: `test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allowance`.
 SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
@@ -177,8 +176,8 @@ SERVED_ELSEWHERE_ALLOWANCE = 10_250
 
 #: What the fleet's **whole** published `manifests/` directory costs, as a second, looser bound.
 #:
-#: `SERVED_ELSEWHERE_ALLOWANCE` covers only bundles this repository also declares, which is the
-#: right basis for `PREFIX_BOUND`: the Helm chart binds no fleet-only bundle. The e2e lane
+#: `SERVED_ELSEWHERE_ALLOWANCE` covers only the bundles an empty enable-list binds, which is the
+#: right basis for `PREFIX_BOUND`: the Helm chart binds no opt-in bundle. The e2e lane
 #: (`infra/live/e2e-full-stack/up.sh`) mounts the whole directory and enables everything it
 #: discovers, so its prefix exceeds `PREFIX_BOUND`; that excess is charged to spend via
 #: `agent_context_prefix_basis` rather than absorbed into the defaults
@@ -635,36 +634,37 @@ def test_the_ratchet_finds_the_checkout_the_live_lane_finds() -> None:
 
 
 def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allowance() -> None:
-    """`SERVED_ELSEWHERE` is a claim about the *sibling's* tree, so the sibling's tree answers it.
+    """`SERVED_ELSEWHERE` is a claim about the *fleet's* tree, so the fleet's tree answers it.
 
-    The neighbouring completeness test reads only this tree's `connectors/`, so a bundle whose
-    manifest lives next door is invisible to it; this half reads the other tree.
+    The fleet owns these manifests (`chemclaw-contracts`), so the registry holds them; what a
+    checkout adds is the directory the lanes put on the path. A fleet bundle that an empty
+    `connectors_enabled` binds is one this repository does not serve and pays for on every model
+    call.
 
-    It deliberately does not widen the allowance to the fleet-only bundles (`pyexec`) or to the
-    `default_enabled: false` bundles declared here: no chart deployment binds them, so charging them
-    to `PREFIX_BOUND` would tighten both compaction defaults everywhere. `FLEET_PUBLISHED_ALLOWANCE`
+    It deliberately does not widen the allowance to `default_enabled: false` bundles (`pyexec` and
+    the process-development five): no chart deployment binds them, so charging them to
+    `PREFIX_BOUND` would tighten both compaction defaults everywhere. `FLEET_PUBLISHED_ALLOWANCE`
     bounds them instead. Needs only a checkout, not a built `.venv`.
     """
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if root is None:
         pytest.skip(
             f"{SIBLING_SKIP} the fleet's published manifests were NOT read: {reason}. Whether "
-            f"SERVED_ELSEWHERE ({', '.join(sorted(SERVED_ELSEWHERE))}) is still what both "
-            "repositories declare is unchecked in this run."
+            f"SERVED_ELSEWHERE ({', '.join(sorted(SERVED_ELSEWHERE))}) is still what the fleet "
+            "publishes and an empty enable-list binds is unchecked in this run."
         )
     published = set(fleet_published_bundles(root))
     bound_by_silence = {m.name for _, m in discovered().values() if m.default_enabled}
-    charged = published & set(bundles_declared_here()) & bound_by_silence
+    charged = published & bound_by_silence
     assert charged == SERVED_ELSEWHERE, (
-        f"the fleet publishes {sorted(published)}, this repository declares "
-        f"{sorted(set(bundles_declared_here()))} and binds {sorted(bound_by_silence)} by silence; "
-        f"the names in all three are {sorted(charged)} where SERVED_ELSEWHERE says "
-        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees that an empty `connectors_enabled` "
-        "still binds is a bundle this repository declares, does not serve, and pays for on every "
-        "model call — so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through it to "
-        "PREFIX_BOUND and both compaction defaults. A bundle declaring `default_enabled: false` "
-        "is declared and not charged; flipping one to true means raising the allowance in the "
-        "same commit."
+        f"the fleet publishes {sorted(published)} and an empty enable-list binds "
+        f"{sorted(bound_by_silence)}; the names in both are {sorted(charged)} where "
+        f"SERVED_ELSEWHERE says {sorted(SERVED_ELSEWHERE)}. A fleet bundle that an empty "
+        "`connectors_enabled` still binds is a bundle this repository does not serve and pays for "
+        "on every model call — so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and "
+        "through it to PREFIX_BOUND and both compaction defaults. A bundle declaring "
+        "`default_enabled: false` is declared and not charged; flipping one to true means raising "
+        "the allowance in the same commit."
     )
 
 
