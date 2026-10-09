@@ -26,7 +26,9 @@ compose file whenever one is reachable), and records whether *it* created the
 containers — so a lane that adopted the shared spine refuses to tear it down.
 `processes.sh` starts and stops the connectors, the Temporal workers, the mock
 gateway and the front door with readiness polls rather than sleeps. `soak.sh`
-drives the lane in rounds, and `siblings.sh` is the one place that resolves a
+drives the lane in rounds, `replicas.sh` runs the multi-replica lane (`make live-replicas`: three
+front doors, two background and two calc workers on a database of its own, the assertions in
+`tests/live_replicas/`), and `siblings.sh` is the one place that resolves a
 sibling checkout's path for both lanes. `e2e-full-stack/` is the four-repo lane
 (this backend plus `Chemclaw3-mcp`, `Chemclaw3_mock` and `Chemclaw3_ui`, `make
 live-e2e-full-stack`). All are reached through `make live-*`; the procedure is in

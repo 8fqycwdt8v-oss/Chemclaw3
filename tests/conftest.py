@@ -34,6 +34,10 @@ from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 # honours `pytest_plugins` in the rootdir conftest. Used by `tests/test_suite_timeouts.py`.
 pytest_plugins = ["pytester"]
 
+# The multi-replica lane starts a dozen processes and its own Temporal broker, so the unit gate does
+# not collect it; `make live-replicas` names it with this variable (`tests/live_replicas/`).
+collect_ignore = [] if os.environ.get("CHEMCLAW_LIVE_REPLICAS") else ["live_replicas"]
+
 
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:

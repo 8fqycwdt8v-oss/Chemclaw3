@@ -355,6 +355,47 @@ jobs:
       - name: Audit the dependency closure for known vulnerabilities
         run: make deps-audit
 
+  # The multi-replica lane (W3.9): three front doors, two background and two calc workers on one
+  # database, asserting that limits hold across replicas, a killed pod's turn resumes and one
+  # calculation miss computes once. Real processes and a real broker, which is why it is a job of
+  # its own and not a corner of `check`: the unit gate runs serially in one process and cannot
+  # start a fleet. It needs Postgres and nothing else — the lane creates its own database and starts
+  # its own Temporal dev server (downloaded on first use), and its model is a function of the
+  # thread, so no credential is involved.
+  replicas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chemclaw
+          POSTGRES_PASSWORD: chemclaw
+          POSTGRES_DB: chemclaw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U chemclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Run the multi-replica lane
+        run: make live-replicas
+
   # The deployment gate (DA-10/D-2). The Helm chart is the one artifact no test can exercise
   # offline, and a broken chart is only discovered at `helm install` — in production, on the worst
   # day. Rendering it against the Kubernetes schemas needs no cluster and no credentials. A separate

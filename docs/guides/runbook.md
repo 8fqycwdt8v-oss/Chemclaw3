@@ -300,6 +300,22 @@ door at each admission cap and family E SIGKILLs a worker, and the RSS of a proc
 been replaced is not a series. Ask `make live-storm` whether the system survives being disturbed;
 ask this one what drifts when it is not.
 
+**`make live-replicas` asks the question the storm cannot: does anything depend on there being one
+process?** It starts three front-door replicas, two background workers and two calc workers on one
+database and asserts that the per-person request budget, the fleet ceiling on concurrent turns and
+the per-person turn cap admit what is configured rather than that times three; that a replica
+SIGKILLed between two model calls has its turn resumed once, as its sender, from another replica,
+with one cost row (and not resumed after a state-changing call); and that eight identical calc jobs
+on two calc workers reach the physics server once. Each claim runs first on processes that keep the
+state per process (`CHEMCLAW_SESSION_STORE=memory`), where the count must come out multiplied, so a
+pass is not a lane that measured nothing. It needs only Postgres (`make up`, or any server at
+`CHEMCLAW_POSTGRES_DSN`): the lane creates and drops a database of its own, starts a private
+Temporal dev server, and its model is a function of the thread (`tests/replica_graph.py`), so there
+is no credential and no `make live-up`. `make live-replicas ARGS='-k resumes'` runs one claim. What
+it does not exercise: the front doors authenticate by a test header and bind no connectors, and the
+calc workers dial an in-process stand-in for the physics server, so Entra, the connector sweep and a
+front door's own tool path to `calc` are `make live-up`'s.
+
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
 probe launches is resolved against Temporal rather than taken from the turn's account of it — a job
