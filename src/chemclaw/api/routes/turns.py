@@ -48,6 +48,7 @@ from chemclaw.api.runner import (
 )
 from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
+    _CLAIM_REFRESHES_PER_LEASE,
     FrontDoorState,
     LiveSession,
     SessionTurns,
@@ -67,7 +68,7 @@ from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
-from chemclaw.core.turn_fence import TurnFence
+from chemclaw.core.turn_fence import Claim, TurnFence
 from chemclaw.exhibits.models import ExhibitRef, UnknownExhibit
 
 logger = logging.getLogger(__name__)
@@ -212,12 +213,6 @@ async def post_message(
     )
 
 
-# How long an attach waits for a turn that has just taken its claim to register: the claim is
-# committed a few awaits before the turn is, and a reader in between would say nothing is running.
-_START_RACE_POLLS = 20
-_START_RACE_POLL_SECONDS = 0.05
-
-
 class _ResumeDeclined(Exception):
     """The turn this attach would have resumed is somebody else's to take, or yielded to a line."""
 
@@ -358,6 +353,11 @@ async def _start_turn(
             await asyncio.shield(_give_back())
         elif claims is not None:
             await _release_turn_claim(claims, session_id, held)
+
+    def _started() -> None:
+        """The turn has passed its point of no return: a resume past here is not given back."""
+        nonlocal ran
+        ran = True
 
     def _release_permit() -> None:
         """Give the process's admission permit back, exactly once, whoever gets here first."""
@@ -560,7 +560,7 @@ async def _start_turn(
         # stays claimed exactly while work is in flight.
         heartbeat: asyncio.Task[None] | None = None
         fence: TurnFence | None = None
-        nonlocal permit, queued_announced, ran
+        nonlocal permit, queued_announced
         # Counts the turn, not its error events: one turn can yield two errors, and the timeout
         # branch sits outside the loop. One increment in the `finally` keeps the failure ratio at
         # most 1.
@@ -575,7 +575,12 @@ async def _start_turn(
                 pump = asyncio.current_task()
                 if owns is not None and pump is not None:
                     # Cancelling the pump ends the turn through its ordinary teardown.
-                    fence = TurnFence(lambda: owns(session_id, holder), pump.cancel)
+                    margin = lease / _CLAIM_REFRESHES_PER_LEASE
+                    fence = TurnFence(
+                        Claim(session_id, holder),
+                        lambda: owns(session_id, holder, margin),
+                        pump.cancel,
+                    )
                 heartbeat = asyncio.create_task(
                     _hold_turn_claim(claims, session_id, lease, holder, fence)
                 )
@@ -622,7 +627,6 @@ async def _start_turn(
             # A resumed turn was counted by the attempt that began it.
             if resume is None:
                 METRICS.increment("chemclaw_turns_started_total")
-            ran = True
             try:
                 # Covers the whole streamed run: a stall in `run_turn` surfaces as `TimeoutError`,
                 # one error event. The transport is bounded by `_TurnStream`'s `send_timeout`.
@@ -649,6 +653,7 @@ async def _start_turn(
                         exhibit_refs=exhibit_refs,
                         resume=resume,
                         fence=fence,
+                        on_started=_started,
                     ):
                         if event.type == "error":
                             turn_failed = True
@@ -1146,7 +1151,9 @@ async def _until_the_starting_turn_registers(
     (this attach lost the race to it), including before its claim is visible.
     """
     relay = front.turn_relay
-    for _ in range(_START_RACE_POLLS):
+    poll = settings.service_turn_relay_poll_seconds
+    deadline = time.monotonic() + settings.service_turn_relay_lease_seconds
+    while True:
         if front.running_turns.get(session_id) is not None:
             return True
         holding = None if relay is None else await relay.holding(session_id)
@@ -1154,8 +1161,11 @@ async def _until_the_starting_turn_registers(
             return False
         if holding is not None and holding.holder not in _local_holders(front, session_id):
             return True
-        await asyncio.sleep(_START_RACE_POLL_SECONDS)
-    return True
+        if time.monotonic() >= deadline:
+            return True
+        # Woken the moment a turn here registers; a turn on another replica is looked for again
+        # after one relay poll.
+        await front.running_turns.wait_registered(session_id, poll)
 
 
 async def _resume_dead_turn(
@@ -1220,7 +1230,8 @@ async def _watch_elsewhere(
             headers={"Retry-After": "1"},
         )
     try:
-        for _ in range(_START_RACE_POLLS):
+        deadline = time.monotonic() + settings.service_turn_relay_lease_seconds
+        while True:
             request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
             if answer.state not in (None, "gone"):
                 break
@@ -1229,7 +1240,9 @@ async def _watch_elsewhere(
             current = await relay.holding(session_id)
             if current is None or current.holder != holding.holder:
                 break
-            await asyncio.sleep(_START_RACE_POLL_SECONDS)
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(settings.service_turn_relay_poll_seconds)
     except BaseException:
         release_slot()
         raise

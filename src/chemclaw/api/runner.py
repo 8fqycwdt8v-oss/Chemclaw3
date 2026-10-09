@@ -62,7 +62,13 @@ from chemclaw.agent.tool_result_size import (
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
-from chemclaw.agent.turn_resume import Refusal, ResumePoint, count_refusal, resume_point
+from chemclaw.agent.turn_resume import (
+    Refusal,
+    ResumePoint,
+    count_refusal,
+    resume_point,
+    resume_point_fresh,
+)
 from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
@@ -104,7 +110,12 @@ from chemclaw.core.session_context import (
 )
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
-from chemclaw.core.turn_fence import TurnFence, reset_turn_fence, set_turn_fence
+from chemclaw.core.turn_fence import (
+    ClaimUnverifiable,
+    TurnFence,
+    reset_turn_fence,
+    set_turn_fence,
+)
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal, SkillLoadedSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
@@ -189,6 +200,7 @@ async def run_turn(
     exhibit_refs: Sequence[ExhibitRef] = (),
     resume: ResumePoint | None = None,
     fence: TurnFence | None = None,
+    on_started: Callable[[], None] | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then an answer or an error).
 
@@ -213,6 +225,8 @@ async def run_turn(
         fence: The turn's hold on its session claim. A turn that loses it is ended without booking,
             settling its question or spending its approval: the replica that took the session over
             owns all three (`core/turn_fence.py`).
+        on_started: Called once the turn has passed the point after which it cannot be given back
+            (a resume's connectors are open, its thread re-read and its trace replayed).
 
     Yields:
         `chemclaw.api.events.Event` values, ending with an `AnswerEvent` or an `ErrorEvent`.
@@ -242,6 +256,8 @@ async def run_turn(
     # settled; out here so the teardown can read both on every path.
     turn_row: int | None = None
     transcript_settled = False
+    # Whether the turn is past the point of no return (`on_started`).
+    started = False
     with (
         _turn_ambient(
             session.session_id,
@@ -269,6 +285,21 @@ async def run_turn(
         # model call, the transcript write and the final `yield`, so those calls nest under this
         # turn's trace and its duration matches the chemist's wait.
         try:
+            if resume is not None:
+                # The thread was judged before the claim was taken; the claim is what stops its
+                # old holder writing to it, so it is read again now and cannot change after.
+                fresh = await resume_point_fresh(session.session_id, resume)
+                if not isinstance(fresh, ResumePoint):
+                    logger.warning(
+                        "session %s's dead turn %s can no longer be resumed (%s); it is given back",
+                        session.session_id,
+                        ledger.correlation_id,
+                        fresh,
+                    )
+                    ledger.booked = True
+                    transcript_settled = True
+                    return
+                resume = fresh
             log_event(
                 logger,
                 "turn.resumed" if resume else "turn.started",
@@ -383,6 +414,9 @@ async def run_turn(
                     if isinstance(last, AIMessage) and not last.tool_calls:
                         # The graph had finished: the answer is written and was never delivered.
                         ledger.answer_parts.append(message_text(last))
+                started = True
+                if on_started is not None:
+                    on_started()
                 async for event in _stream_into(
                     graph_events(
                         graph,
@@ -536,17 +570,19 @@ async def run_turn(
                     _record_review_rounds(session, answer, rounds)
                     # The only escalation site, inside `if rounds:`, so `answer_review_max_rounds =
                     # 0` is a complete no-op and a turn escalates at most once however the loop
-                    # ended.
-                    await _escalate_exhausted_review(
-                        session, answer, actor, review.unsupported, ledger.correlation_id
-                    )
+                    # ended. It opens a durable wait, an effect: a turn that lost its session ends,
+                    # and one that cannot confirm it holds it does not escalate.
+                    if await _holds_the_session(fence) is not False:
+                        await _escalate_exhausted_review(
+                            session, answer, actor, review.unsupported, ledger.correlation_id
+                        )
             # Asked again: a cap can fire inside a revision round. `_cap_events` reads the ledger
             # flag, so each cap is announced once.
             for event in _cap_events(session, ledger):
                 yield event
             # The last look before the turn writes its ending: one that lost its session must not
             # write a second answer beside the replica that took it over.
-            if fence is not None and not await fence.hold():
+            if await _holds_the_session(fence) is False:
                 raise asyncio.CancelledError
             await _record_transcript(
                 history, session, user_message, ledger.answer_text, ledger.exchanges, turn=turn_row
@@ -600,6 +636,13 @@ async def run_turn(
                 ledger.booked = True
                 raise asyncio.CancelledError from exc
             failure = _failure_event(exc, session, ledger)
+            if resume is not None and not started:
+                # Failed before the thread was touched: the resume is given back by the route, so
+                # the question is not settled and nothing is booked.
+                ledger.booked = True
+                transcript_settled = True
+                yield failure
+                return
             if not transcript_settled:
                 await _settle_transcript_turn(history, session, turn_row, "failed")
                 transcript_settled = True
@@ -623,6 +666,21 @@ async def run_turn(
                     turn_row,
                     "stopped" if ledger.cancelled and not ledger.timed_out else "failed",
                 )
+
+
+async def _holds_the_session(fence: TurnFence | None) -> bool | None:
+    """Whether the turn still holds its session claim.
+
+    `True`; `False` (lost, and the turn is now ended); or `None` when the store could not be
+    asked, which is not a takeover.
+    """
+    if fence is None:
+        return True
+    try:
+        return await fence.hold()
+    except ClaimUnverifiable:
+        logger.warning("could not confirm that a turn still holds its session", exc_info=True)
+        return None
 
 
 async def _finish_turn(

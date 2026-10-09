@@ -29,7 +29,13 @@ from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import GenericFakeChatModel
-from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import StructuredTool
 
@@ -100,11 +106,14 @@ class ProbeModel(GenericFakeChatModel):
         start = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
         text = str(messages[start].content)
         done = sum(isinstance(m, ToolMessage) for m in messages[start + 1 :])
-        call_number = done + 1
+        # The step the plan is at: one per assistant message, whatever number of calls it made.
+        step = sum(isinstance(m, AIMessage) for m in messages[start + 1 :])
+        call_number = step + 1
         tag = _tag_of(text)
         _mark(tag, f"model-{call_number}")
         if f"park-model-{call_number}" in text:
             _wait_for_gate(tag)
+            _mark(tag, f"model-{call_number}-woke")
         match = re.search(r"steps=([a-z,]*)", text)
         steps = [s for s in (match.group(1).split(",") if match else []) if s]
         usage = {
@@ -112,8 +121,13 @@ class ProbeModel(GenericFakeChatModel):
             "output_tokens": OUTPUT_TOKENS,
             "total_tokens": INPUT_TOKENS + OUTPUT_TOKENS,
         }
-        if done < len(steps):
-            name = ACTING_TOOL if steps[done] == "act" else READING_TOOL
+        if step < len(steps):
+            # `acts` is two state-changing calls in one assistant message, run in parallel.
+            names = (
+                [ACTING_TOOL, ACTING_TOOL]
+                if steps[step] == "acts"
+                else [ACTING_TOOL if steps[step] == "act" else READING_TOOL]
+            )
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
                     content="",
@@ -123,10 +137,11 @@ class ProbeModel(GenericFakeChatModel):
                             "args": json.dumps(
                                 {"n": call_number, "tag": tag, "hold": f"park-{name}" in text}
                             ),
-                            "id": f"call-{call_number}",
-                            "index": 0,
+                            "id": f"call-{call_number}-{index}",
+                            "index": index,
                             "type": "tool_call_chunk",
                         }
+                        for index, name in enumerate(names)
                     ],
                     usage_metadata=usage,  # type: ignore[arg-type]
                 )

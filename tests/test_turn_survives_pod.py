@@ -23,7 +23,6 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
-from langchain_core.messages import HumanMessage
 
 from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.state import turn_config
@@ -145,7 +144,7 @@ class Victim:
         self.server.kill()
         if self.thread is not None:
             self.thread.join(timeout=30)
-        time.sleep(LEASE + 1.5)
+        _wait_claim_lapsed(self.session_id)
         if not keep_parked:
             _open_gate(self.work, self.tag)
 
@@ -157,14 +156,29 @@ class Victim:
         return self
 
 
+def _wait_claim_lapsed(session_id: str, seconds: float = 60) -> None:
+    """Wait until no live claim stands on the session — a dead holder's lease has run out."""
+    deadline = time.monotonic() + seconds
+    while _rows(
+        "SELECT 1 FROM session_turns WHERE session_id = %s AND expires_at > now()", session_id
+    ):
+        assert time.monotonic() < deadline, "the claim never lapsed"
+        time.sleep(0.1)
+
+
 def attach(
-    server: Replica, session_id: str, user: dict[str, str]
+    server: Replica,
+    session_id: str,
+    user: dict[str, str],
+    opened: threading.Event | None = None,
 ) -> tuple[int, httpx.Headers, list[dict[str, Any]]]:
-    """`GET .../turn/stream` as a client does, read to its end."""
+    """`GET .../turn/stream` as a client does, read to its end; `opened` is set once it answers."""
     events: list[dict[str, Any]] = []
     with httpx.stream(
         "GET", f"{server.base}/sessions/{session_id}/turn/stream", headers=user, timeout=120
     ) as response:
+        if opened is not None:
+            opened.set()
         if response.status_code != 200:
             response.read()
             return response.status_code, response.headers, [{"body": response.text}]
@@ -263,9 +277,10 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     assert _question_status(dead.session_id) == "running"
 
     results: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
+    opened = [threading.Event(), threading.Event()]
     threads = [
-        threading.Thread(target=lambda s=s: results.append(attach(s, dead.session_id, ANA)))
-        for s in ((b, b) if same_replica else (b, c))
+        threading.Thread(target=lambda s=s, o=o: results.append(attach(s, dead.session_id, ANA, o)))
+        for s, o in zip((b, b) if same_replica else (b, c), opened, strict=True)
     ]
     for thread in threads:
         thread.start()
@@ -273,7 +288,8 @@ def test_only_the_sender_resumes_the_turn_and_a_second_attach_follows_it(
     while _executions(work, tag)["model-2"] < 2:  # the winner is in the step the dead one was in
         assert time.monotonic() < deadline, "no attach resumed the turn"
         time.sleep(0.05)
-    time.sleep(2.5)  # the other attach has lost the race and is following the winner
+    # Both attaches have been answered, so the one that lost the race is following the winner.
+    assert all(event.wait(60) for event in opened), "an attach was never answered"
     _open_gate(work, tag)
     for thread in threads:
         thread.join(timeout=120)
@@ -432,9 +448,12 @@ def test_a_client_attached_to_a_live_turn_on_another_replica_is_unaffected(
         live.start("q steps=read,read park-model-2")
         live.reached("model-2")
         followed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
-        watcher = threading.Thread(target=lambda: followed.append(attach(b, live.session_id, ANA)))
+        following = threading.Event()
+        watcher = threading.Thread(
+            target=lambda: followed.append(attach(b, live.session_id, ANA, following))
+        )
         watcher.start()
-        time.sleep(1.5)  # the follow is in place before the turn goes on
+        assert following.wait(60), "the follow was never answered"
         _open_gate(work, "live1")
         watcher.join(timeout=60)
         assert live.thread is not None
@@ -467,7 +486,7 @@ def test_a_turn_that_dies_again_is_not_resumed_a_second_time(
             time.sleep(0.05)
         b.kill()
         attached.join(timeout=30)
-        time.sleep(LEASE + 1.5)
+        _wait_claim_lapsed(dead.session_id)
 
         status, _, _ = attach(c, dead.session_id, ANA)
 
@@ -505,7 +524,7 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         victim.start("q steps=read,act park-model-2")
         victim.reached("model-2")
         _stall(a)
-        time.sleep(LEASE + 1.5)
+        _wait_claim_lapsed(victim.session_id)
 
         resumed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
         attaching = threading.Thread(
@@ -521,7 +540,7 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         attaching.join(timeout=120)
         assert victim.thread is not None
         victim.thread.join(timeout=60)
-        time.sleep(3)  # A has had every chance to carry on
+        _checkpoints_settled(victim.session_id)  # A has had every chance to write
 
         status, _, events = resumed[0]
         assert status == 200 and _types(events)[-1] == "answer", events
@@ -532,6 +551,63 @@ def test_a_pod_that_wakes_after_its_turn_was_resumed_does_not_act_and_books_noth
         assert _question_status(victim.session_id) == "done"
         assert len(_costs(victim.correlation)) == 1
         assert httpx.get(f"{a.base}/healthz", timeout=10).status_code == 200
+
+
+@pytest.mark.parametrize("fenced", [True, False], ids=["fenced-saver", "unfenced-control"])
+def test_a_pod_stalled_in_a_model_call_cannot_fork_the_thread_after_its_turn_finished(
+    work: Path, env: dict[str, str], survivors: list[Replica], fenced: bool
+) -> None:
+    """The checkpoint a woken pod writes must not become the thread the next turn loads.
+
+    A is stopped inside its second model call; B resumes the turn and finishes it, answer and all;
+    A is continued. A's model node completes and LangGraph submits that step's checkpoint from a
+    background task, with an id newer than B's last, so the newest checkpoint would be A's fork:
+    the thread without B's answer, ending on a call nothing ran. The checkpointer's write holds the
+    claim row, so A's write finds none and the newest checkpoint stays B's. The control strips that
+    lock from A and shows the fork, so the assertion is about the fence and not about timing.
+    """
+    b, _ = survivors
+    tag = f"fork{int(fenced)}"
+    a_env = env if fenced else {**env, "REPLICA_NO_SAVER_FENCE": "1"}
+    with replica(a_env) as a:
+        victim = Victim(a, work, ANA, tag)
+        victim.start("q steps=read,read park-model-2")
+        victim.reached("model-2")
+        _stall(a)
+        _wait_claim_lapsed(victim.session_id)
+
+        resumed: list[tuple[int, httpx.Headers, list[dict[str, Any]]]] = []
+        attaching = threading.Thread(
+            target=lambda: resumed.append(attach(b, victim.session_id, ANA)), daemon=True
+        )
+        attaching.start()
+        deadline = time.monotonic() + 60
+        while _executions(work, tag)["model-2"] < 2:  # B is in the step A is stopped in
+            assert time.monotonic() < deadline, b.output()
+            time.sleep(0.05)
+        _open_gate(work, tag)  # B runs on to its answer while A stays stopped
+        attaching.join(timeout=120)
+        status, _, events = resumed[0]
+        assert status == 200 and _types(events)[-1] == "answer", events
+        finished = _latest_thread(victim.session_id)
+        assert finished[-1] == ("ai", FINAL.format(2)), finished
+
+        _wake(a)
+        deadline = time.monotonic() + 60
+        while _executions(work, tag)["model-2-woke"] < 2:  # A's model call has returned
+            assert time.monotonic() < deadline, a.output()
+            time.sleep(0.05)
+        assert victim.thread is not None
+        victim.thread.join(timeout=60)
+        _checkpoints_settled(victim.session_id)
+
+        after = _latest_thread(victim.session_id)
+        if fenced:
+            assert after == finished, f"the woken pod forked the thread: {after}"
+        else:
+            assert after != finished and after[-1][0].endswith("+call"), (
+                f"the control did not fork the thread: {after}"
+            )
 
 
 def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
@@ -556,10 +632,10 @@ def test_a_stall_shorter_than_the_lease_is_not_fenced_and_the_turn_finishes(
         assert [row[0] for row in _costs(victim.correlation)] == ["answered"]
 
 
-def _thread_questions(session_id: str) -> list[str]:
-    """The chemist's messages in the session's checkpointed thread, as the model will read them."""
+def _latest_thread(session_id: str) -> list[tuple[str, str]]:
+    """The thread the next turn loads: the newest checkpoint's messages, as (type, text)."""
 
-    async def read() -> list[str]:
+    async def read() -> list[tuple[str, str]]:
         from chemclaw.agent.checkpointer import checkpointer
 
         try:
@@ -568,11 +644,39 @@ def _thread_questions(session_id: str) -> list[str]:
             found = await saver.aget_tuple(turn_config(session_id))  # type: ignore[arg-type]
             assert found is not None
             messages = found.checkpoint["channel_values"]["messages"]
-            return [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+            return [
+                (m.type + ("+call" if getattr(m, "tool_calls", None) else ""), str(m.content))
+                for m in messages
+            ]
         finally:
             await close_checkpointer()
 
     return asyncio.run(read())
+
+
+def _thread_questions(session_id: str) -> list[str]:
+    """The chemist's messages in the session's checkpointed thread, as the model will read them."""
+    return [text for kind, text in _latest_thread(session_id) if kind == "human"]
+
+
+def _checkpoints_settled(session_id: str, quiet: float = 1.0) -> None:
+    """Wait until the thread's checkpoint rows have stopped changing for `quiet` seconds."""
+    seen = None
+    since = time.monotonic()
+    deadline = since + 60
+    while time.monotonic() < deadline:
+        now = _rows(
+            "SELECT (SELECT count(*) FROM checkpoints WHERE thread_id = %s), "
+            "(SELECT count(*) FROM checkpoint_writes WHERE thread_id = %s)",
+            session_id,
+            session_id,
+        )
+        if now != seen:
+            seen, since = now, time.monotonic()
+        elif time.monotonic() - since >= quiet:
+            return
+        time.sleep(0.1)
+    raise AssertionError("the thread's checkpoints never settled")
 
 
 def test_a_member_presenting_the_senders_correlation_id_does_not_overwrite_the_question(
@@ -609,7 +713,12 @@ def test_a_member_presenting_the_senders_correlation_id_does_not_overwrite_the_q
 
         sending = threading.Thread(target=ben, daemon=True)
         sending.start()
-        time.sleep(1.5)  # Ben's message is in the line behind Ana's running turn
+        deadline = time.monotonic() + 30
+        while not httpx.get(
+            f"{a.base}/sessions/{ana.session_id}/queue", headers=ANA, timeout=10
+        ).json()["waiting"]:  # Ben's message is in the line behind Ana's running turn
+            assert time.monotonic() < deadline, "Ben's message never joined the line"
+            time.sleep(0.05)
         _open_gate(work, "ow1")
         assert ana.thread is not None
         ana.thread.join(timeout=60)

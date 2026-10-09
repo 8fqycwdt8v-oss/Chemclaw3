@@ -295,11 +295,10 @@ def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
 
 
 #: Tools `READ_ONLY_TOOLS` lets run without an approved plan that are still not safe to run again
-#: after a cut-off. The artefact writers write rows, and a second run would leave a second artefact:
-#: not state-changing for the plan gate
-#: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), not repeatable for a resume.
-#: `condense_protocols` makes model calls the thread does not record, so a dead attempt's finished
-#: call would be spend nobody booked.
+#: after a cut-off. The artefact writers write rows, and a second run would leave a second artefact;
+#: an artefact is part of the answer, so the plan gate is right not to see them.
+#: `condense_protocols` makes model calls the thread does not record, so a dead attempt's
+#: finished call would be spend nobody booked.
 NOT_REPEATABLE_READS: frozenset[str] = frozenset(
     {"create_exhibit", "revise_exhibit", "condense_protocols"}
 )

@@ -462,11 +462,35 @@ class RunningTurns:
     def __init__(self) -> None:
         """Start empty; turns register themselves via `register`."""
         self._turns: dict[str, DetachableTurn] = {}
+        # Waiters for a session's turn to be registered, woken by `register`.
+        self._waiters: dict[str, list[asyncio.Future[None]]] = {}
 
     def register(self, session_id: str, turn: DetachableTurn) -> None:
         """Track `turn` as the session's running turn until its pump finishes."""
         self._turns[session_id] = turn
         turn._task.add_done_callback(lambda _t: self._forget(session_id, turn))
+        for waiter in self._waiters.pop(session_id, []):
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def wait_registered(self, session_id: str, timeout: float) -> DetachableTurn | None:
+        """The session's running turn, waiting up to `timeout` for one to register.
+
+        For a reader that found a turn's claim a moment before the turn is in the registry.
+        """
+        turn = self.get(session_id)
+        if turn is not None:
+            return turn
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(session_id, []).append(waiter)
+        try:
+            await asyncio.wait_for(waiter, timeout)
+        except TimeoutError:
+            pass
+        finally:
+            if session_id in self._waiters and waiter in self._waiters[session_id]:
+                self._waiters[session_id].remove(waiter)
+        return self.get(session_id)
 
     def _forget(self, session_id: str, turn: DetachableTurn) -> None:
         """Drop the entry, identity-checked so a successor's registration is never revoked."""

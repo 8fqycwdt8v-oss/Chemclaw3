@@ -89,6 +89,12 @@ def main() -> None:
         from tests import replica_graph
 
         replica_graph.classify_probe_tools()
+        if os.environ.get("REPLICA_NO_SAVER_FENCE"):
+            # The control for the fenced checkpointer: its write no longer asks for the claim.
+            from chemclaw.agent import checkpointer as checkpointer_module
+
+            checkpointer_module._HOLD_CLAIM = "SELECT 1"
+
         factory: Any = replica_graph.graph_factory
     else:
         factory = _Replica().graph_factory

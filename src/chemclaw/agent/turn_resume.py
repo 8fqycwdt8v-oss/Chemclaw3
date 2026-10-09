@@ -22,6 +22,7 @@ Pure judgement is `judge`; the store reads are on the history provider.
 """
 
 import logging
+import time
 from collections.abc import Sequence
 from typing import Literal, NamedTuple, cast
 
@@ -32,6 +33,8 @@ from chemclaw.agent.authz import repeatable_call
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.session_store import LapsedTurn
 from chemclaw.agent.state import turn_config
+from chemclaw.core.bounded import BoundedLru
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
@@ -90,10 +93,16 @@ def judge(messages: Sequence[BaseMessage], question_id: str) -> tuple[BaseMessag
     return tail
 
 
-async def resume_point(session_id: str, turn: LapsedTurn) -> ResumePoint | Refusal:
-    """Read the dead turn's checkpoint and judge it; the point to resume from, or why not."""
-    if not turn.eligible:
-        return "ineligible"
+# Verdicts by (session, question row), kept for a few seconds: every reader that touches a session
+# with a dead turn would otherwise deserialize its whole checkpoint. A stale verdict costs nothing,
+# since the resume reads the thread again after its claim (`resume_point_fresh`).
+_VERDICTS: BoundedLru[tuple[str, int], tuple[float, "ResumePoint | Refusal"]] = BoundedLru(256)
+
+
+async def _judged(
+    session_id: str, turn: LapsedTurn, *, question_id: str
+) -> tuple[BaseMessage, ...] | Refusal:
+    """The thread as it stands now, judged: the committed tail, or why it is not resumable."""
     saver = await checkpointer()
     if saver is None:
         return "no_checkpoint"
@@ -109,13 +118,52 @@ async def resume_point(session_id: str, turn: LapsedTurn) -> ResumePoint | Refus
         return "unreadable_checkpoint"
     if found is None:
         return "no_checkpoint"
-    messages = found.checkpoint.get("channel_values", {}).get("messages") or []
-    verdict = judge(messages, turn.question_id)
-    if isinstance(verdict, str):
-        return verdict
-    return ResumePoint(
-        turn.row_id, turn.correlation_id, turn.question_id, turn.question, turn.dry_run, verdict
+    return judge(found.checkpoint.get("channel_values", {}).get("messages") or [], question_id)
+
+
+async def resume_point(session_id: str, turn: LapsedTurn) -> ResumePoint | Refusal:
+    """Read the dead turn's checkpoint and judge it; the point to resume from, or why not."""
+    if not turn.eligible:
+        return "ineligible"
+    key = (session_id, turn.row_id)
+    cached = _VERDICTS.get(key)
+    if (
+        cached is not None
+        and time.monotonic() - cached[0] < settings.service_readiness_cache_seconds
+    ):
+        return cached[1]
+    tail = await _judged(session_id, turn, question_id=turn.question_id)
+    verdict: ResumePoint | Refusal = (
+        tail
+        if isinstance(tail, str)
+        else ResumePoint(
+            turn.row_id, turn.correlation_id, turn.question_id, turn.question, turn.dry_run, tail
+        )
     )
+    _VERDICTS.put(key, (time.monotonic(), verdict))
+    return verdict
+
+
+async def resume_point_fresh(session_id: str, point: ResumePoint) -> ResumePoint | Refusal:
+    """The thread judged again, uncached, once the resume holds the session's claim.
+
+    The first judgement was made before the claim; until then the old holder could still write, so
+    the thread may have moved (it may have made a call since). From the claim on it cannot, so what
+    is read here is what the resumed run continues from.
+    """
+    turn = LapsedTurn(
+        point.row_id,
+        point.correlation_id,
+        None,
+        point.question,
+        point.question_id,
+        point.dry_run,
+        True,
+    )
+    tail = await _judged(session_id, turn, question_id=point.question_id)
+    if isinstance(tail, str):
+        return tail
+    return point._replace(tail=tail)
 
 
 def count_refusal(reason: Refusal) -> None:

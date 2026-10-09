@@ -95,6 +95,7 @@ from chemclaw.agent.text_overlay import overlaid
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
+    hold_claim_before_model,
     refuse_undeclared_writes,
     refuse_when_claim_lost,
     refuse_writes_on_dry_run,
@@ -749,7 +750,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """
     # `AnswerAtTheCap` sits with the hook whose mark it reads: `enforce_loop_cap` authorises one
     # tool-less call per graph past the cap, and this is what makes that call an answer.
-    caps = [enforce_loop_cap, enforce_spend_cap, AnswerAtTheCap(), MeterTurnSpend()]
+    caps = [
+        hold_claim_before_model,
+        enforce_loop_cap,
+        enforce_spend_cap,
+        AnswerAtTheCap(),
+        MeterTurnSpend(),
+    ]
     if not harness_enabled_for(profile):
         return caps
     return [ScopedTodoListMiddleware(), *caps]

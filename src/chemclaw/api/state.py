@@ -332,14 +332,20 @@ async def _hold_turn_claim(
     Cancelled by the stream's `finally`. A failed refresh is logged and counted, not fatal until a
     whole lease has passed without a successful one: then, like a refresh that shows another worker
     took the session, it loses the `fence`, which ends the turn — a turn that cannot show it holds
-    its session must not go on beside whoever resumed it.
+    its session must not go on beside whoever resumed it. A refresh is bounded to one interval, so
+    that loss comes at most a lease and two intervals after the last success (the lease is counted
+    from the refresh that succeeded, the database's expiry from the one before it). This timer ends
+    a turn that is doing nothing; an effect is stopped by the ownership check before it and a
+    checkpoint by the lock on the claim row, neither of which waits for the timer.
     """
     interval = lease_seconds / _CLAIM_REFRESHES_PER_LEASE
     last_refreshed = time.monotonic()
     while True:
         await asyncio.sleep(interval)
         try:
-            if not await claims.refresh(session_id, holder, lease_seconds):
+            if not await asyncio.wait_for(
+                claims.refresh(session_id, holder, lease_seconds), timeout=interval
+            ):
                 # The claim lapsed and another worker took the session (the UPDATE matched no row).
                 # No later refresh can succeed.
                 METRICS.increment("chemclaw_turn_claims_lost_total")

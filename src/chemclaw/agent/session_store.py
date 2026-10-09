@@ -457,10 +457,12 @@ _TURN_REFRESH = (
     "WHERE session_id = %s AND holder = %s"
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
-# Whether this holder's claim is live now, on the database's clock: what a turn asks before it
-# acts.
+# Whether this holder's claim is live now, on the database's clock, with `margin` seconds still to
+# run: what a turn asks before it acts. A healthy holder refreshes every third of its lease, so it
+# always has two thirds left; a claim with less is one a takeover could be about to follow.
 _TURN_OWNS = (
-    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s AND expires_at > now()"
+    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s "
+    "AND expires_at > now() + make_interval(secs => %s)"
 )
 
 # The same three operations over a set of sessions, one statement each.
@@ -1242,11 +1244,11 @@ class SessionTurnClaims:
             await conn.commit()
         return still_ours
 
-    async def owns(self, session_id: str, holder: str) -> bool:
-        """Whether `holder`'s claim on the session is live: not taken over, not lapsed."""
+    async def owns(self, session_id: str, holder: str, margin_seconds: float = 0.0) -> bool:
+        """Whether `holder`'s claim is live with `margin_seconds` to spare, not taken or lapsing."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_TURN_OWNS, (session_id, holder))
+                await cur.execute(_TURN_OWNS, (session_id, holder, margin_seconds))
                 return await cur.fetchone() is not None
 
     async def release(self, session_id: str, holder: str) -> None:

@@ -13,7 +13,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from langchain.agents.middleware import wrap_tool_call
+from langchain.agents.middleware import before_model, wrap_tool_call
 from langchain_core.messages import ToolMessage
 
 from chemclaw.agent.audit import refusal_reason, returned_failure
@@ -30,7 +30,7 @@ from chemclaw.agent.refusal_route import routed, sentence_of
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
-from chemclaw.core.turn_fence import current_turn_fence
+from chemclaw.core.turn_fence import ClaimUnverifiable, current_turn_fence
 from chemclaw.core.turn_flags import is_dry_run
 from chemclaw.core.turn_signals import record_tool_failure
 
@@ -331,9 +331,36 @@ async def refuse_when_claim_lost(request: Any, handler: Callable[[Any], Any]) ->
     if fence is not None and not repeatable_call(
         request.tool_call["name"], request.tool_call.get("args") or {}
     ):
-        if not await fence.hold():
+        try:
+            owned = await fence.hold()
+        except ClaimUnverifiable as exc:
+            # Not a takeover, so the turn goes on: only this effect is withheld, and the model is
+            # told it did not happen.
+            raise SubsystemUnavailableError(
+                "the turn's hold on its session could not be confirmed, so this call was not run "
+                "and nothing was changed; it may be tried again"
+            ) from exc
+        if not owned:
             raise asyncio.CancelledError
     return await handler(request)
+
+
+@before_model
+async def hold_claim_before_model(state: Any, runtime: Any) -> None:
+    """End the turn instead of making a model call once it has lost its session.
+
+    A model call is repeatable, but its answer is checkpointed and paid for, and a process that woke
+    after its turn was resumed has nothing to add. A claim that cannot be confirmed does not stop
+    the call: only a takeover does.
+    """
+    fence = current_turn_fence()
+    if fence is not None:
+        try:
+            owned = await fence.hold()
+        except ClaimUnverifiable:
+            return
+        if not owned:
+            raise asyncio.CancelledError
 
 
 @wrap_tool_call

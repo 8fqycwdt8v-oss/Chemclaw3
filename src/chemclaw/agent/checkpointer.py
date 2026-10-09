@@ -49,10 +49,11 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
 )
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres import _ainternal
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg import AsyncConnection
-from psycopg.rows import DictRow, tuple_row
+from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.agent.session_store import _session_dsn
@@ -62,6 +63,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import register_pool, unregister_pool
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.turn_fence import TurnFenceLost, current_turn_fence
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +545,17 @@ def _refuse_if_values_are_missing(stored: CheckpointTuple) -> None:
     )
 
 
+# A fenced turn's write takes a share lock on the turn's claim row before it writes, in the
+# transaction that writes. A takeover's claim (`INSERT … ON CONFLICT DO UPDATE` on that row) waits
+# for the lock, so no other replica can have taken the thread between the check and the commit; and
+# a claim that is gone or lapsed finds no row, so a process that woke after its turn was resumed
+# writes nothing.
+_HOLD_CLAIM = (
+    "SELECT 1 FROM session_turns WHERE session_id = %s AND holder = %s AND expires_at > now() "
+    "FOR SHARE"
+)
+
+
 class SchemaStampedSaver(AsyncPostgresSaver):
     """`AsyncPostgresSaver` that records the channels it writes and refuses a thread missing one.
 
@@ -566,14 +579,33 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         global _statements_waiting
         started = time.perf_counter()
         _statements_waiting += 1
+        fence = current_turn_fence() if pipeline else None
         try:
-            async with super()._cursor(pipeline=pipeline) as cur:
-                # Sampled here, not in a `finally`, so it measures the wait alone, not the
-                # statement.
-                METRICS.observe(
-                    "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
-                )
-                yield cur
+            if fence is None:
+                async with super()._cursor(pipeline=pipeline) as cur:
+                    # Sampled here, not in a `finally`, so it measures the wait alone, not the
+                    # statement.
+                    METRICS.observe(
+                        "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
+                    )
+                    yield cur
+                return
+            # A write by a turn that holds a claim: upstream's own pipeline, but inside a
+            # transaction that first holds the claim row (`_HOLD_CLAIM`). `pipeline=True` is how
+            # upstream marks a write; reads never reach here.
+            async with self.lock, _ainternal.get_connection(self.conn) as conn:
+                async with conn.transaction():
+                    held = await conn.execute(
+                        _HOLD_CLAIM, (fence.claim.session_id, fence.claim.holder)
+                    )
+                    if await held.fetchone() is None:
+                        fence.lose()
+                        raise TurnFenceLost
+                    METRICS.observe(
+                        "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
+                    )
+                    async with conn.cursor(binary=True, row_factory=dict_row) as cur:
+                        yield cur
         finally:
             _statements_waiting -= 1
 
