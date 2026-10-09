@@ -1,0 +1,144 @@
+# THROWAWAY (W3.10): ten independent copies of the `check` job's test step at PYTEST_WORKERS=4.
+# Lives on branch claude/w3-parallel-collect only and is never merged.
+name: parallel-collect
+
+on:
+  push:
+    branches: ["claude/w3-parallel-collect"]
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: "v3.13.0"
+  KUBECONFORM_VERSION: "v0.6.7"
+  KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+  PROMETHEUS_VERSION: "v3.1.0"
+  PROMETHEUS_SHA256: "9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c"
+
+jobs:
+  collect:
+    name: collect-${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chemclaw
+          POSTGRES_PASSWORD: chemclaw
+          POSTGRES_DB: chemclaw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U chemclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3-mcp
+          ref: main
+          path: .sibling/Chemclaw3-mcp
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_mock
+          ref: main
+          path: .sibling/Chemclaw3_mock
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_ui
+          ref: main
+          path: .sibling/Chemclaw3_ui
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Build the fleet's environment
+        working-directory: .sibling/Chemclaw3-mcp
+        run: uv sync --frozen
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: "${{ env.HELM_VERSION }}"
+
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION#v}.linux-amd64.tar.gz"
+          echo "${PROMETHEUS_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION#v}.linux-amd64/promtool"
+          sudo install -m 0755 /tmp/promtool /usr/local/bin/promtool
+
+      - name: Apply database migrations
+        run: make db-migrate
+
+      - name: Parallel make cov (PYTEST_WORKERS=4)
+        id: cov
+        continue-on-error: true
+        env:
+          CHEMCLAW_MCP_REPO: ${{ github.workspace }}/.sibling/Chemclaw3-mcp
+          CHEMCLAW_MOCK_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_mock
+          CHEMCLAW_UI_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_ui
+          CHEMCLAW_SIBLINGS_REQUIRED: "1"
+          PYTEST_ADDOPTS: "-rfE --tb=short -p no:cacheprovider --junitxml=junit-${{ matrix.run }}.xml"
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          make cov PYTEST_WORKERS=4 2>&1 | tee cov-${{ matrix.run }}.log || rc=$?
+          end=$(date +%s)
+          {
+            echo "COLLECT-SUMMARY run=${{ matrix.run }} exit=${rc} wall_seconds=$((end-start))"
+            echo "--- FAILED/ERROR lines ---"
+            grep -E '^(FAILED|ERROR) ' cov-${{ matrix.run }}.log || echo "(none)"
+            echo "--- coverage / result lines ---"
+            grep -E 'Required test coverage|FAIL Required|^TOTAL|=+ .*(passed|failed).* in ' cov-${{ matrix.run }}.log || true
+            echo "COLLECT-SUMMARY-END"
+          } | tee summary-${{ matrix.run }}.txt
+          exit "$rc"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: collect-${{ matrix.run }}
+          path: |
+            junit-${{ matrix.run }}.xml
+            cov-${{ matrix.run }}.log
+            summary-${{ matrix.run }}.txt
+          if-no-files-found: warn
