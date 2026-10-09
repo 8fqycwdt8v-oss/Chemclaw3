@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from chemclaw.core.config import settings
+from chemclaw.ingest.eln.warehouse import expr
 from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.ingest.eln.warehouse.expr import (
     PatternBudgetError,
@@ -885,25 +886,48 @@ def test_the_page_budget_does_not_charge_what_happens_between_matches() -> None:
     assert matched < 0.01, f"the matching itself cost {matched:.4f}s, so this arm proves little"
 
 
-def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent() -> None:
+class _BilledClock:
+    """A clock on which every regex search costs exactly `cost`, whatever the host is doing.
+
+    It advances by `cost` at each reading and a search reads it twice (before and after), so the
+    page is billed `cost` per search. The page's accounting is under test, not the host's speed.
+    """
+
+    def __init__(self, cost: float) -> None:
+        """Start at zero; `cost` is the seconds each search is billed."""
+        self._cost = cost
+        self._now = 0.0
+
+    def __call__(self) -> float:
+        """The next reading."""
+        self._now += self._cost
+        return self._now
+
+
+def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A pattern cut short by the page is not reported as innocent.
 
     A clamped search times out exactly when the page runs dry, so the refusal must still name the
-    pattern when it was the one running.
+    pattern when it was the one running. The page is billed by a fake clock, three searches of one
+    cost against a budget of three and a half, so the catastrophic pattern is always given the
+    remaining half cost: the host's speed cannot spend the page before it runs, nor leave it enough
+    for the pattern to finish.
     """
+    cost = settings.eln_regex_timeout_seconds
+    monkeypatch.setattr(expr, "monotonic", _BilledClock(cost))
     catastrophic = {"regex": {"pattern": r"(a+)+$"}}
-    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
 
-    # The page must be nearly spent when the catastrophic pattern runs, or its clamp is large enough
-    # for the unclamped arm to fire instead. Sized from the measured cell cost, not a fixed budget.
     with pytest.raises(PatternBudgetError) as refused:
-        with pattern_budget(3.5 * _SLOW_CELL_COST):
+        with pattern_budget(3.5 * cost):
             for _ in range(3):
-                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+                apply_transforms("batch 4471 of 12", [_HONEST])
             apply_transforms("a" * 4000 + "b", [catastrophic])
 
     message = str(refused.value)
     assert "not established here" in message, message
+    assert "4 transform(s) ran" in message, message  # three billed whole, one cut short
     assert "No single one exceeded" not in message, (
         "the page refusal claimed every transform stayed inside its ceiling, about a pattern that "
         f"was never given its full allowance: {message}"
