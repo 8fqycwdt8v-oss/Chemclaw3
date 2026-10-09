@@ -243,7 +243,7 @@ dependencies = [
     # because the `contracts-v1.0.0` tag could not be pushed; the pin moves to the tag, and `uv.lock`
     # records the resolved commit either way. Needs GitHub at *build* time (the image builds with
     # `git`), never at run time.
-    "chemclaw-contracts @ git+https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp@1d551d40cdf1d1e13d5b86d85ee86fa91f41195f#subdirectory=packages/chemclaw_contracts",
+    "chemclaw-contracts @ git+https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp@6100fc019368c753c5f8d3163b5dc03078491f50#subdirectory=packages/chemclaw_contracts",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
