@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from deepagents.backends import CompositeBackend, StateBackend
+from langchain_core.runnables import RunnableConfig
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg_pool import AsyncConnectionPool
 
@@ -288,6 +289,41 @@ def test_concurrent_first_turns_get_one_migrated_memory_store() -> None:
     assert result["pools"] == {result["published_pool"]}, (
         "a store was handed a pool the module did not publish, so an opened pool leaked"
     )
+
+
+def test_what_an_ended_loop_left_is_replaced_on_the_next_loop() -> None:
+    """A store and a saver built on a loop that has ended are rebuilt, not handed to the next loop.
+
+    They sit on a pool pinned to the loop that opened it, which fails every query from another
+    loop. The first run ends without closing anything, as a script does.
+    """
+    from chemclaw.agent.state import turn_config
+
+    namespace = scratchpad.memory_namespace("ended-loop-probe")
+    config = cast(RunnableConfig, turn_config("ended-loop-probe"))
+
+    async def _first() -> tuple[object, object]:
+        await migrated_db_or_skip()
+        await ckpt.close_checkpointer()
+        store = await scratchpad.memory_store()
+        await store.asearch(namespace, limit=1)
+        return store, await ckpt.checkpointer()
+
+    async def _second() -> tuple[object, object]:
+        try:
+            store = await scratchpad.memory_store()
+            await store.asearch(namespace, limit=1)
+            saver = await ckpt.checkpointer()
+            await saver.aget_tuple(config)
+            return store, saver
+        finally:
+            await ckpt.close_checkpointer()
+
+    first = asyncio.run(_first())
+    second = asyncio.run(_second())
+
+    assert second[0] is not first[0], "the store of an ended loop was handed to the next one"
+    assert second[1] is not first[1], "the saver of an ended loop was handed to the next one"
 
 
 def test_closing_the_checkpointer_drops_the_store_that_sits_on_its_pool() -> None:

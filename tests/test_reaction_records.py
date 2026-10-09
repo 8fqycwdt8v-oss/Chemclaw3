@@ -43,7 +43,7 @@ from chemclaw.kg.validate import external_citations, unresolved_citations, valid
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from tests.pg import migrated_db_or_skip
+from tests.pg import migrated_db_or_skip, planned_index
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -433,24 +433,13 @@ async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
     assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
 
 
-async def _index_behind(statement: str, params: tuple[object, ...]) -> str:
-    """The index the planner uses for `statement`, with sequential scans taken away.
-
-    On a fixture-sized table a sequential scan is correct, so it is disabled to ask which index the
-    schema offers for the predicate.
-    """
-    async with db.connection(settings.postgres_dsn) as conn:
-        await conn.execute("SET LOCAL enable_seqscan = off")
-        cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", params)
-        row = await cursor.fetchone()
-    plan = row[0][0]["Plan"] if row else {}
-    nodes = [plan]
-    while nodes:
-        node = nodes.pop()
-        if "Index Name" in node:
-            return str(node["Index Name"])
-        nodes.extend(node.get("Plans", []))
-    return ""
+#: Ten thousand records over ten sources, so `ingest_source` is selective. With one or two the
+#: source-scoped read is a near-tie between the primary key and the id index.
+_RECORD_SEED = (
+    "INSERT INTO reaction_records (reaction_id, body, source, ingest_source) "
+    "SELECT 'idx-probe-' || n, 'body', 'eln:test', 'src-' || mod(n, 10) "
+    "FROM generate_series(1, 10000) AS n"
+)
 
 
 async def _leading_columns() -> set[str]:
@@ -471,24 +460,30 @@ def test_a_record_lookup_by_id_is_served_by_an_index_leading_with_that_id() -> N
     """`read()` and `known()` filter on the bare `reaction_id`; an index must lead with it.
 
     Timing cannot show this on fixture-sized tables, so two scale-free checks are used: the plan for
-    `_SELECT_ONE` (with sequential scans disabled) names the new index, and the catalog holds an
-    index leading with `reaction_id` for the batch read. `_SELECT_BODIES` filters on the pair and
+    `_SELECT_ONE` names the new index (asked of a table copy this test fills and analyses itself, as
+    the shared table's statistics are whatever earlier tests left), and the catalog holds an index
+    leading with `reaction_id` for the batch read. `_SELECT_BODIES` filters on the pair and
     must keep using the primary key.
     """
 
-    async def _run() -> tuple[str, str, set[str]]:
+    async def _run() -> tuple[str, str, set[str], str]:
         await migrated_db_or_skip()
-        await PostgresReactionRecordStore().record(
-            [ReactionRecord(reaction_id="idx-probe", body="body", source="eln:test")], "pg-eln"
-        )
         ids = [f"idx-probe-{index}" for index in range(50)]
         return (
-            await _index_behind(_SELECT_ONE, ("idx-probe",)),
-            await _index_behind(_SELECT_BODIES, ("pg-eln", ids)),
+            await planned_index("reaction_records", _RECORD_SEED, _SELECT_ONE, ("idx-probe-7",)),
+            await planned_index("reaction_records", _RECORD_SEED, _SELECT_BODIES, ("src-0", ids)),
             await _leading_columns(),
+            await planned_index(
+                "reaction_records",
+                _RECORD_SEED,
+                _SELECT_ONE,
+                ("idx-probe-7",),
+                without="reaction_records_id_idx",
+            ),
         )
 
-    one, bodies, leading = asyncio.run(_run())
+    one, bodies, leading, without_it = asyncio.run(_run())
+    assert without_it != "reaction_records_id_idx", "the plan names an index the copy lacks"
     assert one == "reaction_records_id_idx", (
         f"a single-record read plans through {one!r}, which does not lead with reaction_id"
     )

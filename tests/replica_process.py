@@ -88,6 +88,10 @@ def _apply_fence_controls() -> None:
     - `REPLICA_NO_HEARTBEAT`: the turn never refreshes its claim, so nothing cancels it on a timer.
     - `REPLICA_NO_FENCE`: no part of the fence asks anything, the two above included.
     - `REPLICA_NO_WRITE_BOUND`: a write may hold the claim row for ten minutes.
+    - `REPLICA_HOLD_ACT_COMMIT`: the checkpoint write that records a `probe_act` call waits for the
+      file `commit-<tag>` in `REPLICA_GATE` (`replica_graph.hold_the_commit_of_an_act`).
+    - `REPLICA_ASYNC_DURABILITY`: the graph writes a step's checkpoint while the next step runs, as
+      upstream does by default, instead of before it (`api.graph_stream.TURN_DURABILITY`).
     - `REPLICA_STALL_IN_WRITE=<file>`: the first fenced write stops its own process (SIGSTOP)
       inside its transaction, once the claim row is held, and leaves the file as the sign.
     """
@@ -113,6 +117,14 @@ def _apply_fence_controls() -> None:
         turn_fence.TurnFence.lose = lambda self: None  # type: ignore[method-assign]
     if os.environ.get("REPLICA_NO_WRITE_BOUND"):
         vars(checkpointer_module)["fenced_write_bound"] = lambda lease: 600.0
+    if os.environ.get("REPLICA_HOLD_ACT_COMMIT"):
+        from tests import replica_graph
+
+        replica_graph.hold_the_commit_of_an_act()
+    if os.environ.get("REPLICA_ASYNC_DURABILITY"):
+        from chemclaw.api import graph_stream
+
+        graph_stream.TURN_DURABILITY = "async"
     if sign := os.environ.get("REPLICA_STALL_IN_WRITE"):
         opened: Any = checkpointer_module._FencedWrite._open
 

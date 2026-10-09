@@ -107,6 +107,7 @@ from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.connectors.registry import ConnectorError, skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.core.graph_durability import ignoring_inherited_durability
 from chemclaw.core.logging import log_event
 from chemclaw.core.model_prose import ModelProse
 
@@ -278,10 +279,10 @@ def build_langgraph_agent(
         from langchain.agents import create_agent
 
         _log_bound_surface(prof, bound, handoffs, [], helper=True, peer=peer)
-        return create_agent(**shared)
+        return ignoring_inherited_durability(create_agent(**shared))
     helpers = _subagents(prof, chat_model, sink, correlation_id, actor, connectors)
     _log_bound_surface(prof, bound, handoffs, helpers, helper=False, peer=peer)
-    return create_deep_agent(
+    graph = create_deep_agent(
         backend=backend,
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
@@ -289,6 +290,8 @@ def build_langgraph_agent(
         subagents=helpers,
         **shared,
     )
+    # A peer is compiled without a checkpointer (`turn_graph`) and runs under the turn's durability.
+    return ignoring_inherited_durability(graph) if shared["checkpointer"] is False else graph
 
 
 def _log_bound_surface(

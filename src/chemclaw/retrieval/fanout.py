@@ -23,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
+from chemclaw.core.graph_durability import ignoring_inherited_durability
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.turn_signals import stream_writer_or_none
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
@@ -207,7 +208,7 @@ def _build() -> Any:
     graph.add_node("sweep", _sweep)
     graph.add_conditional_edges(START, _fan, ["sweep"])
     graph.add_edge("sweep", END)
-    return graph.compile(checkpointer=False)
+    return ignoring_inherited_durability(graph.compile(checkpointer=False))
 
 
 _FANOUT = _build()

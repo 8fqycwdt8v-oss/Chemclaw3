@@ -27,7 +27,6 @@ from chemclaw.agent.session_store import (
     chemist_words,
 )
 from chemclaw.api import runner
-from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_text import (
@@ -37,7 +36,7 @@ from chemclaw.core.turn_text import (
 )
 from chemclaw.protocols.models import ExperimentRequest, RequestField
 from tests.fakes_turn import Piece, ScriptedTurn
-from tests.pg import migrated_db_or_skip
+from tests.pg import migrated_db_or_skip, planned_index
 
 #: The chemist's turn 1 — a real constraint, stated in their own words, two turns before the
 #: "ok go ahead" that triggers the intake.
@@ -278,36 +277,44 @@ class _CountingHistory(InMemoryHistoryProvider):
         return await super().recent_user_texts(session_id, limit=limit, state=state)
 
 
+#: Fifty sessions of two hundred rows, half of them a person's words: a table in which one session
+#: is a fiftieth of it, so reaching only that session is visibly cheaper than any other path.
+_AMBIENT_SEED = (
+    "INSERT INTO session_messages (session_id, message, message_shape) "
+    "SELECT 'seed-' || (n % 50), "
+    "jsonb_build_object('type', CASE WHEN n % 2 = 0 THEN 'human' ELSE 'ai' END), "
+    f"'{LANGCHAIN_SHAPE}' "
+    "FROM generate_series(1, 10000) AS n"
+)
+
+
+async def _ambient_read_reaches(without: str | None = None) -> str:
+    """The index the ambient read plans through over a table of known size and shape."""
+    return await planned_index(
+        "session_messages",
+        _AMBIENT_SEED,
+        _SELECT_RECENT_USER_ROWS,
+        ("seed-7", LANGCHAIN_SHAPE, 20),
+        without=without,
+    )
+
+
 def test_the_ambient_read_is_bounded_by_the_session_and_not_by_the_table() -> None:
     """The ambient read plans through the partial index, visiting no other session.
 
     A plan assertion, since the row counts are stable and timings are not: the read must cost
-    O(session), not O(table). Sequential scans are disabled because a fixture table fits in one page
-    (see `tests/test_reaction_records.py::_index_behind`).
+    O(session), not O(table). The plan is asked of a copy of the table this test fills and analyses
+    itself (`tests.pg.planned_index`), since a shared table's statistics are whatever other tests
+    left. Without the partial index the plan names another, so the assertion can fail.
     """
-
-    async def _run() -> str:
-        await migrated_db_or_skip()
-        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
-            await conn.execute("SET LOCAL enable_seqscan = off")
-            cursor = await conn.execute(
-                f"EXPLAIN (FORMAT JSON) {_SELECT_RECENT_USER_ROWS}",
-                ("any-session", LANGCHAIN_SHAPE, 20),
-            )
-            row = await cursor.fetchone()
-        plan = row[0][0]["Plan"] if row else {}
-        nodes = [plan]
-        while nodes:
-            node = nodes.pop()
-            if "Index Name" in node:
-                return str(node["Index Name"])
-            nodes.extend(node.get("Plans", []))
-        return ""
-
-    assert asyncio.run(_run()) == "session_messages_ambient_human_idx", (
+    assert asyncio.run(_ambient_read_reaches()) == "session_messages_ambient_human_idx", (
         "the ambient read no longer plans through the partial index migration 098 added, so it is "
         "back to walking the primary key and discarding every other session's rows — O(table) on "
         "the answer path, once per turn"
+    )
+    assert (
+        asyncio.run(_ambient_read_reaches(without="session_messages_ambient_human_idx"))
+        != "session_messages_ambient_human_idx"
     )
 
 

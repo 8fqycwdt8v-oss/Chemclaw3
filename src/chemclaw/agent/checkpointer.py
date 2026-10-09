@@ -74,6 +74,8 @@ logger = logging.getLogger(__name__)
 
 _saver: AsyncPostgresSaver | None = None
 _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+# The loop `_pool` was opened on, which the pool, the saver and the memory store are pinned to.
+_pool_loop: asyncio.AbstractEventLoop | None = None
 
 # Guards the lazy initializations below (and `scratchpad.memory_store()`, which shares the pool),
 # each a check-then-await-then-act; globals are published only after the await completes, so a
@@ -115,6 +117,28 @@ def _initialization_lock() -> asyncio.Lock:
     if _init_lock is None:
         _init_lock = asyncio.Lock()
     return _init_lock
+
+
+def _forget_what_an_ended_loop_owned() -> None:
+    """Drop the pool, saver and memory store when the loop that opened the pool has closed.
+
+    They are pinned to that loop, and a call through them from a later loop fails with "Event loop
+    is closed". Dropped rather than closed, which needs the dead loop; the connections go with the
+    last reference. Only an ended loop is detected: a second loop that is still running gets the
+    first one's pool (`core/db` keys its pools on the running loop and so serves both). A server
+    has one loop, so nothing changes there; this is for what runs `asyncio.run` more than once.
+    """
+    global _saver, _pool, _pool_loop, _init_lock
+    if _pool_loop is None or not _pool_loop.is_closed():
+        return
+    from chemclaw.agent.scratchpad import drop_memory_store
+
+    drop_memory_store()
+    _saver = None
+    _init_lock = None
+    pool, _pool, _pool_loop = _pool, None, None
+    if pool is not None:
+        unregister_pool(pool)
 
 
 # The tables `AsyncPostgresSaver.setup()` creates, for the erasure sweep and its completeness test.
@@ -857,6 +881,7 @@ async def checkpointer() -> AsyncPostgresSaver:
         A ready saver over this process's checkpointer pool.
     """
     global _saver
+    _forget_what_an_ended_loop_owned()
     if _saver is not None:
         return _saver
     # Awaited outside the lock, because `_checkpoint_pool` takes that same lock itself and
@@ -934,7 +959,8 @@ async def _checkpoint_pool() -> Any:
     `checkpointer()` and `scratchpad.memory_store()` await this before taking the lock for their own
     object, so two cold callers never open two pools.
     """
-    global _pool
+    global _pool, _pool_loop
+    _forget_what_an_ended_loop_owned()
     if _pool is not None:
         return _pool
     async with _initialization_lock():
@@ -967,6 +993,7 @@ async def _checkpoint_pool() -> Any:
                 "chemclaw_checkpointer_statements_waiting", checkpointer_statements_waiting
             )
             _pool = pool
+            _pool_loop = asyncio.get_running_loop()
     return _pool
 
 
@@ -974,17 +1001,19 @@ async def close_checkpointer() -> None:
     """Drop the process's checkpointer and close its pool — for tests and orderly shutdown.
 
     The saver goes with the pool because it is pinned to the loop it was built in. The memory store,
-    which sits on this pool, is dropped first; this is `close_memory_store`'s only caller, so the
-    ordering lives in one place. A pool whose loop has already closed is dropped rather than
-    awaited, since closing it from another loop raises; its connections died with that loop.
+    which sits on this pool, is dropped first, so the ordering lives in one place. A pool whose loop
+    has already closed is dropped rather than awaited, since closing it from another loop raises;
+    its connections died with that loop.
     """
-    global _saver, _pool, _init_lock
+    global _saver, _pool, _pool_loop, _init_lock
     # Imported here rather than at module scope: `scratchpad` pulls the deepagents backends in, and
     # a worker that only needs `CHECKPOINT_TABLES` should not import the agent's filesystem stack.
-    from chemclaw.agent.scratchpad import close_memory_store
+    from chemclaw.agent.scratchpad import drop_memory_store
 
-    await close_memory_store()
+    _forget_what_an_ended_loop_owned()
+    drop_memory_store()
     _saver = None
+    _pool_loop = None
     # Dropped too: an `asyncio.Lock` belongs to its loop, and the next loop's first caller would
     # wait on it forever.
     _init_lock = None
