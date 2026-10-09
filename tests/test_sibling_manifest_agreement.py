@@ -26,6 +26,7 @@ import yaml
 from chemclaw_contracts.calc import CALC_REQUESTS
 from chemclaw_contracts.rxnlabel import RXNLABEL_REQUESTS
 
+from chemclaw.connectors.contract import compare
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.connectors.registry import ConnectorError, discovered, forget_discovered
 from chemclaw.core.config import Settings, settings
@@ -95,6 +96,47 @@ def test_every_connector_the_package_declares_is_discovered_from_the_package(
         )
         assert manifest == from_package
         assert manifest.contract_version == contracts.contract_version(name)
+
+
+@pytest.mark.parametrize("name", contracts.manifest_names())
+def test_every_packaged_connector_declares_a_version_the_session_open_check_reads(
+    name: str, default_path: str
+) -> None:
+    """The version check at session open runs for each connector, so a pin that drops it fails here.
+
+    A server built from the package reports the packaged manifest's own `contract_version` on
+    `/healthz` (`mcp_server_kit.connector_app`), so that is the served value. This tree's model
+    must hold a semver, and `compare` must call it `same` and never `unknown`: an unknown verdict
+    is the silent state in which nothing is ever refused.
+    """
+    del default_path
+    declared = discovered()[name][1].contract_version
+    assert declared is not None, f"the installed package's {name} manifest declares no version"
+    served = contracts.contract_version(name)
+    assert compare(declared, served) == "same", (name, declared, served)
+
+
+@pytest.mark.parametrize("name", contracts.manifest_names(internal=True))
+def test_every_packaged_backend_declares_a_semver_contract_version(name: str) -> None:
+    """The `calc` and `rxnlabel` backends declare one too, though nothing here mounts them."""
+    declared = contracts.contract_version(name)
+    assert declared is not None, f"the installed package's {name} backend declares no version"
+    assert compare(declared, declared) == "same"
+
+
+def test_no_fleet_checkout_manifest_is_a_different_major_from_the_installed_package() -> None:
+    """Core's own comparison does not refuse a connector the pinned package describes.
+
+    A server built from the fleet's current manifests reports that checkout's version. Compared
+    with the pinned package's, a different MAJOR would refuse the connector at every session open.
+    """
+    fleet = _sibling_or_skip()
+    refused: list[str] = []
+    for name in contracts.manifest_names():
+        served = contracts.declared_contract_version(fleet / "manifests" / name / "connector.yaml")
+        if compare(contracts.contract_version(name), served) == "major":
+            refused.append(f"{name}: package {contracts.contract_version(name)}, fleet {served}")
+    assert not refused, "\n".join(refused)
 
 
 #: The packaged connectors this tree relies on being off until a deployment names them: their
