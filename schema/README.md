@@ -1,7 +1,8 @@
 # `schema/` — the contracts ChemClaw3 publishes
 
-Two kinds, one per subdirectory: `api/` is the HTTP and event contract the browser front end is
-generated from; `result-store/` is the database schema for a store somebody else runs.
+Three kinds, one per subdirectory: `api/` is the HTTP and event contract the browser front end is
+generated from; `result-store/` is the database schema for a store somebody else runs; `model-text/`
+is the generated inventory of every string a model reads.
 
 ## `api/`
 
@@ -67,3 +68,8 @@ each deliberately:
 - **No sequences.** Every primary key is a content hash — which also makes re-publishing a record
   a no-op rather than a duplicate, and the whole database re-buildable from `calculation_payload`.
 - **No partial or expression indexes.** Anything worth indexing is a real column.
+
+## `model-text/`
+
+`inventory.json`, the generated list of every string a model reads, with its owner and token cost.
+See `model-text/README.md`.

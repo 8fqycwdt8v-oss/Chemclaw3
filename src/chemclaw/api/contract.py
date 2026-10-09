@@ -19,7 +19,7 @@ from chemclaw.protocols.render import ProtocolReadout
 
 #: Semver of the document. Major: a field, event or route removed, renamed or retyped. Minor:
 #: anything additive. Patch: wording only.
-API_CONTRACT_VERSION = "1.0.0"
+API_CONTRACT_VERSION = "1.0.1"
 
 #: Where the contract is committed, and the `make` target that regenerates it.
 CONTRACT_PATH = Path(__file__).resolve().parents[3] / "schema" / "api" / "openapi.json"

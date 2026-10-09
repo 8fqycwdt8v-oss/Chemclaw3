@@ -50,7 +50,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/`, `templates/`, `profiles/`, `vendored/`, `eln-exports/`, `commitments/`. `data/README.md` names each setting. |
 | `tests/` | The suite, including the guards on declarations: packaging, the image, the Helm chart, the ADR ledger and the layering rules. |
 | `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations for this system's own database. |
-| `schema/` | Contracts this system publishes rather than runs. `result-store/`: schemas for databases it does **not** own, kept apart from `infra/sql/` because nothing here holds DDL on those stores. `api/`: the generated OpenAPI document the UI builds its types from, with its version rules. |
+| `schema/` | Contracts this system publishes rather than runs. `result-store/`: schemas for databases it does **not** own, kept apart from `infra/sql/` because nothing here holds DDL on those stores. `api/`: the generated OpenAPI document the UI builds its types from, with its version rules. `model-text/`: the generated inventory of every string a model reads. |
 | `deploy/` | OpenShift delivery: one rootless multi-role image, the Helm chart, and `kind/` for a local cluster. `deploy/README.md` maps each `CHEMCLAW_COMPONENT` role to its module. |
 | `docs/` | Decisions, guides, reference and archive — `docs/README.md` says which are maintained. |
 | `examples/` | A runnable walkthrough, not shipped in the wheel. |

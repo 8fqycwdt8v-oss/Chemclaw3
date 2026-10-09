@@ -5453,7 +5453,7 @@
   },
   "info": {
     "title": "Chemclaw",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -6406,7 +6406,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Readiness: the agent can be built, Postgres answers, and how many connectors are down.\n\nThe database gates (under `session_store=\"postgres\"` a pod cannot serve a turn without it); the\nconnectors are reported, not gating — `connectors_required` fails startup instead. Reported as a\ncount, not names: this body is public, and names stay on `/metrics` and in logs. The database\nverdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay\nready).\n\n503 rather than an exception, so `curl` shows the reason. `/healthz` stays untouched: an outage\nshould drain pods, not restart them. Both probes are cached for\n`service_readiness_cache_seconds` (0 probes every time).",
+        "description": "Readiness: the agent can be built, Postgres answers, and how many connectors are down.\n\nThe database gates (under `session_store=\"postgres\"` a pod cannot serve a turn without it); the\nconnectors are reported, not gating — `connectors_required` fails startup instead. A process\nrunning a model-text overlay adds its digest, as `model_text_overlay`. Reported as a\ncount, not names: this body is public, and names stay on `/metrics` and in logs. The database\nverdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay\nready).\n\n503 rather than an exception, so `curl` shows the reason. `/healthz` stays untouched: an outage\nshould drain pods, not restart them. Both probes are cached for\n`service_readiness_cache_seconds` (0 probes every time).",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {
