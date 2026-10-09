@@ -1264,6 +1264,23 @@ What *does* decide it on OpenShift is a cluster-wide switch that is off by defau
 check `networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the
 connector port and the worker probe port.
 
+**A pod that stopped mid-turn (a node drain, a frozen container, a blocked event loop).** Its turn is
+resumed by its sender's next attach if it only read (`D-2026-10-09-a-turn-whose-pod-died-resumes-until-it-has-acted`),
+and the pod is fenced if it wakes after that: `chemclaw_turn_claims_lost_total` counts turns ended
+because their claim lapsed or was taken. Three timings, all derived from
+`CHEMCLAW_SERVICE_TURN_CLAIM_LEASE_SECONDS` (no setting of their own): a checkpoint write under a
+claim is cut off by the database after a third of the lease (`idle_in_transaction_session_timeout`,
+`statement_timeout`, `lock_timeout`, all set inside the write's own transaction, so a pooler in
+transaction mode is unaffected); a takeover waits for such a write at most half a lease and then
+answers "held", so an attach during that window is told the turn is running and succeeds on the
+next; and an effect is refused when the claim has less than a third of the lease left, which a
+holder refreshing every third never has. A fenced write costs a transaction instead of a pipeline:
+on loopback, 500 write pairs on one session took p50 4.3 ms unfenced and 5.1 ms fenced, and eight
+sessions at once 30.6 ms and 42.5 ms (about +30 to 40 % wall), writes still serialising under the
+saver's one lock. If a deployment sees `canceling statement due to lock timeout` or
+`terminating connection due to idle-in-transaction timeout` from the checkpointer, a write outlived
+a third of the lease: look at the database's latency before raising the lease.
+
 ## (x-a) Run more than one background worker
 
 `workers.background.replicas` ships at 2 with a `minAvailable: 1` PodDisruptionBudget, so a node

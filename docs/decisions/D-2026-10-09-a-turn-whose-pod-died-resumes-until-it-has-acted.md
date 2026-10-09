@@ -107,7 +107,17 @@ sender. The rule, and where each part lives:
     `SELECT … FROM session_turns WHERE holder = … AND expires_at > now() FOR SHARE`. A takeover is an
     `INSERT … ON CONFLICT DO UPDATE` of that row and waits for the lock, so a write either commits
     before the takeover (the new holder then reads it) or finds no row and is refused with
-    `TurnFenceLost`: there is no gap between the check and the write. Reads are not fenced.
+    `TurnFenceLost`: there is no gap between the check and the write. Reads are not fenced. The
+    transaction opens at the write's first statement, after upstream has serialised the values, so
+    that work is outside the lock; and it is **bounded by the database**: the statement that takes
+    the row also sets `idle_in_transaction_session_timeout`, `statement_timeout` and `lock_timeout`
+    to a third of the lease (`fenced_write_bound`). A writer that stalls inside its transaction (a
+    stopped process, a dead node) is terminated after that, which releases the row and rolls the
+    write back; it is never committed late. A takeover waits for a write in flight at most half a
+    lease (`takeover_wait`, longer than the write's bound) and answers *held* when it gives up, as
+    for any held slot, instead of raising. Measured with a writer stopped inside its write: the
+    takeover is granted within the bound, the stopped pod's write finds its connection gone, and
+    without the bound the takeover is refused for as long as the row is held.
   - **Every model call** asks the claim before it is made (`HoldClaimBeforeModel`), so a woken pod
     stops before it spends.
   - **Every call that is not repeatable**, including each of several in parallel and those of a
@@ -115,20 +125,37 @@ sender. The rule, and where each part lives:
     chain), with a margin: the claim must outlive the check by a third of the lease
     (`_TURN_OWNS`), which a healthy holder always has since it refreshes three times per lease.
   - **The heartbeat** loses the fence when a refresh matches no row, or when no refresh has
-    succeeded for a lease. It bounds a pod that is doing nothing effectful (a stuck read), at about
-    a lease plus two refresh intervals after the last success; effects and checkpoints are stopped
-    by the two checks above, which do not depend on that timer.
-  A fence is lost only on an answer, never on an error. `hold()` distinguishes *taken over* (the
-  claim names someone else, or no row: the fence is lost, the pump cancelled, the teardown settles
-  nothing, books nothing and spends no approval) from *could not ask* (the store raised; one retry,
-  then `ClaimUnverifiable`). For the second, the call is refused with a message the model can
-  read (fail closed for effects) and the turn is not discarded: it books its spend and settles
-  honestly, because a store outage is not evidence of a takeover. `run_turn` looks once more before
-  it writes its ending, and a lost fence also skips `_escalate_exhausted_review`. What the fence
-  cannot cover: an effect already issued when the claim was lost (a request on the wire, a job
-  started). A claim live with that margin at the check means no replica can have taken the thread
-  before the call returns, unless it outlasts the remaining lease, which is the exposure the lease
-  has always had.
+    succeeded for a lease. A refresh matches no row once the lease has lapsed, whether or not
+    anyone took it (`expires_at > now()`): a holder that woke after its lease ran out does not take
+    the session back from the replica about to resume it, and its turn ends. The heartbeat bounds a
+    pod that is doing nothing effectful (a stuck read), at about a lease plus two refresh intervals
+    after the last success; effects and checkpoints are stopped by the checks above, which do not
+    depend on that timer.
+  The store answers three ways, and the fence keeps them apart (`SessionTurnClaims.owns`). *Held*:
+  the row names this holder and is live with the margin to spare. *Lost*: no such row — gone,
+  another holder's, or lapsed by the database's clock; the fence is lost, the pump cancelled, the
+  teardown settles nothing, books nothing and spends no approval. *Unconfirmed*: the row still names
+  this holder and is live but short of its margin, because its refreshes have been failing (a
+  database blip of two refreshes), or the store could not be asked (one retry, then
+  `ClaimUnverifiable`). The check renews a short claim once and asks again, so a recovered store
+  puts the turn straight back; if that cannot be done the call is refused with a message the model
+  can read (fail closed for effects) and the turn is not discarded: it books its spend and settles
+  honestly, because a store outage is not evidence of a takeover. A store that failed twice is not
+  asked again for a third of the lease, so an outage costs one wait and not one per model call.
+  `run_turn` asks once more before it writes its ending and before it reports a failure (a write
+  cut off by its bound is the fence's consequence when the claim is gone), and a lost fence also
+  skips `_escalate_exhausted_review`. What the fence cannot cover: an effect already issued when the
+  claim was lost (a request on the wire, a job started). A claim live with that margin at the check
+  means no replica can have taken the thread before the call returns, unless it outlasts the
+  remaining lease, which is the exposure the lease has always had.
+  **What the saver fence costs**, loopback, 500 `aput` + `aput_writes` pairs on one session and 150
+  on each of eight (median of four runs, `p50 / p95`, milliseconds per pair): one session
+  4.3 / 5.7 unfenced, 5.1 / 8.5 fenced; eight sessions at once 30.6 / 38.1 and 42.5 / 60.2, which
+  is +30 to 40 % wall. The fenced write leaves upstream's pipeline for a transaction (a begin, the
+  claim statement, the writes, a commit), because pipeline mode inside a transaction measured slower
+  than plain statements. Writes still serialise under the saver's one lock, as upstream's do; a
+  lock per session would remove that for both and is a different change with its own measurements.
+  Pool accounting is unchanged: one pooled connection per write, as before.
 - **What it re-executes**: `astream(None, config)` runs the pending node. The committed tail is
   read as a live update is (`replayed_events`): the trace, the grounding evidence, the transcript's
   tool exchanges and the spend are what an uninterrupted turn would hold, and the events are
@@ -176,6 +203,12 @@ of `D-2026-10-04`). It is a BACKLOG row with these numbers.
 - A turn that lost its session is ended by the pod that lost it, whether or not it was ever
   resumed: a lease that lapses under a live pod now ends that turn instead of letting it run beside
   whoever started the next one. `chemclaw_turn_claims_lost_total` counts it.
+- A holder whose refresh lands after its lease lapsed no longer keeps its claim and comes back
+  unadmitted, as `D-2026-10-08-limits-and-bookkeeping-live-in-postgres` records for a database
+  outage longer than a lease: the refresh is refused (`expires_at > now()`), the fence is lost and
+  its turn ends, resumable by its sender's next attach if it only read. Re-extending a lapsed lease
+  is what let a stalled pod keep a session a takeover had been waiting for, and the fence cannot
+  tell that holder from a revived one. That bullet of the earlier record is read with this change.
 - A resumed turn's audit trail has no rows for the reads the dead attempt made.
 - Counters: `chemclaw_turns_resumed_total`, `chemclaw_turn_resume_refused_total{reason}` (once per
   turn, when it is marked). `chemclaw_turns_started_total` counts a turn once, at its first attempt.
@@ -210,3 +243,10 @@ against a resume on two connections (with the bare statement as the control), th
 held, a taken-over and a lapsed claim (with the permissive statement as the control) and the replay.
 `tests/test_turn_fence.py` holds the fence: the tri-state `hold()`, a refused call on an error, each
 of parallel calls and a helper's calls checked, and the heartbeat's two ways to lose.
+`tests/test_turn_fence_bounds.py` holds the bounds: a writer stalled inside its transaction is cut
+off and the takeover proceeds (control: unbounded, the takeover is refused), a takeover behind a
+write answers held, a lapsed lease is not refreshed, a short claim is renewed or unconfirmed and
+never lost (control: lapsed and another's are lost), and an outage is asked about once. In
+`tests/test_turn_survives_pod.py` the fork test has a case where only the checkpointer's fence
+stands (control: it alone removed, the thread forks) and a pod stopped inside its write is shown
+to free its session (control: no bound, the takeover is refused).
