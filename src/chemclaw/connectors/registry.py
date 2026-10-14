@@ -72,7 +72,7 @@ class ConnectorError(ChemclawError):
     """A connector bundle is malformed, or an enabled connector does not exist.
 
     A `ChemclawError` (so a `ValueError`), like other startup configuration errors. Registered by
-    name in `chemclaw.durable.publish._BAD_DATA_TYPES` (Temporal matches by exact name), so a
+    name in `chemclaw.durable.retry._BAD_DATA_TYPES` (Temporal matches by exact name), so a
     template step naming an unknown job fails on its first attempt.
     """
 

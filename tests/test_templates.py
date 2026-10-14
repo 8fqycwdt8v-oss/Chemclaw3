@@ -669,14 +669,15 @@ async def test_only_the_agent_step_carries_the_narrowed_retry(
     """Only the `agent` step carries the narrowed retry.
 
     Replaying a whole agent turn on a provider blip would re-run every tool it already ran, so the
-    agent step gets `agent_step_retry()`; a tool step keeps the normal transient-retry budget.
+    agent step gets the `GOVERNED` policy; a tool step keeps the `REMOTE` transient-retry budget.
     Asserts what `_run_step` hands Temporal per branch, with the module's `workflow` handle
     substituted.
     """
     import types
 
     from chemclaw.durable import template_job
-    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.registry import ActivityClass
+    from chemclaw.durable.retry import policy_for
     from chemclaw.durable.template_activities import StepIdentity
 
     seen: list[Any] = []
@@ -707,11 +708,11 @@ async def test_only_the_agent_step_carries_the_narrowed_retry(
         )
 
     tool_policy, agent_policy = seen
-    assert tool_policy.maximum_attempts == BAD_DATA_RETRY.maximum_attempts
+    assert tool_policy.maximum_attempts == policy_for(ActivityClass.REMOTE).maximum_attempts
     assert agent_policy.maximum_attempts == settings.agent_step_max_attempts
     assert agent_policy.maximum_attempts < tool_policy.maximum_attempts
     # Narrower in attempts only: which failures count as transient must not depend on the branch.
-    assert agent_policy.non_retryable_error_types == BAD_DATA_RETRY.non_retryable_error_types
+    assert agent_policy.non_retryable_error_types == tool_policy.non_retryable_error_types
 
 
 # --- DARK-2: a connector tool step is governed exactly as an in-process one (D-168) ------------

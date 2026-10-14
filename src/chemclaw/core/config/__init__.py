@@ -811,7 +811,7 @@ class Settings(
         It guarantees one full-length attempt, never two: `connector_queue_wait_timeout` is derived
         from the same ceiling, so a worst-case attempt (wait plus work) always consumes nearly all
         of it. Retries remain spendable by attempts that fail quickly, which is what
-        `BAD_DATA_RETRY`'s transient failures do. On the composed class because the ceiling and the
+        the retry classes' transient failures do. On the composed class because the ceiling and the
         budgets live in different sections.
         """
         # The max over every activity budget a bundle child can spend, from
@@ -879,6 +879,24 @@ class Settings(
                 "ceiling — shortening the client bound alone only abandons work the server "
                 "finishes anyway."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _a_retry_never_starts_longer_than_it_is_allowed_to_wait(self) -> Self:
+        """The first retry interval of a class may not exceed that class's longest.
+
+        Temporal refuses a policy whose `initial_interval` exceeds its `maximum_interval`, and from
+        inside a workflow that refusal is a failed workflow task, retried without end.
+        """
+        for first, longest in (
+            ("io_retry_initial_seconds", "io_retry_max_interval_seconds"),
+            ("slow_retry_initial_seconds", "slow_retry_max_interval_seconds"),
+        ):
+            if getattr(self, first) > getattr(self, longest):
+                raise ValueError(
+                    f"{first}={getattr(self, first)} exceeds {longest}={getattr(self, longest)}: "
+                    f"raise {longest} or lower {first}."
+                )
         return self
 
 

@@ -154,7 +154,7 @@ class GitWriteError(ChemclawError):
     """The note write failed in a way a retry cannot fix.
 
     A `ChemclawError`, so the reason reaches the model instead of a generic tool failure. Registered
-    non-retryable (`durable.publish._BAD_DATA_TYPES`), so it is raised only for structural failures:
+    non-retryable (`durable.retry._BAD_DATA_TYPES`), so it is raised only for structural failures:
     a mis-pointed checkout, a path escaping the tree, a denied credential. Transient failures raise
     `GitRemoteError`.
     """

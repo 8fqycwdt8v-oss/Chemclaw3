@@ -27,7 +27,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio import activity, workflow
-from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import (
     ActivityError,
     ApplicationError,
@@ -51,14 +51,14 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.memory.jobs import SynthesisUnit
 
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
     activity_failure_reason,
     light_write_queue_wait_timeout,
     publish_note_best_effort,
     publish_result_best_effort,
     queue_wait_timeout,
 )
-from chemclaw.durable.registry import durable_activity, durable_workflow
+from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
+from chemclaw.durable.retry import child_workflow_once, retry_for
 
 # A plain module logger, used only inside an `is_replaying` guard that also covers the metric
 # beside it, so the count and the line describe the same event.
@@ -528,7 +528,7 @@ class ConnectorJobWorkflow:
             ),
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(record_effect_activity),
         )
 
     async def _settle_effect(
@@ -550,7 +550,7 @@ class ConnectorJobWorkflow:
                 ),
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(settle_effect_activity),
             )
         except Exception:
             # An unsettled row is the safe failure (state in doubt); raising would fail a job whose
@@ -580,11 +580,11 @@ class ConnectorJobWorkflow:
             },
             # One child per parent execution (see `child_workflow_id`), so a duplicate id is a bug.
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-            # One attempt: `BAD_DATA_RETRY` cannot classify a child failure (Temporal matches the
+            # One attempt: the bad-data list cannot classify a child failure (Temporal matches the
             # outermost failure name), so retries here would only duplicate compute. The child's
             # activities already retry transients, and a dead worker is redelivered without a
             # workflow retry.
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            retry_policy=child_workflow_once(),
             # See `child_execution_timeout`.
             execution_timeout=child_execution_timeout(job.timeout_seconds, job.awaits_answer),
         )
@@ -733,7 +733,7 @@ class ConnectorJobWorkflow:
                 # background queue. The light-write bound, not core's hour, because this write sits
                 # in front of `_notify_failure` (`tests/test_durable_observability.py`).
                 schedule_to_start_timeout=light_write_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(record_job),
             )
         except ActivityError as exc:
             # Counted, so a fleet-wide loss of the durable record shows on a dashboard rather than
@@ -762,14 +762,14 @@ class SettleEffectInput(BaseModel):
     external_ref: str = ""
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def record_effect_activity(record: EffectRecord) -> None:
     """Write the intent to change something outside this deployment, before it is attempted."""
     await begin_effect(record)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def settle_effect_activity(payload: SettleEffectInput) -> None:
     """Record how an attempted effect ended."""

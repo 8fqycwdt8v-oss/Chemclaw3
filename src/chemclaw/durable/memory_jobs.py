@@ -17,7 +17,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.eln.adapter import entry_window, fetch_was_truncated
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.ingest.eln.ord import OrdReaction, RecordTier
@@ -35,11 +35,10 @@ with workflow.unsafe.imports_passed_through():
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
     fan_out_queue_wait_timeout,
-    note_publish_retry,
     queue_wait_timeout,
 )
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +175,7 @@ async def read_corpus() -> CorpusRead:
     # reviews them; `memory.jobs._units` says how it is used.
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def build_campaign_notes_activity() -> list[SynthesisUnit]:
     """Detect reaction chains across the corpus and build (not publish) one campaign unit each."""
@@ -186,7 +185,7 @@ async def build_campaign_notes_activity() -> list[SynthesisUnit]:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def build_playbook_notes_activity() -> list[SynthesisUnit]:
     """Distil cross-project candidates across the corpus, one playbook unit per candidate."""
@@ -196,7 +195,7 @@ async def build_playbook_notes_activity() -> list[SynthesisUnit]:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def build_optimization_notes_activity() -> list[SynthesisUnit]:
     """Group same-transformation runs across the corpus, one optimization unit per group."""
@@ -206,7 +205,7 @@ async def build_optimization_notes_activity() -> list[SynthesisUnit]:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn
 async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> str:
     """Record one already-built memory note; return its reference (the fan-out publish step).
@@ -257,11 +256,11 @@ class PublishNoteWorkflow:
             # The fan-out queue wait rather than core's hour, so a note parked on an unserved queue
             # ends as a named activity failure that `fan_out` logs and counts.
             schedule_to_start_timeout=fan_out_queue_wait_timeout(),
-            retry_policy=note_publish_retry(),
+            retry_policy=retry_for(publish_memory_note_activity),
         )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def resolve_notes_per_run() -> int:
     """Resolve the per-run note cap outside workflow code, as `resolve_fan_out_limit` does.
@@ -308,13 +307,13 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
         build_activity,
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
         schedule_to_start_timeout=queue_wait_timeout(),
-        retry_policy=BAD_DATA_RETRY,
+        retry_policy=retry_for(build_activity),
     )
     cap = await workflow.execute_local_activity(
         resolve_notes_per_run,
         # The generic short-activity budget, as `resolve_fan_out_limit` uses beside it.
         start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
-        retry_policy=BAD_DATA_RETRY,
+        retry_policy=retry_for(resolve_notes_per_run),
     )
     return await fan_out(
         PublishNoteWorkflow, _slice_for_this_run(units, cap, id_prefix), id_prefix=id_prefix

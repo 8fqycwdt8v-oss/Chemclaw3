@@ -2,7 +2,7 @@
 
 A preflight, not a clock: composites multiply remote primitives per species, and a timeout fires
 only after the time is spent. Refusals are `ValueError`s naming the count, non-retryable under
-`durable/publish.py::BAD_DATA_RETRY`. `require_hessian_affordable` counts atoms instead.
+`durable/retry.py`'s bad-data list. `require_hessian_affordable` counts atoms instead.
 """
 
 from chemclaw.core.config import settings

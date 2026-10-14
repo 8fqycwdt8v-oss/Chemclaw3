@@ -95,7 +95,7 @@ class CalcBusyError(AtCapacityError):
 
     Retryable by construction: `SubsystemUnavailableError`'s hierarchy is asserted absent from
     `_BAD_DATA_TYPES` (`tests/test_publish.py`), so saturation is never failed as bad data. The
-    backoff is the activity's (`durable/publish.py::calculation_retry`). The message tells the
+    backoff is the activity's (`durable/retry.py`, class `CALC`). The message tells the
     chemist the molecule is fine and covers both the durable path (automatic retry) and the tool
     path (none).
     """

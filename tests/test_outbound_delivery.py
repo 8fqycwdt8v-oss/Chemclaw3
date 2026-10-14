@@ -374,7 +374,7 @@ def test_two_runs_of_one_job_are_two_messages_and_a_retry_is_one(
 
     A `job-result` body has no natural discriminator, so a content-only key would make a receiver
     drop a genuine second result. Both directions are asserted, since a retry (at-least-once under
-    `BAD_DATA_RETRY`) must still collapse.
+    the bad-data retry list) must still collapse.
     """
     outbox = _local_channel(monkeypatch, tmp_path)
 

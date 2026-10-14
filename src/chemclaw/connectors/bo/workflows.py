@@ -44,12 +44,11 @@ from chemclaw.connectors.queues import bundle_queue
 # `start_to_close_timeout` does not bound the wait for a worker; without it a bundle queue served by
 # no pod is indistinguishable from a busy one until the parent's execution ceiling fires.
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
-    calculation_retry,
     connector_queue_wait_timeout,
     remaining_queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
+from chemclaw.durable.retry import retry_for
 
 
 def _carry_on_if_history_is_filling_up(
@@ -279,11 +278,11 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
-                # `calculation_retry`, not `BAD_DATA_RETRY`: a computed objective such as
+                # The `CALC` class, not `IO`: a computed objective such as
                 # `solubility_objective` calls `cached_remote`, so `CalcBusyError` from a full calc
                 # pod is possible, and Temporal's default fast backoff would exhaust attempts within
                 # seconds. Same retryable types, wider spacing.
-                retry_policy=calculation_retry(),
+                retry_policy=retry_for(evaluate_candidates),
             )
         )
 
@@ -313,7 +312,7 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(propose_initial),
             )
             history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
             if not history:
@@ -367,7 +366,7 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(propose_next),
             )
             measured = await self._evaluate(
                 spec, proposed, f"r{rounds_done + 1}", timeout, heartbeat_timeout
@@ -405,7 +404,7 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(record_campaign_run),
             )
             _carry_on_if_history_is_filling_up(
                 payload, history, rounds_remaining, rounds_done, self._spent()
@@ -434,7 +433,7 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(record_campaign_run),
             )
         except CampaignBudgetSpent:
             campaign_id = None

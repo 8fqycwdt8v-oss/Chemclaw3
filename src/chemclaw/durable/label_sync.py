@@ -18,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel
 
     from chemclaw.core.config import settings
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.labels.enrich import LabelReport, label_stale
     from chemclaw.ingest.labels.labeller import RxnLabelServer
     from chemclaw.ingest.sources.registry import active_manifests
@@ -26,7 +26,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 # Module-level indirections so tests swap the production index and server client for fakes — the
 # shape `eln_sync.py` uses for the same reason.
@@ -71,7 +72,7 @@ class LabelSyncState(BaseModel):
     unlabelled: int = 0
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def plan_label_sync() -> LabelSyncPlan:
     """Ask the server what version it is, and fix the run's iteration bound.
@@ -86,7 +87,7 @@ async def plan_label_sync() -> LabelSyncPlan:
 
 # A batch is minutes of remote atom mapping with no progress point, so liveness is time-based via
 # `beating`; the eager pre-beat covers a batch shorter than one interval.
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def label_stale_reactions(version: str) -> LabelReport:
     """Label one bounded batch of rows that are stale at `version`, and stamp them."""
@@ -127,7 +128,7 @@ class ReactionLabelWorkflow:
                 plan_label_sync,
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(plan_label_sync),
             )
             state = LabelSyncState(version=plan.version, max_iterations=plan.max_iterations)
         iterations = 0
@@ -140,7 +141,7 @@ class ReactionLabelWorkflow:
                 heartbeat_timeout=timedelta(seconds=settings.label_sync_heartbeat_timeout_seconds),
                 # Bad data is dropped per reaction inside the pass; what reaches here is a refused
                 # request the whole batch shares, which no retry changes.
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(label_stale_reactions),
             )
             state.labelled += batch.labelled
             state.unlabelled += batch.unlabelled

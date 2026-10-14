@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.turn_signals import ExhibitSignal
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.observation_jobs import workflow_safe_today
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.exhibits.models import (
         PUSH_KIND,
         DocumentSpec,
@@ -61,12 +61,12 @@ from chemclaw.durable.deliver_message import (
 from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
     activity_failure_reason,
     fan_out_queue_wait_timeout,
     light_write_queue_wait_timeout,
     publish_note,
 )
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ def default_retrievers() -> list[SourceRetriever]:
     ]
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
     """Retrieve one report section's evidence across the production sources, as the requester.
@@ -105,7 +105,7 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn
 async def record_report_note(
     report: Report, requested_by: str = "", correlation_id: str = ""
@@ -128,7 +128,7 @@ async def record_report_note(
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn(name="propose_report")
 async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
     """The old Temporal name for `record_report_note`, kept for one deployment cycle.
@@ -169,7 +169,7 @@ def report_exhibit_id(workflow_id: str) -> str:
     return f"xb-{hashlib.sha256(workflow_id.encode('utf-8')).hexdigest()[:16]}"
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def record_report_exhibit(request: ReportExhibitInput) -> str:
     """Show the finished report in the session that asked, as a `document` artefact; return its id.
@@ -272,7 +272,7 @@ async def _report_exhibit_best_effort(request: ReportExhibitInput) -> str:
             task_queue=settings.background_task_queue,
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
             schedule_to_start_timeout=light_write_queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(record_report_exhibit),
         )
     except ActivityError as exc:
         if isinstance(exc.cause, TemporalCancelledError):
@@ -295,7 +295,7 @@ class ReportSectionWorkflow:
 
     A section whose retrieval exhausts its retries degrades to a placeholder marked
     `retrieval_failed` rather than failing the report. The activity carries the single retry
-    boundary (`BAD_DATA_RETRY`); no child-level retry is layered on top.
+    boundary (`durable/retry.py`); no child-level retry is layered on top.
     """
 
     @workflow.run
@@ -310,7 +310,7 @@ class ReportSectionWorkflow:
                 # The fan-out queue wait, which fits inside the child's execution timeout so the
                 # SCHEDULE_TO_START expiry the `except` below degrades on is reachable.
                 schedule_to_start_timeout=fan_out_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(retrieve_section),
             )
         except ActivityError:
             workflow.logger.warning("report section %r retrieval failed; marked", section.heading)

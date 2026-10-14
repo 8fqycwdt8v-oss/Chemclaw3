@@ -70,7 +70,7 @@ def test_the_failure_is_non_retryable_to_temporal() -> None:
 
     `durable/publish.py` matches `non_retryable_error_types` against the class name, not its bases.
     """
-    from chemclaw.durable.publish import _BAD_DATA_TYPES
+    from chemclaw.durable.retry import _BAD_DATA_TYPES
 
     assert ToolReturnedFailure.__name__ in _BAD_DATA_TYPES
 

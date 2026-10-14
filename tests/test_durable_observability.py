@@ -60,8 +60,9 @@ from chemclaw.durable.job_metrics import (
 )
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.job_record_store import PostgresJobRecordSink, read_job_record
-from chemclaw.durable.publish import BAD_DATA_RETRY
 from chemclaw.durable.publish_results import publish_job_result
+from chemclaw.durable.registry import ActivityClass
+from chemclaw.durable.retry import policy_for
 from chemclaw.durable.serve import worker_interceptors
 from chemclaw.durable.template_activities import (
     AgentStepInput,
@@ -1149,7 +1150,7 @@ class _ResultSizeWorkflow:
                 "w8b_result_size",
                 payload_bytes,
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=policy_for(ActivityClass.IO),
             )
         )
 
@@ -1251,7 +1252,7 @@ def test_a_result_the_broker_would_refuse_is_a_counted_failing_activity(
         "fault"
     )
     # Exactly one attempt: the result is deterministic, so `ActivityResultTooLarge` must be in
-    # `durable/publish._BAD_DATA_TYPES` or the retry budget is burnt re-serializing the same bytes.
+    # `durable/retry._BAD_DATA_TYPES` or the retry budget is burnt re-serializing the same bytes.
     # The attempt count is where the server-applied policy is observable.
     assert outcomes.count("completed") == 1, (
         f"the kept result's line should still say completed, got {outcomes}"

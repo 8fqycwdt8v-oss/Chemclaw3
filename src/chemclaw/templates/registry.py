@@ -51,7 +51,7 @@ _INPUT_ANNOTATIONS: dict[InputType, Any] = {
 class TemplateError(ChemclawError):
     """A template file is malformed, or an enabled template does not exist.
 
-    Registered by class name in `chemclaw.durable.publish._BAD_DATA_TYPES`, because Temporal matches
+    Registered by class name in `chemclaw.durable.retry._BAD_DATA_TYPES`, because Temporal matches
     non-retryable error types by exact name.
     """
 
