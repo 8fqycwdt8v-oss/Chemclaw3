@@ -31,8 +31,8 @@ Versions compared (checked against PyPI on 2026-10-14):
 
 Each pin in `tests/test_upstream_surface.py`, and the tests that exercise the agent builder, the
 subagents, skills, the plan gate, authorization, audit, streaming, context budgeting and turn
-durability, were run serially against the latest release with no source change. Six tests turned red;
-two are pins (named in the tables) and four are first-party tests that measured upstream's own
+durability, were run serially against the latest release with no source change. Seven tests turned
+red; two are pins (named in the tables) and five are first-party tests that measured upstream's own
 behaviour:
 
 - `test_middleware_order`: `create_deep_agent` appends a new `UnsupportedContentMiddleware`
@@ -44,6 +44,8 @@ behaviour:
   constant; it should be derived from one turn's writes.
 - `test_context_floor`: the `task` schema is 929 tokens against a bound of 900, from upstream's
   longer usage notes. This is the case the `write_todos` entry in `KNOWN_OVERSIZED` already records.
+- `test_model_text_inventory`: the committed inventory of everything a model reads lists
+  `edit_file`, `read_file` and `task`, which changed.
 
 Separately, the model-facing text upstream owns was diffed (see
 [Upstream text the model reads](#upstream-text-the-model-reads)). Everything else in the gate list,
@@ -57,7 +59,7 @@ including the multi-process `tests/test_turn_survives_pod.py`, passed.
 | `_permissions=` on that replacement | `langgraph_agent._middleware`, `scratchpad.filesystem_permissions` | **(c)** | Private keyword; `create_deep_agent(permissions=)` reaches only the instance upstream built | Still private. Repro: [02](upstream-issues/02-deepagents-permissions-do-not-reach-a-replaced-filesystem-middleware.md) | Shim stays. A permission-enforcing `BackendProtocol` was weighed and declined: upstream enforces at the tool, not the backend, so internal writes (the offload of an oversized tool result) would be refused too, and the denial text the model reads would change |
 | `permissions=filesystem_permissions()` on the outer `create_deep_agent` call | `langgraph_agent.build_langgraph_agent` | **(a)** | Dead: it reaches only the instance the replacement displaces, no declarative subagent and no `interrupt` rule | Dead | Remove with the bump (W5.2); `tests/test_scratchpad.py` still drives an out-of-bounds write through the compiled graph |
 | `disabled_summarizer`: replace the summarizer by name with `SummarizationMiddleware(trigger=None)` | `compaction.disabled_summarizer` | **(a)** for the splice, **(c)** for the lever | Documented splice. `backend=` is swallowed by `**deprecated_kwargs`: a dead parameter. `HarnessProfile.excluded_middleware` exists but is resolved by the model's provider key and misses silently ([03](upstream-issues/03-deepagents-a-harness-profile-per-agent.md)) | Same | Remove the dead `backend` parameter with the bump (W5.2). The splice stays until draft 03 lands. The replaced class is deepagents' own, so its new overflow recovery is not in play; compaction is first-party |
-| `ReloadingSkillsState`: redeclare `skills_metadata` as `UntrackedValue` so the listing reloads each run | `langgraph_agent.ReloadingSkillsState` | **(a)** with a cost, **(c)** | Needs `PrivateStateAttr`, which is not in `types.__all__`. The public equal is `OmitFromSchema(input=True, output=True)` | Since 0.7.16 `skills_metadata = None` requests a reload and `before_agent` honours it. A reload on every run then rests on every entry point (`api/graph_stream.py`, `durable/template_activities.py`, `cli/chat.py`, resumes) passing `None`, and the listing is checkpointed again | Migrate the marker to the public `OmitFromSchema` with the bump (W5.2). The channel stays: "per run" is a property of the channel, not of callers who remember. Draft [04](upstream-issues/04-deepagents-skills-middleware-run-scoped-listing-and-hooks.md) asks for it on the middleware |
+| `ReloadingSkillsState`: redeclare `skills_metadata` as `UntrackedValue` so the listing reloads each run | `langgraph_agent.ReloadingSkillsState` | **(c)** | Needs `PrivateStateAttr`, which is not in `types.__all__`. Its public equal `OmitFromSchema(input=True, output=True)` is **not** a substitute: `deepagents` finds the keys it keeps out of a subagent by identity (`meta is marker`), so the equal object would let the key cross the `task` boundary | Since 0.7.16 `skills_metadata = None` requests a reload and `before_agent` honours it. A reload on every run then rests on every entry point (`api/graph_stream.py`, `durable/template_activities.py`, `cli/chat.py`, resumes) passing `None`, and the listing is checkpointed again | Keep the channel: "per run" is a property of the channel, not of callers who remember. Draft [04](upstream-issues/04-deepagents-skills-middleware-run-scoped-listing-and-hooks.md) asks for it on the middleware, and for `PrivateStateAttr` to be exported |
 | `_format_skills_list` override for an empty listing | `langgraph_agent.ReloadingSkillsMiddleware` | **(c)** | Private method | Private method | Draft 04. The pin turns red when the method is renamed |
 | `_SKILLS_PROMPT_REMOVALS`: cut passages from `SKILLS_SYSTEM_PROMPT` by substring | `langgraph_agent._skills_prompt` | **(b)** | Passed through the public `system_prompt=`; the constant is not in `__all__` | Template unchanged; all four passages found | Keep. The alternative, a first-party template, forgoes upstream's wording on every bump; revisit if upstream parameterises it (draft 04) |
 | `.name` splice of first-party middleware into upstream's stack | `langgraph_agent._middleware` | **(a)** | Documented behaviour (changelog 0.7.0, `create_deep_agent` docstring); the pin drives a private function | Documented, same rule | Re-point the pin at the public path with the bump (W5.2) |
@@ -68,7 +70,9 @@ including the multi-process `tests/test_turn_survives_pod.py`, passed.
 | Runaway cap in `before_model` instead of `ModelCallLimitMiddleware` | `loop_cap.enforce_loop_cap` | **(c)** | Upstream counts in `after_model`, which a jump from a later hook skips | Unchanged. Repro: [06](upstream-issues/06-langchain-model-call-limit-is-skipped-by-an-after-model-jump.md) | Keep first-party. Not a shim on upstream's behaviour: upstream's limiter is unsafe here |
 | `OffLoopContextEditing` | `compaction.OffLoopContextEditing` | **(c)** | `awrap_model_call` deep-copies and edits on the event loop | Unchanged. Repro: [05](upstream-issues/05-langchain-context-editing-runs-on-the-event-loop.md) | Shim stays |
 | `ScopedTodoListMiddleware` (each step declares its tools) | `plan_scope` | **(b)** | A subclass of the public `TodoListMiddleware`; reads its `system_prompt`, `tool_description` and `tools` attributes and re-implements the private `_write_todos` | Same | Keep; pins hold |
-| `ChemclawState` extends `PlanningState`, not `DeepAgentState` | `state` | **(b)** | `state_schema=` is public and the docstring says to extend `DeepAgentState`, whose `messages` channel is a `DeltaChannel`. Without it every superstep rewrites the whole thread (`checkpointer._prune_superseded` notes the quadratic volume) | Same. A synthetic 12-tool-call turn writes 56 kB with `DeepAgentState` against 764 kB with a plain `AgentState` (13.6×, in-memory saver; `AsyncPostgresSaver` ships the delta read path) | **Not migrated here**: it changes what a checkpoint holds, which `session_fork`, `message_migration`, the prune statement and the planned transcript projection all read. Decision for W5.8 |
+| `ChemclawState` extends `PlanningState`, not `DeepAgentState` | `state` | **(b)** | `state_schema=` is public and the docstring says to extend `DeepAgentState`, whose `messages` channel is a `DeltaChannel`. Without it every superstep rewrites the whole thread (`checkpointer._prune_superseded` notes the quadratic volume) | Same. A synthetic 12-tool-call turn writes 56 kB with `DeepAgentState` against 764 kB with a plain `AgentState` (13.6×, in-memory saver; `AsyncPostgresSaver` ships the delta read path) | `DeltaChannel` is still marked beta in langgraph 1.2.15 (`BACKLOG.md`, "Gated on an upstream fix"). **Not migrated**: it changes what a checkpoint holds, which `session_fork`, `message_migration`, the prune statement and the planned transcript projection all read, and upstream's own `aprune(keep_latest)` refuses such a thread. Decision for W5.8 |
+| Checkpoint retention: delete superseded checkpoints inside the turn's own write | `checkpointer._PRUNE_SUPERSEDED`, `durable/retention.py` | **(b)** | Not available | `langgraph-checkpoint-postgres` 3.2.0 adds `AsyncPostgresSaver.aprune(thread_ids, strategy="keep_latest" \| "delete")`. `keep_latest` keeps exactly one checkpoint per namespace (this repository keeps `checkpoint_retain_per_thread`), runs as its own `REPEATABLE READ` transaction that can fail with `SerializationFailure`, and refuses a thread using a `DeltaChannel`. `delete` is `adelete_thread`, already used | Keep first-party. Revisit with the `DeltaChannel` decision: adopting one makes upstream's prune unusable and this repository's statement delta-aware, or the reverse |
+| `UnsupportedContentMiddleware` appended to the stack | `create_deep_agent` | keep | Not present | New upstream tail entry. It replaces a content block the model's profile *explicitly* rejects with a text notice and passes everything else, so it changes nothing for a text-only thread | Add to the recorded order in `tests/test_middleware_order.py`; one more root middleware for the W5.3 count |
 | Helper `files` cross back into the caller's state | `tool_result_shape.rewritten_command_files`, `tool_result_size` | **(b)** | `_EXCLUDED_STATE_KEYS` is a private constant; `files` is absent from it by design (`D-2026-09-04-a-helpers-file-crosses-back-and-stays`) | Same; `SubAgentMiddleware` exposes `subagent_names` and takes `private_state_keys`, not an excluded-keys parameter | Keep. Two pins turn red if `files` is excluded or a second producer appears |
 | Scratch and memory backends | `scratchpad.BoundedStateBackend`, `BoundedStoreBackend`, `skill_store`, `skill_backend` | **(b)** | Subclasses of the public backends; each forwards keyword-only arguments so no copy of upstream's signature goes stale | Same. Backends write an `encoding` key on file data now | Keep |
 | First-party invalid-tool-call handling | `model_calls.PromoteInvalidToolCalls`, `refuse_unparsed_arguments` | **(a)** to check | `create_agent` does not repair invalid tool calls | `create_agent` now answers an unanswered `invalid_tool_calls` entry with its own `ToolMessage` ("… arguments were malformed or truncated") before the model call. The first-party promotion runs on the response and turns the call into a real one, so a call it promoted is not left for upstream to repair; `tests/test_invalid_tool_calls.py` passes unchanged | Keep; revisit if both ever see the same call |
@@ -106,8 +110,8 @@ Grouped by what they read. "Latest" is the result of running the pin on the late
 
 | Pin | Kind | Latest |
 | --- | --- | --- |
-| The cache channel is `skills_metadata` and is omitted from the schema | **(c)** draft 04 | Holds. The marker is now `OmitFromOutput` upstream; the redeclaration keeps the stricter `OmitFromSchema(input=True, output=True)` |
-| `PrivateStateAttr` is importable from `langchain.agents.middleware.types` | (a) | Holds, but the name is not in `__all__`; use the public equal instead and pin the equality (W5.2) |
+| The cache channel is `skills_metadata` and is omitted from the schema | **(c)** draft 04 | Holds. The marker is now `OmitFromOutput` upstream; the redeclaration keeps the stricter `PrivateStateAttr` |
+| `PrivateStateAttr` is importable from `langchain.agents.middleware.types` | **(c)** draft 04: not in `__all__`, and matched by identity | Holds |
 | `_format_skills_list` exists; `before_agent` takes the three-argument call the floor makes | **(c)** draft 04 / test-only | Holds |
 | `SKILLS_SYSTEM_PROMPT` still contains each passage this deployment removes | **(b)** | Holds |
 | An oversized skill description is truncated, not refused | keep: a private parser read as a restart condition | Holds |
@@ -160,11 +164,12 @@ scripted model is byte-identical (after the per-process envelope nonce), as are 
 
 `D-2026-10-08-model-facing-text-changes-ship-behind-an-evaluation` applies to these as to any
 text: they are not first-party, which is why the bump cannot hold them still, and they need the
-evaluation that needs the model. The bump is a lockfile revert if the evaluation says no.
+evaluation that needs the model. `schema/model-text/inventory.json` is regenerated with the bump so
+the diff is visible. The bump is a lockfile revert if the evaluation says no.
 
 ## Upstream issue drafts
 
-Six drafts, each with a minimal reproduction run against the latest release, in `upstream-issues/`.
+Seven drafts, each with a minimal reproduction run against the latest release, in `upstream-issues/`.
 They cannot be filed from the session that wrote them; filing is a row in `BACKLOG.md`.
 
 1. [langgraph: `durability="sync"` in a subgraph with no checkpointer](upstream-issues/01-langgraph-sync-durability-without-a-checkpointer.md)
@@ -173,6 +178,7 @@ They cannot be filed from the session that wrote them; filing is a row in `BACKL
 4. [deepagents: `SkillsMiddleware` run-scoped listing, empty-listing text and an unconditional hook](upstream-issues/04-deepagents-skills-middleware-run-scoped-listing-and-hooks.md)
 5. [langchain: context editing runs on the event loop](upstream-issues/05-langchain-context-editing-runs-on-the-event-loop.md)
 6. [langchain: `ModelCallLimitMiddleware` is skipped by an `after_model` jump](upstream-issues/06-langchain-model-call-limit-is-skipped-by-an-after-model-jump.md)
+7. [deepagents: `import deepagents` imports three provider SDKs](upstream-issues/07-deepagents-import-pulls-in-three-provider-sdks.md)
 
 ## Refreshing this document
 

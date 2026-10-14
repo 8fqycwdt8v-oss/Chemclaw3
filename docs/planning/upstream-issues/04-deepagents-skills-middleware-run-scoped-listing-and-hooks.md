@@ -1,7 +1,7 @@
 # deepagents: `SkillsMiddleware` cannot declare a run-scoped listing, and always adds a model hook
 
 **File against:** `langchain-ai/deepagents`. **Status:** draft, not filed. **Observed on:**
-deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here). Two independent requests;
+deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here). Four independent requests;
 file them separately if upstream prefers.
 
 ## 1. A listing that depends on who is asking has to be reset by the caller on every run
@@ -51,6 +51,21 @@ First-party observation: compiling the production agent on 0.7.25 adds a
 code writes `pinned_skills`. A scripted turn with an in-memory saver writes 11, 18 and 39
 checkpoints for 1, 2 and 5 model calls on 0.7.8 and 12, 20 and 44 on 0.7.25 (one more per model
 call, and one for the turn).
+
+## 4. `PrivateStateAttr` is matched by identity and is not exported
+
+`deepagents.middleware._state.private_state_field_names` decides which state keys stay out of a
+subagent with `any(meta is marker for meta in args[1:])`, where the marker is
+`langchain.agents.middleware.types.PrivateStateAttr`. That name is not in the module's `__all__`,
+and its documented equal, `OmitFromSchema(input=True, output=True)` (which is exported), compares
+equal but is a different object, so a state schema written against the exported class silently
+leaves its keys crossing the `task` boundary in both directions.
+
+Proposed: compare with `==`, or export `PrivateStateAttr`.
+
+First-party handling: `agent/state.py` and `ReloadingSkillsState` import `PrivateStateAttr` from the
+module; `tests/test_state_channels.py` asks `private_state_field_names` which channels are private
+and drives each, so a marker `deepagents` stops recognising turns it red.
 
 ## What turns red when this is fixed
 

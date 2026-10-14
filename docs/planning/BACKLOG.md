@@ -59,7 +59,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`); left: the connector and the queue/stream UI in `Chemclaw3_ui`.
 - [ ] **A routing corpus where the right profile is not inferable from the wording** [M] — build the corpus, compare on answers;
   a router only after (`D-2026-08-15` deleted automatic routing).
-- [ ] **Six upstream issues are drafted and unfiled** [S] — file them from `docs/planning/upstream-issues/` (a human, with access to
+- [ ] **Seven upstream issues are drafted and unfiled** [S] — file them from `docs/planning/upstream-issues/` (a human, with access to
   `langchain-ai`), then pin each fix: `core/graph_durability.py::ignoring_inherited_durability`, `agent/compaction.py::OffLoopContextEditing`.
 
 ### Knowledge and records
