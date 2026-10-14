@@ -21,7 +21,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-import uvicorn
 from fastapi import FastAPI
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -61,6 +60,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.mcp_session import cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
+from tests.served import ServerThread
 
 
 def _endpoint(url: str, *tools: str, request_timeout: int | None = None) -> HttpEndpoint:
@@ -84,29 +84,6 @@ _LOCAL_HTTP = [
 ]
 
 
-class _Server:
-    """A uvicorn server on a background thread, started and stopped around one test."""
-
-    def __init__(self, app: FastAPI, port: int) -> None:
-        self._config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-        self._server = uvicorn.Server(self._config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_Server":
-        """Start the server and wait until it is actually accepting connections."""
-        self._thread.start()
-        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("connector test server did not start")
-
-    def __exit__(self, *_exc: object) -> None:
-        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
-
-
 @pytest.fixture(scope="module")
 def composite() -> Iterator[int]:
     """Serve every local connector once, on one port, and yield it.
@@ -121,7 +98,7 @@ def composite() -> Iterator[int]:
     ensure_dev_tokens()  # returns (values, preexisting); this caller only needs the side effect
     app, _urls = build_composite()
     port = _free_port()
-    with _Server(app, port):
+    with ServerThread(app, port):
         yield port
 
 
@@ -205,7 +182,7 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
     session = set_current_session_id("session-xyz")
     try:
-        with _Server(app, port):
+        with ServerThread(app, port):
             asyncio.run(_call())
     finally:
         reset_current_session_id(session)
@@ -261,7 +238,7 @@ def test_the_turn_identity_reaches_the_calculation_backend(
     session_token = set_current_session_id("session-xyz")
     correlation = set_current_correlation_id("turn-99")
     try:
-        with _Server(app, port):
+        with ServerThread(app, port):
             asyncio.run(_call())
     finally:
         reset_current_correlation_id(correlation)
@@ -344,7 +321,7 @@ def test_a_tool_body_can_read_the_caller_core_stamped() -> None:
     identity = set_current_identity("user-77", frozenset({"process-chemist"}))
     session = set_current_session_id("session-abc")
     try:
-        with _Server(app, port):
+        with ServerThread(app, port):
             asyncio.run(_call())
     finally:
         reset_current_session_id(session)
@@ -402,7 +379,7 @@ def test_a_redirecting_connector_cannot_harvest_the_turn_identity() -> None:
     identity = set_current_identity("user-99", frozenset({"process-chemist"}))
     session = set_current_session_id("session-leak")
     try:
-        with _Server(connector, connector_port), _Server(harvester, harvester_port):
+        with ServerThread(connector, connector_port), ServerThread(harvester, harvester_port):
             status = asyncio.run(_post())
     finally:
         reset_current_session_id(session)
@@ -434,7 +411,7 @@ def test_oversized_body_is_rejected_before_the_mcp_handler_runs(
     port = _free_port()
 
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
-    with _Server(app, port):
+    with ServerThread(app, port):
         response = httpx.post(f"http://127.0.0.1:{port}/mcp", content=b"x" * 1000, headers=headers)
     assert response.status_code == 413
 
@@ -471,7 +448,7 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
             return str(await next(t for t in tools if t.name == "blow_up").ainvoke({}))
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         message = asyncio.run(_call())
     assert secret not in message
     assert "an internal error occurred" in message
@@ -508,7 +485,7 @@ def test_a_full_backend_reaches_the_caller_as_full_not_as_broken() -> None:
             return str(result[0]["text"] if isinstance(result, list) else result)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         message = asyncio.run(_call())
     assert at_capacity(message), message
     assert "the calculation service is busy" in message
@@ -655,7 +632,7 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
             return str(await next(t for t in tools if t.name == "bad_smiles").ainvoke({}))
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         message = asyncio.run(_call())
     assert "could not parse SMILES 'not-a-molecule'" in message
 
@@ -735,7 +712,7 @@ def test_a_slow_tool_call_is_abandoned_at_the_declared_request_timeout() -> None
             return time.monotonic() - started
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         try:
             elapsed = asyncio.run(asyncio.wait_for(_call(), timeout=15))
         finally:
@@ -785,7 +762,7 @@ def test_a_timed_out_call_tells_the_connector_to_stop_working() -> None:
                 "is waiting for"
             )
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         asyncio.run(asyncio.wait_for(_call(), timeout=20))
 
 
@@ -882,7 +859,7 @@ def test_a_tool_carries_the_build_of_the_server_that_answers_it() -> None:
             return tools
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(connector_app(server, name="revision-probe"), port):
+    with ServerThread(connector_app(server, name="revision-probe"), port):
         tools = asyncio.run(_discover())
 
     assert [tool.name for tool in tools] == ["echo"]

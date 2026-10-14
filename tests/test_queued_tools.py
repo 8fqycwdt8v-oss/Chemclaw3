@@ -33,8 +33,9 @@ from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.durable.notify import SessionEventInput
 from tests.conftest import _free_port
+from tests.served import ServerThread
 from tests.temporal_env import pydantic_client, start_local_env_or_skip
-from tests.test_connector_transport import _endpoint, _Server
+from tests.test_connector_transport import _endpoint
 
 _CONNECTOR = "queued-probe"
 
@@ -130,7 +131,7 @@ def test_a_turn_routes_only_the_queued_tools_through_the_queue(
             return str(heavy), str(light)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         heavy, light = asyncio.run(_call())
     assert "queued:answer" in heavy
     assert "light answered directly" in light
@@ -163,7 +164,7 @@ def test_an_unreachable_queue_falls_back_to_the_direct_call(
             return str(await tools[0].ainvoke({"smiles": "CCO"}))
         raise AssertionError("unreachable")  # pragma: no cover
 
-    with _Server(app, port):
+    with ServerThread(app, port):
         assert "direct:CCO" in asyncio.run(_call())
 
 
@@ -205,7 +206,7 @@ def test_the_activity_returns_answers_and_refusals_and_retries_only_a_full_serve
     monkeypatch.setattr("chemclaw.connectors.registry.connector_spec", lambda name: _spec_for(port))
     app = connector_app(_probe_server(), name=_CONNECTOR)
     env = ActivityEnvironment()
-    with _Server(app, port):
+    with ServerThread(app, port):
         answered = asyncio.run(env.run(call_queued_tool, _call("heavy", smiles="CCO")))
         refused = asyncio.run(env.run(call_queued_tool, _call("refuse")))
         with pytest.raises(ApplicationError) as full:
@@ -228,7 +229,7 @@ def test_a_queued_call_touches_no_database(monkeypatch: pytest.MonkeyPatch) -> N
         monkeypatch.setattr(db, name, _refuse)
     port = _free_port()
     monkeypatch.setattr("chemclaw.connectors.registry.connector_spec", lambda name: _spec_for(port))
-    with _Server(connector_app(_probe_server(), name=_CONNECTOR), port):
+    with ServerThread(connector_app(_probe_server(), name=_CONNECTOR), port):
         answered = asyncio.run(
             ActivityEnvironment().run(call_queued_tool, _call("heavy", smiles="CCO"))
         )

@@ -14,14 +14,11 @@ publishes, and launches durable work only through core-generated job tools.
 """
 
 import asyncio
-import threading
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from typing import Any
 
 import pytest
-import uvicorn
-from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.agent.audit import AuditEvent
@@ -32,8 +29,8 @@ from chemclaw.core.call_identity import HEADER_ACTOR
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import _KEY, Signal, ToolFailureSignal
-from tests.conftest import _free_port
 from tests.fakes_langgraph import ScriptedChatModel
+from tests.served import ServerThread
 
 _BUNDLE = """\
 name: governed
@@ -59,30 +56,6 @@ class _RecordingSink:
     async def record(self, event: AuditEvent) -> None:
         """Keep the event; the real sink writes an append-only row."""
         self.events.append(event)
-
-
-class _Server:
-    """A uvicorn server on a background thread, started and stopped around one test."""
-
-    def __init__(self, app: FastAPI, port: int) -> None:
-        self._server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-        )
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_Server":
-        """Start the server and wait until it accepts connections."""
-        self._thread.start()
-        for _ in range(200):
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("connector test server did not start")
-
-    def __exit__(self, *_exc: object) -> None:
-        """Stop the server and join its thread."""
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
 
 
 class _Observed:
@@ -137,15 +110,15 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
             observed.actors.append(actor)
         return await call_next(request)
 
-    port = _free_port()
+    listener = ServerThread(app)
     bundle = tmp_path / "governed"
     bundle.mkdir()
     (bundle / "connector.yaml").write_text(
-        _BUNDLE.format(url=f"http://127.0.0.1:{port}/mcp"), encoding="utf-8"
+        _BUNDLE.format(url=f"http://127.0.0.1:{listener.port}/mcp"), encoding="utf-8"
     )
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    with _Server(app, port):
+    with listener:
         yield observed
 
 

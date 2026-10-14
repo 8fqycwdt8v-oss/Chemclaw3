@@ -7,12 +7,10 @@ returned, and `ungrounded_parameter_shapes` scans for method parameters no tool 
 """
 
 import asyncio
-import threading
 import time
 from typing import Any
 
 import pytest
-import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from langchain_core.language_models import GenericFakeChatModel
@@ -35,7 +33,7 @@ from chemclaw.agent.verifier import (
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.retrieval.evidence import EvidenceChunk
-from tests.conftest import _free_port
+from tests.served import ServerThread
 
 
 class _FakeResponse:
@@ -734,7 +732,7 @@ async def test_the_judge_is_bound_with_json_schema_enforcement(
 # really binds and posts. Only the endpoint is fake.
 
 
-class _FakeOpenAiEndpoint:
+class _FakeOpenAiEndpoint(ServerThread):
     """A real uvicorn server speaking enough of `/v1/chat/completions` to drive `ChatOpenAI`.
 
     Three behaviours: 200 with a JSON verdict, 400 rejecting `response_format`, and 200 with prose
@@ -781,24 +779,7 @@ class _FakeOpenAiEndpoint:
                 }
             )
 
-        self.port = _free_port()
-        self._config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
-        self._server = uvicorn.Server(self._config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_FakeOpenAiEndpoint":
-        """Start the server and wait until it is actually accepting connections."""
-        self._thread.start()
-        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("fake openai_compatible endpoint did not start")
-
-    def __exit__(self, *_exc: object) -> None:
-        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
+        super().__init__(app)
 
 
 def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) -> Any:
