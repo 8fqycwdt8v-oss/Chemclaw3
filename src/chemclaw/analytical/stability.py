@@ -16,13 +16,22 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from scipy import stats
-
 from chemclaw.analytical.specification import AcceptanceCriterion
 from chemclaw.core.units import Measurement, UnitError
 
 #: The confidence level Q1E specifies for the one-sided bound.
 CONFIDENCE = 0.95
+
+
+def _t_quantile(degrees_of_freedom: int) -> float:
+    """The Student-t quantile at `CONFIDENCE`.
+
+    `scipy.stats` is imported here: it costs a second to import and only a fit needs it.
+    """
+    from scipy import stats
+
+    return float(stats.t.ppf(CONFIDENCE, degrees_of_freedom))
+
 
 #: The fewest timepoints a regression may be fitted to. Not a statistical recommendation: with two
 #: points there are zero residual degrees of freedom and no confidence band.
@@ -176,7 +185,7 @@ def _is_a_drift(months: list[float], slope: float, standard_error: float) -> boo
         return slope != 0.0
     mean_x = sum(months) / n
     sxx = sum((x - mean_x) ** 2 for x in months)
-    quantile = float(stats.t.ppf(CONFIDENCE, n - 2))
+    quantile = _t_quantile(n - 2)
     return abs(slope) > quantile * standard_error / math.sqrt(sxx)
 
 
@@ -257,7 +266,7 @@ def _crossing(
     n = len(months)
     mean_x = sum(months) / n
     sxx = sum((x - mean_x) ** 2 for x in months)
-    quantile = float(stats.t.ppf(CONFIDENCE, n - 2))
+    quantile = _t_quantile(n - 2)
 
     def bound_at(time: float) -> float:
         """The one-sided 95% confidence bound on the mean response at `time`."""

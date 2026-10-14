@@ -25,7 +25,6 @@ from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.handoff import handoff_tool_name
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
-from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.agent.text_overlay import BlockGroup, block_text, check_applies
 from chemclaw.connectors.registry import (
     connector_tool_names,
@@ -610,6 +609,8 @@ def skill_tool_names() -> set[str]:
     stale allow-list. `scratchpad_tools` withholds `execute` and `delete`, so they never enter the
     set validators accept.
     """
+    from chemclaw.agent.scratchpad import scratchpad_tools
+
     return set(scratchpad_tools())
 
 
