@@ -6,7 +6,7 @@
        `targetBacklogPerReplica` is how many waiting calls one replica should absorb before another
        is added. Scaling the worker adds *dispatch* capacity; what a call waits for is the server's
        slots, so pair this with the server's own occupancy scaling
-       (`Chemclaw3-mcp` `servers/<name>/deploy/keda/`) — the worker's ceiling on in-flight calls
+       (`Chemclaw3-mcp`'s `autoscaling.mode=keda`, or `servers/<name>/deploy/keda/` before its chart) — the worker's ceiling on in-flight calls
        is what turns a backlog here into occupancy there. */ -}}
 {{- if .Values.keda.enabled }}
 {{- range $name, $cfg := .Values.connectors }}

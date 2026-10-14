@@ -23,7 +23,7 @@ import pytest
 import yaml
 
 from chemclaw.core.config import Settings
-from tests.siblings import SIBLING_SKIP, sibling_root
+from tests.siblings import SIBLING_SKIP, fleet_objects, sibling_root
 
 _CHART = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"
 _VALUES: dict[str, Any] = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
@@ -759,16 +759,19 @@ def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
     return found
 
 
-def _fleet_services(checkout: Path) -> dict[str, int]:
-    """Every Service the sibling fleet actually creates, name onto port.
+def _fleet_services(checkout: Path) -> tuple[dict[str, int], str]:
+    """Every Service the sibling fleet actually creates, name onto port, and why if unreadable.
 
-    Read from `servers/*/deploy/service.yaml`, which the fleet applies untransformed.
+    Read from the fleet's own chart render or, for a checkout that predates the chart,
+    `servers/*/deploy/service.yaml`, which it applies untransformed.
     """
-    services: dict[str, int] = {}
-    for manifest in sorted(checkout.glob("servers/*/deploy/service.yaml")):
-        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-        services[document["metadata"]["name"]] = int(document["spec"]["ports"][0]["port"])
-    return services
+    documents, reason = fleet_objects(checkout)
+    services = {
+        str(document["metadata"]["name"]): int(document["spec"]["ports"][0]["port"])
+        for document in documents
+        if document["kind"] == "Service"
+    }
+    return services, reason
 
 
 def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> None:
@@ -792,8 +795,12 @@ def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> N
             f"{SIBLING_SKIP} {reason}; NOT checked against the fleet's own Services: {listed}"
         )
 
-    services = _fleet_services(checkout)
-    assert services, f"{checkout} declares no servers/*/deploy/service.yaml to compare against"
+    services, unreadable = _fleet_services(checkout)
+    if unreadable:
+        pytest.skip(f"{SIBLING_SKIP} {unreadable}; NOT checked against the fleet's own Services")
+    assert services, (
+        f"{checkout} declares no fleet Service (chart or servers/*/deploy) to compare against"
+    )
 
     wrong: list[str] = []
     for path, (service, host, port) in sorted(addresses.items()):

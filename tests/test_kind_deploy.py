@@ -25,7 +25,7 @@ import pytest
 import yaml
 
 from chemclaw.cli import kind_stale_images
-from tests.siblings import SIBLING_SKIP, sibling_root
+from tests.siblings import SIBLING_SKIP, fleet_objects, sibling_root
 
 _ROOT = Path(__file__).resolve().parents[1]
 _KIND = _ROOT / "deploy" / "kind"
@@ -231,8 +231,10 @@ def test_every_in_cluster_address_names_a_service_this_lane_creates(mode: str) -
     checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     fleet_hosts = {host for host, _ in _dialled(mode).values() if host.startswith("chemclaw-mcp-")}
     if checkout is not None:
-        for path in sorted(checkout.glob("servers/*/deploy/service.yaml")):
-            services |= _service_ports(_documents(path.read_text(encoding="utf-8")))
+        fleet_documents, unreadable = fleet_objects(checkout)
+        if unreadable:
+            pytest.skip(f"{SIBLING_SKIP} {unreadable}; fleet addresses NOT checked")
+        services |= _service_ports(fleet_documents)
     wrong = [
         f"{name} → {host}:{port}"
         for name, (host, port) in sorted(_dialled(mode).items())
@@ -291,14 +293,21 @@ def test_the_ui_sandbox_is_its_own_origin_and_the_origins_are_the_mapped_ports()
 
 
 def test_up_sh_deploys_every_server_the_fleet_ships_a_deployment_for() -> None:
-    """`up.sh`'s FLEET list is the fleet's own `servers/*/deploy/deployment.yaml` set."""
+    """`up.sh`'s FLEET list is the set of Deployments the fleet's own manifests or chart create."""
     match = re.search(r"readonly -a FLEET=\(([^)]*)\)", _UP)
     assert match, "up.sh no longer declares FLEET=( … )"
     listed = set(match.group(1).split())
     checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if checkout is None:
         pytest.skip(f"{SIBLING_SKIP} {reason}; FLEET NOT checked: {sorted(listed)}")
-    shipped = {path.parts[-3] for path in checkout.glob("servers/*/deploy/deployment.yaml")}
+    documents, unreadable = fleet_objects(checkout)
+    if unreadable:
+        pytest.skip(f"{SIBLING_SKIP} {unreadable}; FLEET NOT checked: {sorted(listed)}")
+    shipped = {
+        str(doc["metadata"]["name"]).removeprefix("chemclaw-mcp-")
+        for doc in documents
+        if doc["kind"] == "Deployment"
+    }
     assert listed == shipped, (
         f"up.sh deploys {sorted(listed - shipped)} the fleet does not ship and misses "
         f"{sorted(shipped - listed)}"

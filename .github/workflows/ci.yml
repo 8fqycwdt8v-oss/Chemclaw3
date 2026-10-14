@@ -407,7 +407,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # `kind-validate` renders the fleet the kind lane deploys from the fleet's own manifests
-      # (`deploy/kind/render-fleet.sh`), so it needs the sibling checked out where the Makefile
+      # (`deploy/kind/render-fleet.sh`: the sibling's chart if it has one, else its per-server files), so
+      # it needs the sibling checked out where the Makefile
       # looks for it — the same path and ref the `check` job uses.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

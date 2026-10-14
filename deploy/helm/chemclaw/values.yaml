@@ -1114,7 +1114,7 @@ config:
   # listens on — silently, because the pod's own `/healthz` never touches it and the probes stay
   # green. Named `chemclaw-mcp-calc` for the same reason `connectors.chem.url` /
   # `connectors.safety.url` name their siblings: it is the Service `Chemclaw3-mcp`'s
-  # `servers/calc/deploy/service.yaml` creates in this namespace — and stating it here is also what
+  # fleet chart (`deploy/helm/chemclaw-fleet`, formerly `servers/calc/deploy/service.yaml`) creates in this namespace — and stating it here is also what
   # puts a host on the wire every one of those calls crosses, which the NetworkPolicy's egress
   # destinations then have to name.
   #
@@ -1124,7 +1124,8 @@ config:
   # `connectors.chem`/`safety`/`rxnpredict` and `CHEMCLAW_RXNLABEL_SERVER_URL` carried the same
   # spelling. A comment restating a rule cannot check a value against it, so
   # `tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
-  # reads `servers/*/deploy/service.yaml` out of the sibling checkout and compares names and ports
+  # reads the Services the sibling checkout creates (its chart's render, or `servers/*/deploy/service.yaml`
+  # for a checkout that predates the chart) and compares names and ports
   # — skipping, and naming every address it therefore did not check, where there is no checkout.
   #
   # **The bare short name is the address, not an abbreviation of a longer one.** The fleet's own
@@ -1190,7 +1191,7 @@ config:
   #
   # Inert until a corpus is attached: with no reactions-providing source, no Schedule exists and
   # nothing dials this. Named `chemclaw-mcp-rxnlabel` for the reason `chemclaw-mcp-calc` is — it
-  # is the Service the sibling's `servers/rxnlabel/deploy/service.yaml` creates in this namespace,
+  # is the Service the sibling's fleet chart creates in this namespace,
   # and the same cross-repo test checks it. Its bearer is
   # `secrets.optionalKeys.rxnlabelToken`, and its port is `networkPolicy.egressPorts.rxnlabel`;
   # both are needed, because an egress rule restricts by port independently of `to:`.
