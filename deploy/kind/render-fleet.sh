@@ -87,6 +87,14 @@ render_chart() {
     --set-string "defaults.image.tag=$tag"
     --set-string "defaults.image.pullPolicy=Never"
     --set "defaults.replicas=1")
+  # With no autoscaler rendered (the lane applies only the workload templates) the replica count has
+  # to be the Deployment's own, so it is asked for where the chart can say it: a chart whose
+  # `autoscaling.mode` accepts `none` omits `replicas` otherwise and leaves it to the cluster's
+  # default. Detected from the chart's schema rather than from a version; a chart without the mode
+  # always renders `replicas`, so `defaults.replicas=1` already does it.
+  if grep -Eqs '"mode"[^}]*"none"' "$chart/values.schema.json"; then
+    args+=(--set "autoscaling.mode=none")
+  fi
   for name in "${servers[@]}"; do
     known=""
     for wanted in "${all_servers[@]}"; do [ "$wanted" = "$name" ] && known=1; done
