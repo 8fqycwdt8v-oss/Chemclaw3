@@ -110,15 +110,15 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
             observed.actors.append(actor)
         return await call_next(request)
 
-    server = ServerThread(app)
+    listener = ServerThread(app)
     bundle = tmp_path / "governed"
     bundle.mkdir()
     (bundle / "connector.yaml").write_text(
-        _BUNDLE.format(url=f"http://127.0.0.1:{server.port}/mcp"), encoding="utf-8"
+        _BUNDLE.format(url=f"http://127.0.0.1:{listener.port}/mcp"), encoding="utf-8"
     )
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    with server:
+    with listener:
         yield observed
 
 
