@@ -46,9 +46,10 @@ from chemclaw.ingest.documents.parse import (
 
 logger = logging.getLogger(__name__)
 
-# What the forkserver imports before it forks anything; importing `parse` pulls in every document
-# parser, which is the cost being amortised.
-_PRELOAD = ["chemclaw.ingest.documents.parse"]
+# What the forkserver imports before it forks anything. `parse` imports each format library inside
+# the parser that uses it, so they are named here: loading them in the child would count against
+# its memory ceiling, and loading them once is the cost being amortised.
+_PRELOAD = ["chemclaw.ingest.documents.parse", "pypdf", "docx", "openpyxl", "pptx"]
 
 _context: ForkServerContext | None = None
 # A `threading.Lock`: every caller is already on a worker thread, so two threads can genuinely

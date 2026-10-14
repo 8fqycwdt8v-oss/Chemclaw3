@@ -1582,7 +1582,7 @@ def test_an_oversized_skill_description_is_still_truncated_rather_than_refused()
     assert (MAX_SKILL_NAME_CHARS, MAX_SKILL_DESCRIPTION_CHARS) == (
         MAX_SKILL_NAME_LENGTH,
         MAX_SKILL_DESCRIPTION_LENGTH,
-    ), "this repository's bounds are imported from upstream's, so they cannot disagree"
+    ), "this repository's bounds are no longer the ones upstream truncates at"
 
     over = "d" * (MAX_SKILL_DESCRIPTION_LENGTH + 500)
     parsed = _parse_skill_metadata(

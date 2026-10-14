@@ -26,13 +26,12 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.local_skills import SkillRefused
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.skill_store import (
-    PermittedStoreBackend,
     advisory_writer_lock,
     list_skill_names,
     paged_items,
@@ -46,6 +45,9 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.turn_signals import record_skill_loaded
+
+if TYPE_CHECKING:
+    from chemclaw.agent.skill_store_backend import PermittedStoreBackend
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,8 @@ def org_skills_backend(store: Any, permits: Callable[[str], bool]) -> PermittedS
         store: The process's store.
         permits: `agent/skill_access.skill_permits`' composed narrowing, applied per reach.
     """
+    from chemclaw.agent.skill_store_backend import PermittedStoreBackend
+
     namespace = org_skills_namespace()
     return PermittedStoreBackend(
         namespace=lambda _runtime: namespace,

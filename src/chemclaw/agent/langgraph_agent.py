@@ -16,25 +16,15 @@ not on the advertised list, because deepagents publishes skill paths into the pr
 (`tool_authz`, `repeat_guard`, `audit`); `tool_call_middleware` is the list.
 """
 
+import importlib
 import logging
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, NotRequired, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, StateBackend
-from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.middleware.skills import (
-    SKILLS_SYSTEM_PROMPT,
-    SkillMetadata,
-    SkillsMiddleware,
-    SkillsState,
-)
-from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.runnables import RunnableLambda
-from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore because merged ADRs cite it by name; importing it from
 # other modules in this package is the established idiom.
@@ -70,14 +60,7 @@ from chemclaw.agent.preferences import StandingPreferences
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
-from chemclaw.agent.scratchpad import (
-    expire_stale_scratch,
-    filesystem_permissions,
-    scratchpad_backend,
-    scratchpad_tools,
-)
 from chemclaw.agent.skill_access import SkillNarrowing, skill_permits
-from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
@@ -111,7 +94,32 @@ from chemclaw.core.graph_durability import ignoring_inherited_durability
 from chemclaw.core.logging import log_event
 from chemclaw.core.model_prose import ModelProse
 
+if TYPE_CHECKING:
+    from deepagents.backends import CompositeBackend
+
 logger = logging.getLogger(__name__)
+
+
+#: What compiling a graph imports and importing this module does not: `deepagents` (with the three
+#: provider SDKs it pulls in) and the backends and middleware subclassed from it.
+_GRAPH_MODULES = (
+    "deepagents",
+    "chemclaw.agent.reloading_skills",
+    "chemclaw.agent.scratchpad",
+    "chemclaw.agent.skill_backend",
+    "chemclaw.agent.skill_store_backend",
+)
+
+
+def prepare_imports() -> None:
+    """Import what `build_langgraph_agent` imports lazily, so a first turn does not pay for it.
+
+    A process that only imports the API (a CLI, a test collector) stays light because the builder
+    imports `deepagents` when it compiles. The front door calls this at startup in a worker thread,
+    beside its other startup work, and waits for it before serving.
+    """
+    for name in _GRAPH_MODULES:
+        importlib.import_module(name)
 
 
 def bindable_capability_tools(prof: AgentProfile) -> list[Any]:
@@ -238,6 +246,8 @@ def build_langgraph_agent(
     )
     # The scratchpad wraps the skills routes rather than replacing them, so the skills middleware
     # and the filesystem tools read the same backend object.
+    from chemclaw.agent.scratchpad import filesystem_permissions, scratchpad_backend
+
     backend = scratchpad_backend(skills, store, permits=permits)
     shared: dict[str, Any] = {
         "model": chat_model,
@@ -282,6 +292,8 @@ def build_langgraph_agent(
         return ignoring_inherited_durability(create_agent(**shared))
     helpers = _subagents(prof, chat_model, sink, correlation_id, actor, connectors)
     _log_bound_surface(prof, bound, handoffs, helpers, helper=False, peer=peer)
+    from deepagents import create_deep_agent
+
     graph = create_deep_agent(
         backend=backend,
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
@@ -367,7 +379,7 @@ def _resolve_chat_model(supplied: Any | None, profile: AgentProfile) -> Any:
 
 def _middleware(
     profile: AgentProfile,
-    backend: CompositeBackend,
+    backend: "CompositeBackend",
     audit: Any,
     model: Any,
     labelled: list[tuple[str, str]],
@@ -396,6 +408,16 @@ def _middleware(
     Returns:
         The list to hand `create_deep_agent(middleware=…)`.
     """
+    # Imported here: `deepagents` and the backends built on it cost seconds to import, and the API
+    # process only needs them when it compiles a graph (`prepare_imports` does it at startup).
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    from chemclaw.agent.scratchpad import (
+        expire_stale_scratch,
+        filesystem_permissions,
+        scratchpad_tools,
+    )
+
     return [
         *_harness_middleware(profile),
         # `_permissions` is passed because a replacement inherits nothing:
@@ -600,48 +622,6 @@ def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
     return RunnableLambda(invoke)
 
 
-class ReloadingSkillsState(SkillsState):
-    """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
-
-    One redeclared field, and it is the whole reloading mechanism. Upstream annotates
-    `skills_metadata` with `PrivateStateAttr` only, so it resolves to a checkpointed `LastValue`;
-    `UntrackedValue` is never written to a checkpoint (`checkpoint()` returns `MISSING`), so the
-    key is absent at the start of every run of the graph and upstream's own
-    `if "skills_metadata" in state: return None` short-circuit simply does not fire.
-
-    Measured over three turns on one thread, counting whether the key was already in state when
-    `before_agent` ran: `[False, True, True]` on upstream's channel and `[False, False, False]` on
-    this one.
-
-    The same mechanism `ChemclawState.loop_capped` uses, and for the same reason: "per turn" is a
-    property of the channel, not of a caller who remembers to clear it.
-    """
-
-    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
-
-
-class ReloadingSkillsMiddleware(SkillsMiddleware):
-    """`SkillsMiddleware` that re-narrows its listing every turn instead of caching it.
-
-    The role gate reads the turn's identity, so a listing cached from one caller or an earlier role
-    would be wrong. The subclass is one redeclared state field (`ReloadingSkillsState`), depending
-    only on the field name pinned by `tests/test_upstream_surface.py`. A staleness fix, not the
-    gate: `NarrowedSkillsBackend` refuses reads on every call regardless.
-    """
-
-    state_schema = ReloadingSkillsState
-
-    def _format_skills_list(self, skills: list[SkillMetadata]) -> str:
-        """Upstream's listing, except when there is nothing to list — see `NO_SKILLS`.
-
-        Upstream's empty-listing text invites writing a skill, which `NarrowedSkillsBackend`
-        refuses. A private-method override, pinned by `tests/test_upstream_surface.py`.
-        """
-        if not skills:
-            return NO_SKILLS
-        return str(super()._format_skills_list(skills))
-
-
 #: What the model is told when its narrowed skills listing is empty. Upstream's text invites
 #: creating a skill, which every write verb refuses (`SkillsReadOnlyRefusal`). Empty may mean the
 #: deployment ships none or the predicates removed all for this caller; the model cannot tell, so it
@@ -700,6 +680,8 @@ def _skills_prompt() -> str:
         RuntimeError: When one of the passages is no longer in upstream's template, so a bump cannot
             silently restore it. Named one at a time, since the fix differs per passage.
     """
+    from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
+
     prompt = SKILLS_SYSTEM_PROMPT
     for passage, description in _SKILLS_PROMPT_REMOVALS:
         if passage not in prompt:
@@ -766,7 +748,7 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
 
 
 def _skills_middleware(
-    backend: CompositeBackend, labelled: list[tuple[str, str]], profile: AgentProfile
+    backend: "CompositeBackend", labelled: list[tuple[str, str]], profile: AgentProfile
 ) -> Any:
     """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
 
@@ -792,6 +774,8 @@ def _skills_middleware(
         if ORG_SKILLS_ROOT in backend.routes:
             sources.append((f"/{ORG_SKILLS_LABEL}", ORG_SKILLS_LABEL))
     sources += [(f"/{label}", label) for label, _ in labelled]
+    from chemclaw.agent.reloading_skills import ReloadingSkillsMiddleware
+
     return ReloadingSkillsMiddleware(
         backend=backend,
         sources=sources,
@@ -808,7 +792,7 @@ def skills_backend(
     labelled: list[tuple[str, str]] | None = None,
     available: Collection[str] | None = None,
     permits: SkillNarrowing | None = None,
-) -> CompositeBackend:
+) -> "CompositeBackend":
     """The skills backend for one profile — a backend that can only reach what it may.
 
     The narrowing is on the backend, not the listing, because the model reads skill bodies by path
@@ -831,6 +815,10 @@ def skills_backend(
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
     if permits is None:
         permits = skill_narrowing(profile, tools, labelled, available=available)
+    from deepagents.backends import CompositeBackend, StateBackend
+
+    from chemclaw.agent.skill_backend import NarrowedSkillsBackend
+
     return CompositeBackend(
         default=StateBackend(),
         routes={

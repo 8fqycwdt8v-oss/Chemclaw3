@@ -98,14 +98,6 @@ Site = tuple[str, str]  # (path relative to the repo root, stack or target modul
 _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # --- `scipy`: one row per package that uses it.
     # ------------------------------------------------
-    ("chemclaw.memory", "scipy"): (
-        "similarity clustering: one `csr @ csr.T` and one `connected_components` in place of an "
-        "O(n^2) Python pairwise loop over the same fingerprints"
-    ),
-    ("chemclaw.analytical", "scipy"): "stability regression over the analytical series",
-    ("chemclaw.science", "scipy"): (
-        "the RRHO arithmetic's eigenproblem, in `science/calc/thermo.py`"
-    ),
     ("chemclaw.core", "scipy"): (
         "`core/units.py` reads the calorie, the hartree and the electronvolt out of "
         "`scipy.constants` instead of transcribing them — the kernel is the one layer that may "
@@ -279,6 +271,19 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "both warehouse drivers are imported inside their own connect call, so a deployment that "
         "binds no warehouse never needs either installed (D-2026-08-04: the schema is a file, not "
         "an import)"
+    ),
+    # `scipy`'s statistics, sparse and linear-algebra parts each cost a second to import and are
+    # used by one function; `tests/test_import_budget.py` holds that the front door loads none.
+    ("chemclaw.memory", "scipy"): (
+        "similarity clustering: one `csr @ csr.T` and one `connected_components` in place of an "
+        "O(n^2) Python pairwise loop over the same fingerprints, imported inside that function"
+    ),
+    ("chemclaw.analytical", "scipy"): (
+        "the stability regression's t quantile, imported inside `_t_quantile`"
+    ),
+    ("chemclaw.science", "scipy"): (
+        "the RRHO arithmetic's eigenproblem, imported inside the one function in "
+        "`science/calc/thermo.py` that needs `null_space`"
     ),
 }
 
