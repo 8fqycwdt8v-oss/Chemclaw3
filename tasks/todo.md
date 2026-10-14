@@ -403,7 +403,7 @@ Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smalle
       git + batching, Postgres + git mirror, Postgres only, a graph database). Supersedes the
       git half of the layer-4 description; "Markdown with frontmatter" survives as the note **format**
       (body + JSONB frontmatter), not as files.
-- [ ] **W4.2 Schema** (`infra/sql/122_kg_notes.sql`):
+- [ ] **W4.2 Schema** (`infra/sql/128_kg_notes.sql`):
   - `kg_notes` (id, type, frontmatter JSONB, body text, created_by, valid_from, valid_to,
     revision, content_sha, created_at);
   - `kg_note_revisions` (append-only history, which replaces git log as the audit trail);

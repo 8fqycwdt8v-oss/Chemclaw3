@@ -12,10 +12,9 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 
-from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import OrdReaction
-from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note
+from chemclaw.kg.store import note_store
 from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
@@ -171,7 +170,7 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
             "still be true"
         )
         return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
-    existing = load_notes(settings.knowledge_path)
+    existing = note_store().notes()
     units = {note.id: SynthesisUnit(note=note) for note in notes}
     for retired in supersede_updates(notes, existing, date.today()):
         units[carrier_of(retired)].retirements.append(retired)

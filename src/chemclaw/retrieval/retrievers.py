@@ -18,7 +18,6 @@ from typing import Any, Protocol, runtime_checkable
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
-from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
 from chemclaw.kg.search import (
     matched_terms,
@@ -26,6 +25,7 @@ from chemclaw.kg.search import (
     term_coverage,
     term_frequencies,
 )
+from chemclaw.kg.store import note_store
 from chemclaw.retrieval.evidence import EvidenceChunk, Hits, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -194,7 +194,7 @@ def _load_if_present(directory: Path) -> list[Note]:
     Zero parseable notes is a deployment fault (wrong `knowledge_path`, unmounted volume), not an
     empty answer.
     """
-    notes = load_notes(directory) if directory.exists() else []
+    notes = note_store(directory).notes() if directory.exists() else []
     if not notes:
         raise RetrieverSkip(f"no notes found under {directory}")
     return notes

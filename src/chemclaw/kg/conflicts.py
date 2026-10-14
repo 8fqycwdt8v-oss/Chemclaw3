@@ -14,6 +14,7 @@ import heapq
 import logging
 import threading
 from collections import defaultdict
+from collections.abc import Hashable
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -21,8 +22,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
-from chemclaw.kg.graph import NotesFingerprint, cached_notes
 from chemclaw.kg.note import Note
+from chemclaw.kg.store import note_store
 
 log = logging.getLogger(__name__)
 
@@ -329,7 +330,7 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # `graph._COMPUTE_LOCKS`.
 _LOCKS_GUARD = threading.Lock()
 _INDEX_LOCKS: dict[str, threading.Lock] = {}
-_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date | None, dict[str, NoteConflicts]]] = {}
+_INDEX_CACHE: dict[str, tuple[Hashable, date | None, dict[str, NoteConflicts]]] = {}
 
 # Warn once per process that with `graph_cache_enabled=false` every retrieval pays the full scan.
 _WARNED_UNCACHED = False
@@ -353,9 +354,9 @@ def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflic
     if not settings.conflict_detection_enabled or not notes_dir.exists():
         return {}
     key = str(notes_dir)
-    # Snapshot before taking this module's lock; `cached_notes` has its own lock, and nesting them
+    # Snapshot before taking this module's lock; the store's read has its own lock, and nesting them
     # would couple both critical sections for a whole cold parse.
-    fingerprint, notes = cached_notes(notes_dir)
+    fingerprint, notes = note_store(notes_dir).snapshot()
     if fingerprint is None:
         global _WARNED_UNCACHED
         if not _WARNED_UNCACHED:

@@ -25,9 +25,9 @@ from pydantic import BaseModel, ConfigDict
 
 from chemclaw.core.chem import STANDARDIZATION_VERSION, InvalidSmilesError, compound_id
 from chemclaw.ingest.eln.compound import STRUCTURAL_COMPOUND_ID, compound_note
-from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.record import NoteWriter, record_note
+from chemclaw.kg.store import note_store
 from chemclaw.memory.supersede import retire_note
 from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
 from chemclaw.science.fingerprints.rekey import (
@@ -241,7 +241,7 @@ async def rekey_standardization(
         reaction_store: The reaction index.
         as_of: The date a retired note's `valid_to` records.
     """
-    notes = await asyncio.to_thread(load_notes, notes_dir)
+    notes = await asyncio.to_thread(note_store(notes_dir).notes)
     plan = plan_compound_rekey(notes, as_of)
     if apply and plan.rekeys:
         await apply_compound_rekey(plan, writer())

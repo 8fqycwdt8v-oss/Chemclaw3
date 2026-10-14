@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from chemclaw.agent.subscriptions import Subscription
+from chemclaw.kg.store import GitNoteStore
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -146,7 +147,7 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
     async def _one_subscription() -> list[Any]:
         return [Subscription(id=1, owner="u-1", query="suzuki")]
 
-    monkeypatch.setattr(digest, "load_notes", _slow_load)
+    monkeypatch.setattr(GitNoteStore, "notes", _slow_load)
     monkeypatch.setattr(digest, "all_subscriptions", _one_subscription)
     monkeypatch.setattr(digest, "conflict_index", lambda *a, **k: {})
 

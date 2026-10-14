@@ -7,6 +7,12 @@ The reasoning path is graph traversal rather than top-k vector similarity, and t
 through a dense or lexical index (`retrieval_mode`, default `graph`). Those are entry points into
 the traversal, never a replacement for it.
 
+`store.py` is the read interface the readers of the corpus go through (`NoteStore`, chosen by the
+`kg_store` setting) and `GitNoteStore` the only implementation today, a delegation to `graph.py`
+(writes stay with `record.py`); `rows.py` maps a `Note` to the columns of `kg_notes` and `kg_edges`
+(`infra/sql/128_kg_notes.sql`), which nothing reads yet
+(`D-2026-10-14-the-notes-live-in-postgres-and-git-leaves-the-knowledge-path`).
+
 `note.py` is the schema and parser, `graph.py` the NetworkX indexer, `search.py` what a note's text
 *is* for a substring search, `relations.py` and `crosslink.py` the link semantics, `validate.py`
 the schema/link checker behind `make kg-validate`, `analytics.py` the derived views, `conflicts.py`
@@ -19,7 +25,8 @@ definition of which calculations a note rests on, counting those it cites only t
 
 `graph.related(graph, id, rel, as_of=)` — the *directed, one-relation, date-scoped* query D-134
 exists to make possible ("which of this compound's precursors held on that date") — is complete,
-tested, and called by nothing in `src/`. No agent tool, route or retriever exposes it;
+tested, and reached only through `NoteStore.related`, which nothing in `src/` calls. No agent tool,
+route or retriever exposes it;
 `agent.graph_tools.expand_note` reports each neighbour's typed edges in both directions, which is
 the same question in a less precise form. It is kept as the only read path for a capability a
 merged ADR claims.

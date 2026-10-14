@@ -17,6 +17,7 @@ import chemclaw.retrieval.vector_index as vector_index_module
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.embeddings import embed_texts
+from chemclaw.kg.store import GitNoteStore
 from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
     NoteRecord,
@@ -155,18 +156,18 @@ def test_a_note_rewritten_while_the_pass_reads_it_heals_on_the_next_pass(
     index = InMemoryNoteIndex()
     asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
 
-    from chemclaw.kg.graph import load_notes as real_load
+    real_load = GitNoteStore.notes
 
-    def _load_then_a_write_lands(directory: Path) -> object:
-        notes = real_load(directory)
+    def _load_then_a_write_lands(store: GitNoteStore) -> object:
+        notes = real_load(store)
         _write_note(tmp_path, "note-a", "first note body, amended while the pass read it")
         return notes
 
     time.sleep(0.01)  # a distinct mtime on coarse filesystems
     _write_note(tmp_path, "note-a", "first note body, edited")
-    monkeypatch.setattr(vector_index_module, "load_notes", _load_then_a_write_lands)
+    monkeypatch.setattr(GitNoteStore, "notes", _load_then_a_write_lands)
     asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
-    monkeypatch.setattr(vector_index_module, "load_notes", real_load)
+    monkeypatch.setattr(GitNoteStore, "notes", real_load)
 
     assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 1, (
         "the amendment that landed mid-pass was stored under a digest that already matches it, so "

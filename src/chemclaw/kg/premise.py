@@ -16,11 +16,10 @@ from functools import partial
 
 from pydantic import BaseModel
 
-from chemclaw.core.config import settings
 from chemclaw.core.metrics import Metrics
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.kg.graph import build_graph, note_in
 from chemclaw.kg.note import resolves_outside_graph
+from chemclaw.kg.store import note_store
 
 
 class BrokenPremise(BaseModel):
@@ -53,18 +52,18 @@ class BrokenPremise(BaseModel):
 
 
 def _breaks(note_ids: list[str], as_of: date) -> list[BrokenPremise]:
-    """The synchronous scan: one graph build, then a by-id lookup per premise note.
+    """The synchronous scan: one read of the corpus, then a by-id lookup per premise note.
 
-    Uses `note_in`, since graph membership is true for cited-but-undefined ids. External citations
+    A cited-but-undefined id is absent, not a node. External citations
     (`[[reaction-...]]`) name store rows, not notes, so they are skipped rather than reported
     `absent`; judging them would mean asking the record store, a different question.
     """
-    graph = build_graph(settings.knowledge_path)
+    found = note_store().get_many(note_ids)
     broken: list[BrokenPremise] = []
     for note_id in note_ids:
         if resolves_outside_graph(note_id):
             continue
-        note = note_in(graph, note_id)
+        note = found[note_id]
         if note is None:
             broken.append(BrokenPremise(note_id=note_id, reason="absent"))
         elif not note.is_current(as_of):
@@ -79,8 +78,8 @@ def _breaks(note_ids: list[str], as_of: date) -> list[BrokenPremise]:
 async def premise_breaks(note_ids: list[str], as_of: date | None = None) -> list[BrokenPremise]:
     """Which of these notes no longer hold; empty when the premise is whole (or when there is none).
 
-    Offloaded to a thread because `build_graph` is synchronous and this runs on an HTTP answer path.
-    An empty `note_ids` returns without touching the corpus.
+    Offloaded to a thread because the store's reads are synchronous and this runs on an HTTP answer
+    path. An empty `note_ids` returns without touching the corpus.
     """
     if not note_ids:
         return []
