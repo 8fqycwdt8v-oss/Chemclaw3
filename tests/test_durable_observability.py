@@ -668,10 +668,9 @@ def test_the_in_flight_gauge_survives_terminate_and_eviction() -> None:
     A terminated workflow never runs its `finally`, and an evicted one is still RUNNING.
     """
 
-    async def _run() -> list[float]:
+    async def _run() -> None:
         async with await start_local_env_or_skip() as env:
             client = pydantic_client(env)
-            readings: list[float] = []
             # Evicted after every workflow task: the posture that used to read zero.
             async with _core_worker(client, max_cached_workflows=0):
                 handle = await client.start_workflow(
@@ -681,17 +680,12 @@ def test_the_in_flight_gauge_survives_terminate_and_eviction() -> None:
                     task_queue=settings.background_task_queue,
                 )
                 await _until_running(handle)
-                await refresh_open_jobs(client)
-                readings.append(jobs_in_flight())
+                await _until_in_flight(client, 1.0)
                 await handle.terminate()
                 await _until_not_running(handle)
-                await refresh_open_jobs(client)
-                readings.append(jobs_in_flight())
-            return readings
+                await _until_in_flight(client, 0.0)
 
-    running, terminated = asyncio.run(_run())
-    assert running == 1.0
-    assert terminated == 0.0
+    asyncio.run(_run())
 
 
 def test_a_status_poll_with_no_wait_does_not_block_on_a_running_job() -> None:
@@ -914,7 +908,26 @@ async def _until_not_running(handle: Any, timeout: float = 20.0) -> Any:
         description = await handle.describe()
         if description.status is not None and description.status.name != "RUNNING":
             return description
+        await asyncio.sleep(0.1)
     raise AssertionError("the probe workflow never left RUNNING")
+
+
+async def _until_in_flight(client: Any, expected: float, timeout: float = 20.0) -> None:
+    """Refresh the gauge until it reads `expected`, naming the last reading if it never does.
+
+    `describe()` reads the execution's own state; the gauge reads the visibility store, which the
+    broker updates asynchronously after it. The gauge follows the broker's visibility by design, so
+    a test of it waits for that condition rather than for the execution's.
+    """
+    deadline = time.monotonic() + timeout
+    reading = jobs_in_flight()
+    while time.monotonic() < deadline:
+        await refresh_open_jobs(client)
+        reading = jobs_in_flight()
+        if reading == expected:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"the gauge never read {expected}; its last reading was {reading}")
 
 
 async def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:

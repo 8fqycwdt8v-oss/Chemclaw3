@@ -1950,3 +1950,84 @@ async def test_a_cancelled_connect_is_not_absorbed_by_psycopg() -> None:
         "late the cancel landed); a cancelled turn can then run on past a database read — see "
         "pyproject.toml's psycopg floor"
     )
+
+
+# 500 cancellations absorb about 15 on psycopg-pool 3.3.1 (3 in 100) and a residual of about 0.1 on
+# the floor (1 in 4000, in psycopg's own pipeline); 3 separates the two with odds beyond 1 in 10^4.
+_ABSORBED_CHECKOUTS_AT_FLOOR = 3
+
+
+async def test_a_cancelled_pool_checkout_is_not_absorbed() -> None:
+    """A task cancelled while it checks a connection out of a pool built with `check=` is cancelled.
+
+    Every pool here sets `check=`. `psycopg-pool` before 3.3.3 caught the `CancelledError` of the
+    check, returned the connection and looped to hand out another, so the cancellation vanished and
+    the caller (a database read in a middleware, a checkpoint write) went on after the turn was
+    stopped. `pyproject.toml` floors the version.
+    """
+    from psycopg_pool import AsyncConnectionPool
+
+    from chemclaw.core.config import settings
+    from tests.pg import cancels_absorbed, migrated_db_or_skip
+
+    await migrated_db_or_skip()
+    pool = AsyncConnectionPool(
+        settings.postgres_dsn,
+        kwargs={"autocommit": True},
+        min_size=0,
+        max_size=4,
+        check=AsyncConnectionPool.check_connection,
+        open=False,
+    )
+    await pool.open()
+
+    async def checkout() -> None:
+        async with pool.connection() as conn:
+            await conn.execute("SELECT pg_sleep(0.004)")
+
+    try:
+        absorbed = await cancels_absorbed(checkout, 500)
+    finally:
+        await pool.close()
+    assert absorbed <= _ABSORBED_CHECKOUTS_AT_FLOOR, (
+        f"{absorbed} of 500 cancelled checkouts returned as if nothing had happened; see the "
+        "psycopg-pool floor in pyproject.toml"
+    )
+
+
+def test_the_durability_a_turn_asks_for_is_spelt_and_resolved_the_way_the_guard_relies_on() -> None:
+    """`astream(durability=...)` exists, and upstream resolves it per graph in `_defaults`.
+
+    `api/graph_stream.TURN_DURABILITY` passes `"sync"`; `core/graph_durability.py` overrides
+    `_defaults`, whose checkpointer is the fifth item and whose durability is the last. Upstream
+    leaves `"sync"` as asked for a graph with no checkpointer, which is what the guard corrects.
+    """
+    from typing import get_args
+
+    from langchain_core.runnables.config import ensure_config
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.pregel import Pregel
+    from langgraph.types import Durability
+    from typing_extensions import TypedDict
+
+    assert {"sync", "async"} <= set(get_args(Durability))
+    assert "durability" in inspect.signature(Pregel.astream).parameters
+    assert "durability" in inspect.signature(Pregel.ainvoke).parameters
+
+    class _State(TypedDict):
+        n: int
+
+    graph = StateGraph(_State)
+    graph.add_node("bump", lambda state: {"n": state["n"] + 1})
+    graph.add_edge(START, "bump")
+    graph.add_edge("bump", END)
+    resolved = graph.compile(checkpointer=False)._defaults(
+        ensure_config({"configurable": {"thread_id": "t"}}),
+        stream_mode="values",
+        print_mode=(),
+        output_keys=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        durability="sync",
+    )
+    assert resolved[4] is None and resolved[-1] == "sync", resolved

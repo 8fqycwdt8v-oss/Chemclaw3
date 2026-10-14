@@ -152,19 +152,23 @@ async def _until(predicate: Callable[[], Any], *, seconds: float = 20.0) -> None
         await asyncio.sleep(0.05)
 
 
-async def _thread(session_id: str) -> list[str]:
-    """The human messages the *model* will be built from next turn, in order."""
+async def _thread(session_id: str, *, consumed: bool = False) -> list[str]:
+    """The human messages the *model* will be built from next turn, in order.
+
+    The input checkpoint holds the message on the `__start__` channel before the first node runs;
+    the step after it moves it to `messages`. Until then the next turn's own input replaces it, so
+    `consumed` asks for the messages alone: the point from which the question cannot be lost.
+    """
     saver = await checkpointer()
     stored = await saver.aget_tuple(cast("RunnableConfig", turn_config(session_id)))
     if stored is None:
         return []
+    values = stored.checkpoint["channel_values"]
     return [
         str(message.content)
-        # The input checkpoint holds the message on the `__start__` channel before the first
-        # node runs; from then on it is in `messages`. Either is "the model will read it".
         for message in [
-            *stored.checkpoint["channel_values"].get("messages", []),
-            *_started_with(stored.checkpoint["channel_values"].get("__start__")),
+            *values.get("messages", []),
+            *([] if consumed else _started_with(values.get("__start__"))),
         ]
         if isinstance(message, HumanMessage)
     ]
@@ -239,7 +243,7 @@ async def _a_turn_whose_process_dies(session_id: str, question: str, correlation
         )
 
         async def _in_both_records() -> bool:
-            return question in await _thread(session_id) and any(
+            return question in await _thread(session_id, consumed=True) and any(
                 stored_turn_status(m) == "running" for m in await _transcript(session_id)
             )
 

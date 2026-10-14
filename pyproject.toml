@@ -165,7 +165,13 @@ dependencies = [
     # case-sensitive by default, which is the other half (`M` molar against `m` metre).
     "pint>=0.25.3",
     "pandas>=2.2",
-    "psycopg-pool>=3.2",
+    # 3.3.3 is a floor for correctness: before it, a pool built with `check=` (every pool here)
+    # caught the `CancelledError` of a task cancelled during the connection check, returned the
+    # connection and looped to hand out another, so the cancellation vanished and the caller went
+    # on. Measured on 3.3.1: 46 of 1500 `pool.connection()` checkouts cancelled at a random moment
+    # returned normally, none without `check=`
+    # (`tests/test_upstream_surface.py::test_a_cancelled_pool_checkout_is_not_absorbed`).
+    "psycopg-pool>=3.3.3",
     # 3.3.6 is a floor for correctness, not for a feature: before it, `wait_async` and
     # `wait_conn_async` waited through `asyncio.wait_for`, which on Python 3.11 returns the inner
     # result and drops the cancellation when the socket wakes in the same tick the task is

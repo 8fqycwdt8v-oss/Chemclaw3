@@ -14,7 +14,8 @@ Every model call and tool call writes a file in `REPLICA_MARKS` named
 `<tag>.model-<n>.<pid>.<id>` or `<tag>.tool-<name>-<n>.<pid>.<id>`, one per execution, so a test
 counts executions rather than inferring them. `tag=<x>` in the message names the turn (replicas
 outlive a test). `park-model-<n>` holds model call `n`, and `park-<name>` holds that tool's body,
-until the file `<tag>` exists in the `REPLICA_GATE` directory.
+until the file `<tag>` exists in the `REPLICA_GATE` directory. `hold_the_commit_of_an_act` holds the
+checkpoint write that records a `probe_act` call until `commit-<tag>` exists there.
 """
 
 import asyncio
@@ -190,6 +191,34 @@ def classify_probe_tools() -> None:
 
     registry.state_changing_tool_names = lambda: [ACTING_TOOL]
     registry.read_only_tool_names = lambda: [READING_TOOL]
+
+
+def hold_the_commit_of_an_act() -> None:
+    """Park the checkpoint write recording a `probe_act` call until `commit-<tag>` is in the gate.
+
+    Marks `<tag>.commit-held` when a write parks, so a test knows the call is decided and not yet
+    stored. With the write parked, whether the act's body may start is the graph's durability mode.
+    """
+    from chemclaw.agent import checkpointer as checkpointer_module
+
+    put: Any = checkpointer_module.SchemaStampedSaver.aput
+
+    def _act_tag(checkpoint: Any) -> str | None:
+        messages = (checkpoint.get("channel_values") or {}).get("messages") or []
+        last = messages[-1] if messages else None
+        for call in getattr(last, "tool_calls", None) or []:
+            if call.get("name") == ACTING_TOOL:
+                return str(call["args"]["tag"])
+        return None
+
+    async def _held_put(self: Any, config: Any, checkpoint: Any, *rest: Any) -> Any:
+        tag = _act_tag(checkpoint)
+        if tag is not None:
+            _mark(tag, "commit-held")
+            await asyncio.to_thread(_wait_for_gate, f"commit-{tag}")
+        return await put(self, config, checkpoint, *rest)
+
+    checkpointer_module.SchemaStampedSaver.aput = _held_put  # type: ignore[method-assign,assignment]
 
 
 def graph_factory(**kwargs: Any) -> Any:

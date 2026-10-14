@@ -8,6 +8,11 @@ no schema parameter in product code; `tests/conftest.py::redirect_dsns_to_test_s
 list of settings, including the migration DSN.
 """
 
+import asyncio
+import random
+import re
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -114,3 +119,86 @@ async def create_checkpoint_tables() -> None:
                 continue
             await conn.execute(statement)
         await conn.commit()
+
+
+async def planned_index(
+    table: str,
+    seed: str,
+    statement: str,
+    params: Sequence[object] | dict[str, object],
+    *,
+    without: str | None = None,
+) -> str:
+    """The index the planner reaches for `statement`, over a copy of `table` this call fills itself.
+
+    A plan depends on the table's size and statistics, and on a shared schema those are whatever
+    earlier tests left behind. The copy is a temp table of the same name (so `statement` resolves
+    to it unchanged) carrying the same indexes under the same names, filled by `seed` and analysed
+    inside the transaction, which is rolled back. Sequential scans are disabled to ask which index
+    the schema offers rather than whether a scan is cheaper on a small table.
+
+    Args:
+        table: The table in the current schema to copy.
+        seed: An `INSERT` into `table`; it runs against the copy, whose columns have the original's
+            defaults and `NOT NULL`s.
+        statement: The query to plan; its `%s` placeholders are filled from `params`.
+        params: The query's parameters.
+        without: An index of `table` to leave off the copy, for a control that the plan notices.
+
+    Returns:
+        The first index named in the plan, or `""` when it uses none.
+    """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = current_schema() AND tablename = %s",
+                (table,),
+            )
+        ).fetchall()
+        await conn.execute(
+            f"CREATE TEMP TABLE {table} (LIKE {table} INCLUDING DEFAULTS INCLUDING GENERATED)"
+        )
+        for name, definition in rows:
+            if name != without:
+                on_the_copy = re.sub(
+                    r" ON \S+ USING ", f" ON pg_temp.{table} USING ", definition, count=1
+                )
+                await conn.execute(on_the_copy)
+        await conn.execute(seed)
+        await conn.execute(f"ANALYZE {table}")
+        await conn.execute("SET LOCAL enable_seqscan = off")
+        setting = await (await conn.execute("SHOW enable_seqscan")).fetchone()
+        if setting is None or setting[0] != "off":  # a no-op outside a transaction block
+            raise AssertionError(f"enable_seqscan is {setting}, so the plan would not be asked")
+        cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", params)
+        row = await cursor.fetchone()
+        await conn.rollback()
+    nodes: list[Any] = [row[0][0]["Plan"]] if row else []
+    while nodes:
+        node = nodes.pop()
+        if "Index Name" in node:
+            return str(node["Index Name"])
+        nodes.extend(node.get("Plans", []))
+    return ""
+
+
+async def cancels_absorbed(make: Callable[[], Awaitable[object]], attempts: int) -> int:
+    """How many of `attempts` runs of `make()` returned normally though their task was cancelled.
+
+    Each is cancelled after a random few milliseconds, which lands the cancellation at every stage
+    of a database call: waiting for a connection, sending, waiting for the result, finished. A
+    task that swallows its cancellation is a Stop that a turn does not obey.
+    """
+    absorbed = 0
+    for _ in range(attempts):
+        task = asyncio.ensure_future(make())
+        await asyncio.sleep(random.uniform(0, 0.012))
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            continue
+        absorbed += bool(task.cancelling())
+    return absorbed

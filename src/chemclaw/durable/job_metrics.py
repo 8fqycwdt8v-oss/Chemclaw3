@@ -40,6 +40,8 @@ _BROKER_STALE_INTERVALS = 3
 async def refresh_open_jobs(client: Client) -> None:
     """Re-read the broker's count of open connector jobs into the gauge's reading.
 
+    The count is the broker's visibility store, which trails an execution's own state by a moment,
+    so a job that just closed may still be counted on the next refresh and not on the one after.
     Never raises: a failed query is counted (`chemclaw_degraded_total`) and the previous reading
     stands, so the drain and probe surface keep running.
     """

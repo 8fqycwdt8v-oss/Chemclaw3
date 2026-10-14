@@ -124,12 +124,19 @@ async def memory_store() -> AsyncPostgresStore:
         A ready store over this process's session pool.
     """
     global _store
-    if _store is not None:
-        return _store
     # Imported here rather than at module scope: `checkpointer` imports `state`, which imports
     # config, and a module-scope import would put this module in that cycle for one call.
-    from chemclaw.agent.checkpointer import _checkpoint_pool, _initialization_lock, _setup_once
+    from chemclaw.agent.checkpointer import (
+        _checkpoint_pool,
+        _forget_what_an_ended_loop_owned,
+        _initialization_lock,
+        _setup_once,
+    )
     from chemclaw.agent.session_store import _session_dsn
+
+    _forget_what_an_ended_loop_owned()
+    if _store is not None:
+        return _store
 
     # Awaited outside the lock, and it must stay outside: `_checkpoint_pool` takes the same lock,
     # and `asyncio.Lock` is not reentrant. Holding it across that call deadlocks every cold start.
@@ -147,11 +154,11 @@ async def memory_store() -> AsyncPostgresStore:
     return _store
 
 
-async def close_memory_store() -> None:
-    """Drop the process's store — called by `close_checkpointer`, which owns the pool beneath it.
+def drop_memory_store() -> None:
+    """Drop the process's store, for the module that owns the pool beneath it to call.
 
-    The store is dropped before its pool is closed, so nothing is handed a store over closed
-    connections. The pool itself is left to `close_checkpointer`.
+    The store goes before its pool does, so nothing is handed a store over closed connections. The
+    pool itself is left to `agent/checkpointer`, which calls this.
     """
     global _store
     _store = None
