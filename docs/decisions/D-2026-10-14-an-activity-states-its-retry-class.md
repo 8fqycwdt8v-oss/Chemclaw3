@@ -22,9 +22,10 @@ remembered. A down dependency was asked again after 1, 2, 4 and
 
 ## Options
 
-1. **Keep `BAD_DATA_RETRY` and the four variants; add a lint.** No behaviour change. The policy
-   still follows the call site, so the same activity can be dispatched under two policies, and the
-   lint can only check that a name was written, not that it is the right one.
+1. **Keep `BAD_DATA_RETRY` and the four variants; only check that every dispatch names one.** No
+   behaviour change. The policy still follows the call site, so the same activity can be dispatched
+   under two policies, and the check can only see that a name was written, not that it is the
+   right one.
 2. **A table in one module, activity name to class.** One place to read every assignment. A new
    activity needs an edit in a distant file, the key is a string that can drift from the function,
    and the Temporal name can differ from the function name (`activity.defn(name=...)`).
@@ -52,7 +53,7 @@ Seven classes, each distinct in at least one parameter:
 | `IO` | short Postgres or in-process work | `io_retry_max_attempts` (8); 1 s doubling to 30 s |
 | `NOTE_WRITE` | one knowledge-note write | `note_write_max_attempts` (3); as `IO` |
 | `COMPUTE` | a sweep or computation in the worker | `activity_max_attempts` (5); 10 s doubling to 300 s |
-| `REMOTE` | a service or system outside the worker and Postgres, repeatable | as `COMPUTE`, and jittered |
+| `REMOTE` | a service or system outside the worker and Postgres, repeatable: a data source or share, the model gateway, an embedding or labelling server, retrieval across sources, an outbound channel, a governed tool call | as `COMPUTE`, and jittered |
 | `CALC` | the calculation backend | unchanged: sized so the last retry waits one calculation |
 | `GOVERNED` | a re-run repeats audited side effects | `agent_step_max_attempts` (1); as `IO` |
 | `QUEUED_TOOL` | a heavy tool call waiting for a slot | unchanged: unbounded, ended by the call's `schedule_to_close` |
@@ -66,6 +67,27 @@ day an outbound channel needs a different bound.
 Jitter spreads the first interval of the classes that lean on a shared dependency (`REMOTE`,
 `CALC`); `COMPUTE` owns its work and has nothing to spread against. It is drawn from
 `workflow.random()`, deterministic on replay.
+
+**What decides a class, checked on the code.** An activity that calls the model gateway, an
+embedding server, a data source or an outside channel is `REMOTE`, because a retry is billed or
+asked again and, unjittered, every worker asks a provider that is down at once. That reading moved
+four activities after review: `read_check_result` (a model call), `retrieve_section` and
+`gather_hypothesis_evidence` (retrieval across the registered sources, hybrid mode included) to
+`REMOTE`, and `collect_digests` (a scan of the corpus and `git log`, no outside call) to `COMPUTE`.
+Left in `IO` on the same reading: the activities that touch only Postgres, the settings or the
+registry, and `settle_orphaned_waits`, which asks the Temporal frontend the worker already needs
+in order to run at all.
+
+`authorize_job_step`, `ground_check_template` and `ground_check_job` stay `IO`, with their reason.
+Each runs `audited_launch`, which calls `prepare_job_launch` through the governed chain: validate
+the arguments, check funding and availability, authorize an expensive trigger, run the job's
+declared precondition. That is a pre-flight, not the launch: it starts no job and changes nothing in
+the world. What a re-run repeats is one more append-only `audit_events` row (the sink inserts
+without a key, and the chain derives one call id per tool and arguments), which records the attempt
+and is the audit trail's intended content for a retried call. This differs from `run_tool_step` and
+`run_computable_check`, whose re-run repeats the governed tool call itself. Every deterministic
+refusal the pre-flight raises (`AuthorizationError`, `ConnectorError`, a validation error) is in the
+bad-data list and costs one attempt; only a transient read fault is retried.
 
 **Replay.** A retry policy is a field of the schedule command, not part of the sequence Temporal
 compares on replay (activity type, id and ordering are), so changing a class's numbers or moving
@@ -83,17 +105,39 @@ and up to 300 s between later ones instead of 1 s and 100 s; a hypothesis check
 agent step's. `CALC` and `QUEUED_TOOL` spacing and attempts are unchanged.
 
 Five settings are added and validated against each other (a first interval above the longest is
-refused at start-up, since from a workflow it would fail the task without end).
+refused at start-up, since from a workflow it would fail the task without end). A sixth rule couples
+the retry windows to the fan-out child's ceiling: `activity_max_attempts` report sections of
+300 s plus the 150 s of backoff between them is 1650 s, which `fan_out_child_timeout_seconds`
+(3600 s) must exceed with the child's overhead; at 1500 s the one-attempt rule passes and this one
+refuses.
+
+An activity a worker does not serve raises `NotFoundError`, which is not in the bad-data list (on
+purpose: during a rolling deploy another pod serves it). It is now retried five times over about
+150 s (`REMOTE`) or eight over about 91 s (`IO`) before the workflow gives up, instead of about
+15 s, so a misconfigured worker delays a job's end by that much; four tests whose worker left an
+activity out waited past their bounds and now serve it.
+
+The same worst case, per item, is not bounded by a setting: a hard Postgres outage makes each
+swallowed `IO` write in a per-subscriber or per-source loop cost the whole 91 s window (about 950
+digest subscribers exceed `schedule_run_timeout_seconds`). That is a backlog row, not a validator,
+because the item count is data.
+
+Two retries multiply and are left as they were: the hypothesis calculation child restarts up to
+`activity_max_attempts` times on top of the `CALC` attempts of its activity, and an LLM activity's
+Temporal attempts multiply the SDK's own `llm_max_retries`. Both are backlog rows.
 
 A template `tool` step (`run_tool_step`) is classed `REMOTE` and so keeps retrying, although a
 re-run repeats a governed tool call and its audit row exactly as `run_computable_check` does, which
-is single-attempt. Reclassifying it `GOVERNED` is a behaviour decision and is left to the backlog.
+is single-attempt. Reclassifying it `GOVERNED` is a behaviour decision and is a backlog row.
 
 ## What keeps it true
 
 `tests/test_retry.py`: every `@activity.defn` declares a class and the imported function carries
-it; every dispatch passes `retry_for` of the activity it dispatches; no module but `retry.py`
-builds a `RetryPolicy`; every class is bounded except `QUEUED_TOOL`, whose dispatch passes
+it; the members of `CALC`, `GOVERNED`, `QUEUED_TOOL` and `REMOTE` are pinned by name, so moving an
+activity into or out of one fails a test that names it; every dispatch passes `retry_for` of the
+activity it dispatches and every child start one of the two child policies (an AST walk that also
+refuses an aliased import, a `getattr` and the dispatch name used as a value, each shown by a
+snippet); no module but `retry.py` builds a `RetryPolicy`; every class is bounded except `QUEUED_TOOL`, whose dispatch passes
 `schedule_to_close_timeout`; no class is empty; and against a real dev server, in every class, a
 `ValueError` is attempted once and a transient failure is attempted exactly the configured number
 of times and then fails with its own message.

@@ -84,7 +84,7 @@ def default_retrievers() -> list[SourceRetriever]:
     ]
 
 
-@durable_activity("background", ActivityClass.IO)
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
     """Retrieve one report section's evidence across the production sources, as the requester.

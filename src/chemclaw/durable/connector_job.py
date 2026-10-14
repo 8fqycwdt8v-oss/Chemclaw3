@@ -499,6 +499,8 @@ class ConnectorJobWorkflow:
                 # leave a live question for a dead job. `REQUEST_CANCEL` delivers the cancellation
                 # the wait handles by settling its row.
                 parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
+                # Stated rather than defaulted: a wait is asked once and never restarted.
+                retry_policy=child_workflow_once(),
             )
         )
         if outcome.state != "answered" or not outcome.payload.get("approved", False):

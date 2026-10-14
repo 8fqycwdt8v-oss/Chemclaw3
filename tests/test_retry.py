@@ -430,6 +430,20 @@ def test_a_first_interval_longer_than_the_longest_is_refused_at_startup() -> Non
         Settings(slow_retry_initial_seconds=900.0, slow_retry_max_interval_seconds=300.0)
 
 
+def test_a_fan_out_ceiling_that_holds_one_attempt_but_not_its_retries_is_refused() -> None:
+    """The ceiling must contain every attempt of the longest fan-out activity, not just one.
+
+    At 1500 s it clears the one-attempt rule (300 s section plus 30 s overhead) but a section that
+    fails all five attempts takes 5 x 300 s plus 10 + 20 + 40 + 80 s of backoff, 1650 s, and the
+    child would die as an execution timeout no workflow code sees.
+    """
+    shortest = settings.fan_out_child_timeout_seconds
+    assert shortest > 1650 + settings.activity_timeout_seconds, "the shipped ceiling covers it"
+    with pytest.raises(ValueError, match="cover the retries"):
+        Settings(fan_out_child_timeout_seconds=1500.0)
+    Settings(fan_out_child_timeout_seconds=1700.0)
+
+
 # --- every activity declares a class, and every dispatch uses it ------------------------------
 
 # Every SDK call that puts an activity on a queue or runs it as a local activity, including the
@@ -512,84 +526,234 @@ def _dispatch_offences(tree: ast.Module, where: str) -> tuple[int, list[str]]:
     return sites, offences
 
 
+# The calls that start a child workflow: a child given no policy runs on the server's default.
+_CHILD_NAMES = {"execute_child_workflow", "start_child_workflow"}
+_CHILD_POLICIES = {"child_workflow_retry", "child_workflow_once"}
+
+
+def _call_name(call: ast.Call) -> str:
+    """The bare name a call is made through: `workflow.execute_activity(...)` is that name."""
+    func = call.func
+    return func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+
+
+def _enclosing_parameters(tree: ast.Module) -> dict[int, frozenset[str]]:
+    """For every node, the parameter names of the function it sits in."""
+    found: dict[int, frozenset[str]] = {}
+
+    def visit(node: ast.AST, parameters: frozenset[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = parameters
+            if isinstance(child, ast.AsyncFunctionDef | ast.FunctionDef):
+                arguments = child.args
+                inner = frozenset(
+                    one.arg
+                    for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+                )
+            found[id(child)] = inner
+            visit(child, inner)
+
+    visit(tree, frozenset())
+    return found
+
+
+def _states_a_policy(
+    call: ast.Call, enclosing: dict[int, frozenset[str]], allowed: set[str]
+) -> bool:
+    """Whether `call` passes `retry_policy=` as a call to one of `allowed`, or forwards its own.
+
+    A variable called `retry_policy` counts only inside a function that takes a parameter of that
+    name (the helper that forwards its caller's), so an arbitrary variable cannot pass.
+    """
+    policy = _keywords(call).get("retry_policy")
+    if isinstance(policy, ast.Call):
+        return _call_name(policy) in allowed
+    return (
+        isinstance(policy, ast.Name)
+        and policy.id == "retry_policy"
+        and "retry_policy" in enclosing.get(id(call), frozenset())
+    )
+
+
+def _policy_offences(tree: ast.Module, where: str) -> list[str]:
+    """A policy built outside `retry.py`, and a `retry_policy=` that is not one of its calls."""
+    if where == "durable/retry.py":
+        return []
+    enclosing = _enclosing_parameters(tree)
+    allowed = {"retry_for"} | _CHILD_POLICIES
+    offences = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        if _call_name(call) == "RetryPolicy":
+            offences.append(f"{where}:{call.lineno} constructs a RetryPolicy")
+        policy = _keywords(call).get("retry_policy")
+        if policy is not None and not _states_a_policy(call, enclosing, allowed):
+            offences.append(f"{where}:{call.lineno} passes retry_policy={ast.unparse(policy)}")
+    return offences
+
+
+def _child_offences(tree: ast.Module, where: str) -> list[str]:
+    """Child-workflow starts that state neither of the two child policies nor a forwarded one."""
+    enclosing = _enclosing_parameters(tree)
+    offences = []
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and _call_name(call) in _CHILD_NAMES):
+            continue
+        if not _states_a_policy(call, enclosing, _CHILD_POLICIES):
+            policy = _keywords(call).get("retry_policy")
+            given = ast.unparse(policy) if policy else "nothing (the server's default)"
+            offences.append(f"{where}:{call.lineno} starts a child workflow with {given}")
+    return offences
+
+
+def _hole_offences(tree: ast.Module, where: str) -> list[str]:
+    """Ways to start an activity or child that the call walks above cannot see.
+
+    An import under another name, a `getattr` with the name as a string, and the name used as a
+    value (assigned, passed on) instead of called.
+    """
+    watched = _DISPATCH_NAMES | _CHILD_NAMES
+    called = {id(call.func) for call in ast.walk(tree) if isinstance(call, ast.Call)}
+    offences = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in watched and alias.asname:
+                    offences.append(
+                        f"{where}:{node.lineno} imports {alias.name} as {alias.asname}, so its "
+                        "calls cannot be recognised"
+                    )
+        elif isinstance(node, ast.Call):
+            if (
+                _call_name(node) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in watched
+            ):
+                offences.append(f"{where}:{node.lineno} reaches {node.args[1].value} by getattr")
+        elif isinstance(node, ast.Attribute | ast.Name) and id(node) not in called:
+            name = node.attr if isinstance(node, ast.Attribute) else node.id
+            if name in watched and isinstance(node.ctx, ast.Load):
+                offences.append(f"{where}:{node.lineno} uses {name} as a value, not a call")
+    return offences
+
+
+def _all_offences(tree: ast.Module, where: str) -> tuple[int, list[str]]:
+    """Every rule about how work is started and retried, over one module.
+
+    Returns:
+        The number of activity dispatches found, and one message per offence of any rule.
+    """
+    sites, offences = _dispatch_offences(tree, where)
+    return sites, [
+        *offences,
+        *_policy_offences(tree, where),
+        *_child_offences(tree, where),
+        *_hole_offences(tree, where),
+    ]
+
+
 def test_every_dispatch_passes_the_policy_of_the_activity_it_dispatches() -> None:
     """No dispatch leans on the SDK's unlimited default or spells a policy of its own.
 
-    `retry_policy=retry_for(<the activity dispatched>)` at every site, so the class an activity
-    declares is the class it is retried under, and a policy cannot be copied onto the wrong one.
+    `retry_policy=retry_for(<the activity dispatched>)` at every activity site and one of the two
+    child policies at every child start, so the class an activity declares is the class it is
+    retried under, a policy cannot be copied onto the wrong one, and nothing is started in a way
+    the walk cannot see. A policy is spelled once, in `retry.py`.
     """
     total = 0
     offences: list[str] = []
     for where, tree in _source_trees():
-        sites, found = _dispatch_offences(tree, where)
+        sites, found = _all_offences(tree, where)
         total += sites
         offences.extend(found)
 
     assert total >= _DISPATCH_SITES_FLOOR, f"the walk found only {total} dispatch sites"
-    assert not offences, "dispatches outside the retry classes:\n" + "\n".join(offences)
+    assert not offences, "work started outside the retry classes:\n" + "\n".join(offences)
 
 
-def test_the_dispatch_walk_sees_the_spellings_it_exists_to_refuse() -> None:
-    """Driven on source nobody wrote: a default, a literal, a class helper for another activity."""
-    template = "async def run():\n    await workflow.{call}({args})\n"
-    refused = [
-        template.format(call="execute_activity", args="act, start_to_close_timeout=t"),
-        template.format(
-            call="execute_activity", args="act, retry_policy=RetryPolicy(maximum_attempts=1)"
-        ),
-        template.format(
-            call="start_activity", args="act, retry_policy=policy_for(ActivityClass.IO)"
-        ),
-        template.format(call="execute_local_activity", args="act, retry_policy=retry_for(other)"),
-        template.format(call="execute_activity", args="activity=act, retry_policy=BAD_DATA_RETRY"),
-    ]
-    accepted = [
-        template.format(call="execute_activity", args="act, retry_policy=retry_for(act)"),
-        template.format(call="execute_local_activity", args="act, retry_policy=retry_for(act)"),
-        template.format(
-            call="start_activity", args="activity=mod.act, retry_policy=retry_for(mod.act)"
-        ),
-    ]
-    for source in refused:
-        sites, offences = _dispatch_offences(ast.parse(source), "probe")
-        assert (sites, len(offences)) == (1, 1), source
-    for source in accepted:
-        assert _dispatch_offences(ast.parse(source), "probe") == (1, []), source
+def _offences_of(source: str) -> list[str]:
+    """Every rule over a snippet nobody wrote, as if it were a module under `src`."""
+    return _all_offences(ast.parse(source), "probe")[1]
+
+
+_TEMPLATE = "async def run():\n    await workflow.{call}({args})\n"
+
+# Each spelling the walk could fall through, and the snippet that uses it.
+_REFUSED = {
+    "the SDK default": _TEMPLATE.format(call="execute_activity", args="act"),
+    "a literal policy": _TEMPLATE.format(
+        call="execute_activity", args="act, retry_policy=RetryPolicy(maximum_attempts=1)"
+    ),
+    "a class helper": _TEMPLATE.format(
+        call="start_activity", args="act, retry_policy=policy_for(ActivityClass.IO)"
+    ),
+    "another activity's policy": _TEMPLATE.format(
+        call="execute_local_activity", args="act, retry_policy=retry_for(other)"
+    ),
+    "a retired name": _TEMPLATE.format(
+        call="execute_activity", args="activity=act, retry_policy=BAD_DATA_RETRY"
+    ),
+    "an aliased import": (
+        "from temporalio.workflow import execute_activity as ea\n"
+        "async def run():\n    await ea(act, retry_policy=retry_for(act))\n"
+    ),
+    "a getattr": (
+        "async def run():\n"
+        "    await getattr(workflow, 'execute_activity')(act, retry_policy=retry_for(act))\n"
+    ),
+    "a name used as a value": (
+        "async def run():\n    go = workflow.execute_activity\n"
+        "    await go(act, retry_policy=retry_for(act))\n"
+    ),
+    "a variable that happens to be called retry_policy": (
+        "async def run(policy):\n    retry_policy = policy\n"
+        "    await workflow.execute_activity(act, retry_policy=retry_policy)\n"
+    ),
+    "a child with no policy": _TEMPLATE.format(call="execute_child_workflow", args="W.run"),
+    "a child with a literal policy": _TEMPLATE.format(
+        call="start_child_workflow", args="W.run, retry_policy=RetryPolicy(maximum_attempts=3)"
+    ),
+    "a child with an activity's policy": _TEMPLATE.format(
+        call="execute_child_workflow", args="W.run, retry_policy=retry_for(act)"
+    ),
+}
+
+_ACCEPTED = [
+    _TEMPLATE.format(call="execute_activity", args="act, retry_policy=retry_for(act)"),
+    _TEMPLATE.format(call="execute_local_activity", args="act, retry_policy=retry_for(act)"),
+    _TEMPLATE.format(
+        call="start_activity", args="activity=mod.act, retry_policy=retry_for(mod.act)"
+    ),
+    _TEMPLATE.format(
+        call="execute_child_workflow", args="W.run, retry_policy=child_workflow_once()"
+    ),
+    _TEMPLATE.format(
+        call="start_child_workflow", args="W.run, retry_policy=child_workflow_retry()"
+    ),
+    # The helper that forwards its caller's policy: the parameter is its own.
+    "async def run_child(retry_policy):\n"
+    "    return await workflow.execute_child_workflow(W.run, retry_policy=retry_policy)\n",
+]
+
+
+@pytest.mark.parametrize("name", list(_REFUSED))
+def test_the_walk_refuses_each_spelling_it_exists_to_refuse(name: str) -> None:
+    """Each hole the walk could fall through is closed, shown by a snippet that uses it."""
+    assert _offences_of(_REFUSED[name]), f"{name} got through"
+
+
+@pytest.mark.parametrize("source", _ACCEPTED)
+def test_the_walk_accepts_the_spellings_the_tree_uses(source: str) -> None:
+    """The refusals are not so broad that the shipped spellings fail with them."""
+    assert _offences_of(source) == [], source
+
+
+def test_the_interceptor_delegation_is_not_a_dispatch() -> None:
+    """`self.next.execute_activity(...)` hands on an activity already scheduled."""
     interceptor = "async def f(self, input):\n    return await self.next.execute_activity(input)\n"
-    assert _dispatch_offences(ast.parse(interceptor), "interceptor") == (0, [])
-
-
-def test_no_module_but_the_retry_module_builds_a_retry_policy() -> None:
-    """A policy is spelled once, so changing how the system retries is one edit in one file.
-
-    Every `retry_policy=` in the tree is a call to one of the module's three functions, or the
-    parameter of the helper that forwards a caller's.
-    """
-    allowed = {"retry_for", "child_workflow_retry", "child_workflow_once"}
-    offences = []
-    for where, tree in _source_trees():
-        if where == "durable/retry.py":
-            continue
-        for call in ast.walk(tree):
-            if not isinstance(call, ast.Call):
-                continue
-            name = (
-                call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
-            )
-            if name == "RetryPolicy":
-                offences.append(f"{where}:{call.lineno} constructs a RetryPolicy")
-            policy = _keywords(call).get("retry_policy")
-            if policy is None:
-                continue
-            forwarded = isinstance(policy, ast.Name) and policy.id == "retry_policy"
-            called = (
-                isinstance(policy, ast.Call)
-                and isinstance(policy.func, ast.Name)
-                and policy.func.id in allowed
-            )
-            if not (forwarded or called):
-                offences.append(f"{where}:{call.lineno} passes retry_policy={ast.unparse(policy)}")
-    assert not offences, "\n".join(offences)
+    assert _all_offences(ast.parse(interceptor), "interceptor") == (0, [])
 
 
 def _declared_classes() -> dict[tuple[str, str], str]:
@@ -662,6 +826,87 @@ def test_no_class_exists_that_no_activity_uses() -> None:
     assert used == set(ActivityClass.__members__), (
         f"unused classes: {sorted(set(ActivityClass.__members__) - used)}"
     )
+
+
+# The classes whose members carry a safety property, pinned by name. A wrong class is otherwise
+# silent: every policy is valid, so moving `evaluate_candidates` from CALC to IO leaves the suite
+# green while a computed objective is recomputed eight times. Moving an activity into or out of one
+# of these fails here, naming it; the other classes are the rest, and need no table.
+_PINNED_MEMBERS = {
+    # Re-running one repeats an expensive, metered calculation (a persisted result is never
+    # recomputed).
+    ActivityClass.CALC: {"evaluate_candidates", "run_xtb_calculation"},
+    # Re-running one repeats audited side effects: an agent turn's tools, a governed check.
+    ActivityClass.GOVERNED: {"run_agent_step", "run_computable_check"},
+    # Retried against a full server until the call's own deadline; the only unbounded class.
+    ActivityClass.QUEUED_TOOL: {"call_queued_tool"},
+    # A call to a system outside the worker and Postgres. The model gateway is the costly one: a
+    # retry is billed again, and without jitter every worker asks a provider that is down at once.
+    ActivityClass.REMOTE: {
+        "compare_hypotheses",
+        "critique_hypothesis",
+        "deliver_digest_activity",
+        "deliver_message_activity",
+        "derive_check",
+        "draft_angles",
+        "drain_reaction_corpus",
+        "drain_result_publications",
+        "gather_hypothesis_evidence",
+        "generate_hypotheses",
+        "label_stale_reactions",
+        "mirror_commitments_activity",
+        "plan_label_sync",
+        "read_check_result",
+        "reembed_stale_documents",
+        "retrieve_section",
+        "run_tool_step",
+        "sync_document_share",
+        "sync_eln_entries",
+    },
+}
+
+# The activities that call the model gateway, which must stay in `REMOTE` whatever else moves.
+_MODEL_GATEWAY_CALLERS = {
+    "compare_hypotheses",
+    "critique_hypothesis",
+    "derive_check",
+    "draft_angles",
+    "generate_hypotheses",
+    "read_check_result",
+}
+
+
+def _members_by_class() -> dict[ActivityClass, set[str]]:
+    """The activities of each class, by function name (unique across the tree)."""
+    members: dict[ActivityClass, set[str]] = {one: set() for one in ActivityClass}
+    seen: set[str] = set()
+    for (_, name), member in _declared_classes().items():
+        assert name not in seen, f"{name} is defined twice; the pinned table is keyed by name"
+        seen.add(name)
+        members[ActivityClass[member]].add(name)
+    return members
+
+
+@pytest.mark.parametrize("activity_class", list(_PINNED_MEMBERS))
+def test_the_members_of_a_safety_bearing_class_are_exactly_the_pinned_ones(
+    activity_class: ActivityClass,
+) -> None:
+    """Moving an activity into or out of CALC, GOVERNED, QUEUED_TOOL or REMOTE is a visible edit.
+
+    Set equality, so an addition is named as well as a removal: the author of a new activity in
+    one of these classes states, here, why it belongs there.
+    """
+    actual = _members_by_class()[activity_class]
+    expected = _PINNED_MEMBERS[activity_class]
+    assert actual == expected, (
+        f"{activity_class}: no longer in it {sorted(expected - actual)}; "
+        f"newly in it {sorted(actual - expected)}. Update `_PINNED_MEMBERS` with the reason."
+    )
+
+
+def test_every_activity_that_calls_the_model_gateway_is_remote() -> None:
+    """A model call is billed again on retry and must back off and spread like any dependency."""
+    assert _MODEL_GATEWAY_CALLERS <= _members_by_class()[ActivityClass.REMOTE]
 
 
 def test_a_function_with_no_class_is_refused_by_name() -> None:

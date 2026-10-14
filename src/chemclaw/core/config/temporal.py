@@ -10,6 +10,15 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
+def backoff_seconds(retries: int, initial: float, longest: float) -> float:
+    """The pauses a retry policy spends between `retries + 1` attempts, doubling to a cap.
+
+    Pure arithmetic over the settings that shape a policy (`durable/retry.py`), so a ceiling that
+    must contain every attempt can be checked where it is configured.
+    """
+    return sum(min(initial * 2.0**step, longest) for step in range(retries))
+
+
 class TemporalSettings(BaseSettings):
     """Temporal — durable execution of long scientific jobs (plan Phase 1).
 
@@ -53,9 +62,10 @@ class TemporalSettings(BaseSettings):
     # so a killed run restarts from page one.
     schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
 
-    # Attempts under the retry classes that wait on something slow: `COMPUTE`, `REMOTE` and `CALC`
-    # (`durable/retry.py`). Bad data is non-retryable by type; this caps transient retries so an
-    # unclassified deterministic failure gives up instead of pinning a worker.
+    # Attempts under the retry classes that wait on something slow: `COMPUTE`, `REMOTE` and `CALC`,
+    # and the restarts of a fan-out child and of the hypothesis calculation child
+    # (`durable/retry.py::child_workflow_retry`). Bad data is non-retryable by type; this caps
+    # transient retries so an unclassified deterministic failure gives up, not pinning a worker.
     activity_max_attempts: int = Field(default=5, ge=1)
 
     # The `IO` class: short Postgres and in-process work, where a fault clears in seconds. Many

@@ -279,7 +279,7 @@ async def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.Monke
     assert "CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS" not in str(busy.value)
 
     # The classification, which is the whole fix: `SubsystemUnavailableError` is the hierarchy
-    # `tests/test_publish.py` asserts is *absent* from `_BAD_DATA_TYPES`, so this is retryable by
+    # `tests/test_retry.py` asserts is *absent* from `_BAD_DATA_TYPES`, so this is retryable by
     # construction and cannot be made non-retryable without failing a test that says why.
     assert issubclass(CalcBusyError, SubsystemUnavailableError)
     assert not issubclass(CalcBusyError, ChemclawError)

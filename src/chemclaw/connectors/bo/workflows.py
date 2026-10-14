@@ -48,7 +48,7 @@ from chemclaw.durable.publish import (
     remaining_queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
-from chemclaw.durable.retry import retry_for
+from chemclaw.durable.retry import child_workflow_once, retry_for
 
 
 def _carry_on_if_history_is_filling_up(
@@ -131,6 +131,8 @@ async def _measure(
             # gone. Pinned by `tests/test_awaiting.py` and, at this call site,
             # `tests/test_bo_campaign.py`.
             parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
+            # Stated rather than defaulted: a wait is asked once and never restarted.
+            retry_policy=child_workflow_once(),
         )
     )
     if outcome.state != "answered":

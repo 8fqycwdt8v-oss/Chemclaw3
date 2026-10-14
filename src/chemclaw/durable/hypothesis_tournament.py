@@ -63,7 +63,7 @@ from chemclaw.durable.publish import (
     publish_note_best_effort,
     queue_wait_timeout,
 )
-from chemclaw.durable.retry import child_workflow_retry, retry_for
+from chemclaw.durable.retry import child_workflow_once, child_workflow_retry, retry_for
 
 # How many evidence chunks ride into one prompt. Small on purpose: a comparison prompt carries two
 # hypotheses' evidence, so this is doubled there, and the budget that matters is the endpoint's.
@@ -316,7 +316,7 @@ async def draft_angles(request: TournamentRequest, wanted: int = 4) -> _AngleSet
         reset_current_identity(token)
 
 
-@durable_activity("background", ActivityClass.IO)
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def gather_hypothesis_evidence(
     query: str, hypothesis_id: str = "", requested_by: str = "", correlation_id: str = ""
@@ -1166,7 +1166,7 @@ _READ_CHECK_RESULT = ModelProse(
 )
 
 
-@durable_activity("background", ActivityClass.IO)
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def read_check_result(
     check: DiscriminatingCheck, result: str, requested_by: str = "", correlation_id: str = ""
@@ -1977,8 +1977,9 @@ class HypothesisTournamentWorkflow:
                     # The ceiling `start_template_run` passes and `unrunnable_reason` gated on; also
                     # the only bound on an enumeration's fan-out.
                     execution_timeout=timedelta(seconds=plan.run_timeout_seconds),
-                    # No retry policy, matching `start_template_run`: a retry would re-run the whole
+                    # One attempt, matching `start_template_run`: a retry would re-run the whole
                     # procedure, including an uncached metered model turn.
+                    retry_policy=child_workflow_once(),
                     result_type=TemplateRunResult,
                 )
                 for check, plan, definition in launches

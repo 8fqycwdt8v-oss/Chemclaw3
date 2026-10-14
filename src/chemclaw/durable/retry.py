@@ -280,10 +280,12 @@ _POLICIES = {
 
 
 def child_workflow_retry() -> RetryPolicy:
-    """Bounded restarts of a fan-out child, which is small and independent of its siblings.
+    """Bounded restarts of a child workflow that is small and independent of its siblings.
 
-    Only `maximum_attempts` takes effect: a child failing through its activity surfaces as a child
-    failure, whose outermost type is not in the bad-data list.
+    Used by the fan-out and by the hypothesis calculation child. The attempt bound is what acts: a
+    child failing through its activity surfaces as a child failure whose outermost type is the
+    child's, not the activity's error, so the bad-data list classifies only a failure raised by the
+    child's own code.
     """
     return RetryPolicy(
         maximum_attempts=settings.activity_max_attempts,

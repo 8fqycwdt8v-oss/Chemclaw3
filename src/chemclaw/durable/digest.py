@@ -82,7 +82,7 @@ class DigestItem(BaseModel):
     headlines: dict[str, str] = Field(default_factory=dict)
 
 
-@durable_activity("background", ActivityClass.IO)
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def collect_digests() -> list[DigestItem]:
     """Find, per subscription, the notes matching it that appeared since its watermark.

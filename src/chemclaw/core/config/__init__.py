@@ -50,7 +50,7 @@ from chemclaw.core.config.retrieval import (
 from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
-from chemclaw.core.config.temporal import TemporalSettings
+from chemclaw.core.config.temporal import TemporalSettings, backoff_seconds
 from chemclaw.core.egress import pin_langsmith_egress
 from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 from chemclaw.core.netguard_preload import publish_state as publish_preload_state
@@ -707,6 +707,50 @@ class Settings(
                 f"fan_out_child_timeout_seconds above {needed}, or lower {budget} — the child's "
                 "queue wait is derived from what is left, so a ceiling that does not clear this "
                 "floor leaves no wait to give it."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_fan_out_ceiling_covers_the_retries_of_the_section_it_bounds(self) -> Self:
+        """The retries of the longest fan-out activity, back to back, fit the child's ceiling.
+
+        The rule above counts one attempt. A report section is retried under `REMOTE` and a note
+        write under `NOTE_WRITE` (`durable/retry.py`), so a section that fails every attempt spends
+        `activity_max_attempts` budgets plus the backoff between them, and a child past its ceiling
+        dies as an execution timeout no workflow code sees. This counts the retries alone, not on
+        top of a full queue wait, which is derived from what the one-attempt rule leaves.
+        """
+        windows = (
+            (
+                self.activity_max_attempts * self.report_section_timeout_seconds
+                + backoff_seconds(
+                    self.activity_max_attempts - 1,
+                    self.slow_retry_initial_seconds,
+                    self.slow_retry_max_interval_seconds,
+                ),
+                "report_section_timeout_seconds",
+                "activity_max_attempts",
+            ),
+            (
+                self.note_write_max_attempts * self.note_write_timeout_seconds
+                + backoff_seconds(
+                    self.note_write_max_attempts - 1,
+                    self.io_retry_initial_seconds,
+                    self.io_retry_max_interval_seconds,
+                ),
+                "note_write_timeout_seconds",
+                "note_write_max_attempts",
+            ),
+        )
+        window, budget, attempts = max(windows)
+        needed = window + self.activity_timeout_seconds
+        if self.fan_out_child_timeout_seconds <= needed:
+            raise ValueError(
+                f"fan_out_child_timeout_seconds={self.fan_out_child_timeout_seconds} does not "
+                f"cover the retries of the activity it bounds: {attempts} attempts at {budget} and "
+                f"the backoff between them take {window}s, and the child's own overhead up to "
+                f"{self.activity_timeout_seconds}s more. Raise fan_out_child_timeout_seconds above "
+                f"{needed}, or lower {budget} or {attempts}."
             )
         return self
 
