@@ -29,15 +29,8 @@ from chemclaw.core.fulltext import (
     reference_tokens,
 )
 from chemclaw.core.job_lock import exclusive_job
-from chemclaw.kg.graph import (
-    corpus_revision,
-    invalidate_cache,
-    load_notes,
-    note_file_fingerprints,
-    scan_notes_dir,
-)
-from chemclaw.kg.note import NoteError, read_note
 from chemclaw.kg.search import search_text
+from chemclaw.kg.store import note_store
 
 log = logging.getLogger(__name__)
 
@@ -482,27 +475,6 @@ def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, st
     return fingerprint != stored.get(note_id)
 
 
-def _notes_that_failed_to_parse(directory: Path, stems: set[str]) -> list[str]:
-    """Which of `stems` are notes that failed to parse — not files that were never notes.
-
-    Re-reads each with `read_note`, the one definition of both, so a frontmatter-less `README.md`
-    raises no alarm.
-    """
-    if not stems:
-        return []
-    unparsed: list[str] = []
-    seen: set[str] = set()
-    for path, _ in scan_notes_dir(directory):
-        if path.stem not in stems or path.stem in seen:
-            continue
-        seen.add(path.stem)
-        try:
-            read_note(path)
-        except NoteError:
-            unparsed.append(path.stem)
-    return unparsed
-
-
 #: What the scheduled activity returns, in place of a count, when another worker held the pass.
 REINDEX_SKIPPED = -1
 
@@ -538,13 +510,12 @@ async def reindex_notes(
     `reindex_exclusively`.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
-    await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))
+    store = note_store(directory)
+    await asyncio.to_thread(partial(store.refresh, reparse=True))
     # Hash before parsing: a note rewritten between the two passes then pairs a new body with an
     # old digest, which the next pass reads as changed and heals; the reverse order would stick.
-    current_fingerprints = (
-        await asyncio.to_thread(note_file_fingerprints, directory) if directory.exists() else {}
-    )
-    notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
+    current_fingerprints = await asyncio.to_thread(store.fingerprints) if directory.exists() else {}
+    notes = await asyncio.to_thread(store.notes) if directory.exists() else []
     if not notes:
         # A missing directory is a deployment fault (unmounted volume, wrong `knowledge_path`) and
         # is reported loudly; a present but empty one is a fresh corpus and stays at DEBUG.
@@ -562,9 +533,7 @@ async def reindex_notes(
     # `keep`, and `keep` is the union of what parsed and what is on disk. The on-disk half (which
     # includes unparseable and unreadable files) stops a transient parse failure from deleting rows.
     on_disk = set(current_fingerprints)
-    unparsed = await asyncio.to_thread(
-        _notes_that_failed_to_parse, directory, on_disk - {note.id for note in notes}
-    )
+    unparsed = await asyncio.to_thread(store.unparseable, on_disk - {note.id for note in notes})
     if unparsed:
         log.warning(
             "note re-index: %d note file(s) on disk did not parse and are kept in the index rather "
@@ -574,7 +543,7 @@ async def reindex_notes(
         )
     # A prune is a claim about the corpus, and pods hold different checkouts: rows built from a
     # newer `corpus_revision` than this pass holds are left alone. `None` (no git) is no constraint.
-    revision = await asyncio.to_thread(corpus_revision, directory)
+    revision = await asyncio.to_thread(store.revision)
     retired = await index.retire_absent(
         {note.id for note in notes} | on_disk, built_before=revision
     )

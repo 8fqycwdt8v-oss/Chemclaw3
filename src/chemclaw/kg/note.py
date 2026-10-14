@@ -236,12 +236,18 @@ _CALC_REF = re.compile(rf"^{_CALC_TYPE}@{_CALC_VERSION}:{_CALC_HASH}:{_CALC_HASH
 
 
 def _reject_unencodable(value: str, field: str) -> str:
-    r"""Refuse a string UTF-8 cannot encode: a lone surrogate is not text a note can hold.
+    r"""Refuse a string a note cannot be stored with: a lone surrogate, or U+0000.
 
     JSON can carry an unpaired surrogate, and such a value would fail every later writer (the note
-    file, Postgres, the vector index). A note is by definition written to a UTF-8 file, so the value
-    is invalid input and is rejected at the boundary.
+    file, Postgres, the vector index). A NUL is valid UTF-8 and a git file holds it, but Postgres
+    refuses it in `text` and `jsonb`, so a note carrying one could be recorded and never stored.
+    Both are invalid input and are rejected at the boundary.
     """
+    if "\x00" in value:
+        raise ValueError(
+            f"{field} contains a NUL character (U+0000), which a note cannot hold: the database "
+            "that stores notes refuses it in text. Remove it from the value"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -533,7 +539,7 @@ class Note(TemporalWindow):
 
     @model_validator(mode="after")
     def _text_is_writable(self) -> Self:
-        """Every unconstrained string this note carries must survive UTF-8.
+        """Every unconstrained string this note carries must survive UTF-8 and hold no NUL.
 
         Walks `model_fields` (and nested models) so a new string field is covered automatically.
         Constrained fields (`id`, `type`, relation fields, the ref lists) are already rejected by

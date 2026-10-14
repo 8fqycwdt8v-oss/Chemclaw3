@@ -6,7 +6,7 @@ owns the env prefix, `.env` loading and cross-section validators.
 
 import os
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
@@ -25,6 +25,9 @@ class KgSettings(BaseSettings):
     a note now lands on that branch instead of on `note/<id>` beside it.
     """
 
+    # Where notes are stored. Only `git` (the Markdown tree and the note writer) exists today; the
+    # Postgres store arrives behind this setting so a release can be rolled back by setting it.
+    kg_store: Literal["git"] = "git"
     # Directory of note files the indexer reads; retrieval traverses their [[wikilinks]].
     knowledge_dir: str = "knowledge"
     # Upper bound on `expand_note`'s model-supplied `hops`; larger values are clamped, not rejected.

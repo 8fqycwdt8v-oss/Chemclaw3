@@ -10,9 +10,7 @@ import logging
 import re
 from collections.abc import Sequence
 from datetime import date
-from pathlib import Path
 
-import networkx as nx
 from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
@@ -28,17 +26,11 @@ from chemclaw.ingest.eln.ord import RecordTier
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
-from chemclaw.kg.graph import (
-    build_graph,
-    current_successor,
-    load_notes,
-    neighborhood,
-    note_in,
-)
 from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outside_graph
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
-from chemclaw.kg.search import query_terms, term_coverage
+from chemclaw.kg.search import query_terms
+from chemclaw.kg.store import Edge, NoteStore, note_store
 from chemclaw.memory.failure import close_refuted_note, failure_note
 from chemclaw.science.fingerprints.molfp.search import indexed_structure
 from chemclaw.science.fingerprints.store import default_molecule_store
@@ -198,8 +190,8 @@ class NoteSearch(BaseModel):
         )
 
 
-def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
-    """Search every current note under `notes_dir` for `terms`, ranked and capped.
+def _scan_notes(store: NoteStore, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
+    """Search every current note in `store` for `terms`, ranked and capped.
 
     Synchronous so the caller can run the whole O(N) scan, ranking and truncation included, in a
     thread; on the event loop it would stall every other turn on the pod. That buys latency, not
@@ -208,10 +200,10 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
     It deliberately does not use the Postgres `note_index`: that index is only maintained where a
     lexical or vector source is enabled, and its stemmed matching differs from the substring rule
     `term_coverage` shares with `GraphRetriever`, so moving this reader alone would find notes
-    `gather_evidence` cannot cite. Uses `load_notes`, not `build_graph`, since it follows no edge.
+    `gather_evidence` cannot cite. Uses `NoteStore.search`, not the graph, since it follows no edge.
 
     Args:
-        notes_dir: The corpus root, resolved by the caller so this stays testable with a fixture.
+        store: The notes to search, chosen by the caller so this stays testable with a fixture.
         terms: The query's tokens, already normalised by `query_terms`.
         today: The date `is_current` is judged against, passed in so one scan cannot straddle
             midnight.
@@ -220,18 +212,12 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
     Returns:
         The search result, with `total_matches` counting the hits before the cap.
     """
-    scored: list[tuple[int, NoteRef]] = []
-    searched = 0
-    for note in sorted(load_notes(notes_dir), key=lambda candidate: candidate.id):
-        # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
-        # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
-        if not note.is_current(today):
-            continue
-        # Counted after the currency filter: that is the corpus this search can hit.
-        searched += 1
-        coverage = term_coverage(note, terms)
-        if coverage:
-            scored.append((coverage, _ref(note)))
+    # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced as
+    # current fact (KM-7). It stays in the store and remains reachable by explicit id.
+    found = store.search(terms, today)
+    # `searched` counts after the currency filter: that is the corpus this search can hit.
+    searched = found.searched
+    scored = [(coverage, _ref(note)) for coverage, note in found.matches]
     complete = [pair for pair in scored if pair[0] == len(terms)]
     widened = not complete and bool(scored)
     # Widened results rank by coverage; complete ones stay in id order, so identical queries return
@@ -276,24 +262,31 @@ async def find_notes(text: str) -> NoteSearch:
     # Every step of the search runs in the worker thread, including the ranking and the cut: see
     # `_scan_notes` for the measurement that says why a partial offload is not one.
     return await asyncio.to_thread(
-        _scan_notes, settings.knowledge_path, terms, date.today(), settings.graph_max_results
+        _scan_notes, note_store(), terms, date.today(), settings.graph_max_results
     )
 
 
-def _edge_relations(graph: nx.DiGraph, source: str, target: str) -> list[str]:
+def _edge_relations(edges: Sequence[Edge], source: str, target: str) -> list[str]:
     """The relation names asserted on the `source -> target` edge, sorted; empty if there is none.
 
-    Reports what the graph says; filtering `cites` is `_neighbor_ref`'s job.
+    Reports what the store says; filtering `cites` is `_neighbor_ref`'s job.
     """
-    if not graph.has_edge(source, target):
-        return []
-    return sorted({relation.rel for relation in graph[source][target].get("relations", ())})
+    return sorted(
+        {
+            relation.rel
+            for edge in edges
+            if edge.src == source and edge.dst == target
+            for relation in edge.relations
+        }
+    )
 
 
 def _neighbor_ref(
-    graph: nx.DiGraph, anchor_id: str, note: Note, via: str | None = None
+    edges: Sequence[Edge], anchor_id: str, note: Note, via: str | None = None
 ) -> NeighborRef:
     """One neighbour of `anchor_id`, carrying the typed edges between the two.
+
+    `edges` are the anchor's own (`NoteStore.edges`), which hold every link in either direction.
 
     `via` is the node the edges actually join when `note` stands in for it (a retired compound
     reported as its successor). `cites` is dropped in both directions: it is what every untyped
@@ -303,15 +296,15 @@ def _neighbor_ref(
     return NeighborRef(
         **_ref(note).model_dump(),
         relations_out=[
-            rel for rel in _edge_relations(graph, anchor_id, joined) if rel != DEFAULT_RELATION
+            rel for rel in _edge_relations(edges, anchor_id, joined) if rel != DEFAULT_RELATION
         ],
         relations_in=[
-            rel for rel in _edge_relations(graph, joined, anchor_id) if rel != DEFAULT_RELATION
+            rel for rel in _edge_relations(edges, joined, anchor_id) if rel != DEFAULT_RELATION
         ],
     )
 
 
-def _current_compound(graph: nx.DiGraph, note_id: str, today: date) -> Note | None:
+def _current_compound(store: NoteStore, note_id: str, today: date) -> Note | None:
     """The current compound note that replaced `note_id`, when `note_id` is a superseded compound.
 
     Compounds only: a compound id is a hash of its structure, so a retired one is the same substance
@@ -319,21 +312,21 @@ def _current_compound(graph: nx.DiGraph, note_id: str, today: date) -> Note | No
 
     `None` when `note_id` names a current note, a non-compound, or nothing a supersede link reaches.
     """
-    note = note_in(graph, note_id)
+    note = store.get(note_id)
     if note is not None and (note.type != "compound" or note.is_current(today)):
         return None
-    successor = current_successor(graph, note_id, today)
+    successor = store.current_successor(note_id, today)
     return successor if successor is not None and successor.type == "compound" else None
 
 
-def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
+def _require_note(store: NoteStore, note_id: str) -> Note:
     """The note `note_id` names, or a `ChemclawError` saying it could not be found.
 
     One message for both by-id lookups (`expand_note`, `record_failure`).
     """
-    if note_id not in graph or graph.nodes[note_id].get("note") is None:
+    note = store.get(note_id)
+    if note is None:
         raise ChemclawError(f"no note with id {note_id!r}")
-    note: Note = graph.nodes[note_id]["note"]
     return note
 
 
@@ -342,13 +335,12 @@ def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
 _STRUCTURAL_COMPOUND_ID = re.compile(r"compound-[0-9a-f]{12}")
 
 
-def _notes_carrying(graph: nx.DiGraph, note_id: str) -> list[Note]:
+def _notes_carrying(store: NoteStore, note_id: str) -> list[Note]:
     """The current notes whose `compound_smiles` is the structure `note_id` was derived from."""
     today = date.today()
     carrying = []
-    for _, data in graph.nodes(data=True):
-        note = data.get("note")
-        if note is None or not note.compound_smiles or not note.is_current(today):
+    for note in store.notes():
+        if not note.compound_smiles or not note.is_current(today):
             continue
         try:
             if compound_id(note.compound_smiles) == note_id:
@@ -358,7 +350,7 @@ def _notes_carrying(graph: nx.DiGraph, note_id: str) -> list[Note]:
     return sorted(carrying, key=lambda note: note.id)
 
 
-async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
+async def _expand_compound(store: NoteStore, note_id: str, hops: int) -> NoteView:
     """Resolve a structure-derived compound id that no note was written under.
 
     Similarity hits carry `core.chem.compound_id`, which may match no note. In order:
@@ -369,10 +361,10 @@ async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteVi
 
     The view says, as system text outside the framed body, that no note was written.
     """
-    carrying = await asyncio.to_thread(_notes_carrying, graph, note_id)
+    carrying = await asyncio.to_thread(_notes_carrying, store, note_id)
     for note in carrying:
         if note.type == "compound":
-            return _expand_in_graph(graph, note.id, hops)
+            return await asyncio.to_thread(_expand_in_store, store, note.id, hops)
     smiles = (
         carrying[0].compound_smiles
         if carrying
@@ -386,10 +378,11 @@ async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteVi
         "What was run with it is in the reaction records — search them by this SMILES "
         f"(similar_reactions, substrate_precedent). {SYSTEM_SPEECH_MARK}"
     )
+    edges = await asyncio.to_thread(store.edges, note_id)
     return NoteView(
         note=_ref(rendered),
         body=f"{notice}\n\n{frame_untrusted(rendered.body, note_id=note_id)}",
-        neighbors=[_neighbor_ref(graph, note_id, note) for note in carrying],
+        neighbors=[_neighbor_ref(edges, note_id, note) for note in carrying],
     )
 
 
@@ -477,17 +470,18 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     """
     # `ChemclawError` is the safe "bad input" contract, so `tool_authz` passes its message to the
     # model verbatim. Kept out of the tool docstring, which is resent on every model call.
-    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    # Graph first, store second: `reaction-` is a prefix, not a reservation, so a human-authored
-    # note of that name wins. Test for a note, not mere id membership (see `note_in`).
-    if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
+    store = note_store()
+    # Notes first, records second: `reaction-` is a prefix, not a reservation, so a human-authored
+    # note of that name wins. Every store read runs in a worker thread, as it may scan the disk.
+    defined = await asyncio.to_thread(store.get, note_id)
+    if defined is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
     # A compound id a standardization bump superseded resolves to the note that replaced it, and
     # says so as system text outside the framed body — see `_current_compound`.
     today = date.today()
-    successor = _current_compound(graph, note_id, today)
+    successor = await asyncio.to_thread(_current_compound, store, note_id, today)
     if successor is not None:
-        view = _expand_in_graph(graph, successor.id, hops)
+        view = await asyncio.to_thread(_expand_in_store, store, successor.id, hops)
         notice = (
             f"{note_id} is a superseded id for this compound: the current standardization files "
             f"the same structure as {successor.id}, shown here. {SYSTEM_SPEECH_MARK}"
@@ -495,14 +489,14 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
         return view.model_copy(update={"body": f"{notice}\n\n{view.body}"})
     # A structure-derived compound id with no note under it — what nearly every `similar_molecules`
     # hit cites, since an ELN run is a record and not a note. See `_expand_compound`.
-    if note_in(graph, note_id) is None and _STRUCTURAL_COMPOUND_ID.fullmatch(note_id):
-        return await _expand_compound(graph, note_id, hops)
-    return _expand_in_graph(graph, note_id, hops)
+    if defined is None and _STRUCTURAL_COMPOUND_ID.fullmatch(note_id):
+        return await _expand_compound(store, note_id, hops)
+    return await asyncio.to_thread(_expand_in_store, store, note_id, hops)
 
 
-def _expand_in_graph(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
-    """`expand_note` over a note the graph holds: its body and its current neighbourhood."""
-    note = _require_note(graph, note_id)
+def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteView:
+    """`expand_note` over a note the store holds: its body and its current neighbourhood."""
+    note = _require_note(store, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
@@ -510,17 +504,18 @@ def _expand_in_graph(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
     # The anchor is returned even if expired; non-current neighbours are dropped, except a retired
     # compound, which stands for its successor.
     neighbors: dict[str, NeighborRef] = {}
-    for nid in sorted(neighborhood(graph, note_id, hops=hops)):
-        neighbor = note_in(graph, nid)
+    edges = store.edges(note_id)
+    reached = sorted(store.neighborhood(note_id, hops=hops))
+    for nid, neighbor in store.get_many(reached).items():
         if neighbor is None:
             continue
         if neighbor.is_current(today):
-            neighbors.setdefault(nid, _neighbor_ref(graph, note_id, neighbor))
+            neighbors.setdefault(nid, _neighbor_ref(edges, note_id, neighbor))
             continue
-        replacement = _current_compound(graph, nid, today)
+        replacement = _current_compound(store, nid, today)
         if replacement is not None and replacement.id != note_id:
             neighbors.setdefault(
-                replacement.id, _neighbor_ref(graph, note_id, replacement, via=nid)
+                replacement.id, _neighbor_ref(edges, note_id, replacement, via=nid)
             )
     # The body is note content (possibly ingested, not agent-authored): frame it as data.
     return NoteView(
@@ -554,9 +549,9 @@ async def find_knowledge_gaps() -> GraphGaps:
         the playbooks still awaiting a rule, the most-cited hub notes, and any dangling links in
         the served graph.
     """
-    directory = settings.knowledge_path
-    graph = await asyncio.to_thread(build_graph, directory)
-    notes = await asyncio.to_thread(load_notes, directory)
+    store = note_store()
+    graph = await asyncio.to_thread(store.graph)
+    notes = await asyncio.to_thread(store.notes)
     gaps = analyze(graph, notes)
     # Tags and dangling-link targets are free text, so they are defanged; the rest are ids, types
     # and counts.
@@ -689,8 +684,7 @@ async def record_failure(
         ChemclawError: When `refutes` names no note, when `held_until` predates that note's own
             `valid_from`, or when the note has already been retired on some other date.
     """
-    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    refuted = _require_note(graph, refutes)
+    refuted = await asyncio.to_thread(_require_note, note_store(), refutes)
     # The reporter is the authenticated user, never a model-supplied parameter.
     note = failure_note(
         refutes,
