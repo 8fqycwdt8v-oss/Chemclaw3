@@ -48,6 +48,7 @@ from chemclaw.durable.connector_job import (
     failed_job_record,
     failure_reason,
 )
+from chemclaw.durable.deliver_message import deliver_message_activity
 from chemclaw.durable.interceptor import (
     ChemclawWorkerInterceptor,
     activities_in_flight,
@@ -649,6 +650,7 @@ def _hanging_job(**overrides: Any) -> ConnectorJobInput:
 @contextlib.asynccontextmanager
 async def _core_worker(client: Any, **kwargs: Any) -> Any:
     """The background worker a deployment runs, with the record sink stubbed out."""
+    from chemclaw.durable.deliver_message import deliver_message_activity
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import record_session_event_activity
 
@@ -656,7 +658,14 @@ async def _core_worker(client: Any, **kwargs: Any) -> Any:
         client,
         task_queue=settings.background_task_queue,
         workflows=[ConnectorJobWorkflow],
-        activities=[publish_memory_note_activity, record_session_event_activity, record_job],
+        # Everything the wrapper dispatches at its end is served, as in production: an unserved
+        # activity is retried under its class before the workflow gives up on it.
+        activities=[
+            deliver_message_activity,
+            publish_memory_note_activity,
+            record_session_event_activity,
+            record_job,
+        ],
         **kwargs,
     )
     async with worker:
@@ -1002,7 +1011,7 @@ def test_a_run_that_fails_after_recording_is_not_recorded_a_second_time() -> Non
                     client,
                     task_queue=settings.background_task_queue,
                     workflows=[ConnectorJobWorkflow],
-                    activities=[record_job, publish_job_result],
+                    activities=[record_job, publish_job_result, deliver_message_activity],
                     workflow_runner=UnsandboxedWorkflowRunner(),
                 )
                 bundle = Worker(
