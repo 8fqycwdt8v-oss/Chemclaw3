@@ -99,7 +99,8 @@ pipeline {
             components[key] = [
               kind: 'deployment', repo: 'Chemclaw3-mcp',
               // Both names belong to `Chemclaw3-mcp` and are read off its own
-              // `servers/<name>/deploy/deployment.yaml`, never guessed from the bundle name: the
+              // Deployment (`deploy/helm/chemclaw-fleet`, formerly `servers/<name>/deploy/deployment.yaml`),
+              // never guessed from the bundle name: the
               // workload is `chemclaw-mcp-<name>` and the container inside every one of the seven
               // is `server`. This line said `chemclaw3-mcp-${name}` and `name` — a Deployment and
               // a container that both do not exist — directly above an image reference that was

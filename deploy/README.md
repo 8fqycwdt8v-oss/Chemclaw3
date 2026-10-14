@@ -137,7 +137,8 @@ shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as
 (`url:` set, so this chart renders no pod for them), and `config` points the two backends at
 `CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_RXNLABEL_SERVER_URL`. For each fleet server you rely on:
 
-1. Deploy it from its own `servers/<name>/deploy/` files **into this release's namespace** — its
+1. Deploy it from `Chemclaw3-mcp`'s `deploy/helm/chemclaw-fleet` chart (or, before that chart,
+   its `servers/<name>/deploy/` files) **into this release's namespace** — its
    NetworkPolicy admits callers with a same-namespace `podSelector`, so a namespace-qualified
    address resolves and is then dropped. Its Service name is what the URLs in `values.yaml` already
    say (`chemclaw-mcp-<name>`); its own `MCP_ALLOWED_HOSTS` must name that Service's `name:port`.
