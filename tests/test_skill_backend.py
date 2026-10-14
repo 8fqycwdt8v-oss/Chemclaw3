@@ -338,8 +338,10 @@ def test_a_skill_longer_than_the_read_default_says_so_rather_than_stopping_silen
         read = _read(_backend(tmp, lambda _name: True), "/long-one/SKILL.md")
 
     assert "step 100" in read and "step 101" not in read, "the tool's default no longer caps at 100"
-    assert "112 lines remaining from offset 100" in read
-    assert "of 212 total" in read
+    # The disclosure is the window, the file's length and the offset to continue from; its wording
+    # is upstream's.
+    assert "lines 1-100 of 212" in read
+    assert "next offset 100" in read
 
 
 def _empty_listing(tmp_path: Path) -> str:

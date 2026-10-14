@@ -111,6 +111,9 @@ _EXPECTED_ORDER = (
     "PromoteInvalidToolCalls",
     "RecordModelCalls",
     "AnthropicPromptCachingMiddleware",
+    # Upstream's last entry: it swaps a content block the model's profile explicitly rejects for a
+    # text notice, and passes everything else, so it changes nothing for a text-only thread.
+    "UnsupportedContentMiddleware",
 )
 
 

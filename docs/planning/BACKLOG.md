@@ -70,13 +70,13 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 ### Everything else
 
 - [ ] **PR #321's review findings never landed** [M] — extract what is still open from its review document into rows, then close #321.
-- [ ] **Dependabot group #431 needs hand-made bumps** [S] — mutmut 3.8 drops `Config.ensure_loaded`; deepagents `task` schema vs the
-  900-token bound in `tests/test_context_floor.py`; rdkit 2026.3.6 lands paired with Chemclaw3-mcp (`tests/test_calc_rotation.py`).
+- [ ] **Dependabot group #431 needs hand-made bumps** [S] — mutmut 3.8 drops `Config.ensure_loaded`; rdkit 2026.3.6 lands paired
+  with Chemclaw3-mcp (`tests/test_calc_rotation.py`).
 
 ## Upstream watch
 
 On a dependency bump, ask per line: does upstream now do this, and better? A changed answer needs an ADR.
-Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11, `langchain-core` 1.5.5, `deepagents` 0.7.6, `mcp` 1.x.
+Standings derived at `temporalio` 1.31.0, `langchain` 1.4.6, `langgraph` 1.2.15, `langchain-core` 1.6.10, `deepagents` 0.7.25, `mcp` 1.x.
 
 - `temporalio.contrib.langgraph.LangGraphPlugin` — declined, we use no `interrupt()` (`D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use`).
 - `ContextEditingMiddleware` / `ClearToolUsesEdit` — adopted. `deepagents.SkillsMiddleware` — adopted, narrowed at the backend.
@@ -84,6 +84,10 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - `ModelCallLimitMiddleware` — reverted (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`).
 - `ToolErrorMiddleware`, `ToolRetryMiddleware` — declined: MCP tools never raise.
 - `HumanInTheLoopMiddleware` — declined for plan approval (`D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question`); per-call approval of irreversible actions is still open.
+- `AsyncPostgresSaver.aprune` — not adopted: `keep_latest` keeps one checkpoint per namespace and refuses a thread that uses a
+  `DeltaChannel`; `agent/checkpointer.py::_PRUNE_SUPERSEDED` keeps `checkpoint_retain_per_thread`.
+- `deepagents.HarnessProfile` — not adopted: found by the model's provider key, so a miss is silent
+  (`docs/planning/upstream-issues/03-deepagents-a-harness-profile-per-agent.md`).
 - deepagents `execute` verb — declined; code runs in the fleet's `pyexec` (`D-2026-08-25-a-sandbox-is-a-server-not-a-verb`). LangSmith — declined.
 - MCP progressive discovery — watch: would narrow the server side of the schema cost. MCP Tasks — declined for durability, watch the wire.
 - MCP server-initiated events — declined: fleet servers are stateless. MRTR — declined: different question from `ask_clarifying_question`.

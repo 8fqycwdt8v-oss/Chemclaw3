@@ -497,17 +497,16 @@ def filesystem_permissions() -> list[Any]:
     `FilesystemPermission` is first-match-wins, so the allows under the writable roots come first
     and a blanket write-deny closes the rest.
 
-    The rules must also be handed to the `FilesystemMiddleware` instance
-    `langgraph_agent._middleware` substitutes (as `_permissions=`);
-    `create_deep_agent(permissions=…)` reaches only its own instance. Riding the middleware list
-    also carries them into helpers.
+    The rules are handed to the `FilesystemMiddleware` instance `langgraph_agent._middleware`
+    substitutes (as `_permissions=`); `create_deep_agent(permissions=…)` reaches only the instance
+    upstream builds, which that substitution displaces. Riding the middleware list also carries them
+    into helpers.
 
     `/skills/` is refused here and again by `NarrowedSkillsBackend`, deliberately, so the property
     does not rest on upstream's defaults alone.
 
     Returns:
-        The rules to pass `create_deep_agent(permissions=…)` **and** the `FilesystemMiddleware` that
-        replaces upstream's.
+        The rules for the `FilesystemMiddleware` that replaces upstream's.
     """
     from deepagents import FilesystemPermission
 

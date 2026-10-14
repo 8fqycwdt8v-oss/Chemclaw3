@@ -55,6 +55,7 @@ from chemclaw.agent.subagents import (
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import registered_tool_names
+from tests.roster import captured_roster
 
 #: The brief that tells the one fake model which of the two graphs is calling it.
 _BRIEF = "BRIEF-MARKER-7f3a"
@@ -330,14 +331,15 @@ def test_a_helper_holds_its_callers_reading_connectors_and_none_that_act() -> No
         "vacuous — it would pass against a helper that was handed every connector tool unfiltered"
     )
     reads, writes = "zz_probe_reads", acting[0]
-    caller = build_langgraph_agent(
-        model=_model(),
-        profile=AgentProfile(name="default"),
-        connectors=[_named(reads), _named(writes)],
-    )
+    with captured_roster() as roster:
+        caller = build_langgraph_agent(
+            model=_model(),
+            profile=AgentProfile(name="default"),
+            connectors=[_named(reads), _named(writes)],
+        )
     assert {reads, writes} <= _tool_names(caller)
 
-    spawned = _helper_of(caller)
+    spawned = roster["general-purpose"]["runnable"]
     assert reads in _tool_names(spawned), (
         "a helper holds none of its caller's connector tools, so it cannot look up anything the "
         "chemist's agent can look up — the isolation it exists for buys nothing on a question "
@@ -348,19 +350,6 @@ def test_a_helper_holds_its_callers_reading_connectors_and_none_that_act() -> No
         "and it does not act, and that has to be one property of `helper=True` rather than two "
         "half-properties over `tool_names` and `connectors` that can drift apart"
     )
-
-
-def _helper_of(caller: Any) -> Any:
-    """The graph behind the caller's `task` tool, as the caller really compiled it.
-
-    Upstream closes over `subagent_graphs` with no accessor, so the closure is walked.
-    """
-    import inspect
-
-    task = caller.nodes["tools"].bound.tools_by_name["task"]
-    body = cast(Any, getattr(task, "coroutine", None) or getattr(task, "func", None))
-    graphs = inspect.getclosurevars(body).nonlocals["subagent_graphs"]
-    return graphs["general-purpose"]
 
 
 def _named(name: str) -> Any:

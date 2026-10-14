@@ -286,7 +286,6 @@ def build_langgraph_agent(
         backend=backend,
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
-        permissions=filesystem_permissions(),
         subagents=helpers,
         **shared,
     )
@@ -403,7 +402,7 @@ def _middleware(
         # replaces. `tools=` decides which verbs exist; `_permissions=` decides where they may point
         # (`agent/scratchpad.py`). The keyword is private, so `tests/test_upstream_surface.py` pins
         # it, and `tests/test_scratchpad.py` drives an out-of-bounds write through the compiled
-        # graph. `permissions=` stays on the outer call as the public statement of the rules.
+        # graph.
         FilesystemMiddleware(
             backend=backend,
             tools=list(scratchpad_tools()),
@@ -414,7 +413,7 @@ def _middleware(
         expire_stale_scratch,
         # Replaces the summarizer `create_deep_agent` composes unconditionally; this deployment
         # declines one on prompt-injection grounds (`agent/compaction.py`).
-        disabled_summarizer(model, backend),
+        disabled_summarizer(model),
         _skills_middleware(backend, labelled, profile),
         *tool_call_middleware(audit, profile),
         # The chemist's standing preferences, appended to every model call's instructions; above the
@@ -603,21 +602,17 @@ def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
 class ReloadingSkillsState(SkillsState):
     """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
 
-    One redeclared field, and it is the whole reloading mechanism. Upstream annotates
-    `skills_metadata` with `PrivateStateAttr` only, so it resolves to a checkpointed `LastValue`;
-    `UntrackedValue` is never written to a checkpoint (`checkpoint()` returns `MISSING`), so the
-    key is absent at the start of every run of the graph and upstream's own
-    `if "skills_metadata" in state: return None` short-circuit simply does not fire.
-
-    Measured over three turns on one thread, counting whether the key was already in state when
-    `before_agent` ran: `[False, True, True]` on upstream's channel and `[False, False, False]` on
-    this one.
-
-    The same mechanism `ChemclawState.loop_capped` uses, and for the same reason: "per turn" is a
-    property of the channel, not of a caller who remembers to clear it.
+    One redeclared field is the whole reloading mechanism. Upstream annotates `skills_metadata`
+    with an `OmitFromSchema` marker only, so it resolves to a checkpointed `LastValue` and
+    `before_agent` finds the previous run's listing. An `UntrackedValue` is never written to a
+    checkpoint, so the key is absent at the start of every run and upstream's own "load when
+    missing or `None`" check fires. The same mechanism `ChemclawState.loop_capped` uses: "per turn"
+    is a property of the channel, not of a caller who remembers to clear it.
     """
 
-    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
+    skills_metadata: NotRequired[
+        Annotated[list[SkillMetadata] | None, UntrackedValue, PrivateStateAttr]
+    ]
 
 
 class ReloadingSkillsMiddleware(SkillsMiddleware):

@@ -23,7 +23,7 @@ from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -47,6 +47,7 @@ from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
 from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings, settings
+from tests.roster import captured_roster
 from tests.siblings import (
     SIBLING_SKIP,
     fleet_published_bundles,
@@ -93,6 +94,9 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # is appended rather than forked so it cannot go stale on a bump. The available lever is the
     # profile allow-list.
     "write_todos": 1_372,
+    # Upstream's usage notes plus the roster's descriptions, which this repository writes; the
+    # notes grew past the bound on a deepagents bump while the roster text stayed as it was.
+    "task": 929,
     "suggest_next_experiment": 2_951,
     # Grew when `criterion` folded BoFire's `DoEStrategy` in, far cheaper than a second tool that
     # would have carried a second copy of the `OptimizationProblem` schema. No tool taking that
@@ -242,10 +246,10 @@ def _bound_tools(graph: Any) -> list[Any]:
     The node's copy can differ slightly from what `bind_tools` receives (`FilesystemMiddleware`
     trims `grep`'s description); the node's is larger, the safe direction, and
     `test_the_ratchet_charges_at_least_what_the_model_is_sent` pins it. The three upstream shapes
-    read here — node key `"tools"`, `PregelNode.bound`, `ToolNode._tools_by_name` — are pinned in
+    read here — node key `"tools"`, `PregelNode.bound`, `ToolNode.tools_by_name` — are pinned in
     `tests/test_upstream_surface.py`.
     """
-    return list(graph.nodes["tools"].bound._tools_by_name.values())
+    return list(graph.nodes["tools"].bound.tools_by_name.values())
 
 
 #: What the last `_CapturingModel` was sent and bound. Module level because a `BaseChatModel` is a
@@ -1027,19 +1031,16 @@ def test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets() -> 
     an inequality rather than a second transcribed number. This fails if a helper prompt outgrows
     what the harness block pays for, or a tool source reaches a helper without reaching its caller.
     """
-    import inspect
-
     profile = get_profile("default")
     connectors = _connector_tools(profile)
-    caller = build_langgraph_agent(
-        model=_CapturingModel(messages=iter([AIMessage(content="") for _ in range(8)])),
-        profile=profile,
-        audit_sink=NullAuditSink(),
-        connectors=connectors,
-    )
-    task = caller.nodes["tools"].bound.tools_by_name["task"]
-    body = cast(Any, getattr(task, "coroutine", None) or getattr(task, "func", None))
-    helper = inspect.getclosurevars(body).nonlocals["subagent_graphs"]["general-purpose"]
+    with captured_roster() as roster:
+        caller = build_langgraph_agent(
+            model=_CapturingModel(messages=iter([AIMessage(content="") for _ in range(8)])),
+            profile=profile,
+            audit_sink=NullAuditSink(),
+            connectors=connectors,
+        )
+    helper = roster["general-purpose"]["runnable"]
 
     def prefix(graph: Any) -> int:
         _RECEIVED.clear()

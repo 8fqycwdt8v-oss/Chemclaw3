@@ -386,7 +386,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         del messages[:cut]
 
 
-def disabled_summarizer(model: Any, backend: Any) -> Any:
+def disabled_summarizer(model: Any) -> Any:
     """Upstream's summarizer, constructed switched off — it arrives whether or not we want it.
 
     `create_deep_agent` composes a `SummarizationMiddleware` unconditionally, so "no summarizer"
@@ -397,14 +397,13 @@ def disabled_summarizer(model: Any, backend: Any) -> Any:
 
     Args:
         model: The turn's resolved chat model; required by the constructor, never called.
-        backend: The turn's backend; held for the offload path that cannot run.
 
     Returns:
         The middleware to hand `create_deep_agent(middleware=…)` in upstream's slot.
     """
     from langchain.agents.middleware.summarization import SummarizationMiddleware
 
-    return SummarizationMiddleware(model=model, backend=backend, trigger=None)
+    return SummarizationMiddleware(model=model, trigger=None)
 
 
 # Degradation kinds already reported loudly. Process-wide: a shape failure is one fault however

@@ -14,7 +14,7 @@ is this file's length, not a number in a sentence.
 import asyncio
 import inspect
 from types import SimpleNamespace
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
 
 import pytest
 
@@ -190,17 +190,18 @@ def test_the_skills_middleware_still_caches_under_skills_metadata() -> None:
 
 
 def test_private_state_attr_is_still_where_the_skills_state_reaches_for_it() -> None:
-    """`PrivateStateAttr` is still where `ReloadingSkillsState` imports it from.
+    """`PrivateStateAttr` is still where `ReloadingSkillsState` and `ChemclawState` import it from.
 
-    It is not in `langchain.agents.middleware.__all__`, so `agent/langgraph_agent.py` reaches into
-    `langchain.agents.middleware.types`; dropping the marker is not an option because it is a
-    security property.
+    It is not in `langchain.agents.middleware.types.__all__`, and it has to be that object: the
+    keys `deepagents` keeps out of a subagent are found by *identity* (`meta is marker`), so the
+    equal public `OmitFromSchema(input=True, output=True)` would leave `loop_wrap_up` and
+    `skills_metadata` crossing the `task` boundary. Dropping the marker is not an option either.
     """
     from langchain.agents.middleware import types
 
     assert hasattr(types, "PrivateStateAttr"), (
-        "PrivateStateAttr moved; agent/langgraph_agent.ReloadingSkillsState imports it from "
-        "langchain.agents.middleware.types because it is not re-exported by the package"
+        "PrivateStateAttr moved; agent/state.py and agent/langgraph_agent.ReloadingSkillsState "
+        "import it from langchain.agents.middleware.types because it is not re-exported"
     )
 
 
@@ -357,10 +358,10 @@ def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_f
 
 
 def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None:
-    """The tool node still holds its bound tools under `_tools_by_name`.
+    """The tool node still holds its bound tools under `tools_by_name`.
 
-    `tests/test_context_floor.py` must measure the tools the graph binds, and `ToolNode` has no
-    public accessor. Asserted on a real instance, since the attribute is set in `__init__`.
+    `tests/test_context_floor.py` must measure the tools the graph binds. Asserted on a real
+    instance, since the mapping is built in `__init__`.
     """
     from langchain_core.tools import tool as create_tool
     from langgraph.prebuilt.tool_node import ToolNode
@@ -370,9 +371,9 @@ def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None
         """A tool whose only job is to be held."""
         return value
 
-    held = ToolNode([probe])._tools_by_name
+    held = ToolNode([probe]).tools_by_name
     assert held == {"probe": probe}, (
-        "ToolNode no longer holds its bound tools under `_tools_by_name`; "
+        "ToolNode no longer holds its bound tools under `tools_by_name`; "
         "tests/test_context_floor.py::_bound_tools reads the static prefix off exactly that "
         "attribute and would silently measure nothing"
     )
@@ -381,9 +382,9 @@ def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None
 def test_a_compiled_agent_still_reaches_its_tool_node_at_nodes_tools_dot_bound() -> None:
     """A compiled agent still reaches its tool node at `nodes["tools"].bound`.
 
-    `_bound_tools` relies on the node key, the `PregelNode.bound` accessor and the private mapping
-    above. Asserted over upstream's own `create_agent`, so a first-party regression cannot look like
-    a dependency bump.
+    `_bound_tools` relies on the node key, the `PregelNode.bound` accessor and the mapping above.
+    Asserted over upstream's own `create_agent`, so a first-party regression cannot look like a
+    dependency bump.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -413,12 +414,12 @@ def test_a_compiled_agent_still_reaches_its_tool_node_at_nodes_tools_dot_bound()
     )
     assert isinstance(node.bound, ToolNode), (
         f"`nodes['tools'].bound` is now {type(node.bound).__name__} rather than a ToolNode; "
-        "tests/test_context_floor.py::_bound_tools reads `_tools_by_name` off it and the "
+        "tests/test_context_floor.py::_bound_tools reads `tools_by_name` off it and the "
         "assertion above this one no longer says anything about what it will find"
     )
-    assert node.bound._tools_by_name == {"probe": probe}, (
+    assert node.bound.tools_by_name == {"probe": probe}, (
         "the full path tests/test_context_floor.py::_bound_tools walks — "
-        "`nodes['tools'].bound._tools_by_name` — no longer yields the tools the graph was built "
+        "`nodes['tools'].bound.tools_by_name` — no longer yields the tools the graph was built "
         "with, so the context ratchet would measure the wrong surface"
     )
 
@@ -564,25 +565,23 @@ def test_custom_middleware_still_replaces_an_upstream_entry_by_name() -> None:
     """Custom middleware still replaces an upstream entry by name.
 
     The repository withholds `execute` and `delete` by passing its own `FilesystemMiddleware` under
-    the same `.name`, which `_apply_custom_middleware` swaps in. If it appended instead, upstream's
-    would restore the withheld verbs. `HarnessProfile.excluded_tools` is not used: it resolves by
-    the model's reported provider and is silently skipped on a miss.
+    the same `.name`, which `create_deep_agent` documents as a replacement in place. If it appended
+    instead, upstream's would restore the withheld verbs. `HarnessProfile.excluded_tools` is not
+    used: it resolves by the model's reported provider and is silently skipped on a miss.
     """
-    from typing import Any
+    from deepagents import create_deep_agent
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
 
-    from deepagents.graph import _apply_custom_middleware
-    from langchain.agents.middleware import AgentMiddleware, TodoListMiddleware
-
-    class Impostor(TodoListMiddleware):
-        """A stand-in for `FilesystemMiddleware`, sharing a name it does not own by class."""
-
-        @property
-        def name(self) -> str:
-            return "TodoListMiddleware"
-
-    base: list[AgentMiddleware[Any, Any, Any]] = [TodoListMiddleware()]
-    mine = Impostor()
-    assert _apply_custom_middleware(base, [mine]) == [mine], (
+    graph = create_deep_agent(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="ok")])),
+        middleware=[FilesystemMiddleware(backend=StateBackend(), tools=["read_file"])],
+    )
+    bound = set(cast(Any, graph).nodes["tools"].bound.tools_by_name)
+    assert "read_file" in bound
+    assert not {"ls", "write_file", "edit_file", "glob", "grep", "execute", "delete"} & bound, (
         "custom middleware no longer replaces a same-named upstream entry in place; "
         "agent/langgraph_agent._middleware relies on this to withhold `execute` and `delete`"
     )
@@ -787,14 +786,16 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
     from importlib.metadata import version
 
     measured: dict[str, tuple[int, ...]] = {
-        "langchain": (1, 3, 14),
-        "langgraph": (1, 2, 10),
-        "deepagents": (0, 7, 5),
+        "langchain": (1, 4, 6),
+        "langgraph": (1, 2, 15),
+        "deepagents": (0, 7, 25),
         "langchain-mcp-adapters": (0, 3, 2),
         # The two clients the gateway seam actually reads shapes off: `langchain-openai` for the
         # usage keys above, `langchain-core` for `BaseMessage.text` being a property.
-        "langchain-openai": (1, 6, 0),
-        "langchain-core": (1, 6, 0),
+        "langchain-openai": (1, 7, 2),
+        "langchain-core": (1, 6, 10),
+        # The checkpointer whose `aput` is asserted to write in one transaction.
+        "langgraph-checkpoint-postgres": (3, 2, 0),
         # Not a layer-1 dependency at all — the live harnesses' SSE parser, whose *private*
         # decoder `evals/live.py` drives by hand. It is here because that is the coupling most
         # likely to be moved by a patch release, and the row above is the one that says so.
@@ -1249,22 +1250,56 @@ def test_the_task_tool_returns_a_dict_shaped_command_update() -> None:
     `agent/tool_result_shape.py` rewrites only the dict form; the other forms `Command` accepts
     would let a helper's report reach the caller without defanging or the size ceiling.
     """
-    import deepagents.middleware.subagents as upstream_subagents
-    from langchain_core.messages import ToolMessage
+    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import wrap_tool_call
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from langgraph.types import Command
 
     from chemclaw.agent.tool_result_shape import rewritten_tool_messages
+    from tests.fakes import ScriptedModel
 
-    source = inspect.getsource(upstream_subagents._build_task_tool)
-    assert "Command(" in source, (
+    returned: list[Any] = []
+
+    @wrap_tool_call
+    def watch(request: Any, handler: Any) -> Any:
+        """Keep what the `task` tool hands back, as the middleware chain receives it."""
+        result = handler(request)
+        if request.tool_call["name"] == "task":
+            returned.append(result)
+        return result
+
+    helper = create_agent(
+        model=ScriptedModel(messages=iter([AIMessage(content="report")])), tools=[]
+    )
+    delegate = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "task",
+                "args": {"description": "look it up", "subagent_type": "general-purpose"},
+                "id": "c1",
+            }
+        ],
+    )
+    graph = create_deep_agent(
+        model=ScriptedModel(messages=iter([delegate, AIMessage(content="done")])),
+        subagents=[{"name": "general-purpose", "description": "d", "runnable": helper}],
+        middleware=[watch],
+    )
+    graph.invoke({"messages": [HumanMessage("delegate")]})
+
+    assert len(returned) == 1 and isinstance(returned[0], Command), (
         "deepagents' task tool no longer returns a Command; `agent/tool_result_shape.py` "
         "dispatches on that type, and a plain return would take the ToolMessage branch instead"
     )
-    assert "update={" in source, (
+    update = returned[0].update
+    assert isinstance(update, dict) and isinstance(update.get("messages"), list), (
         "deepagents' task tool no longer builds a dict-shaped Command.update, so "
         "`agent/tool_result_shape.py` rewrites nothing in a helper's report — it reaches the "
         "caller's thread undefanged and unbounded, which is what that module exists to prevent"
     )
+    assert update["messages"][0].content == "report"
 
     marked = ToolMessage(content="report", tool_call_id="probe")
     rewritten = rewritten_tool_messages(
@@ -1523,44 +1558,6 @@ def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> No
     )
 
 
-def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None:
-    """The `task` tool still closes over its roster as `subagent_graphs`.
-
-    `SubAgentMiddleware` exposes no accessor for a compiled caller's roster, so
-    `tests/test_subagents.py::_helper_of` walks the closure to check what a helper holds. Pins that
-    the body is reachable as `coroutine`/`func` and the nonlocal is `subagent_graphs` keyed by name.
-    If an accessor appears, delete the walk.
-    """
-    import inspect
-
-    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-    from langchain_core.messages import AIMessage
-
-    from chemclaw.agent.langgraph_agent import build_langgraph_agent
-    from chemclaw.agent.profiles import AgentProfile
-
-    caller = build_langgraph_agent(
-        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
-        profile=AgentProfile(name="default"),
-    )
-    task = caller.nodes["tools"].bound.tools_by_name["task"]
-    body = getattr(task, "coroutine", None) or getattr(task, "func", None)
-    assert body is not None, (
-        "the `task` tool no longer carries its body on `coroutine` or `func`; "
-        "tests/test_subagents.py::_helper_of reaches the roster through exactly those two names"
-    )
-    nonlocals = inspect.getclosurevars(body).nonlocals
-    assert "subagent_graphs" in nonlocals, (
-        f"the `task` tool no longer closes over `subagent_graphs` (it closes over "
-        f"{sorted(nonlocals)}); tests/test_subagents.py::_helper_of reads the compiled roster "
-        "from that name, and without it the helper's connector narrowing has no observed basis"
-    )
-    assert "general-purpose" in nonlocals["subagent_graphs"], (
-        "the roster is no longer keyed by subagent name, so `_helper_of` cannot name the one "
-        "helper `agent/subagents.py` compiles"
-    )
-
-
 def test_an_oversized_skill_description_is_still_truncated_rather_than_refused() -> None:
     """An oversized skill description is still truncated rather than refused upstream.
 
@@ -1685,6 +1682,38 @@ def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
     )
 
 
+def _child_namespaces(child_checkpointer: bool | None) -> set[str]:
+    """The checkpoint namespaces below the root that a child graph wrote into its parent's saver."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from typing_extensions import TypedDict
+
+    class _State(TypedDict):
+        n: int
+
+    child = StateGraph(_State)
+    child.add_node("bump", lambda state: {"n": state["n"] + 1})
+    child.add_edge(START, "bump")
+    child.add_edge("bump", END)
+    inner = child.compile(checkpointer=child_checkpointer)
+
+    async def call_child(state: _State) -> dict[str, Any]:
+        return cast(dict[str, Any], await inner.ainvoke(state))
+
+    parent = StateGraph(_State)
+    parent.add_node("call_child", call_child)
+    parent.add_edge(START, "call_child")
+    parent.add_edge("call_child", END)
+    saver = InMemorySaver()
+    config: Any = {"configurable": {"thread_id": "t"}}
+    asyncio.run(parent.compile(checkpointer=saver).ainvoke({"n": 0}, config))
+    return {
+        str(found.config["configurable"]["checkpoint_ns"])
+        for found in saver.list(config)
+        if found.config["configurable"]["checkpoint_ns"]
+    }
+
+
 def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> None:
     """A subgraph compiled without a checkpointer inherits its parent's.
 
@@ -1694,7 +1723,6 @@ def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> No
     import inspect
 
     from langgraph import types as lg_types
-    from langgraph.pregel import Pregel
 
     # Read the source rather than `__doc__`: `Checkpointer` is a type alias, so the string under it
     # is a module-level literal that never becomes an attribute. Asserting `__doc__` here passed
@@ -1708,9 +1736,15 @@ def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> No
         "upstream no longer documents `False` as the opt-out; `agent/langgraph_agent.py` and "
         "`retrieval/fanout.py` both rely on it"
     )
-    assert "if self.checkpointer is False" in inspect.getsource(Pregel._defaults), (
-        "`Pregel._defaults` no longer short-circuits on `checkpointer is False` before reading "
-        "the parent's saver out of the run config, which is where the opt-out is resolved"
+    # The behaviour the two sentences describe, driven: a child started inside a node writes
+    # checkpoints of its own into the parent's saver unless it opts out.
+    assert _child_namespaces(None), (
+        "a subgraph compiled with `checkpointer=None` no longer inherits its parent's saver; "
+        "the `checkpointer=False` call sites in this tree may now be saying something else"
+    )
+    assert not _child_namespaces(False), (
+        "a subgraph compiled with `checkpointer=False` still wrote checkpoints into its parent's "
+        "saver; `agent/langgraph_agent.py` and `retrieval/fanout.py` rely on the opt-out"
     )
 
 
@@ -1767,7 +1801,7 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
 
     import deepagents
 
-    producers: list[str] = []
+    producers: set[str] = set()
     for found in pkgutil.walk_packages(deepagents.__path__, deepagents.__name__ + "."):
         try:
             module = importlib.import_module(found.name)
@@ -1775,7 +1809,13 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
         except Exception:
             # A module that will not import, or has no readable source, cannot be a producer.
             continue
-        for node in ast.walk(ast.parse(source)):
+        tree = ast.parse(source)
+        enclosing: dict[int, str] = {}
+        for function in ast.walk(tree):
+            if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                for inner in ast.walk(function):
+                    enclosing.setdefault(id(inner), function.name)
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
@@ -1793,15 +1833,15 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
                     for key in keyword.value.keys
                 )
                 if spreads or literal:
-                    producers.append(f"{found.name}:{node.lineno}")
+                    producers.add(f"{found.name}.{enclosing.get(id(node), '<module>')}")
 
-    assert producers == [
+    assert producers == {
         # The two relays: a wrapped tool's own update, rebuilt with new messages.
-        "deepagents.middleware.filesystem:3422",
-        "deepagents.middleware.filesystem:3463",
+        "deepagents.middleware.filesystem._intercept_large_tool_result",
+        "deepagents.middleware.filesystem._aintercept_large_tool_result",
         # The producer: `**state_update`, every key the subagent held that is not excluded.
-        "deepagents.middleware.subagents:507",
-    ], (
+        "deepagents.middleware.subagents._build_task_tool",
+    }, (
         f"the sites handing a caller a `Command` that can carry `files` are {producers}, and "
         "`agent/tool_result_size.py::batch_siblings` divides the helper file budget by the "
         "batch's calls naming ONE tool on the grounds that exactly one of them originates such a "

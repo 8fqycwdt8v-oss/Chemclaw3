@@ -423,7 +423,7 @@ def _bound_surface() -> tuple[list[BaseTool], dict[str, str], dict[str, list[Any
             audit_sink=NullAuditSink(),
             connectors=connectors,
         )
-    bound = list(graph.nodes["tools"].bound._tools_by_name.values())
+    bound = list(graph.nodes["tools"].bound.tools_by_name.values())
     return bound, origin, listed
 
 

@@ -136,23 +136,28 @@ def test_a_thread_stops_growing_with_the_square_of_its_turns(
     Pruned, the row count is bounded independently of the number of turns.
     """
 
-    async def _run(keep: int, thread: str) -> tuple[dict[str, int], list[str]]:
+    async def _run(keep: int, thread: str, turns: int = 12) -> tuple[dict[str, int], list[str]]:
         saver = await _ready(monkeypatch, keep)
         try:
-            conversation = await _drive(saver, thread, 12, _TOOL_TURN)
+            conversation = await _drive(saver, thread, turns, _TOOL_TURN)
             return await _thread_rows(thread), conversation
         finally:
             await ckpt.close_checkpointer()
 
     unpruned, unpruned_conversation = asyncio.run(_run(0, "prune-off"))
     pruned, pruned_conversation = asyncio.run(_run(3, "prune-on"))
+    # What one turn writes depends on how many supersteps upstream's hooks add to a model call, so
+    # the bound is measured on this build rather than carried as a constant.
+    one_turn, _ = asyncio.run(_run(0, "prune-one-turn", turns=1))
+    bound = 3 + one_turn["checkpoints"]
 
-    assert unpruned["checkpoints"] > 100, (
+    assert unpruned["checkpoints"] > 5 * bound, (
         "the unpruned arm did not grow, so this fixture is not measuring what it claims to"
     )
-    assert pruned["checkpoints"] <= 20, (
+    assert pruned["checkpoints"] <= bound, (
         f"a pruned thread holds {pruned['checkpoints']} checkpoints after 12 turns; the bound is "
-        "the retained ones plus one turn's writes, and it must not grow with turn count"
+        f"the 3 retained plus one turn's {one_turn['checkpoints']}, and it must not grow with turn "
+        "count"
     )
     assert pruned["blob_bytes"] * 3 < unpruned["blob_bytes"], (
         f"pruning saved too little to be the fix: {pruned['blob_bytes']} against "
