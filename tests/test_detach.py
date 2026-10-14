@@ -8,18 +8,17 @@ that cancels).
 import asyncio
 import contextlib
 import logging
-import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import pytest
-import uvicorn
 
 from chemclaw.api.detach import DetachableTurn, RunningTurns
 from chemclaw.core.config import settings
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.served import ServerThread
 from tests.test_service import _app
 
 
@@ -125,7 +124,7 @@ class _SlowAgent(ScriptedTurn):
         self.finished = True
 
 
-class _Served:
+class _Served(ServerThread):
     """The app under a real uvicorn server on loopback — the only honest transport here.
 
     `TestClient` and httpx's ASGI transport buffer a response whole and run each request on its own
@@ -134,24 +133,8 @@ class _Served:
     """
 
     def __init__(self, app: Any) -> None:
+        super().__init__(app)
         self.app = app
-        self.port = _free_port()
-        self._server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
-        )
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_Served":
-        self._thread.start()
-        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("the app under test did not start")  # pragma: no cover
-
-    def __exit__(self, *_exc: object) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
 
     @property
     def base(self) -> str:
@@ -165,15 +148,6 @@ class _Served:
             if time.monotonic() > deadline:  # pragma: no cover - only on a real regression
                 raise AssertionError("the turn never released its slot")
             time.sleep(0.01)
-
-
-def _free_port() -> int:
-    """An ephemeral loopback port, released immediately for uvicorn to claim."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 def test_a_dropped_stream_still_delivers_the_answer_to_the_transcript() -> None:

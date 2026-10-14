@@ -7,10 +7,7 @@ as `tests/calc_server_fake.py` fakes the calculation server.
 """
 
 import asyncio
-import socket
-import threading
 from datetime import date
-from typing import Any
 
 import pytest
 
@@ -31,6 +28,7 @@ from chemclaw.science.labels.policy import LabelPolicy
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION, LabelGroup, SpeciesRole
+from tests.served import ServerThread
 
 _VERSION = "rxnlabel@1:std5:roles1"
 #: The stamp a current labeller mints, in `labeller_version`'s shape
@@ -570,43 +568,6 @@ async def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() ->
 # --- the labelling leg's identity on the wire ----------------------------------------------------
 
 
-class _UvicornServer:
-    """A uvicorn server on a background thread, started and stopped around one test.
-
-    Copied in shape from `tests/test_connector_transport.py::_Server` rather than imported, since
-    that module builds every local bundle at import.
-    """
-
-    def __init__(self, app: Any, port: int) -> None:
-        import uvicorn
-
-        self._server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-        )
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_UvicornServer":
-        """Start it and wait until it is actually accepting connections."""
-        self._thread.start()
-        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("the labelling test server did not start")
-
-    def __exit__(self, *_exc: object) -> None:
-        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
-
-
-def _free_port() -> int:
-    """A port the OS has just confirmed is free."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -637,9 +598,9 @@ def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
         seen.append({"actor": actor, "session": session, "correlation": correlation})
         return {"version": "probe-1"}
 
-    port = _free_port()
+    probe = ServerThread(connector_app(server, name="rxnlabel-probe"))
     monkeypatch.setenv("CHEMCLAW_RXNLABEL_TOKEN", "probe-secret")
-    monkeypatch.setattr(settings, "rxnlabel_server_url", f"http://127.0.0.1:{port}/mcp")
+    monkeypatch.setattr(settings, "rxnlabel_server_url", f"http://127.0.0.1:{probe.port}/mcp")
     monkeypatch.setattr(settings, "rxnlabel_server_token_env", "CHEMCLAW_RXNLABEL_TOKEN")
 
     async def drive() -> None:
@@ -648,7 +609,7 @@ def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
         set_current_correlation_id("corr-7")
         await RxnLabelServer().version()
 
-    with _UvicornServer(connector_app(server, name="rxnlabel-probe"), port):
+    with probe:
         asyncio.run(drive())
 
     assert seen == [{"actor": "alice-oid", "session": "sess-42", "correlation": "corr-7"}], (
