@@ -40,7 +40,7 @@ from chemclaw.kg.store import (
     NoteUnit,
     NoteWriteError,
 )
-from tests.note_store_harness import STORES, Harness, empty_note_tables
+from tests.note_store_harness import STORES, Harness, changed, empty_note_tables
 from tests.pg import planned_index
 
 _SHIPPED = Path(__file__).resolve().parents[1] / "knowledge"
@@ -346,7 +346,7 @@ async def test_writing_identical_content_again_adds_no_revision_and_moves_nothin
     assert (again.written, again.notes, again.revisions) == ((), 0, {"steady": 1})
     assert await store.signature() == signature and (await store.snapshot())[0] == token
     assert await _rows("SELECT count(*) FROM kg_note_revisions") == [(1,)]
-    await store.put(NoteUnit(note.model_copy(update={"body": "Other words."})))
+    await store.put(NoteUnit(changed(note, {"body": "Other words."})))
     assert await store.signature() != signature and (await store.snapshot())[0] != token
 
 
@@ -374,11 +374,12 @@ async def test_a_unit_is_written_dependencies_then_subject_then_retirements_in_o
     """Three roles, three outcomes: a new dependency, the subject, and the retired note's close."""
     old = _note("old-entry", "The first entry.")
     await store.put(NoteUnit(old))
-    retired = old.model_copy(
-        update={
+    retired = changed(
+        old,
+        {
             "valid_to": date(2026, 1, 31),
             "relations": [Relation(rel="superseded-by", to="new-entry")],
-        }
+        },
     )
     unit = NoteUnit(
         subject=_note("new-entry", "Cites [[compound-x]] and replaces [[old-entry]]."),
@@ -456,7 +457,7 @@ async def test_a_retirement_of_a_humans_note_is_left_alone_and_the_subject_still
     """The person's file is untouched, as the file writer leaves it, and the new note lands."""
     person = Note(id="curated", type="playbook", created_by="human", body="By a person.")
     await store.put(NoteUnit(person))
-    closed = person.model_copy(update={"valid_to": date(2026, 1, 1)})
+    closed = changed(person, {"valid_to": date(2026, 1, 1)})
     with caplog.at_level(logging.WARNING):
         outcome = await store.put(
             NoteUnit(_note("successor", "Replaces [[curated]]."), retirements=(closed,))
@@ -485,13 +486,13 @@ async def test_a_write_names_the_revision_it_read_and_a_stale_one_is_refused(
     note = _note("claimed", "One.")
     await store.put(NoteUnit(note, expected_revision=0))
     with pytest.raises(NoteRevisionConflict) as already:
-        await store.put(NoteUnit(note.model_copy(update={"body": "Two."}), expected_revision=0))
+        await store.put(NoteUnit(changed(note, {"body": "Two."}), expected_revision=0))
     assert (already.value.expected, already.value.actual) == (0, 1)
-    await store.put(NoteUnit(note.model_copy(update={"body": "Two."}), expected_revision=1))
+    await store.put(NoteUnit(changed(note, {"body": "Two."}), expected_revision=1))
     with pytest.raises(NoteRevisionConflict) as stale:
-        await store.put(NoteUnit(note.model_copy(update={"body": "Three."}), expected_revision=1))
+        await store.put(NoteUnit(changed(note, {"body": "Three."}), expected_revision=1))
     assert (stale.value.expected, stale.value.actual) == (1, 2)
-    unwritten = await store.put(NoteUnit(note.model_copy(update={"body": "Four."})))
+    unwritten = await store.put(NoteUnit(changed(note, {"body": "Four."})))
     assert unwritten.revisions == {"claimed": 3}
 
 
@@ -808,12 +809,13 @@ async def test_a_retirement_closes_the_note_as_it_now_stands_and_keeps_an_edit_m
     await store.put(NoteUnit(_note("target", "Original.")))
     read = await store.get("target")
     assert read is not None
-    retirement = read.model_copy(
-        update={
+    retirement = changed(
+        read,
+        {
             "valid_to": date(2026, 4, 30),
             "relations": [Relation(rel="superseded-by", to="successor")],
             "body": "Original.\n\nSuperseded by successor.",
-        }
+        },
     )
     await store.put(NoteUnit(_note("target", "Edited meanwhile.", tags=["edited"])))
     outcome = await store.put(
@@ -848,7 +850,7 @@ async def test_a_retirement_that_cannot_close_the_note_as_it_now_stands_fails_th
     await store.put(NoteUnit(_note("target", "Original.")))
     read = await store.get("target")
     assert read is not None
-    retirement = read.model_copy(update={"valid_to": date(2026, 1, 1)})
+    retirement = changed(read, {"valid_to": date(2026, 1, 1)})
     await store.put(NoteUnit(_note("target", "Moved.", valid_from=date(2026, 6, 1))))
     with pytest.raises(NoteWriteError):
         await store.put(NoteUnit(_note("successor", "New."), retirements=(retirement,)))

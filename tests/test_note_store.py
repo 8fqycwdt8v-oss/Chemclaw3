@@ -21,7 +21,7 @@ from chemclaw.kg.note import Note, Relation, note_relative_path
 from chemclaw.kg.render import render_note
 from chemclaw.kg.store import GitNoteStore, NoteStore, note_store
 from tests.kg_repo import write_notes
-from tests.note_store_harness import AUTUMN, SPRING, STORES, Harness
+from tests.note_store_harness import AUTUMN, SPRING, STORES, Harness, changed
 from tests.note_store_harness import corpus as _corpus
 
 _SPRING = SPRING
@@ -303,7 +303,7 @@ async def test_a_note_comes_back_as_its_file_text_reads_including_the_whitespace
     )
     await harness.add(written)
     read = await harness.store.get("padded")
-    assert read == written.model_copy(update={"body": "Body with edges."})
+    assert read == changed(written, {"body": "Body with edges."})
 
 
 async def test_graph_has_a_node_per_note_and_one_per_dangling_target(harness: Harness) -> None:

@@ -282,7 +282,7 @@ def _closed(current: Note, retirement: Note) -> Note:
     if retirement.valid_to is not None:
         changes["valid_to"] = retirement.valid_to
     try:
-        return canonical_note(Note.model_validate({**current.model_dump(), **changes}))
+        return canonical_note(Note(**{**current.model_dump(), **changes}))
     except ValidationError as exc:
         raise NoteWriteError(f"cannot retire note {current.id!r} as it now stands: {exc}") from exc
 

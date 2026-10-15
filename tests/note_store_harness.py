@@ -9,7 +9,7 @@ suite uses: links both ways, a dangling target, windows, a supersede chain and c
 from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import pytest
 
@@ -100,6 +100,11 @@ def corpus() -> list[Note]:
             body="Replaced by a, which makes a cycle.",
         ),
     ]
+
+
+def changed(note: Note, changes: dict[str, Any]) -> Note:
+    """`note` with `changes` applied through the constructor, so the schema checks the result."""
+    return Note.model_validate({**note.model_dump(), **changes})
 
 
 class Harness(Protocol):

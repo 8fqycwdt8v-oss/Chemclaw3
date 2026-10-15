@@ -25,7 +25,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from chemclaw.core.config import settings
-from chemclaw.core.db import connect, pooling
+from chemclaw.core.db import connection, pooling
 from chemclaw.core.migrate import migrate
 from chemclaw.kg.note import Note
 from chemclaw.kg.postgres_store import PostgresNoteStore
@@ -191,7 +191,7 @@ async def _rss_child() -> None:
 async def _run(notes: int, write_notes: int, writers: int, repeats: int) -> dict[str, Any]:
     schema = f"kg_bench_{uuid4().hex[:10]}"
     base = settings.postgres_dsn
-    async with await connect(base) as conn:
+    async with connection(base) as conn:
         await conn.execute(f'CREATE SCHEMA "{schema}"')
         await conn.commit()
     dsn = _scratch_dsn(base, schema)
@@ -226,7 +226,7 @@ async def _run(notes: int, write_notes: int, writers: int, repeats: int) -> dict
             started = time.perf_counter()
             await _write(store, [_note(i, notes, rng) for i in range(loaded, notes)], writers)
             report["load_seconds"] = round(time.perf_counter() - started, 1)
-            async with await connect(dsn) as conn:
+            async with connection(dsn) as conn:
                 await conn.execute("ANALYZE kg_notes")
                 await conn.execute("ANALYZE kg_edges")
                 await conn.commit()
@@ -234,7 +234,7 @@ async def _run(notes: int, write_notes: int, writers: int, repeats: int) -> dict
         report["rss_mb_loaded_corpus"] = _rss_in_a_new_process(dsn)
     finally:
         settings.postgres_dsn = base
-        async with await connect(base) as conn:
+        async with connection(base) as conn:
             await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
             await conn.commit()
     return report
