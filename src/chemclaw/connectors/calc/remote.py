@@ -200,10 +200,9 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Ba
             settings.calc_server_url,
         )
         raise CalcServerError(
-            f"the calculation service at {settings.calc_server_url} reports contract version "
-            f"{exc.served or 'none'}, which predates the typed HTTP interface "
-            f"CHEMCLAW_CALC_TRANSPORT=rpc needs (1.1.0), so no calculation was run. Upgrade the "
-            "service, or set CHEMCLAW_CALC_TRANSPORT=mcp."
+            f"the calculation service at {settings.calc_server_url} {exc.problem}, so no "
+            "calculation was run. Fix or upgrade the service, or set "
+            "CHEMCLAW_CALC_TRANSPORT=mcp."
         ) from exc
     finally:
         _dispatching(-1)

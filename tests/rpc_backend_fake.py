@@ -34,11 +34,27 @@ STATUS_OF: dict[RpcErrorKind, int] = {
 }
 
 
+#: The statuses each kind may travel on; `rejected` is the transport guard's Content-Type (400),
+#: Origin (403) and Host (421) refusals.
+ALLOWED_STATUSES: dict[RpcErrorKind, frozenset[int]] = {
+    "refused": frozenset({400}),
+    "unknown_op": frozenset({404}),
+    "rejected": frozenset({400, 403, 421}),
+    "at_capacity": frozenset({503}),
+    "time_budget": frozenset({422}),
+    "failed": frozenset({500}),
+}
+
+
 def rpc_error(kind: RpcErrorKind, message: str, status: int | None = None) -> Response:
-    """The route's error answer for `kind`, on its usual status unless `status` says otherwise."""
-    return JSONResponse(
-        RpcError(kind=kind, message=message).model_dump(), status_code=status or STATUS_OF[kind]
-    )
+    """The route's error answer for `kind`, on its usual status unless `status` says otherwise.
+
+    A status the real route never uses for `kind` is a mistake in the test, so it raises.
+    """
+    chosen = status or STATUS_OF[kind]
+    if chosen not in ALLOWED_STATUSES[kind]:
+        raise ValueError(f"the route never answers {kind!r} with HTTP {chosen}")
+    return JSONResponse(RpcError(kind=kind, message=message).model_dump(), status_code=chosen)
 
 
 @dataclass(frozen=True)
@@ -70,11 +86,15 @@ class RpcBackendFake:
     health_hits: int = 0
     # Answers every `/rpc` request with a bare 404, as a pod whose image predates the route does.
     route_missing: bool = False
+    # Replaces the whole `/healthz` answer (a 5xx, a page that is not JSON) when set.
+    health_override: Response | None = None
 
     async def _healthz(self, request: Request) -> Response:
         """Open, like the fleet's: the version a caller checks before it uses `/rpc`."""
         del request
         self.health_hits += 1
+        if self.health_override is not None:
+            return self.health_override
         payload: dict[str, Any] = {"status": "ok", "server": "fake"}
         if self.reported is not None:
             payload["contract_version"] = self.reported

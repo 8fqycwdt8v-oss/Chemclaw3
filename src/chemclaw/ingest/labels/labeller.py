@@ -33,6 +33,7 @@ from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.mcp_session import (
+    McpAtCapacity,
     McpConnectFailed,
     McpCredentialRefused,
     McpRequestRefused,
@@ -298,10 +299,16 @@ class RxnLabelServer:
         except RpcUnsupported as exc:
             # Retryable: during a rollout the next batch may reach a pod that serves `/rpc`.
             raise LabelServerError(
-                f"the labelling server at {settings.rxnlabel_server_url} reports contract version "
-                f"{exc.served or 'none'}, which predates the typed HTTP interface "
-                "CHEMCLAW_CALC_TRANSPORT=rpc needs (1.1.0), so no reaction was labelled. Upgrade "
-                "the server, or set CHEMCLAW_CALC_TRANSPORT=mcp."
+                f"the labelling server at {settings.rxnlabel_server_url} {exc.problem}, so no "
+                "reaction was labelled. Fix or upgrade the server, or set "
+                "CHEMCLAW_CALC_TRANSPORT=mcp."
+            ) from exc
+        except McpAtCapacity as exc:
+            # Before `McpRequestRefused`, its base class: a full pod ran nothing and the same
+            # batch succeeds later, so the drain retries it instead of failing the run.
+            raise LabelServerError(
+                f"the labelling server is full, so {tool} was turned away before any reaction was "
+                "labelled. Nothing is wrong with the batch; the drain will ask again."
             ) from exc
         except McpRequestRefused as exc:
             raise LabelToolError(str(exc)) from exc

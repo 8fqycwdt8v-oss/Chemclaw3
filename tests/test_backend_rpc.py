@@ -9,6 +9,7 @@ same client against the fleet's own `calc` app.
 """
 
 import asyncio
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,7 +24,8 @@ from chemclaw_contracts.calc import (
 from chemclaw_contracts.rxnlabel import RXNLABEL_REQUESTS
 from mcp import ClientSession
 from mcp.types import CallToolResult, TextContent
-from starlette.responses import PlainTextResponse
+from pydantic import ValidationError
+from starlette.responses import PlainTextResponse, Response
 
 from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
@@ -341,24 +343,94 @@ async def test_a_transport_guard_rejection_reads_as_the_mcp_path_reads_it(
         assert refused.value.status == 403
 
 
-async def test_the_layers_below_the_route_answer_in_plain_text(
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, McpCredentialRefused),
+        (403, McpCredentialRefused),
+        (413, McpRequestRefused),
+        # An intermediary's answers when the request never reached a server that could run it.
+        (408, McpConnectFailed),
+        (425, McpConnectFailed),
+        (429, McpConnectFailed),
+        (502, McpConnectFailed),
+        (503, McpConnectFailed),
+        # The server or a hop stopping mid-call.
+        (500, McpServerFault),
+        (504, McpServerFault),
+        # Not the route speaking at all: never the caller's fault, never a verdict on its input.
+        (302, backend_rpc.RpcUnsupported),
+        (404, backend_rpc.RpcUnsupported),
+        (405, backend_rpc.RpcUnsupported),
+        (418, backend_rpc.RpcUnsupported),
+        (202, backend_rpc.RpcUnsupported),
+    ],
+)
+async def test_the_layers_below_the_route_are_classified_by_what_they_can_know(
+    monkeypatch: pytest.MonkeyPatch, status: int, expected: type[Exception]
+) -> None:
+    """Only 401, 403 and 413 are decisive; a proxy's transient statuses are retryable.
+
+    The body of a reply that is not the route's is never put in an error message.
+    """
+    fake = _calc_backend()
+    fake.answers["predict_solubility"] = lambda body: PlainTextResponse(
+        "<html>secret-proxy-body</html>", status
+    )
+    async with serving(fake, monkeypatch) as served:
+        with pytest.raises(Exception) as raised:
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert type(raised.value) is expected
+        assert "secret-proxy-body" not in str(raised.value)
+        if expected is McpServerFault:
+            assert raised.value.internal is False  # type: ignore[attr-defined]
+        if expected is backend_rpc.RpcUnsupported:
+            assert f"HTTP {status}" in str(raised.value)
+            # The version is asked again before the next call.
+            assert served.fake.health_hits == 1
+            fake.answers["predict_solubility"] = lambda body: {"log_s_mol_per_l": 0.0}
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+            assert served.fake.health_hits == 2
+
+
+async def test_a_transient_proxy_status_is_retryable_through_the_calc_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """413 is a refusal, a bare 5xx is the server stopping, 401 is the credential."""
+    """429 from an ingress is `CalcServerError` (retryable), not a verdict on the molecule."""
     fake = _calc_backend()
+    fake.answers["calculation_key"] = lambda body: PlainTextResponse("slow down", 429)
+    async with serving(fake, monkeypatch):
+        with pytest.raises(CalcServerError):
+            await cached_remote(InMemoryStore(), PredictSolubilityRequest(smiles="CCO"))
+
+
+async def test_a_nan_or_infinity_in_a_request_is_refused_before_it_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As the fleet refuses one over MCP (`is not a finite number`); nothing reaches the wire."""
+    async with serving(_calc_backend(), monkeypatch) as served:
+        for bad in (float("nan"), float("inf")):
+            with pytest.raises(McpRequestRefused, match="is not a finite number"):
+                await _session(served).invoke("predict_solubility", {"smiles": "CCO", "x": bad})
+        assert served.fake.seen == []
+
+
+async def test_the_client_passes_an_answer_through_as_the_server_serialized_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Response side of the finite-number difference: a null stays null, a NaN literal parses.
+
+    Over `/rpc` the server's JSON encoder decides what a NaN becomes (the fleet's answers carry
+    null); MCP's text channel carries whatever was printed. The client repairs neither.
+    """
+    fake = _calc_backend()
+    fake.answers["predict_solubility"] = lambda body: PlainTextResponse(
+        '{"a": null, "b": NaN}', 200, media_type="application/json"
+    )
     async with serving(fake, monkeypatch) as served:
-        fake.answers["predict_solubility"] = lambda body: PlainTextResponse("too big", 413)
-        with pytest.raises(McpRequestRefused, match="larger than the server takes"):
-            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-
-        fake.answers["predict_solubility"] = lambda body: PlainTextResponse("bad gateway", 502)
-        with pytest.raises(McpServerFault) as fault:
-            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-        assert fault.value.internal is False
-
-        fake.answers["predict_solubility"] = lambda body: PlainTextResponse("odd", 418)
-        with pytest.raises(McpRequestRefused, match="HTTP 418"):
-            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        answer = await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert answer["a"] is None
+        assert answer["b"] != answer["b"]
 
 
 async def test_an_answer_that_is_not_json_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -488,20 +560,27 @@ async def test_a_server_that_predates_rpc_is_refused_clearly_and_never_asked_ove
 
 
 @pytest.mark.parametrize(
-    ("reported", "accepted"),
+    ("reported", "accepted", "words"),
     [
-        ("1.0.0", False),
-        (None, False),
-        ("garbage", False),
-        ("1.1.0", True),
-        ("1.10.2", True),
-        ("2.0.0", True),
+        ("1.0.0", False, "predates"),
+        ("0.9", False, "does not speak"),
+        (None, False, "without a readable contract_version"),
+        ("garbage", False, "without a readable contract_version"),
+        ("1.1.0.2", False, "without a readable contract_version"),
+        ("1.1.0", True, ""),
+        ("1.1", True, ""),
+        ("1.10.2", True, ""),
+        ("2.0.0", False, "does not speak"),
     ],
 )
-async def test_the_contract_version_is_compared_as_numbers(
-    monkeypatch: pytest.MonkeyPatch, reported: str | None, accepted: bool
+async def test_the_contract_version_is_compared_as_numbers_within_major_one(
+    monkeypatch: pytest.MonkeyPatch, reported: str | None, accepted: bool, words: str
 ) -> None:
-    """1.10.2 is newer than 1.1.0; a missing or unreadable version is not an accepted one."""
+    """1.10.2 is newer than 1.1.0 and `1.1` reads as 1.1.0; another major is refused, not trusted.
+
+    The client is typed against contract 1.x, so a 2.x server is as unusable as a 1.0 one, for a
+    different reason that the message says.
+    """
     fake = _calc_backend()
     fake.reported = reported
     async with serving(fake, monkeypatch) as served:
@@ -510,19 +589,45 @@ async def test_the_contract_version_is_compared_as_numbers(
         else:
             with pytest.raises(backend_rpc.RpcUnsupported) as refused:
                 await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-            assert refused.value.served == (reported if reported != "garbage" else "garbage")
+            assert words in refused.value.problem
+            assert refused.value.served == reported
+
+
+@pytest.mark.parametrize(
+    "health",
+    [
+        PlainTextResponse("upstream connect error", 503),
+        PlainTextResponse("<html>not json</html>", 200),
+    ],
+)
+async def test_an_unreadable_healthz_is_not_reported_as_an_old_server(
+    monkeypatch: pytest.MonkeyPatch, health: Response
+) -> None:
+    """A 5xx or a page that is not JSON says /healthz could not be read, not that /rpc is old."""
+    fake = _calc_backend()
+    fake.health_override = health
+    async with serving(fake, monkeypatch) as served:
+        with pytest.raises(backend_rpc.RpcUnsupported) as refused:
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert "without a readable contract_version" in refused.value.problem
+        assert "predates" not in refused.value.problem
+        assert served.fake.seen == []
 
 
 async def test_a_pod_without_the_route_is_unsupported_and_the_version_is_asked_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """During a rollout /healthz may be answered by a new pod and /rpc by an old one."""
+    """During a rollout /healthz may be answered by a new pod and /rpc by an old one.
+
+    The message then says the route answered 404 and does not claim the version is old.
+    """
     fake = _calc_backend()
     async with serving(fake, monkeypatch) as served:
         await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
         fake.route_missing = True
-        with pytest.raises(backend_rpc.RpcUnsupported):
+        with pytest.raises(backend_rpc.RpcUnsupported) as refused:
             await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert "HTTP 404" in refused.value.problem and "predates" not in refused.value.problem
         fake.route_missing = False
         await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
         assert fake.health_hits == 2
@@ -531,24 +636,97 @@ async def test_a_pod_without_the_route_is_unsupported_and_the_version_is_asked_a
 # ---- the pool's lifetime --------------------------------------------------------------------
 
 
-async def test_the_pool_is_shared_by_url_and_closed_with_its_loop(
+async def test_pooling_closes_what_it_opened_and_retires_the_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One client per (loop, base URL); `pooling()` closes this loop's and no other's."""
+    """One client per (loop, base URL); `pooling()` closes its own; a later call is refused.
+
+    After the outermost scope ends, a call would open a pool nothing closes, so it raises.
+    """
     async with serving(_calc_backend(), monkeypatch) as served:
         assert backend_rpc.open_pool_count() == 0, "pools open lazily"
-        await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-        await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-        assert backend_rpc.open_pool_count() == 1
-        client = next(iter(backend_rpc._POOLS.values())).client
-
         async with backend_rpc.pooling():
-            pass
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+            assert backend_rpc.open_pool_count() == 1
+            client = next(iter(backend_rpc._POOLS.values())).client
         assert client.is_closed
         assert backend_rpc.open_pool_count() == 0
 
+        with pytest.raises(backend_rpc.PoolClosedError, match="pooling"):
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert backend_rpc.open_pool_count() == 0, "the refused call opened nothing"
+
+        async with backend_rpc.pooling():
+            await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+            assert backend_rpc.open_pool_count() == 1, "a new scope reopens the loop"
+
+
+async def test_a_nested_scope_closes_only_the_pools_it_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inner `pooling()` (a nested lifespan) must not close the outer scope's pool under it."""
+    async with serving(_calc_backend(), monkeypatch) as served:
+        other = RpcBackendFake(CALC_REQUESTS, token=served.fake.token)
+        other.answers["predict_solubility"] = lambda body: {"log_s_mol_per_l": 9.0}
+        with ServerThread(other.app()) as second:
+            second_session = backend_rpc.RpcSession(
+                f"http://127.0.0.1:{second.port}", TOKEN_ENV, timeout_seconds=30.0
+            )
+            async with backend_rpc.pooling():
+                await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+                outer = next(iter(backend_rpc._POOLS.values())).client
+                async with backend_rpc.pooling():
+                    await second_session.invoke("predict_solubility", {"smiles": "CCO"})
+                    assert backend_rpc.open_pool_count() == 2
+                assert backend_rpc.open_pool_count() == 1
+                assert not outer.is_closed
+                await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+            assert outer.is_closed
+
+
+async def test_close_pools_of_this_loop_closes_whichever_scope_opened_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit close (scripts, tests) is not scoped, and does not retire the loop."""
+    async with serving(_calc_backend(), monkeypatch) as served:
         await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
-        assert backend_rpc.open_pool_count() == 1, "a closed pool is replaced on next use"
+        await backend_rpc.close_pools_of_this_loop()
+        assert backend_rpc.open_pool_count() == 0
+        await _session(served).invoke("predict_solubility", {"smiles": "CCO"})
+        assert backend_rpc.open_pool_count() == 1
+
+
+def test_the_keepalive_setting_cannot_reach_the_servers_idle_timeout() -> None:
+    """A value at or above uvicorn's 5 s would reuse connections the server is closing."""
+    from chemclaw.core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(backend_rpc_keepalive_seconds=5.0)
+    assert Settings(backend_rpc_keepalive_seconds=4.9).backend_rpc_keepalive_seconds == 4.9
+
+
+async def test_connections_carry_tcp_keepalive_from_the_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing travels while a long call runs, so the socket itself must keep the flow alive."""
+    monkeypatch.setattr(settings, "backend_rpc_tcp_keepalive_seconds", 11)
+    monkeypatch.setattr(settings, "backend_rpc_tcp_keepalive_probes", 3)
+    options = backend_rpc._socket_options()
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        assert (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 11) in options
+        assert (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 11) in options
+        assert (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3) in options
+
+    async with serving(_calc_backend(), monkeypatch) as served:
+        pool = backend_rpc._pool_for(backend_rpc.rpc_base_url(served.url))
+        response = await pool.client.get("/healthz")
+        sock = response.extensions["network_stream"].get_extra_info("socket")
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == 11
+            assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT) == 3
 
 
 def test_a_pool_of_an_ended_loop_is_dropped_not_reused() -> None:
@@ -671,6 +849,20 @@ async def test_the_labelling_client_classifies_failures_as_it_does_over_mcp(
         with pytest.raises(LabelServerError, match="failed while running labeller_version"):
             await RxnLabelServer().version()
 
+        # A full pod ran nothing, so the drain retries the batch: it must not be bad data.
+        fake.answers["labeller_version"] = lambda body: rpc_error(
+            "at_capacity", "[rxnlabel-at-capacity] 0 of 2 slots free"
+        )
+        with pytest.raises(LabelServerError, match="turned away"):
+            await RxnLabelServer().version()
+        assert not issubclass(LabelServerError, LabelToolError)
+
+        fake.answers["labeller_version"] = lambda body: rpc_error(
+            "time_budget", "[rxnlabel-time-budget] stopped"
+        )
+        with pytest.raises(LabelToolError, match="stopped"):
+            await RxnLabelServer().version()
+
         monkeypatch.setenv(TOKEN_ENV, "wrong")
         with pytest.raises(LabelToolError, match="refused this client's credential"):
             await RxnLabelServer().version()
@@ -693,3 +885,22 @@ async def test_both_backends_share_one_pool_when_they_share_a_host(
         await remote_call(PredictSolubilityRequest(smiles="CCO"))
         await RxnLabelServer().version()
         assert backend_rpc.open_pool_count() == 1
+
+
+async def test_a_full_labelling_pod_is_retryable_on_the_mcp_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`McpAtCapacity` subclasses `McpRequestRefused`; it must not be read as bad data on either."""
+
+    @asynccontextmanager
+    async def _session_stub(*args: Any, **kwargs: Any) -> AsyncIterator[object]:
+        yield object()
+
+    async def _full(session: object, tool: str, arguments: dict[str, Any]) -> Any:
+        raise McpAtCapacity(f"{tool} was refused: [rxnlabel-at-capacity] full")
+
+    monkeypatch.setattr(settings, "calc_transport", "mcp")
+    monkeypatch.setattr(labeller, "open_session", _session_stub)
+    monkeypatch.setattr(labeller, "invoke", _full)
+    with pytest.raises(LabelServerError, match="turned away"):
+        await RxnLabelServer().version()
