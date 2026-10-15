@@ -1369,7 +1369,7 @@ to one effective run:
 
 | Kind | Jobs | Why a second worker is harmless |
 | --- | --- | --- |
-| Temporal Schedule, `SKIP` | `eln-sync`, `eval-drift`, `note-reindex`, `document-sync`, `reaction-labels`, `reaction-corpus`, `commitment-mirror`, `digest`, `agent-check-in`, `retention`, `exhibit-pushes`, `artifact-eviction`, `orphaned-waits`, `result-publish`, `observations` | The Temporal service drops a fire while the previous run is going; worker count never reaches it. The Schedules are created by the `chemclaw-schedules` Helm hook Job, not by a worker. |
+| Temporal Schedule, `SKIP` | `eln-sync`, `eval-drift`, `note-reindex`, `document-sync`, `reaction-labels`, `reaction-corpus`, `commitment-mirror`, `digest`, `agent-check-in`, `retention`, `exhibit-pushes`, `artifact-eviction`, `orphaned-waits`, `result-publish`, `observations`, `kg-compare` | The Temporal service drops a fire while the previous run is going; worker count never reaches it. The Schedules are created by the `chemclaw-schedules` Helm hook Job, not by a worker. |
 | Cluster-wide lock | the note reindex pass (`core/job_lock.py`, key `note-reindex`), from the scheduled activity and from `python -m chemclaw.retrieval.vector_index` | A session-level Postgres advisory lock, tried and never awaited, on a connection of its own. A pass that finds it held does nothing, counts `chemclaw_job_lock_skipped_total{job}`, and says so: the activity returns -1 (not 0, which is an index already current) and the command line prints `skipped` and exits 3. The lock belongs to the holder's connection, so a killed pod frees it and the next scheduled pass runs. The command line locks even with the default `CHEMCLAW_SESSION_STORE=memory`, because it shares the index with the pods. |
 | Cluster-wide lock (older) | git note submission (`kg/git_writer.py`), checkpoint-table setup, migrations | Same mechanism, one lock each, queued rather than skipped. |
 | Idempotent or claim-based | the result outbox (`FOR UPDATE SKIP LOCKED`), ELN and label cursors (`GREATEST`), retention (every `DELETE` re-checks its predicate), digests (one `UPDATE` advances the watermark), memory/report/connector-job/template workflows (deterministic workflow ids) | Two overlapping runs do the same work once or do it twice with the same result. |
@@ -1619,6 +1619,44 @@ index.lock behind inside the checkout's .git directory. Both recover on their ow
 `kg.write.dead_write_residue_discarded` and `kg.write.stale_index_lock_cleared` at WARNING. Seeing
 either once is the recovery working. Seeing one repeatedly is a pod being killed mid-write, which is
 a restart-loop question rather than a git one — check the worker's terminations, not the remote.
+
+#### ChemclawKnowledgeDualWriteFailing
+`warning`. Under `CHEMCLAW_KG_STORE=dual` a note was written to the notes tree and then failed to
+reach Postgres. The chemist's call succeeded and the note is in the authoritative tree, so nothing
+is lost; the two stores now differ. The `kg.dual_write.failed` log record names the note and the
+database error (usually Postgres unreachable, a pool timeout or a statement timeout, which the
+database alerts beside it explain). Recording the same note again repairs it, since a write is
+idempotent; for the general case run `make kg-validate-compare ARGS=--repair` on a pod that can
+reach both. The failure restarts the clean-comparison window that the read flip waits for.
+
+#### ChemclawKnowledgeStoresDiffer
+`warning`. The nightly comparison (`kg-compare` Schedule, `KgCompareWorkflow`) found notes that the
+tree and Postgres serve differently; `chemclaw_kg_compare_differences{kind}` counts them by kind:
+`missing_in_postgres` (a write the mirror lost, or a note never imported), `missing_in_git` (Postgres
+holds a note the tree does not: an interrupted batch backfill, or a clone that has not synced),
+`canonical`, `validity` and `edges` (the content, the validity window, or the stored edges differ).
+List them with `make kg-validate-compare` (`ARGS=--json` for a machine-readable list). A
+difference that did not persist for `CHEMCLAW_KG_COMPARE_SETTLE_SECONDS` is not reported, so a note
+another pod wrote a minute before the run is not a finding. (A clone lags a write by up to two
+sync intervals; the chart derives the pause from `knowledge.sync.intervalSeconds` as 2 x interval +
+120 s. A pod that holds a commit it has not pushed never catches up, and reports its notes as
+differences until its next write pushes them.) Each replica keeps its own last result; the alert
+and the panel read the pod with the newest `chemclaw_kg_compare_last_run_timestamp_seconds`.
+`ARGS=--repair` copies the tree's note
+into Postgres for each difference; it leaves what it cannot decide (a note only Postgres holds, a
+note that changed in Postgres after it was compared) and says why, and it refuses outright unless the
+checkout is at the remote's tip. The scheduled run only compares: a repair that ran by itself would turn every divergence
+into a clean day.
+
+#### ChemclawKnowledgeCompareNotRunning
+`warning`, rendered only under `CHEMCLAW_KG_STORE=dual`. No background worker has completed the
+nightly comparison in two schedule intervals (`chemclaw_kg_compare_last_run_timestamp_seconds` is
+the newest completion across the replicas; 0 in a process that has not completed one). The days
+since are unobserved, not clean, so they do not count toward the seven the read flip waits for.
+Check the `kg-compare` Schedule is present and not paused (`/schedules`, `make schedules-apply`),
+that a `background-jobs` worker is running, and the Schedule's `last_outcome`: a run that fails
+every attempt (the database, or the settle pause outlasting `CHEMCLAW_KG_COMPARE_TIMEOUT_SECONDS`)
+leaves exactly this signal and nothing else.
 
 #### ChemclawKnowledgeCorpusStale
 `warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —

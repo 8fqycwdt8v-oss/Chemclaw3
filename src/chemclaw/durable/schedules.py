@@ -44,6 +44,7 @@ from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
+from chemclaw.durable.kg_compare import KgCompareWorkflow
 from chemclaw.durable.label_sync import ReactionLabelWorkflow
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
@@ -103,6 +104,8 @@ OWNED_SCHEDULE_IDS = frozenset(
         "optimization-campaign",
         "eval-drift",
         "note-reindex",
+        # Conditional job: listed so leaving `kg_store=dual` prunes the Schedule.
+        "kg-compare",
         "retention",
         # Retired job. Kept so the next apply prunes a still-live Schedule; remove once every
         # deployment has applied once.
@@ -169,6 +172,10 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.note_reindex_effective:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
+    # Only while both note stores are written. Compares and reports; never repairs.
+    if settings.kg_store == "dual":
+        compare_every = timedelta(minutes=settings.kg_compare_schedule_minutes)
+        schedules.append(PlannedSchedule("kg-compare", KgCompareWorkflow, compare_every))
     # Only where a document share is enabled, asked of the manifests (the source list is the
     # switch).
     if share_sources():

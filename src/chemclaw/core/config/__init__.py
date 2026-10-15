@@ -892,6 +892,7 @@ class Settings(
             (
                 (self.retention_timeout_seconds, "retention_timeout_seconds"),
                 (self.note_reindex_timeout_seconds, "note_reindex_timeout_seconds"),
+                (self.kg_compare_timeout_seconds, "kg_compare_timeout_seconds"),
                 (self.result_publish_timeout_seconds, "result_publish_timeout_seconds"),
             )
         )

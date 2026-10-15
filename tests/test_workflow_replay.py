@@ -48,6 +48,9 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         "ElnSyncWorkflow",
         "EvalDriftWorkflow",
         "NoteReindexWorkflow",
+        # New with `kg_store=dual`; a one-activity workflow that earns a fixture at the first
+        # change to its command sequence, as `NoteReindexWorkflow` does.
+        "KgCompareWorkflow",
         "ObservationPromotionWorkflow",
         "ObservationSynthesisWorkflow",
         "OptimizationCampaignWorkflow",
