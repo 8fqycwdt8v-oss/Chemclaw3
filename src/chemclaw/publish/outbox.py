@@ -26,6 +26,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.core.tenant_registry import for_each_tenant
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
 from chemclaw.publish.registry import enabled_names, publishing_enabled
 
@@ -507,6 +508,36 @@ def _log_fenced_off(outcome: str, fenced: int) -> None:
     )
 
 
+class _Backlog(NamedTuple):
+    """A tenant's reading: pending `(sink, count, oldest epoch)`; dead and orphaned `(sink, n)`."""
+
+    pending: list[Any]
+    dead: list[Any]
+    orphaned: list[Any]
+
+
+def _merge_backlogs(readings: Sequence[_Backlog]) -> _Backlog:
+    """Every tenant's reading as one: counts add and the oldest pending row is the oldest of all."""
+    pending: dict[str, tuple[int, float | None]] = {}
+    for reading in readings:
+        for sink, count, oldest in reading.pending:
+            have = pending.get(str(sink), (0, None))
+            epochs = [e for e in (have[1], oldest) if e is not None]
+            pending[str(sink)] = (have[0] + int(count), min(epochs) if epochs else None)
+
+    def total(rows: Sequence[Sequence[Any]]) -> list[Any]:
+        sums: dict[str, int] = {}
+        for sink, count in rows:
+            sums[str(sink)] = sums.get(str(sink), 0) + int(count)
+        return list(sums.items())
+
+    return _Backlog(
+        [(sink, count, oldest) for sink, (count, oldest) in pending.items()],
+        total([row for reading in readings for row in reading.dead]),
+        total([row for reading in readings for row in reading.orphaned]),
+    )
+
+
 async def refresh_backlog(dsn: str | None = None) -> None:
     """Re-read the backlog and republish the three gauges. Called on the drain pass. Never raises.
 
@@ -522,13 +553,19 @@ async def refresh_backlog(dsn: str | None = None) -> None:
     target = dsn if dsn is not None else settings.postgres_dsn
     try:
         sinks = enabled_names()
-        async with db.connection(target, operation="outbox_backlog") as conn:
-            cursor = await conn.execute(_PENDING, (sinks,))
-            pending = await cursor.fetchall()
-            cursor = await conn.execute(_DEAD_LETTERED, (sinks,))
-            dead = await cursor.fetchall()
-            cursor = await conn.execute(_ORPHANED, (sinks,))
-            orphaned = await cursor.fetchall()
+
+        async def read(_tenant: str) -> _Backlog:
+            async with db.connection(target, operation="outbox_backlog") as conn:
+                cursor = await conn.execute(_PENDING, (sinks,))
+                pending = await cursor.fetchall()
+                cursor = await conn.execute(_DEAD_LETTERED, (sinks,))
+                dead = await cursor.fetchall()
+                cursor = await conn.execute(_ORPHANED, (sinks,))
+                return _Backlog(pending, dead, await cursor.fetchall())
+
+        # The whole backlog, not the tenant of whichever drain asked: the gauges are the process's.
+        backlog = _merge_backlogs(list((await for_each_tenant(read)).values()))
+        pending, dead, orphaned = backlog.pending, backlog.dead, backlog.orphaned
     except Exception:
         logger.warning("publish: could not read the outbox backlog; gauges keep their last value")
         return

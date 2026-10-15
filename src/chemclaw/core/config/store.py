@@ -94,6 +94,14 @@ class StoreSettings(BaseSettings):
     # The tenant a process works for when no request or activity bound one: a CLI, or a worker run
     # for one tenant. Empty, with tenancy enabled, is no fallback, so unbound work sees no rows.
     tenancy_process_tenant: str = ""
+    # How long a process remembers that a tenant is registered for this release. Short, because a
+    # tenant handed to another release (`make tenant-assign`) must stop being served by the pods
+    # that still hold it, and the registry is read-only for them.
+    tenant_registry_cache_seconds: float = Field(default=30.0, gt=0)
+    # The most tenants a sweep that acts for each of them (a backlog reading, a model re-embed, the
+    # readiness probe) will walk. A deployment with more raises it knowingly; the sweep refuses
+    # rather than silently covering some.
+    tenancy_sweep_max_tenants: int = Field(default=64, ge=1)
     # This release's identity on a shared database: the chart derives it from the Helm release's
     # namespace and name. The first release to migrate stamps it into the database, and every start
     # compares (`core/deployment.py`); a different one is refused unless tenancy lets two releases

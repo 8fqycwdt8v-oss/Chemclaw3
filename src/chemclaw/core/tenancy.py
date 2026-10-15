@@ -12,6 +12,7 @@ Invariants:
 - A tenant id is a slug. A role `tenant:<id>` is the only way a token names one.
 """
 
+import re
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -44,6 +45,9 @@ class TenantError(ChemclawError):
     by name because Temporal matches that way.
     """
 
+
+#: A run of a tenant's Schedule `<job>@<tenant>`: its id is `<job>@<tenant>-scheduled-<time>`.
+_SCHEDULED_RUN = re.compile(r"[^@~]+@([a-z0-9][a-z0-9_-]{0,62}?)-scheduled-")
 
 _current_tenant: ContextVar[str | None] = ContextVar("chemclaw_current_tenant", default=None)
 
@@ -146,8 +150,22 @@ def scope_workflow_id(workflow_id: str) -> str:
     return f"{tenant}{WORKFLOW_ID_SEPARATOR}{workflow_id}"
 
 
+def workflow_owner(workflow_id: str) -> str:
+    """The tenant `workflow_id` belongs to, read from the id.
+
+    `<tenant>~<id>` is a run a tenant's request started. `<schedule>@<tenant>-scheduled-<time>` is a
+    run of a tenant's Schedule. Any other id predates tenancy or is the default tenant's, whose ids
+    are unchanged.
+    """
+    owner, separator, _ = workflow_id.partition(WORKFLOW_ID_SEPARATOR)
+    if separator:
+        return owner
+    scheduled = _SCHEDULED_RUN.match(workflow_id)
+    return scheduled.group(1) if scheduled else DEFAULT_TENANT
+
+
 def owns_workflow(workflow_id: str) -> bool:
-    """Whether the current tenant started `workflow_id`: the one place a run's tenant is read back.
+    """Whether the current tenant owns `workflow_id`: the one place a run's tenant is read back.
 
     Temporal answers by id for anyone who asks, so a status or cancel route asks this first and
     treats a run that is not the caller's as unknown. Always true while tenancy is off.
@@ -155,7 +173,4 @@ def owns_workflow(workflow_id: str) -> bool:
     if not settings.tenancy_enabled:
         return True
     tenant = current_tenant()
-    if not tenant:
-        return False
-    owner, separator, _ = workflow_id.partition(WORKFLOW_ID_SEPARATOR)
-    return owner == tenant if separator else tenant == DEFAULT_TENANT
+    return bool(tenant) and workflow_owner(workflow_id) == tenant
