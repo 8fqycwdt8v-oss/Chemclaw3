@@ -33,7 +33,7 @@
        still run `ensure_embedding_width` for the target revision's `embedding_dim`, which finds
        its columns already there (they are never dropped) and takes no lock; only a revision
        configured for a width the database has never had would build one, under the lock
-       `infra/sql/130_embedding_width.sql` describes. */ -}}
+       `infra/sql/130_embedding_width_columns.sql` describes. */ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:

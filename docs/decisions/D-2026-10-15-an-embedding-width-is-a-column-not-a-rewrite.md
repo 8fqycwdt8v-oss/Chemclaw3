@@ -38,7 +38,7 @@ cannot stall the crawl, the scheduled sync or a peer.
 
 ## Decision
 
-Option 3. `infra/sql/130_embedding_width.sql` defines `ensure_embedding_width(width)`, which adds
+Option 3. `infra/sql/130_embedding_width_columns.sql` defines `ensure_embedding_width(width)`, which adds
 `embedding_<width>` and its HNSW cosine index to `note_index` and `document_chunks` when they are
 absent and does nothing for 1536 or when they exist. `core/migrate.py` calls it on every run with
 `settings.embedding_dim`, because the width is a setting that can change between releases while a

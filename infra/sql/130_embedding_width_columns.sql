@@ -80,7 +80,7 @@ BEGIN
         idx := holder || '_' || col || '_idx';
         IF to_regclass(idx) IS NULL THEN
             EXECUTE format(
-                'CREATE INDEX %I ON %I USING hnsw (%I vector_cosine_ops)', idx, holder, col
+                'CREATE INDEX IF NOT EXISTS %I ON %I USING hnsw (%I vector_cosine_ops)', idx, holder, col
             );
         END IF;
     END LOOP;

@@ -169,7 +169,7 @@ async def _ensure_vector_width(conn: psycopg.AsyncConnection[TupleRow]) -> None:
     """Create the vector column and index for `settings.embedding_dim` where they do not exist.
 
     The width is a setting that may change between releases while a migration file runs once, so
-    the file (`130_embedding_width.sql`) defines the function and this calls it on every run. It is
+    the file (`130_embedding_width_columns.sql`) defines the function and this calls it on every run. It is
     a no-op for the original 1536 columns and for a column that exists. Skipped, with a warning,
     where the vectors live outside Postgres or the width is one pgvector cannot index: a deployment
     that never reads those columns must still migrate, and `/readyz` reports the mismatch for one

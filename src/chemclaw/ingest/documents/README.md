@@ -51,7 +51,9 @@ not move any file's fingerprint, so before `D-2026-08-06-a-vector-is-only-good-f
 a model swap re-embedded nothing and left the table holding a mix of two models' vectors — with no
 error anywhere. `sync.reembed_stale` refreshes them from the `content` stored beside each vector,
 so the fix is a database-to-database pass that never touches the share and runs even when the mount
-is down.
+is down. It holds no lock across the embedding call: its write is conditional on the row still being
+stale, so the crawl, the scheduled pass and `make reembed` can reach one chunk without waiting for
+each other, at the price of an occasional embedding paid twice.
 
 **And a chunk is only good for the chunking that cut it.** The same argument one step out
 (`chunking_key`, migration 040): `chunk_chars` and `chunk_overlap_chars` decide what text each

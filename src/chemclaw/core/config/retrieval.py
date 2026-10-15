@@ -140,7 +140,7 @@ class RetrievalSettings(BaseSettings):
 
 # The width of the original embedding columns (`note_index.embedding`, `document_chunks.embedding`,
 # `vector(1536)`), which keep their name; any other width lives in `embedding_<N>`
-# (`core/vector_schema.py`, `infra/sql/130_embedding_width.sql`).
+# (`core/vector_schema.py`, `infra/sql/130_embedding_width_columns.sql`).
 LEGACY_VECTOR_DIM = 1536
 
 # The widest `vector` pgvector will build an HNSW index on. A wider model needs a smaller output

@@ -1,7 +1,7 @@
 """Which pgvector column holds an embedding of a given width, and whether the corpus agrees.
 
 A `vector(N)` column has one width for life, so a model with another width gets a sibling column
-(`embedding_<N>`) beside the original `embedding` (1536); `infra/sql/130_embedding_width.sql`
+(`embedding_<N>`) beside the original `embedding` (1536); `infra/sql/130_embedding_width_columns.sql`
 creates it from `settings.embedding_dim` when `core/migrate.py` runs. A row's `embedding_key`
 (`core/embeddings.py::embedding_config_key`) names the provider, model and width that made its
 vector, so it is also the per-row record this module decodes and checks.

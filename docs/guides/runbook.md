@@ -1082,7 +1082,7 @@ plus one command (D-2026-10-15-an-embedding-width-is-a-column-not-a-rewrite).
    run). Adding the column is instant, but both tables are locked `ACCESS EXCLUSIVE` through the
    index builds, which scan every row: budget roughly 0.3-1.8 s per million rows, more for
    `document_chunks`, and reads wait as well as writes. On a large corpus pre-build the columns and
-   indexes with `CONCURRENTLY` first, as `infra/sql/130_embedding_width.sql` describes, and the hook
+   indexes with `CONCURRENTLY` first, as `infra/sql/130_embedding_width_columns.sql` describes, and the hook
    then finds them and takes no lock. An unchanged width does nothing at all. A pod configured for
    a width with no column answers `/readyz` 503 `vector width behind config`, which is the signal
    that the hook did not run; while a migration holds the tables the probe keeps its last verdict.

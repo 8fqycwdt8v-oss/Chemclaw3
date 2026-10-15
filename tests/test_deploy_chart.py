@@ -3709,6 +3709,8 @@ def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "temporal.namespace=chemclaw",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
             "--set-string",
             "retention.unboundedGrowthAccepted=false",
         ],
