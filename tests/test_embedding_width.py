@@ -153,8 +153,8 @@ async def _write_notes(count: int) -> list[str]:
     return texts
 
 
-async def _write_chunks(count: int, *, key: str | None = None) -> None:
-    """Index `count` single-chunk documents under the live configuration (or `key`)."""
+async def _write_chunks(count: int) -> None:
+    """Index `count` single-chunk documents under the live configuration."""
     index = PostgresDocumentIndex()
     texts = [f"crystallisation report {i} ethyl acetate" for i in range(count)]
     vectors = embed_texts(texts, cache=False)
@@ -179,7 +179,7 @@ async def _write_chunks(count: int, *, key: str | None = None) -> None:
             )
             for i, (text, vector) in enumerate(zip(texts, vectors, strict=True))
         ],
-        key or embedding_config_key(),
+        embedding_config_key(),
     )
 
 
