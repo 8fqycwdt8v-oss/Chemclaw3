@@ -519,7 +519,7 @@ could.
       (`refuse_undeclared_writes`, `refuse_writes_on_dry_run`, `enforce_plan_approval`,
       `enforce_tool_authz`). The audit row records the single decision. `api/auth.py` keeps
       authentication only. Test: one table-driven test over the decision matrix.
-- [ ] **W5.10 Skills.** One `skills/` package: a single `SkillStore` with three tiers (repo, org,
+- [x] **W5.10 Skills.** One `skills/` package: a single `SkillStore` with three tiers (repo, org,
       mine) behind one interface, one access predicate, one manifest. 11 files → ≤4.
 - [ ] **W5.11 Plan.** One `plan/` package (state, scope, approval store, gate). 6 files → ≤3.
 - [ ] **W5.12 Rename leftovers.** `chemclaw_agent.py` → `profiles/surface.py` (it now only answers

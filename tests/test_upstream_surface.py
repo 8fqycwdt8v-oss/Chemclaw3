@@ -178,14 +178,14 @@ def test_the_skills_middleware_still_caches_under_skills_metadata() -> None:
     hints = get_type_hints(SkillsState, include_extras=True)
     assert "skills_metadata" in hints, (
         "SkillsMiddleware renamed its cache channel; "
-        "agent/langgraph_agent.ReloadingSkillsState redeclares `skills_metadata` by name"
+        "skills/backends.ReloadingSkillsState redeclares `skills_metadata` by name"
     )
     # The annotation as well as the name: the redeclaration must reproduce `PrivateStateAttr`, or
     # the role-narrowed listing enters the graph's input schema where a caller could replace it.
     # `tests/test_state_channels.py` asserts our side.
     assert "OmitFromSchema" in repr(hints["skills_metadata"]), (
         "SkillsMiddleware no longer marks `skills_metadata` private; "
-        "agent/langgraph_agent.ReloadingSkillsState copies that marker and should stop"
+        "skills/backends.ReloadingSkillsState copies that marker and should stop"
     )
 
 
@@ -199,7 +199,7 @@ def test_private_state_attr_is_still_where_the_skills_state_reaches_for_it() -> 
     from langchain.agents.middleware import types
 
     assert hasattr(types, "PrivateStateAttr"), (
-        "PrivateStateAttr moved; agent/langgraph_agent.ReloadingSkillsState imports it from "
+        "PrivateStateAttr moved; skills/backends.ReloadingSkillsState imports it from "
         "langchain.agents.middleware.types because it is not re-exported by the package"
     )
 
@@ -623,7 +623,7 @@ def test_the_general_purpose_subagent_is_still_displaced_by_claiming_its_name() 
         ("deepagents.middleware.subagents", "SubAgentMiddleware", "the subagent seam"),
         ("deepagents.middleware.subagents", "CompiledSubAgent", "the subagent seam"),
         ("deepagents.middleware.skills", "SkillsMiddleware", "agent/langgraph_agent.py"),
-        ("deepagents.backends", "FilesystemBackend", "agent/skill_backend.py"),
+        ("deepagents.backends", "FilesystemBackend", "skills/backends.py"),
         ("deepagents.backends", "CompositeBackend", "agent/langgraph_agent.skills_backend"),
         ("deepagents.backends", "StateBackend", "agent/langgraph_agent.skills_backend"),
     ],
@@ -1592,7 +1592,7 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
 def test_an_oversized_skill_description_is_still_truncated_rather_than_refused() -> None:
     """An oversized skill description is still truncated rather than refused upstream.
 
-    So `agent/skill_manifest.py` turns `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH`
+    So `skills/manifest.py` turns `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH`
     into pydantic bounds, refusing what upstream would silently truncate. If upstream switched to
     refusing, the skill would silently vanish instead; either is workable, not knowing is not.
     """
@@ -1602,7 +1602,7 @@ def test_an_oversized_skill_description_is_still_truncated_rather_than_refused()
         _parse_skill_metadata,
     )
 
-    from chemclaw.agent.skill_manifest import (
+    from chemclaw.skills.manifest import (
         MAX_SKILL_DESCRIPTION_CHARS,
         MAX_SKILL_NAME_CHARS,
     )

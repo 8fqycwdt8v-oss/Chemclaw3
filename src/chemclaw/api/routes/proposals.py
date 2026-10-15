@@ -20,16 +20,12 @@ from chemclaw.agent.behaviour_proposals import (
     ProposalKind,
     default_proposal_store,
 )
-from chemclaw.agent.local_skills import (
-    SkillRefused,
-    delete_local_skill,
-    read_local_skill,
-    save_local_skill,
-    validated_skill,
-)
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
+from chemclaw.skills.access import Tier, Writer
+from chemclaw.skills.manifest import SkillRefused, validated_skill
+from chemclaw.skills.store import SkillStore
 
 logger = logging.getLogger(__name__)
 
@@ -204,18 +200,20 @@ async def _write_what_was_accepted(
     )
     # The row cap is enforced by the writer, so this door and the save route share one bound and
     # lock.
-    replaced = await read_local_skill(store, actor, proposal.name)
+    skills = SkillStore(store, actor=actor)
+    owner = Writer(actor=actor)
+    replaced = await skills.read(Tier.MINE, proposal.name)
     try:
-        await save_local_skill(store, actor, proposal.name, proposal.content)
+        await skills.save(Tier.MINE, proposal.name, proposal.content, writer=owner)
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
 
     async def undo() -> None:
         """Put the tier back as it stood before this acceptance wrote to it."""
         if replaced is None:
-            await delete_local_skill(store, actor, proposal.name)
+            await skills.remove(Tier.MINE, proposal.name, writer=owner)
         else:
-            await save_local_skill(store, actor, proposal.name, replaced)
+            await skills.save(Tier.MINE, proposal.name, replaced, writer=owner)
 
     return undo
 

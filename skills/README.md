@@ -13,7 +13,7 @@ This directory holds **Markdown, not Python**. See `docs/reference/architektur.m
 
 Drop a `skills/<name>/SKILL.md` through a reviewed commit — discovery is automatic, with no
 registration and no allowlist. The agent reads skills through `deepagents.SkillsMiddleware` over a
-read-only backend (`src/chemclaw/agent/skill_backend.py`) that also serves each enabled connector
+read-only backend (`src/chemclaw/skills/backends.py`) that also serves each enabled connector
 bundle's own `skills/`. Skills can live in more than one directory: set `CHEMCLAW_SKILLS_DIR` to an
 OS-path-separator-delimited list (like `PATH`, e.g. `skills:/opt/team-skills`) to add a second,
 e.g. team-private, skills directory without code changes; `CHEMCLAW_SKILLS_ENABLED` narrows the
@@ -25,7 +25,7 @@ This directory is one of three tiers. The organisation's tier changes through `P
 
 ### SKILL.md front-matter schema
 
-YAML front-matter between `---` fences. This is **`agent/skill_manifest.py`'s `SkillManifest`**, which
+YAML front-matter between `---` fences. This is **`src/chemclaw/skills/manifest.py`'s `SkillManifest`**, which
 is `extra="forbid"` — any field not in this table fails `make skill-validate`. It is a narrowing of
 the [Agent Skills spec](https://agentskills.io/specification): the spec's `license`,
 `compatibility`, `allowed_tools` and `metadata` are **not accepted here**, because nothing in this

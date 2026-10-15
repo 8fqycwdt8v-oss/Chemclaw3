@@ -83,7 +83,9 @@ _BAD_DATA_TYPES = [
     # document. In practice `surface_domain_errors` converts it to a `ToolMessage` before it can
     # cross an activity boundary.
     "UnparsedArguments",
-    # A turn tried to change the skills tree; an `AuthorizationError` subclass, listed by name.
+    # A writer the skills tiers' rule does not admit, and a turn's attempt to change one; both
+    # `AuthorizationError` subclasses, listed by name.
+    "SkillWriteRefused",
     "SkillsReadOnlyRefusal",
     "ConnectorJobError",
     "GitWriteError",

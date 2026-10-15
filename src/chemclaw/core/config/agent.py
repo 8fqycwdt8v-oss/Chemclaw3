@@ -111,7 +111,7 @@ class AgentSettings(BaseSettings):
     agent_memory_max_files: int = Field(default=200, ge=1)
     # Bounds on a chemist's own skills tier, refused at the route (authored judgment is never
     # evicted). The char cap is one skill's body; the row cap bounds prefix spend, since every local
-    # skill's name and description ride on every model call (`agent/local_skills.py` has the
+    # skill's name and description ride on every model call (`skills/store.py` has the
     # arithmetic).
     agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
     agent_local_skills_max: int = Field(default=20, ge=1)

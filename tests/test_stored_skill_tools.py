@@ -20,20 +20,24 @@ from chemclaw.agent.langgraph_agent import (
     skill_narrowing,
     skills_backend,
 )
-from chemclaw.agent.local_skills import (
-    LOCAL_SKILLS_ROOT,
-    local_skills_namespace,
-    save_local_skill,
-)
-from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, save_org_skill
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
-from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, declared_tools
-from chemclaw.agent.skill_store import LISTING_PAGE, skill_key, store_writer
-from chemclaw.agent.stored_skill_tools import StoredSkillTools, stored_skill_declarations
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.access import skill_permits
+from chemclaw.skills.manifest import UNREADABLE_DECLARATION, declared_tools
+from chemclaw.skills.store import (
+    LISTING_PAGE,
+    LOCAL_SKILLS_ROOT,
+    ORG_SKILLS_ROOT,
+    StoredSkillTools,
+    local_skills_namespace,
+    save_local_skill,
+    save_org_skill,
+    skill_key,
+    store_writer,
+    stored_skill_declarations,
+)
 
 _ACTOR = "alice-oid"
 
@@ -408,7 +412,7 @@ def test_a_stored_body_and_a_filed_one_are_read_by_one_function(tmp_path: Any) -
     """
     import frontmatter
 
-    from chemclaw.agent.skill_manifest import _declared_pair, declared_triple
+    from chemclaw.skills.manifest import _declared_pair, declared_triple
 
     shapes = [
         "---\nname: ok\ntools: [a, b]\nrequires: [a]\n---\nbody",

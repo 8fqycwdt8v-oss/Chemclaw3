@@ -43,10 +43,10 @@ from chemclaw.agent.langgraph_agent import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
-from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
 from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings, settings
+from chemclaw.skills.manifest import MAX_SKILL_DESCRIPTION_CHARS
 from tests.siblings import (
     SIBLING_SKIP,
     fleet_published_bundles,
@@ -1087,9 +1087,9 @@ def test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows() -> No
 
     from langgraph.store.memory import InMemoryStore
 
-    from chemclaw.agent.local_skills import save_local_skill
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+    from chemclaw.skills.store import save_local_skill
 
     profile = get_profile("default")
     connectors = _connector_tools(profile)
@@ -1154,7 +1154,7 @@ def test_the_organisations_skills_cost_no_more_prefix_than_the_cap_allows() -> N
 
     from langgraph.store.memory import InMemoryStore
 
-    from chemclaw.agent.org_skills import save_org_skill
+    from chemclaw.skills.store import save_org_skill
 
     profile = get_profile("default")
     connectors = _connector_tools(profile)

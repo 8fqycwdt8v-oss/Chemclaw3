@@ -1,6 +1,6 @@
 """The organisation's skills over HTTP: open to read, closed to change.
 
-The tier itself is `agent/org_skills.py`. Reads take any authenticated caller: the tier acts on
+The tier itself is `skills/store.py`. Reads take any authenticated caller: the tier acts on
 every chemist's turn, so everyone may inspect it and its versions. Writes take the privileged role
 (`deps._is_reviewer`); a refusal is a 403 plus `record_refusal`. No route decides somebody else's
 proposal: an admin promotes by posting a document, never by reaching into a person's queue.
@@ -11,18 +11,16 @@ an empty list.
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from chemclaw.agent.local_skills import SkillRefused, validated_skill
-from chemclaw.agent.org_skills import (
-    activate_org_version,
-    list_org_skills,
-    list_org_versions,
-    read_org_skill,
-    retire_org_skill,
-    save_org_skill,
-)
 from chemclaw.api.deps import ORG_SKILL, CurrentUser, _is_reviewer, record_refusal
-from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
+from chemclaw.api.routes.skill_http import (
+    handle_write_refusals,
+    skill_refusal_http,
+    store_or_503,
+)
 from chemclaw.api.runner import turn_store
+from chemclaw.skills.access import Tier, Writer, may_write
+from chemclaw.skills.manifest import SkillRefused, validated_skill
+from chemclaw.skills.store import SkillStore
 
 
 class OrgSkillIn(BaseModel):
@@ -82,13 +80,18 @@ class OrgSkillVersionsOut(BaseModel):
     versions: list[OrgSkillVersionOut]
 
 
+def _writer(principal: CurrentUser) -> Writer:
+    """The caller as the organisation's tier sees a writer: a person, and a reviewer or not."""
+    return Writer(actor=principal.oid, reviewer=_is_reviewer(principal))
+
+
 def _reviewer_or_refuse(principal: CurrentUser, target: str, act: str) -> None:
     """Refuse unless this caller holds the privileged role, and record it either way it goes.
 
     403 rather than 404: the tier's reads are open, so a name's existence is no secret
     (`deps.ORG_SKILL`).
     """
-    if _is_reviewer(principal):
+    if may_write(Tier.ORG, _writer(principal)):
         return
     record_refusal(ORG_SKILL, "not a reviewer", principal, target, status=403)
     raise HTTPException(
@@ -99,28 +102,29 @@ def _reviewer_or_refuse(principal: CurrentUser, target: str, act: str) -> None:
     )
 
 
-async def _store_or_refuse() -> object:
-    """This deployment's store, or a 503 saying the tier is unavailable rather than empty.
+async def _skills_of(principal: CurrentUser) -> SkillStore:
+    """This deployment's skill store, or a 503 saying the tier is unavailable rather than empty.
 
     Without a store a listing would answer `[]` and a publish would vanish.
     """
-    return store_or_503(
+    store = store_or_503(
         await turn_store(),
         "this deployment keeps no organisation skills: it needs the durable memory store "
         "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
     )
+    return SkillStore(store, actor=principal.oid)
 
 
 async def list_skills(principal: CurrentUser) -> OrgSkillsOut:
     """Every skill the organisation publishes — names, since this answers "what acts on me"."""
-    store = await _store_or_refuse()
-    return OrgSkillsOut(skills=await list_org_skills(store))
+    skills = await _skills_of(principal)
+    return OrgSkillsOut(skills=await skills.names(Tier.ORG))
 
 
 async def read_skill(name: str, principal: CurrentUser) -> OrgSkillOut:
     """One organisation skill, verbatim — the body a turn is actually given."""
-    store = await _store_or_refuse()
-    body = await read_org_skill(store, name)
+    skills = await _skills_of(principal)
+    body = await skills.read(Tier.ORG, name)
     if body is None:
         raise HTTPException(404, f"this organisation publishes no skill named {name!r}")
     return OrgSkillOut(name=name, body=body)
@@ -128,7 +132,7 @@ async def read_skill(name: str, principal: CurrentUser) -> OrgSkillOut:
 
 async def read_versions(name: str, principal: CurrentUser) -> OrgSkillVersionsOut:
     """Every body ever activated under this name — the blame half of the rollback story."""
-    store = await _store_or_refuse()
+    skills = await _skills_of(principal)
     return OrgSkillVersionsOut(
         versions=[
             OrgSkillVersionOut(
@@ -137,7 +141,7 @@ async def read_versions(name: str, principal: CurrentUser) -> OrgSkillVersionsOu
                 activated_by=version.activated_by,
                 activated_at=version.activated_at,
             )
-            for version in await list_org_versions(store, name)
+            for version in await skills.versions(name)
         ]
     )
 
@@ -149,14 +153,14 @@ async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut
     target is `<publish>` since there is no validated name yet.
     """
     _reviewer_or_refuse(principal, "<publish>", "publishing an organisation skill")
-    store = await _store_or_refuse()
+    skills = await _skills_of(principal)
     try:
         name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
     # The row cap is enforced by the writer, under the same lock that spends it.
     try:
-        await save_org_skill(store, name, body.body, activated_by=principal.oid)
+        await skills.save(Tier.ORG, name, body.body, writer=_writer(principal))
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
     return OrgSkillOut(name=name, body=body.body)
@@ -168,11 +172,9 @@ async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser
     404 on a hash the tier does not hold: the pointer can only point at history.
     """
     _reviewer_or_refuse(principal, name, "reverting an organisation skill")
-    store = await _store_or_refuse()
+    skills = await _skills_of(principal)
     try:
-        reverted = await activate_org_version(
-            store, name, body.content_hash, activated_by=principal.oid
-        )
+        reverted = await skills.revert(name, body.content_hash, writer=_writer(principal))
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
     if not reverted:
@@ -182,7 +184,7 @@ async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser
             f"GET /skills/org/{name}/versions for the bodies it can be reverted to",
         )
     # Read back, so the caller is told what the tier now serves even if something raced this call.
-    active = await read_org_skill(store, name)
+    active = await skills.read(Tier.ORG, name)
     return OrgSkillOut(name=name, body=active or "")
 
 
@@ -192,10 +194,10 @@ async def forget_skill(name: str, principal: CurrentUser) -> OrgSkillsOut:
     History survives, so the revert route can restore it.
     """
     _reviewer_or_refuse(principal, name, "retiring an organisation skill")
-    store = await _store_or_refuse()
-    if not await retire_org_skill(store, name, retired_by=principal.oid):
+    skills = await _skills_of(principal)
+    if not await skills.remove(Tier.ORG, name, writer=_writer(principal)):
         raise HTTPException(404, f"this organisation publishes no skill named {name!r}")
-    return OrgSkillsOut(skills=await list_org_skills(store))
+    return OrgSkillsOut(skills=await skills.names(Tier.ORG))
 
 
 def register(app: FastAPI) -> None:
@@ -203,6 +205,7 @@ def register(app: FastAPI) -> None:
 
     App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
+    handle_write_refusals(app)
     app.get("/skills/org", response_model=OrgSkillsOut)(list_skills)
     app.post("/skills/org", response_model=OrgSkillOut)(publish_skill)
     app.get("/skills/org/{name}", response_model=OrgSkillOut)(read_skill)

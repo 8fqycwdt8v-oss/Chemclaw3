@@ -189,7 +189,7 @@ jobs:
           # first completed run would have failed on it.
           #
           # **Re-measured 2026-09-23 on a wider population, and the floor did not move.** Three
-          # refusal gates — `agent/plan_gate.py`, `agent/skill_backend.py`, `spend/guard.py` (then `agent/loop_cap.py`) —
+          # refusal gates — `agent/plan_gate.py`, `skills/backends.py`, `spend/guard.py` (then `agent/loop_cap.py`) —
           # joined `source_paths` with their own test files, taking the run from 3,640 mutants to
           # **4,057**: **2,555 killed — 63.0%** — with 986 survived, 473 reached by no selected
           # test (11.7%), 43 timed out, 0 suspicious or segfault, in **82m40s at 0.76

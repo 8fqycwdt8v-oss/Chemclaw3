@@ -10,9 +10,9 @@ the only route to `subagents=` and filesystem permissions. Middleware is spliced
 stack by `.name` (`_middleware`; pinned by `tests/test_middleware_order.py`).
 
 Tools cross unchanged: `core/tool_registry` stores plain callables and LangChain derives schemas
-from signatures and docstrings. Skills are narrowed by `skill_access.skill_permits` on the backend,
+from signatures and docstrings. Skills are narrowed by `skills.access.skill_permits` on the backend,
 not on the advertised list, because deepagents publishes skill paths into the prompt
-(`agent/skill_backend.py`). The `@wrap_tool_call` chain runs over shared decision functions
+(`skills/backends.py`). The `@wrap_tool_call` chain runs over shared decision functions
 (`tool_authz`, `repeat_guard`, `audit`); `tool_call_middleware` is the list.
 """
 
@@ -44,14 +44,7 @@ from chemclaw.agent.exhibit_notes import ExhibitListing
 from chemclaw.agent.exhibit_tools import described_for_deployment
 from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
-from chemclaw.agent.local_skills import (
-    LOCAL_SKILLS_LABEL,
-    LOCAL_SKILLS_ROOT,
-    PERSONAL_TIER_TOOLS,
-    personal_skills_available,
-)
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
-from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
@@ -59,10 +52,7 @@ from chemclaw.agent.preferences import StandingPreferences
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
-from chemclaw.agent.skill_access import SkillNarrowing, skill_permits
-from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.state import ChemclawState
-from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
     describe_helper,
@@ -91,6 +81,17 @@ from chemclaw.core.config import settings
 from chemclaw.core.graph_durability import ignoring_inherited_durability
 from chemclaw.core.logging import log_event
 from chemclaw.core.model_prose import ModelProse
+from chemclaw.skills.access import SkillNarrowing, skill_permits
+from chemclaw.skills.manifest import declared_tools, required_tools
+from chemclaw.skills.store import (
+    LOCAL_SKILLS_LABEL,
+    LOCAL_SKILLS_ROOT,
+    ORG_SKILLS_LABEL,
+    ORG_SKILLS_ROOT,
+    PERSONAL_TIER_TOOLS,
+    StoredSkillTools,
+    personal_skills_available,
+)
 from chemclaw.spend.guard import AnswerAtTheCap, MeterTurnSpend, enforce_loop_cap, enforce_spend_cap
 
 if TYPE_CHECKING:
@@ -103,10 +104,8 @@ logger = logging.getLogger(__name__)
 #: provider SDKs it pulls in) and the backends and middleware subclassed from it.
 _GRAPH_MODULES = (
     "deepagents",
-    "chemclaw.agent.reloading_skills",
     "chemclaw.agent.scratchpad",
-    "chemclaw.agent.skill_backend",
-    "chemclaw.agent.skill_store_backend",
+    "chemclaw.skills.backends",
 )
 
 
@@ -135,7 +134,7 @@ def bindable_capability_tools(prof: AgentProfile) -> list[Any]:
     """
     tools = _capability_tools(prof)
     # A tool whose only outcome is unreachable is not bound: `propose_skill` needs the personal tier
-    # (see `local_skills.personal_skills_available`). Filtered here rather than refused inside the
+    # (see `skills.store.personal_skills_available`). Filtered here rather than refused inside the
     # tool, because an unbound tool costs nothing in the prefix.
     if not personal_skills_available():
         tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
@@ -184,7 +183,7 @@ def build_langgraph_agent(
         store: This process's memory store (`agent/scratchpad.memory_store`), or `None` for no
             durable memory. Passed in because creating it is async.
         stored_skills: What the two stored skill tiers declare about tools
-            (`agent/stored_skill_tools.stored_skill_declarations`), read by the async caller.
+            (`skills.store.stored_skill_declarations`), read by the async caller.
             Omitted, the stored tiers declare nothing.
         helper: Whether this graph is a `task` helper. A helper gets no helpers of its own (the
             recursion guard), `helper_profile`'s in-process narrowing and `helper_connectors`'
@@ -236,7 +235,7 @@ def build_langgraph_agent(
     # Built after `bound`, so skills are narrowed by the tools this turn actually binds rather than
     # by manifest allow-lists, which do not change when a server is unreachable. Computed once and
     # handed to every mount (filed and stored tiers ask different questions; see
-    # `skill_access.SkillNarrowing`).
+    # `skills.access.SkillNarrowing`).
     permits = skill_narrowing(
         prof, tools, labelled, available={t.name for t in bound}, stored=stored_skills
     )
@@ -773,7 +772,7 @@ def _skills_middleware(
         if ORG_SKILLS_ROOT in backend.routes:
             sources.append((f"/{ORG_SKILLS_LABEL}", ORG_SKILLS_LABEL))
     sources += [(f"/{label}", label) for label, _ in labelled]
-    from chemclaw.agent.reloading_skills import ReloadingSkillsMiddleware
+    from chemclaw.skills.backends import ReloadingSkillsMiddleware
 
     return ReloadingSkillsMiddleware(
         backend=backend,
@@ -816,7 +815,7 @@ def skills_backend(
         permits = skill_narrowing(profile, tools, labelled, available=available)
     from deepagents.backends import CompositeBackend, StateBackend
 
-    from chemclaw.agent.skill_backend import NarrowedSkillsBackend
+    from chemclaw.skills.backends import NarrowedSkillsBackend
 
     return CompositeBackend(
         default=StateBackend(),
@@ -839,7 +838,7 @@ def skill_narrowing(
 
     The reviewed tree, the personal tier and the organisation's tier are three mounts read through
     one backend, so the narrowing is computed once and handed to every mount; each mount binds the
-    half for its kind of tier (`skill_access.SkillNarrowing`). One computation also means one
+    half for its kind of tier (`skills.access.SkillNarrowing`). One computation also means one
     `_log_narrowing` line per build.
 
     Args:
@@ -848,7 +847,7 @@ def skill_narrowing(
         labelled: The already-walked `(label, directory)` list, for the declared-tools map.
         available: The tool names this turn actually binds, connectors included (see
             `skills_backend` for the fallback).
-        stored: What the stored tiers declare (`agent/stored_skill_tools.py`), read by the async
+        stored: What the stored tiers declare (`skills/store.py`), read by the async
             caller. Omitted, they declare nothing.
 
     Returns:
@@ -918,9 +917,9 @@ def _skill_dirs() -> list[str]:
 def shipped_skill_names() -> frozenset[str]:
     """Every name this deployment's *reviewed* trees occupy — declared, or held by a broken file.
 
-    Used by `api/routes/skills.py` and `local_skills.validated_skill` to refuse a personal skill
+    Used by `api/routes/skills.py` and `skills.manifest.validated_skill` to refuse a personal skill
     taking a shipped name, from the same walk the graph does. A broken `SKILL.md` occupies its
-    directory name (`skill_manifest._declared_pair`), so a personal skill cannot shadow a shipped
+    directory name (`skills.manifest._declared_pair`), so a personal skill cannot shadow a shipped
     skill that is one fix away from working; `tests/test_local_skills.py` holds this. Cheap per
     request: `declared_tools` is cached on the directory tuple.
 

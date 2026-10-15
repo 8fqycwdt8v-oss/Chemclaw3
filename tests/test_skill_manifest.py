@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 
 import chemclaw.cli.validate_skills as validate_skills
-from chemclaw.agent.skill_access import EnabledSkills, RoleScopedSkills
-from chemclaw.agent.skill_manifest import SkillManifest, declared_tools
 from chemclaw.core.config import Settings, settings
+from chemclaw.skills.access import EnabledSkills, RoleScopedSkills
+from chemclaw.skills.manifest import SkillManifest, declared_tools
 
 
 def _write_skill(root: Path, name: str) -> None:
@@ -197,7 +197,7 @@ def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: P
     `ToolScopedSkills` reads a missing entry as "declares nothing", i.e. visible to everyone, so a
     read error must never drop the entry.
     """
-    from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS, _declared_tools
+    from chemclaw.skills.manifest import MAX_SKILL_DESCRIPTION_CHARS, _declared_tools
 
     for name, extra in (
         ("over-long", f"description: {'x' * (MAX_SKILL_DESCRIPTION_CHARS + 1)}"),
@@ -226,8 +226,8 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
     would be visible to every caller. `skill-validate` requires directory and frontmatter names to
     agree.
     """
-    from chemclaw.agent.skill_access import ToolScopedSkills
-    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_tools
+    from chemclaw.skills.access import ToolScopedSkills
+    from chemclaw.skills.manifest import UNREADABLE_DECLARATION, _declared_tools
 
     for name, body in (
         ("nameless", "---\ndescription: no name\n---\n\nbody\n"),
@@ -283,7 +283,7 @@ def test_a_skill_manifest_read_is_always_a_whole_triple(tmp_path: Path) -> None:
     opposite quantifiers, so sentinelling only one would fail open on the other; the triple is
     compared whole.
     """
-    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_pair
+    from chemclaw.skills.manifest import UNREADABLE_DECLARATION, _declared_pair
 
     cases = {
         "gone": None,

@@ -53,7 +53,7 @@ class AgentProfile(BaseModel):
     # with no entry in `model_routes` reuses the model already built.
     model_route: str | None = None
     # Which skills this agent may reach, narrowing the discovered set; `None` leaves the surface to
-    # `agent/skill_access.py`. It lets an A/B arm vary skills while holding the tool surface still.
+    # `skills/access.py`. It lets an A/B arm vary skills while holding the tool surface still.
     # An unknown name is caught by `make skill-validate`, not at build time, because the skills tree
     # is deployment configuration; it narrows to nothing.
     skill_names: frozenset[str] | None = None

@@ -22,8 +22,6 @@ from langgraph.store.memory import InMemoryStore
 from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.agent.behaviour_proposals import PostgresProposalStore, Proposal, content_hash
-from chemclaw.agent.local_skills import save_local_skill
-from chemclaw.agent.org_skills import save_org_skill
 from chemclaw.agent.session_events import record_session_event
 from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.api.app import create_app
@@ -37,6 +35,7 @@ from chemclaw.durable.template_job import template_fingerprint
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.store import PostgresDesignStore
 from chemclaw.science.calc.postgres_artifacts import PostgresArtifactStore
+from chemclaw.skills.store import save_local_skill, save_org_skill
 from chemclaw.templates.composed import ComposedWorkflow, PostgresComposedStore
 from tests.tenancy_app import (
     ACME,

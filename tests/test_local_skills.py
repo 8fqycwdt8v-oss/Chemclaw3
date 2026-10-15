@@ -11,24 +11,26 @@ import pytest
 from langgraph.store.memory import InMemoryStore
 
 from chemclaw.agent.langgraph_agent import skills_backend
-from chemclaw.agent.local_skills import (
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.access import SkillNarrowing
+from chemclaw.skills.backends import (
+    PermittedStoreBackend,
+    SkillsReadOnlyRefusal,
+    local_skills_backend,
+)
+from chemclaw.skills.store import (
     LOCAL_SKILLS_LABEL,
     LOCAL_SKILLS_ROOT,
     delete_local_skill,
     list_local_skills,
-    local_skills_backend,
     local_skills_namespace,
     local_skills_prefix,
     read_local_skill,
     save_local_skill,
 )
-from chemclaw.agent.profiles import AgentProfile
-from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
-from chemclaw.agent.skill_access import SkillNarrowing
-from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
-from chemclaw.agent.skill_store_backend import PermittedStoreBackend
-from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 _BODY = "---\nname: my-workup\ndescription: how I work up a Suzuki\n---\n\nQuench cold.\n"
 
@@ -439,7 +441,7 @@ async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> No
     The route takes the name off the URL, and Postgres rejects a NUL byte in a text field. Both the
     in-memory and Postgres stores are driven, since they must agree.
     """
-    from chemclaw.agent.skill_store import storable_name
+    from chemclaw.skills.manifest import storable_name
 
     assert not storable_name("a\x00b")
     assert not storable_name("two words")
@@ -461,7 +463,7 @@ def test_a_directory_whose_manifest_is_broken_still_occupies_its_name(
     the skill will hold once fixed, and leaving it free would let a personal skill shadow it.
     """
     from chemclaw.agent.langgraph_agent import shipped_skill_names
-    from chemclaw.agent.skill_manifest import _declared_tools
+    from chemclaw.skills.manifest import _declared_tools
 
     broken = tmp_path / "half-written-skill"
     broken.mkdir()

@@ -25,7 +25,7 @@ identity" below).
   outside a bundle. This holds even when the harness plans
   autonomously — an autonomously-planned todo cannot launch a job outside the requesting user's
   entitlements.
-- **Role-scoped skills.** `agent/skill_access.py::RoleScopedSkills` hides a gated skill
+- **Role-scoped skills.** `skills/access.py::RoleScopedSkills` hides a gated skill
   (`skill_role_gates`: skill → allowed roles) from a caller holding none of its roles (D-052).
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
   `src/chemclaw/core/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
@@ -41,7 +41,7 @@ identity" below).
   control that stops a wrong machine-written claim being served — it is what makes one visible as
   machine-written and reversible once seen. The line that remains is on *behaviour*: a skill
   changes every later answer with no citation trail, so **no agent path writes one at all** —
-  `agent/skill_backend.SkillsReadOnlyRefusal` and `agent/skill_store.PermittedStoreBackend` refuse
+  `skills/backends.SkillsReadOnlyRefusal` and `skills/backends.PermittedStoreBackend` refuse
   every write through the skills surface, on all three tiers alike. They differ in *who* may write,
   never in whether a turn may, and who that is follows the blast radius
   (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`). `skills/` is git-resident, so a

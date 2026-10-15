@@ -23,7 +23,7 @@
 # `_capability_tools` and from every connector's allow-list before `create_agent` is called, so the
 # compiled graph's `ToolNode` never holds them (`agent/langgraph_agent.py`). The skills narrow with
 # it by the mechanism that already exists — a skill whose every declared tool is absent is dropped
-# (`agent/skill_access.py::ToolScopedSkills`) — so this arm carries neither the tools nor the
+# (`skills/access.py::ToolScopedSkills`) — so this arm carries neither the tools nor the
 # judgment about them.
 #
 # **What it still carries, stated because a control arm that overstates itself is worse than none.**

@@ -27,10 +27,10 @@ from chemclaw.agent.scratchpad import (
     scratchpad_backend,
     scratchpad_tools,
 )
-from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.metrics import METRICS
+from chemclaw.skills.access import SkillNarrowing
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"

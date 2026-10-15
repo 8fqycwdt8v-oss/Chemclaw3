@@ -183,7 +183,7 @@ def test_an_agent_middleware_subclass_keeps_upstream_s_schema_markers() -> None:
     """
     from deepagents.middleware.skills import SkillsState
 
-    from chemclaw.agent.reloading_skills import ReloadingSkillsState
+    from chemclaw.skills.backends import ReloadingSkillsState
 
     upstream = repr(get_type_hints(SkillsState, include_extras=True)["skills_metadata"])
     ours = repr(get_type_hints(ReloadingSkillsState, include_extras=True)["skills_metadata"])

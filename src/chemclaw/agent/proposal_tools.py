@@ -2,7 +2,7 @@
 
 `propose_skill` writes a row in `behaviour_proposals` and nothing else; a person accepts it through
 `POST /proposals/...`, so a model never authorizes its own work, and no turn writes a skill
-(`agent/skill_backend.SkillsReadOnlyRefusal`). It is in `authz.STATE_CHANGING_TOOLS` so the plan
+(`skills/backends.SkillsReadOnlyRefusal`). It is in `authz.STATE_CHANGING_TOOLS` so the plan
 gate sees a turn proposing a behaviour change, and so it is subtracted from every helper's surface.
 """
 
@@ -85,7 +85,7 @@ def _validated(name: str, body: str) -> str:
     Raises:
         ChemclawError: Worded for the model, naming what is wrong and what to send instead.
     """
-    from chemclaw.agent.local_skills import SkillRefused, validated_skill
+    from chemclaw.skills.manifest import SkillRefused, validated_skill
 
     # Checked before the body, because a name the model got wrong is the cheaper thing to say and
     # `validated_skill` can only report the name the *frontmatter* declares.

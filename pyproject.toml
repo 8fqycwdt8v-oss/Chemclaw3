@@ -19,7 +19,7 @@ dependencies = [
     # meant an unpinned upgrade walked into a release that announces it removes API — and what this
     # repo reaches for there is the skills backend, which is where role-gated skill *visibility* is
     # enforced. It has now been read, diff by diff, and three things in it touch this tree: the
-    # protocol gained a `delete` **write** verb that `agent/skill_backend.py` had no refusal for,
+    # protocol gained a `delete` **write** verb that `skills/backends.py` had no refusal for,
     # `grep` gained keyword-only `max_count`/`context_lines` that upstream *introspects* an override
     # for, and `FilesystemBackend.virtual_mode` now defaults to the `True` this repo already passes
     # explicitly. All three are handled there; the cap moves up a major rather than off, because the
@@ -590,7 +590,7 @@ source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
     # Added by the wave-5 backlog pass. Four refusal gates were outside this list —
-    # `agent/plan_gate.py`, `agent/skill_backend.py` and `spend/guard.py` (then `spend_cap.py` and
+    # `agent/plan_gate.py`, `skills/backends.py` and `spend/guard.py` (then `spend_cap.py` and
     # `loop_cap.py`) —
     # each a control of the same kind as `authz.py` above: a refusal whose surviving mutant is a tool
     # call that should not have happened. Only **one** lands here, because the row asking for them
@@ -598,7 +598,7 @@ source_paths = [
     # long — so each addition needs its runtime measured rather than assumed."
     #
     # `spend_cap.py` (now in `spend/guard.py`) is first because it is the **smallest of the four by source length** (309 lines
-    # against `loop_cap.py`'s (now `spend/guard.py`) 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
+    # against `loop_cap.py`'s (now `spend/guard.py`) 333, the former `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
     # cheapest available answer to "what does one of these cost". Lines are a proxy for mutant count
     # and not a measurement of it, and **the cost of this addition is not recorded anywhere yet**:
     # `make mutants` has not completed a run since `D-2026-09-22-a-mutation-backstop-that-cannot-start`
@@ -607,8 +607,10 @@ source_paths = [
     # the file that will, and the `BACKLOG.md` row carries what is left to do.
     "src/chemclaw/spend/guard.py",
     # `spend/guard.py` is the former `spend_cap.py` and `loop_cap.py` (one entry now), and
-    # `spend/limits.py` the former `api/budget.py` plus the durable window; the recorded floor
-    # predates that merge.
+    # `spend/limits.py` the former `api/budget.py` plus the durable window (`_BOOK`, `_USAGE`,
+    # `Window`, `usage`, `book`), which was never mutated before. The recorded floor and no-tests
+    # ceiling predate that merge and the `skills/backends.py` change above; the first completed
+    # `make mutants` run must re-record both.
     # The other three, added 2026-09-23 once the row's premise had been measured away. It asked for
     # each addition's runtime to be priced first, on the ground that "the run is hours long"; the
     # first completed run was **87 minutes**, and `spend_cap.py`'s own share of it was **29
@@ -633,9 +635,15 @@ source_paths = [
     # is a hole in the *selection*"). `total` counts it either way, which is how the score reached
     # 44.3% against a floor of 72.0: 1,009 `no_tests`, against 988 that genuinely survived. Measured
     # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-    # `skill_backend.py` **51% -> 90%**, `spend/guard.py` (as `loop_cap.py`) **88% -> 100%**.
+    # the former `agent/skill_backend.py` **51% -> 90%**, `spend/guard.py` (as `loop_cap.py`) **88% -> 100%**.
     "src/chemclaw/agent/plan_gate.py",
-    "src/chemclaw/agent/skill_backend.py",
+    # **The population changed here and the floor was not re-recorded.** `skills/backends.py` took
+    # the place of `agent/skill_backend.py`, and also holds `PermittedStoreBackend` and the
+    # reloading middleware, so it is about 1.5 times the code the "51% -> 90%" above was measured
+    # on. Nothing in this edit could run `make mutants` (about 80 minutes): the recorded floor and
+    # no-tests ceiling in `.github/workflows/mutants.yml` stand over a population they were not
+    # measured on, and the first completed run after this change must re-record both.
+    "src/chemclaw/skills/backends.py",
     "src/chemclaw/spend/limits.py",
     "src/chemclaw/api/runner_trace.py",
     "src/chemclaw/core/chem.py",
@@ -789,6 +797,10 @@ pytest_add_cli_args_test_selection = [
     # measurements of different things, reported as the before-and-after of one — the same
     # instrument error this repository keeps finding, one directory over.
     "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
-    "tests/test_skill_backend.py",  # agent/skill_backend.py   51% ->  90%
+    "tests/test_skill_backend.py",  # the former agent/skill_backend.py     51% ->  90%
+    # The stored-tier half of `skills/backends.py` (`PermittedStoreBackend`), which the file holds
+    # beside the reviewed tree's. Not measured: `make mutants` must re-record both rates.
+    "tests/test_local_skills.py",
+    "tests/test_org_skills.py",
     "tests/test_loop_cap_floor.py",  # spend/guard.py       88% -> 100%
 ]

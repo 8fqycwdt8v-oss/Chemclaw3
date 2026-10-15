@@ -138,6 +138,12 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "`spend/ledger.py` reads usage off LangChain messages and callbacks; the guard is "
         "assembled into layer 1's graph"
     ),
+    # skills: the backends and middleware the skills tiers are read through subclass deepagents'.
+    ("chemclaw.skills", "langgraph"): (
+        "skills/backends.py subclasses deepagents' `FilesystemBackend`, `StoreBackend` and "
+        "`SkillsMiddleware`; skills/store.py names `StoreBackend` only inside the one function "
+        "that writes a stored tier"
+    ),
     # api: layer 1's front door (F2).
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",
