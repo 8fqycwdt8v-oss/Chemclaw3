@@ -213,12 +213,18 @@ Register two applications:
      and empty means every expensive job is refused for every user (`deploy/README.md`, "The
      setting that does *not* block boot"). The full set of gates is in the runbook, "(xv) Onboard,
      entitle and offboard a person".
-2. **The UI** (a single-page-application registration).
-   - Redirect URI: `https://<UI host>/auth/callback` (`Chemclaw3_ui:src/auth/msalAuth.ts`).
+2. **The UI** (a **Web** registration with a client secret; the UI's BFF redeems the sign-in code
+   server-side and holds the tokens, `Chemclaw3_ui:docs/operations.md` §8).
+   - Platform **Web**, not single-page application (a server-side redemption against an SPA
+     registration is refused). Redirect URIs: `https://<UI host>/auth/callback` and
+     `https://<UI host>/`, exactly `APP_ORIGIN` plus the path; one host per deployment.
+   - A client secret on that registration (24 months at most), which becomes the UI's Secret
+     `chemclaw3-ui-oidc`. Rotation is a second secret, the Secret updated, the pods restarted, the
+     first secret deleted.
    - API permission: the scope from step 1, with admin consent granted.
 
 Values that only your tenant can supply, and which nothing here can check: tenant ID, both client
-IDs, role names, and whether your tenant emits `groups`.
+IDs, the UI's client secret, role names, and whether your tenant emits `groups`.
 
 ### 2.5 Registry, build hosts and tools
 
@@ -725,8 +731,9 @@ apply them into the **same** namespace:
 | UI environment variable | Value |
 |---|---|
 | the backend URL (the entry whose example is `http://chemclaw-service:8080`) | keep `http://chemclaw-service:8080`. That is the chart's Service, and its name is fixed. Give the service root with no path. |
-| `AUTH_MODE` | `msal` |
-| `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` | the tenant, and the **UI** app registration's client ID |
+| `AUTH_MODE` | `bff` (the only other value is `dev`; `msal` is refused by name) |
+| `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` | the tenant GUID, and the **UI** app registration's client ID |
+| `ENTRA_CLIENT_SECRET_FILE` | the mounted `chemclaw3-ui-oidc` Secret (`oc create secret generic chemclaw3-ui-oidc --from-literal=client-secret=<value>`); `ENTRA_CLIENT_AUTH=none` is for a test tenant that issues no secret and is not for production |
 | `API_SCOPE` | the API scope, e.g. `api://<API app client ID>/Chat.Access` |
 | `REVIEWER_ROLES` | the app-role values that may review (UI-side display only) |
 | `APP_ORIGIN`, `SANDBOX_ORIGIN` | `https://` plus the two Route hosts, **exactly**. Put the sandbox on a separate registrable domain. |
@@ -744,14 +751,28 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
   the same override: Helm merges maps). The kind lane's UI carries a different label and is
   admitted by its namespace entry instead.
 - **The UI startup check.** `Chemclaw3_ui:server/config.ts` refuses to start on a missing tenant,
-  client ID, scope or malformed origin.
+  client ID, scope, client secret or malformed origin, and on an `APP_ORIGIN` that is not https
+  off loopback (`Chemclaw3_ui` README, "What the BFF refuses to start with").
+- **The UI calls the identity provider itself.** Discovery, the key set and the token endpoint are
+  outbound HTTPS from the UI pod to `login.microsoftonline.com` (or `ENTRA_AUTHORITY`). This
+  chart's `networkPolicy` selects the release's own pods only and the UI repository ships no
+  NetworkPolicy, so a namespace with a default-deny egress policy needs one for the UI pods
+  (DNS, `chemclaw-service:8080`, the identity provider). Node's `fetch` ignores `HTTPS_PROXY`
+  unless `NODE_USE_ENV_PROXY=1` is set (Node 22.21 or later).
+- **Replicas.** The BFF keeps sessions in each pod's memory. The shipped UI Deployment runs two
+  replicas, so the app Route's default cookie affinity must stay (`disable_cookies` is for the
+  sandbox Route only). Without it a sign-in appears to work and the next request reaches a pod that
+  never saw the session. Also required: a per-source-IP rate limit at the router for `/auth/login`
+  and `/auth/callback` (the example Route carries one).
 - **The sandbox Route.** Nothing in front of it may authenticate or rewrite headers
   (`Chemclaw3_ui:deploy/openshift/README.md`).
 
 ### 7.4 Plain Kubernetes differences
 
-- `route.enabled: false`, then add an Ingress to `chemclaw-service:8080` (and two for the UI).
-  **Session affinity is not required.** Uploaded attachments are stored in Postgres
+- `route.enabled: false`, then add an Ingress to `chemclaw-service:8080` (and two for the UI; the
+  UI's app Ingress needs cookie affinity beyond one replica, for example ingress-nginx
+  `nginx.ingress.kubernetes.io/affinity: cookie`, and a per-source-IP limit on `/auth/*`).
+  **Session affinity is not required for the front door.** Uploaded attachments are stored in Postgres
   (`session_attachments`, D-2026-10-04-an-upload-is-session-state-not-pod-state) and every replica
   reads them, and a running turn can be followed (`GET /sessions/{id}/turn/stream`) or stopped
   (`POST …/turn/stop`) on any replica, which asks the pod holding the turn through Postgres

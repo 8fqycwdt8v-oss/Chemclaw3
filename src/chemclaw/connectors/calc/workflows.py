@@ -25,8 +25,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.calc.geometry import without_geometry
 
 from chemclaw.connectors.queues import bundle_queue
-from chemclaw.durable.publish import calculation_retry, connector_queue_wait_timeout
+from chemclaw.durable.publish import connector_queue_wait_timeout
 from chemclaw.durable.registry import durable_workflow
+from chemclaw.durable.retry import retry_for
 
 
 def job_envelope(result: XtbJobResult) -> ConnectorJobResult:
@@ -83,10 +84,10 @@ class CalcJobWorkflow:
             # The activity heartbeats between species and scan points; this timeout is what turns a
             # dead worker into a prompt retry instead of waiting out start-to-close.
             heartbeat_timeout=timedelta(seconds=settings.xtb_job_heartbeat_timeout_seconds),
-            # Bad input still fails fast (`BAD_DATA_RETRY`'s type list); the backoff is sized to
+            # Bad input still fails fast (the bad-data type list); the backoff is sized to
             # wait out a saturated backend (`CalcBusyError`), which a default-spaced retry would
             # merely spin against.
-            retry_policy=calculation_retry(),
+            retry_policy=retry_for(run_xtb_calculation),
         )
         # Applied here, not in the activity, because the activity's return type is pinned by
         # histories in flight; `job_envelope` is pure, so replay is unaffected.

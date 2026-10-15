@@ -302,6 +302,7 @@ async def test_a_finished_job_publishes_the_note_it_produced(
     from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
     from chemclaw.durable.connector_job import ConnectorJobWorkflow
+    from chemclaw.durable.deliver_message import deliver_message_activity
     from chemclaw.durable.job_record import record_job
     from chemclaw.durable.publish_results import publish_job_result
     from tests.temporal_env import pydantic_client, start_local_env_or_skip
@@ -323,7 +324,9 @@ async def test_a_finished_job_publishes_the_note_it_produced(
             client,
             task_queue=settings.background_task_queue,
             workflows=[ConnectorJobWorkflow],
-            activities=[record_job, publish_job_result],
+            # Every activity the wrapper dispatches at its end is served, as in production: an
+            # unserved one is retried under its class before the workflow gives up on it.
+            activities=[record_job, publish_job_result, deliver_message_activity],
             workflow_runner=UnsandboxedWorkflowRunner(),
         )
         bundle = Worker(client, task_queue="connector-fixture", workflows=[FixtureJobWorkflow])

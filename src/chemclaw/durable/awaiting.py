@@ -32,8 +32,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable import pending_store
     from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.notify import notify_session_best_effort
-    from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.publish import queue_wait_timeout
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
+    from chemclaw.durable.retry import retry_for
     from chemclaw.kg.note import cited_ids, is_note_slug
 
 #: The push-back kind sent into the requester's mailbox, for the opening notice and every reminder;
@@ -222,7 +223,7 @@ class _SettleInput(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def open_pending_request_activity(payload: _OpenInput) -> str:
     """Project the open wait into `pending_requests`, and return the deadline it was opened with.
@@ -256,7 +257,7 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
     return due_at.isoformat()
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def settle_pending_request_activity(payload: _SettleInput) -> bool:
     """Settle the projection. Returns whether this call was the one that settled it."""
@@ -268,7 +269,7 @@ async def settle_pending_request_activity(payload: _SettleInput) -> bool:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def record_reminder_activity(request_id: str, count: int = 0) -> None:
     """Record the asking workflow's escalation count against a still-open request.
@@ -333,7 +334,7 @@ class AwaitAnswerWorkflow:
                 ),
                 start_to_close_timeout=activity_timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(open_pending_request_activity),
             )
             due_at = datetime.fromisoformat(opened)
             await self._notify(request, request_id, due_at.isoformat())
@@ -407,7 +408,7 @@ class AwaitAnswerWorkflow:
                         seconds=settings.awaiting_activity_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(record_reminder_activity),
                 )
                 await self._notify(request, request_id, due_at.isoformat())
 
@@ -463,7 +464,7 @@ class AwaitAnswerWorkflow:
             ),
             start_to_close_timeout=timeout,
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(settle_pending_request_activity),
             cancellation_type=(
                 workflow.ActivityCancellationType.ABANDON
                 if detached

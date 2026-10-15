@@ -17,13 +17,14 @@ from temporalio.exceptions import is_cancelled_exception
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.commitments.store import record_commitments
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.sources.registry import active_commitment_sources, make_data_source
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 
 class CommitmentSyncResult(BaseModel):
@@ -87,7 +88,7 @@ async def sweep_withdrawn(source: str, marked_at: datetime) -> int:
         return cursor.rowcount
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def mirror_commitments_activity(source: str) -> CommitmentSyncResult:
     """Fetch one source's commitments since its cursor, upsert them, and sweep what it withdrew.
@@ -162,7 +163,7 @@ class CommitmentSyncWorkflow:
             list_commitment_sources_activity,
             start_to_close_timeout=timeout,
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(list_commitment_sources_activity),
         )
         report = CommitmentSyncReport()
         for source in sources:
@@ -176,7 +177,7 @@ class CommitmentSyncWorkflow:
                         heartbeat_timeout=timedelta(
                             seconds=settings.commitment_sync_heartbeat_timeout_seconds
                         ),
-                        retry_policy=BAD_DATA_RETRY,
+                        retry_policy=retry_for(mirror_commitments_activity),
                     )
                 )
             except Exception as exc:
@@ -189,7 +190,7 @@ class CommitmentSyncWorkflow:
         return report
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def list_commitment_sources_activity() -> list[str]:
     """Which sources hold committed work.

@@ -1,217 +1,24 @@
-"""Shared workflow-side retry and timeout discipline for durable activities.
+"""Shared workflow-side queue-wait bounds and note-publish helpers for durable activities.
 
-`BAD_DATA_RETRY` fails fast on bad data (Temporal matches non-retryable types by exact class
-name, so every bad-data class is listed) and bounds transient retries. The note and result
-publish helpers run on the light background queue and, for best-effort publishes, never fail a
-completed scientific result. The queue-wait bounds say how long an activity may sit unclaimed,
-in three sizes: `queue_wait_timeout` (core's hour), `connector_queue_wait_timeout` (a bundle's,
-where a wait is backpressure) and `light_write_queue_wait_timeout` (end-of-job writes).
-`calculation_retry` adds a backoff sized to a full calculation backend.
+The note and result publish helpers run on the light background queue and, for best-effort
+publishes, never fail a completed scientific result. The queue-wait bounds say how long an activity
+may sit unclaimed, in three sizes: `queue_wait_timeout` (core's hour),
+`connector_queue_wait_timeout` (a bundle's, where a wait is backpressure) and
+`light_write_queue_wait_timeout` (end-of-job writes). How an activity is retried is
+`durable/retry.py`'s.
 """
 
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, TimeoutType
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
-
-# Temporal matches `non_retryable_error_types` by exact class name (not isinstance), so every
-# bad-data name that can cross an activity boundary is listed, including pydantic's
-# `ValidationError`. `tests/test_publish.py` asserts every `ChemclawError` subclass is either
-# listed here or declared retryable below.
-_DECLARED_RETRYABLE = frozenset(
-    {
-        # Not in the bad-data list: `kg/git_writer.py`'s `GitRemoteError` (dead remote, timeout,
-        # contended lock) is the retryable half of git write failures.
-        "GitRemoteError",
-    }
-)
-
-_BAD_DATA_TYPES = [
-    "ValueError",
-    "ValidationError",
-    "ChemclawError",
-    "InvalidSmilesError",
-    "FingerprintError",
-    # The argument was not fingerprintable; listed beside its parent because names, not the
-    # hierarchy, are matched.
-    "FingerprintInputError",
-    # A structure asked of a citation-only reaction (`ingest/eln/ord.py`): the source named a
-    # species without its structure, and a retry finds the identical record.
-    "StructureNotGiven",
-    # A fork of a session with no saved state; retrying finds the same absence.
-    "SessionForkError",
-    # The proposal store's insert-or-conflict found no row; deterministic against the same rows.
-    "ProposalStoreError",
-    # A document the personal skills tier will not keep; the admission rules are deterministic.
-    "SkillRefused",
-    # A `reaction_records.conditions` payload that is not a JSON object; retrying re-reads the same
-    # row.
-    "UnreadableConditions",
-    "ElnMappingError",
-    "ElnFormatError",
-    "OrdFormatError",
-    "IngestError",
-    # An activity result over `activity_result_max_bytes` (`durable/interceptor.py`); the result is
-    # deterministic in the arguments, so a retry is the same size.
-    "ActivityResultTooLarge",
-    "MetricError",
-    "PlaybookError",
-    # A campaign's recorded points and its decision space disagreeing, or a design space that cannot
-    # be expressed as factors; permanent properties of the two documents.
-    "BoTranslationError",
-    "NoteError",
-    # A delivery channel with no folder or a `config:` the driver refuses; an unreachable
-    # destination raises from the driver instead and stays retryable.
-    "DeliveryChannelError",
-    "EvalCaseError",
-    # A run scored against a baseline recorded on a different case-set; stays impossible until a
-    # person refreshes one of them.
-    "CaseSetMismatchError",
-    # A tool answered with `isError=True`: the server gave its verdict. `CalcServerError` (nobody
-    # answered) is the retryable neighbour.
-    "ToolReturnedFailure",
-    # A tool call the model mis-serialised; the arguments are fixed, so a retry re-reads the same
-    # document. In practice `surface_domain_errors` converts it to a `ToolMessage` before it can
-    # cross an activity boundary.
-    "UnparsedArguments",
-    # A turn tried to change the skills tree; an `AuthorizationError` subclass, listed by name.
-    "SkillsReadOnlyRefusal",
-    "ConnectorJobError",
-    "GitWriteError",
-    # A write the note store refuses for what it would do to the notes (a human's note, a stale
-    # revision); the same notes are found on every attempt.
-    "NoteWriteError",
-    "HumanNoteProtected",
-    "NoteRevisionConflict",
-    "CalculationDomainError",
-    # A waiter on another pod's calculation, told that the holder was refused (`science/calc/
-    # flight.py`); the holder's own retry class, carried across.
-    "PeerCalculationRefused",
-    "ConnectorError",
-    # The manifest and the server disagree about a MAJOR of the contract; the same two versions are
-    # found on every attempt, so a retry is the same refusal.
-    "ContractMismatch",
-    "DataSourceError",
-    # Two sources transcribed the same entry id; the ambiguity is a fact about the corpus.
-    "AmbiguousReactionRecord",
-    # A label written for a reaction with no stored record phase; retrying finds the same absence.
-    "LabelIndexError",
-    # The labelling server refused the input; `LabelServerError` (nobody answered) is the retryable
-    # sibling.
-    "LabelToolError",
-    # An unresolvable sink manifest, or a record a destination answered and refused.
-    # `SinkUnavailableError` is a `ConnectionError` and stays retryable.
-    "ResultSinkError",
-    "SinkRejectedError",
-    "SinkConnectionError",
-    "ProjectionError",
-    "UnknownPropertyError",
-    # An offboarding erasure the database refused, or one on a blank actor; both facts about the
-    # request or the deployment.
-    "ErasureError",
-    # A vector store that cannot be built as configured (missing package, unknown provider).
-    # `VectorStoreError` (unreachable) stays retryable.
-    "VectorStoreConfigError",
-    # The prescriptive-design tier: a plate that cannot hold the arms, an unknown design id, a
-    # revision derived from a stale head. `RevisionConflict` and `StatusConflict` look transient but
-    # are not: retrying would resolve the race by discarding the revision or decision it did not
-    # see.
-    "LayoutError",
-    "RevisionConflict",
-    "StatusConflict",
-    "UnstorableDocument",
-    "UnknownDesign",
-    # An outcome naming an arm the stored revision does not have.
-    "UnknownArm",
-    # The latest values for one outcome in more than one unit. The stored rows decide it, so a
-    # retry reads the same rows and refuses identically.
-    "MixedUnits",
-    # An artefact write the store refuses; decided by the stored rows and the request.
-    "InvalidExhibit",
-    "StaleRevision",
-    "UnknownExhibit",
-    "ExhibitLimit",
-    "TemplateError",
-    # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
-    # exactly this list's sense: the document is what is wrong, so every attempt fails identically.
-    "ComposedWorkflowError",
-    "UnresolvedReference",
-    "ProfileError",
-    # A surrogate fit or acquisition step failed on the given observations; deterministic in the
-    # data.
-    "SurrogateFitError",
-    # A declaratively-bound warehouse source failing deterministically: a malformed binding, a value
-    # outside the binding's vocabulary, a missing relation or column, or a `regex` transform that
-    # exhausted its time budget. An unreachable warehouse raises `ConnectionError` and stays
-    # retryable.
-    "BindingError",
-    "PathSyntaxError",
-    "PatternBudgetError",
-    "TransformError",
-    "WarehouseQueryError",
-    # A vendored dataset that is absent, malformed or fails its checksum; the fix is a rebuild.
-    "VendoredDatasetError",
-    # A mounted document share that cannot be read as declared (malformed binding, not a directory).
-    "DocumentShareError",
-    # The calculation server was reached and refused. `CalcServerError` (unreachable) is a
-    # `SubsystemUnavailableError` and stays retryable.
-    "CalcToolError",
-    # The server's inline time budget stopped the calculation; a retry hits the same clock.
-    "CalcTimeBudgetError",
-    # A turn repeated an identical tool call too often; identical on retry too.
-    "RepeatedCallRefusal",
-    # `AuthorizationError` and its subclasses are not `ChemclawError`s (a refusal is policy, not bad
-    # data) but never change on retry, so they are listed by name; `authorize_job_step` raises one
-    # across a real activity boundary.
-    "AuthorizationError",
-    "DryRunRefusal",
-    "PlanNotApprovedError",
-    # An agent step reached for a write its template did not declare; the declaration is pinned in
-    # the run's input.
-    "UndeclaredWriteRefusal",
-    # Deliberately absent: `SubsystemUnavailableError` means an unreachable subsystem, which a retry
-    # can ride out. `tests/test_publish.py` asserts its absence.
-]
-
-# Bad data is non-retryable by type; `maximum_attempts` bounds transient retries so an
-# unclassified deterministic failure gives up instead of pinning a worker forever.
-BAD_DATA_RETRY = RetryPolicy(
-    maximum_attempts=settings.activity_max_attempts,
-    non_retryable_error_types=list(_BAD_DATA_TYPES),
-)
-
-
-def note_publish_retry() -> RetryPolicy:
-    """Bounded retries for a note write (config `note_write_max_attempts`).
-
-    Shares the bad-data list, so a bad note or a structural `GitWriteError` fails fast;
-    `GitRemoteError` (dead remote, timeout, contended lock) is the retryable subclass.
-    """
-    return RetryPolicy(
-        maximum_attempts=settings.note_write_max_attempts,
-        non_retryable_error_types=list(_BAD_DATA_TYPES),
-    )
-
-
-def agent_step_retry() -> RetryPolicy:
-    """A narrow outer bound for the one activity whose retry is not free.
-
-    Config `agent_step_max_attempts`. A retry of a template's agent step replays the whole turn,
-    re-running every tool and its side effects (duplicate notes, duplicate audit rows), so attempts
-    are fewer. The bad-data list is unchanged: a provider 503 stays retryable, and the SDK already
-    retries a blip internally. A long provider outage fails the step sooner; a person re-runs it.
-    """
-    return RetryPolicy(
-        maximum_attempts=settings.agent_step_max_attempts,
-        non_retryable_error_types=list(_BAD_DATA_TYPES),
-    )
+    from chemclaw.durable.retry import retry_for
 
 
 def queue_wait_timeout() -> timedelta:
@@ -326,64 +133,6 @@ def remaining_queue_wait_timeout(remaining: timedelta, activity_seconds: float) 
     return timedelta(seconds=seconds) if seconds > 0 else None
 
 
-# How far *down* the first capacity retry may be moved, as a fraction of it, to spread a burst of
-# jobs refused together. Downward only; `calculation_retry` says why.
-_CAPACITY_RETRY_JITTER = 0.25
-
-
-def calculation_retry() -> RetryPolicy:
-    """The retry discipline for an activity that calls the shared calculation backend.
-
-    `BAD_DATA_RETRY`'s types and attempt count, with spacing sized for `CalcBusyError` (every slot
-    taken), where a slot frees only when a calculation finishes. The longest interval is
-    `calc_server_timeout_seconds`, the longest calculation waited for; the first is that cap divided
-    by the doublings the attempt budget allows. `tests/test_publish.py` asserts wait plus backoff
-    plus attempt fits the parent ceiling.
-
-    Temporal's retry schedule has no jitter, so the first interval is jittered with
-    `workflow.random()`: deterministic on replay, different between runs, so jobs refused together
-    do not retry in lockstep. Outside a workflow the nominal schedule is returned.
-
-    Returns:
-        The retry policy every activity that dispatches to the calculation backend passes.
-    """
-    cap = settings.calc_server_timeout_seconds
-    # `attempts - 2` because N attempts are N-1 retries, and the *last* of those is the one
-    # that should wait a whole calculation: intervals i, 2i, 4i, 8i with 8i == cap.
-    doublings = 2 ** max(settings.activity_max_attempts - 2, 0)
-    first = cap / doublings
-    if workflow.in_workflow():
-        # Downward only: upward jitter would push the last interval past `maximum_interval`, where
-        # the cap silently removes the spread.
-        first *= workflow.random().uniform(1.0 - _CAPACITY_RETRY_JITTER, 1.0)
-    return RetryPolicy(
-        maximum_attempts=settings.activity_max_attempts,
-        non_retryable_error_types=list(_BAD_DATA_TYPES),
-        initial_interval=timedelta(seconds=first),
-        backoff_coefficient=2.0,
-        maximum_interval=timedelta(seconds=cap),
-    )
-
-
-def queued_tool_retry() -> RetryPolicy:
-    """The retry discipline for a queued tool call: ask a full server again within seconds.
-
-    A queued call's worker is sized to the server's slots, so a refusal is a race with a slot about
-    to free. Unlimited attempts, bounded by the call's own `schedule_to_close`; the one
-    non-retryable type is a fault that already spent `queued_tool_fault_attempts`
-    (`connectors/queued_call.py`).
-    """
-    cap = settings.queued_tool_retry_max_seconds
-    return RetryPolicy(
-        # Never above the cap: the server refuses a policy whose first interval exceeds its maximum.
-        initial_interval=timedelta(seconds=min(1.0, cap)),
-        backoff_coefficient=1.5,
-        maximum_interval=timedelta(seconds=cap),
-        maximum_attempts=0,
-        non_retryable_error_types=["QueuedToolFault"],
-    )
-
-
 def activity_failure_reason(exc: ActivityError) -> str:
     """A short reason for a *swallowed* activity failure, so one log line separates two states.
 
@@ -419,7 +168,7 @@ async def publish_note(activity: Any, args: list[Any]) -> str:
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
         schedule_to_start_timeout=queue_wait_timeout(),
-        retry_policy=note_publish_retry(),
+        retry_policy=retry_for(activity),
     )
     return result
 
@@ -453,7 +202,7 @@ async def publish_result_best_effort(activity: Any, args: list[Any], label: str)
             task_queue=settings.background_task_queue,
             start_to_close_timeout=timedelta(seconds=settings.result_publish_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(activity),
         )
     except ActivityError:
         workflow.logger.warning("result publication failed to queue for %s", label)

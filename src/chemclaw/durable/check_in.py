@@ -26,8 +26,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.digest import digest_channel
     from chemclaw.durable.notify import notify_session_best_effort
-    from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.publish import queue_wait_timeout
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
+    from chemclaw.durable.retry import retry_for
 
 #: The `session_events` kind and `Message.kind` a check-in travels under, distinct from
 #: `DIGEST_KIND` so a reader can tell "new knowledge matched your query" from "your own work is
@@ -143,7 +144,7 @@ def _abbreviated(text: str, full_chars: int) -> str:
     return f"{text}… [{dropped} more character(s) not carried; open the request to read it]"
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def supersede_unread_check_ins(owners: list[str]) -> int:
     """Delete these requesters' unread check-ins, so tonight's is the only one left to read.
@@ -168,7 +169,7 @@ async def supersede_unread_check_ins(owners: list[str]) -> int:
         return int(cursor.rowcount)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def collect_check_ins(after: str = "") -> CheckInPage:
     """One bounded page of quiet, still-open requests, grouped by the person who asked them.
@@ -311,7 +312,7 @@ class CheckInWorkflow:
                 after,
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(collect_check_ins),
             )
             # Patched because superseding per batch moves a command relative to the old per-page
             # supersede, which would fail a mid-sweep replay. Asked only for a non-empty page, the
@@ -323,7 +324,7 @@ class CheckInWorkflow:
                     [item.owner for item in page.check_ins],
                     start_to_close_timeout=timeout,
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(supersede_unread_check_ins),
                 )
             for start in range(0, len(page.check_ins), _CONCURRENT_REQUESTERS):
                 batch = page.check_ins[start : start + _CONCURRENT_REQUESTERS]
@@ -335,7 +336,7 @@ class CheckInWorkflow:
                         [item.owner for item in batch],
                         start_to_close_timeout=timeout,
                         schedule_to_start_timeout=queue_wait_timeout(),
-                        retry_policy=BAD_DATA_RETRY,
+                        retry_policy=retry_for(supersede_unread_check_ins),
                     )
                 # Concurrent across requesters, serial within one (see `_tell`); best-effort per
                 # requester.

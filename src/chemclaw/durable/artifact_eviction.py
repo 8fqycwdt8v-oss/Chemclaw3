@@ -22,10 +22,11 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 # Blobs nobody has opened in `artifact_evict_idle_days`. Unconditional: an artifact that has not
 # been read in months is not paying for the space it occupies, whatever the store's total size.
@@ -86,7 +87,7 @@ def _reclaimed(rows: list[tuple[int]]) -> tuple[int, int]:
     return len(rows), sum(int(row[0]) for row in rows)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def evict_cold_artifacts() -> EvictionOutcome:
     """Reclaim artifact blobs, heartbeating while the pass runs so a dead worker is noticed.
@@ -150,5 +151,5 @@ class ArtifactEvictionWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(evict_cold_artifacts),
         )

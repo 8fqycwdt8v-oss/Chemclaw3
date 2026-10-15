@@ -676,8 +676,8 @@ async def test_every_read_names_its_tenant_when_the_same_ids_and_a_link_target_a
     assert set((await other.current_successors(["p", "q"], _DAY)).values()) == {None}
     own = await store.search(["unique-a"], _DAY)
     assert (own.searched, [(c, n.id) for c, n in own.matches]) == (2, [(1, "p2")])
-    theirs = await other.search(["unique-a"], _DAY)
-    assert (theirs.searched, theirs.matches) == (3, [])
+    their_search = await other.search(["unique-a"], _DAY)
+    assert (their_search.searched, their_search.matches) == (3, [])
     beta = await other.search(["beta"], _DAY)
     assert [(c, n.id) for c, n in beta.matches] == [(1, "q")]
     assert (await store.search(["beta"], _DAY)).matches == []

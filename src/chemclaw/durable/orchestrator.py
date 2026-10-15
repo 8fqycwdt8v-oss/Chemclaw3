@@ -17,12 +17,12 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
-    from chemclaw.durable.registry import durable_activity
+    from chemclaw.durable.registry import ActivityClass, durable_activity
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.retry import child_workflow_retry, retry_for
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def resolve_fan_out_limit() -> int:
     """Resolve the configured fan-out concurrency bound — outside workflow code, on purpose.
@@ -121,7 +121,7 @@ async def fan_out(
             resolve_fan_out_limit,
             # The generic short-activity budget (same knob the notify seam uses for its write).
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(resolve_fan_out_limit),
         )
     if limit < 1:
         raise ValueError(f"max_parallel must be >= 1, got {limit}")
@@ -131,10 +131,9 @@ async def fan_out(
     results: list[Any] = []
     # Batches rather than a semaphore: deterministic under replay, same concurrency bound.
     #
-    # Children run on core's `background-jobs` queue under `BAD_DATA_RETRY` (bounded; Temporal's
-    # default retries forever). Only its `maximum_attempts` takes effect here, since a child failing
-    # through its activity surfaces as a child failure; acceptable because fan-out children are
-    # small and independent.
+    # Children run on core's `background-jobs` queue under `child_workflow_retry` (bounded;
+    # Temporal's default retries forever); acceptable because fan-out children are small and
+    # independent.
     for batch in _batches(indexed, limit):
         settled = await asyncio.gather(
             *(
@@ -145,7 +144,7 @@ async def fan_out(
                     id_prefix=id_prefix,
                     parent_id=parent_id,
                     task_queue=settings.background_task_queue,
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=child_workflow_retry(),
                     execution_timeout=child_timeout,
                 )
                 for index, payload in batch
