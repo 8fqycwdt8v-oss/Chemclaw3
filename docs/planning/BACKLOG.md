@@ -85,6 +85,9 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **An entry amended to citation-only keeps its old label row** [S] — `connectors/rxnfp/server/tools.py::reagent_frequency` still
   counts it; `agent/protocol_design_tools.py::uncited_precedent` checks neither withheld nor retracted.
 
+- [ ] **A note view is read in several steps, not one snapshot** [S] — `expand_note` awaits `edges`, `neighborhood`, `get_many` and
+  `current_successors` separately, so a write between them can show a neighbour its links do not yet name; the Postgres store answers it with one transaction (`kg/store.py::NoteStore`).
+
 ### Everything else
 
 - [ ] **PR #321's review findings never landed** [M] — extract what is still open from its review document into rows, then close #321.

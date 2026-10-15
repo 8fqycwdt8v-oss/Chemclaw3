@@ -5,13 +5,16 @@
 (`kg_store`), not a property of the call site. `GitNoteStore` answers from the Markdown tree by
 delegation only. Writes are not here: `kg.record.record_note` is the one write path.
 
-Reads are synchronous because their callers already run them in a worker thread. `CorpusState` is
-the part a cache or an index needs, namely whether the corpus moved and what each note's content
-digest is; a note is never read through it.
+Reads are coroutines, so a database store can use the process's one async pool. `GitNoteStore` does
+its file and graph work in a worker thread and never blocks the event loop. `CorpusState` is the
+part a cache or an index needs, namely whether the corpus moved and what each note's content digest
+is; a note is never read through it.
 """
 
+import asyncio
 from collections.abc import Collection, Hashable, Sequence
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple, Protocol, assert_never
 
@@ -50,7 +53,7 @@ class Edge(NamedTuple):
 class CorpusState(Protocol):
     """What a cache or an index asks of the corpus without reading a note's content."""
 
-    def snapshot(self) -> tuple[Hashable | None, list[Note]]:
+    async def snapshot(self) -> tuple[Hashable | None, list[Note]]:
         """Every note with a token that changes whenever any of them does.
 
         The token is `None` when the store is not caching, which tells a caller there is nothing to
@@ -58,15 +61,15 @@ class CorpusState(Protocol):
         """
         ...
 
-    def signature(self) -> tuple[int, int]:
+    async def signature(self) -> tuple[int, int]:
         """`(note count, newest change marker)`: cheap, and changes on any add, edit or delete."""
         ...
 
-    def arrivals(self) -> dict[str, date]:
+    async def arrivals(self) -> dict[str, date]:
         """Note id to the date it reached the corpus; empty when the store cannot say."""
         ...
 
-    def fingerprints(self) -> dict[str, str]:
+    async def fingerprints(self) -> dict[str, str]:
         """Note id to `sha256:<hex>` of its content, for every note the store holds.
 
         A note that exists but cannot be read keeps an entry, so an index does not retire it. What
@@ -75,15 +78,15 @@ class CorpusState(Protocol):
         """
         ...
 
-    def unparseable(self, note_ids: Collection[str]) -> list[str]:
+    async def unparseable(self, note_ids: Collection[str]) -> list[str]:
         """Which of `note_ids` hold a note that fails the schema, as opposed to no note at all."""
         ...
 
-    def revision(self) -> int | None:
+    async def revision(self) -> int | None:
         """A number that never goes down as the corpus grows, or `None` when it has none to give."""
         ...
 
-    def refresh(self, *, reparse: bool = False) -> None:
+    async def refresh(self, *, reparse: bool = False) -> None:
         """Forget what was read so the next read sees the store as it is now.
 
         `reparse` also drops the parsed copies, for a caller pairing content digests with bodies.
@@ -99,30 +102,30 @@ class NoteStore(CorpusState, Protocol):
     in `neighborhood()` and `edges()`, and never notes.
     """
 
-    def get(self, note_id: str) -> Note | None:
+    async def get(self, note_id: str) -> Note | None:
         """The note `note_id` names, or `None`."""
         ...
 
-    def get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
+    async def get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
         """`get` for each id from one read of the corpus, so the answers agree with each other.
 
         Reads the corpus even when `note_ids` is empty, so an unreadable corpus fails here too.
         """
         ...
 
-    def notes(self) -> list[Note]:
+    async def notes(self) -> list[Note]:
         """Every readable note; a note that fails the schema is skipped, not raised."""
         ...
 
-    def related(self, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
+    async def related(self, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
         """The sorted ids `note_id` points at through `rel`; `as_of` applies each edge's window."""
         ...
 
-    def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
+    async def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
         """Node ids within `hops` of `note_id`, following links both ways, `note_id` excluded."""
         ...
 
-    def edges(self, note_id: str) -> list[Edge]:
+    async def edges(self, note_id: str) -> list[Edge]:
         """Every link into or out of `note_id` with the relations on it; empty for an unlinked id.
 
         Not an error for an id nothing mentions: a compound id derived from a structure may be
@@ -130,15 +133,21 @@ class NoteStore(CorpusState, Protocol):
         """
         ...
 
-    def current_successor(self, note_id: str, as_of: date) -> Note | None:
+    async def current_successor(self, note_id: str, as_of: date) -> Note | None:
         """The first note current on `as_of` that a chain of supersede links leads to."""
         ...
 
-    def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
+    async def current_successors(
+        self, note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
+        """`current_successor` for each id from one read of the corpus, so the answers agree."""
+        ...
+
+    async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         """The notes current on `as_of` that contain at least one of `terms`, as substrings."""
         ...
 
-    def graph(self) -> nx.DiGraph:
+    async def graph(self) -> nx.DiGraph:
         """The whole note graph, for analytics that need a whole-graph algorithm and nothing else.
 
         A request reads through the methods above. Shared and frozen; copy it to change it.
@@ -149,38 +158,57 @@ class NoteStore(CorpusState, Protocol):
 class GitNoteStore:
     """`NoteStore` over a directory of Markdown notes.
 
-    Every method delegates to `kg.graph`, behind its stat-fingerprint caches. It holds no state
-    beyond the directory, so it is cheap to make per call and two of them over one directory share
-    the module's caches.
+    Each method runs its synchronous twin (`_get` for `get`, and so on) in a worker thread, because
+    the twin may scan or parse the disk and takes `kg.graph`'s blocking locks. The twins delegate to
+    `kg.graph`, behind its stat-fingerprint caches. The store holds no state beyond the directory,
+    so it is cheap to make per call and two of them over one directory share the module's caches.
     """
 
     def __init__(self, notes_dir: Path) -> None:
         """Serve the notes under `notes_dir`."""
         self._dir = notes_dir
 
-    def get(self, note_id: str) -> Note | None:
+    async def get(self, note_id: str) -> Note | None:
         """The note `note_id` names; a cited-but-undefined id is `None`, not a bare node."""
+        return await asyncio.to_thread(self._get, note_id)
+
+    def _get(self, note_id: str) -> Note | None:
         return corpus.note_in(corpus.build_graph(self._dir), note_id)
 
-    def get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
+    async def get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
         """One graph read, then a lookup per id."""
+        return await asyncio.to_thread(self._get_many, note_ids)
+
+    def _get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
         graph = corpus.build_graph(self._dir)
         return {note_id: corpus.note_in(graph, note_id) for note_id in note_ids}
 
-    def notes(self) -> list[Note]:
+    async def notes(self) -> list[Note]:
         """Every parseable note under the directory, cached behind its stat fingerprint."""
+        return await asyncio.to_thread(self._notes)
+
+    def _notes(self) -> list[Note]:
         return corpus.load_notes(self._dir)
 
-    def related(self, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
+    async def related(self, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
         """See `kg.graph.related`."""
+        return await asyncio.to_thread(self._related, note_id, rel, as_of)
+
+    def _related(self, note_id: str, rel: str, as_of: date | None) -> list[str]:
         return corpus.related(corpus.build_graph(self._dir), note_id, rel, as_of)
 
-    def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
+    async def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
         """See `kg.graph.neighborhood`."""
+        return await asyncio.to_thread(self._neighborhood, note_id, hops)
+
+    def _neighborhood(self, note_id: str, hops: int) -> set[str]:
         return corpus.neighborhood(corpus.build_graph(self._dir), note_id, hops=hops)
 
-    def edges(self, note_id: str) -> list[Edge]:
+    async def edges(self, note_id: str) -> list[Edge]:
         """The graph's out-edges of `note_id` followed by its in-edges; a self-link once."""
+        return await asyncio.to_thread(self._edges, note_id)
+
+    def _edges(self, note_id: str) -> list[Edge]:
         graph = corpus.build_graph(self._dir)
         if note_id not in graph:
             return []
@@ -192,19 +220,35 @@ class GitNoteStore:
             found.setdefault((source, target), Edge(source, target, tuple(data["relations"])))
         return list(found.values())
 
-    def current_successor(self, note_id: str, as_of: date) -> Note | None:
+    async def current_successor(self, note_id: str, as_of: date) -> Note | None:
         """See `kg.graph.current_successor`."""
+        return await asyncio.to_thread(self._current_successor, note_id, as_of)
+
+    def _current_successor(self, note_id: str, as_of: date) -> Note | None:
         return corpus.current_successor(corpus.build_graph(self._dir), note_id, as_of)
 
-    def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
+    async def current_successors(
+        self, note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
+        """One graph read, then a successor walk per id."""
+        return await asyncio.to_thread(self._current_successors, note_ids, as_of)
+
+    def _current_successors(self, note_ids: Collection[str], as_of: date) -> dict[str, Note | None]:
+        graph = corpus.build_graph(self._dir)
+        return {note_id: corpus.current_successor(graph, note_id, as_of) for note_id in note_ids}
+
+    async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         """Substring-match `terms` over the notes current on `as_of`, in note id order.
 
         Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced as
         current fact, and stays reachable by explicit id.
         """
+        return await asyncio.to_thread(self._search, terms, as_of)
+
+    def _search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         matches: list[tuple[int, Note]] = []
         searched = 0
-        for note in sorted(self.notes(), key=lambda candidate: candidate.id):
+        for note in sorted(self._notes(), key=lambda candidate: candidate.id):
             if not note.is_current(as_of):
                 continue
             searched += 1
@@ -213,16 +257,19 @@ class GitNoteStore:
                 matches.append((coverage, note))
         return SearchResult(searched=searched, matches=matches)
 
-    def graph(self) -> nx.DiGraph:
+    async def graph(self) -> nx.DiGraph:
         """The assembled graph, cached and frozen by `kg.graph.build_graph`."""
-        return corpus.build_graph(self._dir)
+        return await asyncio.to_thread(corpus.build_graph, self._dir)
 
-    def snapshot(self) -> tuple[Hashable | None, list[Note]]:
+    async def snapshot(self) -> tuple[Hashable | None, list[Note]]:
         """The notes and the stat fingerprint they were parsed at."""
-        return corpus.cached_notes(self._dir)
+        return await asyncio.to_thread(corpus.cached_notes, self._dir)
 
-    def signature(self) -> tuple[int, int]:
+    async def signature(self) -> tuple[int, int]:
         """`(note files, newest mtime in ns)`, from a stat of each file and no parse."""
+        return await asyncio.to_thread(self._signature)
+
+    def _signature(self) -> tuple[int, int]:
         count = 0
         newest = 0
         for _, stat in corpus.scan_notes_dir(self._dir):
@@ -230,20 +277,23 @@ class GitNoteStore:
             newest = max(newest, stat.st_mtime_ns)
         return count, newest
 
-    def arrivals(self) -> dict[str, date]:
+    async def arrivals(self) -> dict[str, date]:
         """The date each note's file was first committed; see `kg.graph.note_arrivals`."""
-        return corpus.note_arrivals(self._dir)
+        return await asyncio.to_thread(corpus.note_arrivals, self._dir)
 
-    def fingerprints(self) -> dict[str, str]:
+    async def fingerprints(self) -> dict[str, str]:
         """Per-file content digests; see `kg.graph.note_file_fingerprints`."""
-        return corpus.note_file_fingerprints(self._dir)
+        return await asyncio.to_thread(corpus.note_file_fingerprints, self._dir)
 
-    def unparseable(self, note_ids: Collection[str]) -> list[str]:
+    async def unparseable(self, note_ids: Collection[str]) -> list[str]:
         """The files named by `note_ids` that hold a note failing the schema.
 
         Re-reads each with `read_note`, the one definition of both, so a frontmatter-less
         `README.md` raises no alarm.
         """
+        return await asyncio.to_thread(self._unparseable, note_ids)
+
+    def _unparseable(self, note_ids: Collection[str]) -> list[str]:
         wanted = set(note_ids)
         if not wanted:
             return []
@@ -259,13 +309,13 @@ class GitNoteStore:
                 unparsed.append(path.stem)
         return unparsed
 
-    def revision(self) -> int | None:
+    async def revision(self) -> int | None:
         """The checkout's commit count; see `kg.graph.corpus_revision`."""
-        return corpus.corpus_revision(self._dir)
+        return await asyncio.to_thread(corpus.corpus_revision, self._dir)
 
-    def refresh(self, *, reparse: bool = False) -> None:
+    async def refresh(self, *, reparse: bool = False) -> None:
         """Drop the cached scan so the next read looks at the directory again."""
-        corpus.invalidate_cache(self._dir, reparse=reparse)
+        await asyncio.to_thread(partial(corpus.invalidate_cache, self._dir, reparse=reparse))
 
 
 def note_store(notes_dir: Path | None = None) -> NoteStore:

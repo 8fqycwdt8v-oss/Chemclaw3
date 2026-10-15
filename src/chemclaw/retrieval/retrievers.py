@@ -95,35 +95,39 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     """Load the notes eligible as current evidence under `filters`, as an id→Note map.
 
     The one eligibility gate for every graph-backed retriever: type/tag/date filters plus currency
-    (expired or not-yet-valid notes are never current evidence; see `_eligible_sync` for windowed
-    sweeps). Load and filter run in a worker thread. Empty when the directory is absent.
+    (expired or not-yet-valid notes are never current evidence; see `_filter_eligible` for windowed
+    sweeps). Load and filter run off the event loop. Empty when the directory is absent.
     """
-    return await asyncio.to_thread(_eligible_sync, directory, filters, date.today())
+    return await _eligible(directory, filters, date.today())
 
 
 def _is_windowed(filters: dict[str, Any]) -> bool:
     """Whether this sweep names a period, which decides *both* date rules it applies.
 
-    `_eligible_sync` and `_conflict_index` must agree on it, or retired notes in the window get an
+    `_filter_eligible` and `_conflict_index` must agree on it, or retired notes in the window get an
     empty `conflicts_with`.
     """
     return filters.get("since") is not None or filters.get("until") is not None
 
 
-def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dict[str, Note]:
-    """The synchronous body of `_eligible_notes`: load, then filter, in one worker thread.
+async def _eligible(directory: Path, filters: dict[str, Any], today: date) -> dict[str, Note]:
+    """The body of `_eligible_notes`: load, then filter in a worker thread.
 
     `today` is passed in so one sweep is judged against one date.
     """
+    notes = await _load_if_present(directory)
+    return await asyncio.to_thread(_filter_eligible, notes, filters, today)
+
+
+def _filter_eligible(notes: list[Note], filters: dict[str, Any], today: date) -> dict[str, Note]:
+    """The notes of `notes` that are eligible under `filters`, as an id→Note map."""
     want_type = filters.get("type")
     want_tag = filters.get("tag")
     since = filters.get("since")
     until = filters.get("until")
-    notes: dict[str, Note] = {}
-    # The directory check runs in the worker thread with the load, keeping even the `stat` off the
-    # event loop.
+    eligible: dict[str, Note] = {}
     windowed = _is_windowed(filters)
-    for note in _load_if_present(directory):
+    for note in notes:
         if want_type is not None and note.type != want_type:
             continue
         if want_tag is not None and want_tag not in note.tags:
@@ -135,21 +139,29 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
         # was current somewhere inside the period by construction (`valid_to >= valid_from`).
         if not windowed and not note.is_current(today):
             continue
-        notes[note.id] = note
-    return notes
+        eligible[note.id] = note
+    return eligible
 
 
-def _rank_by_terms(
+async def _rank_by_terms(
     directory: Path, filters: dict[str, Any], terms: Sequence[str], today: date
 ) -> tuple[list[tuple[int, float, float, Note]], int]:
-    """`GraphRetriever`'s whole search in one worker-thread hop: filter, score, rank, cut.
+    """`GraphRetriever`'s whole search: load and filter, then score, rank and cut in a thread.
 
     Returns:
         `(chosen, found)`: `(coverage, relevance, confidence, note)` for the best `retrieval_top_k`
         matches, and the pre-cut total.
     """
+    eligible = await _eligible(directory, filters, today)
+    return await asyncio.to_thread(_rank, eligible, terms)
+
+
+def _rank(
+    eligible: dict[str, Note], terms: Sequence[str]
+) -> tuple[list[tuple[int, float, float, Note]], int]:
+    """Score every eligible note against `terms`, rank them and cut to `retrieval_top_k`."""
     frequencies: list[tuple[int, dict[str, int], Note]] = []
-    for note in _eligible_sync(directory, filters, today).values():
+    for note in eligible.values():
         # Membership is `term_coverage` (substring, so `ester` finds `polyester`); weight is
         # `term_frequencies`. Gating on the frequency dict would silently narrow recall.
         coverage = term_coverage(note, terms)
@@ -188,13 +200,14 @@ def _rank_by_terms(
     return ranked[: settings.retrieval_top_k], len(ranked)
 
 
-def _load_if_present(directory: Path) -> list[Note]:
+async def _load_if_present(directory: Path) -> list[Note]:
     """Every note under `directory`, raising `RetrieverSkip` when there are none at all.
 
     Zero parseable notes is a deployment fault (wrong `knowledge_path`, unmounted volume), not an
     empty answer.
     """
-    notes = note_store(directory).notes() if directory.exists() else []
+    present = await asyncio.to_thread(directory.exists)
+    notes = await note_store(directory).notes() if present else []
     if not notes:
         raise RetrieverSkip(f"no notes found under {directory}")
     return notes
@@ -217,11 +230,11 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
 async def _conflict_index(directory: Path, filters: dict[str, Any]) -> dict[str, NoteConflicts]:
     """Map each note id to what it is known or suspected to disagree with.
 
-    Runs in a worker thread; `kg.conflicts.conflict_index` caches per corpus and `as_of`. `as_of` is
-    today when unwindowed and `None` (whole corpus) when windowed, matching `_eligible_sync`.
+    Runs off the event loop; `kg.conflicts.conflict_index` caches per corpus and `as_of`. `as_of` is
+    today when unwindowed and `None` (whole corpus) when windowed, matching `_filter_eligible`.
     """
     as_of = None if _is_windowed(filters) else date.today()
-    return await asyncio.to_thread(conflict_index, directory, as_of)
+    return await conflict_index(directory, as_of)
 
 
 class GraphRetriever:
@@ -244,11 +257,9 @@ class GraphRetriever:
         judged downstream.
         """
         terms = query_terms(query)
-        # Load, filter, score, rank and cut in one worker thread: each step is O(corpus) pure Python
-        # and would otherwise stall the event loop shared by every concurrent turn.
-        chosen, found = await asyncio.to_thread(
-            _rank_by_terms, self._dir, filters, terms, date.today()
-        )
+        # Load, filter, score, rank and cut all run in worker threads: each step is O(corpus) pure
+        # Python and would otherwise stall the event loop shared by every concurrent turn.
+        chosen, found = await _rank_by_terms(self._dir, filters, terms, date.today())
         conflicts = await _conflict_index(self._dir, filters)
         # `found` is the pre-cut total, so a per-leg cut is reported rather than read as the corpus.
         return Hits(

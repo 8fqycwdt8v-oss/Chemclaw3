@@ -11,7 +11,6 @@ import logging
 import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -522,11 +521,11 @@ async def reindex_notes(
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     store = note_store(directory)
-    await asyncio.to_thread(partial(store.refresh, reparse=True))
+    await store.refresh(reparse=True)
     # Hash before parsing: a note rewritten between the two passes then pairs a new body with an
     # old digest, which the next pass reads as changed and heals; the reverse order would stick.
-    current_fingerprints = await asyncio.to_thread(store.fingerprints) if directory.exists() else {}
-    notes = await asyncio.to_thread(store.notes) if directory.exists() else []
+    current_fingerprints = await store.fingerprints() if directory.exists() else {}
+    notes = await store.notes() if directory.exists() else []
     if not notes:
         # A missing directory is a deployment fault (unmounted volume, wrong `knowledge_path`) and
         # is reported loudly; a present but empty one is a fresh corpus and stays at DEBUG.
@@ -544,7 +543,7 @@ async def reindex_notes(
     # `keep`, and `keep` is the union of what parsed and what is on disk. The on-disk half (which
     # includes unparseable and unreadable files) stops a transient parse failure from deleting rows.
     on_disk = set(current_fingerprints)
-    unparsed = await asyncio.to_thread(store.unparseable, on_disk - {note.id for note in notes})
+    unparsed = await store.unparseable(on_disk - {note.id for note in notes})
     if unparsed:
         log.warning(
             "note re-index: %d note file(s) on disk did not parse and are kept in the index rather "
@@ -554,7 +553,7 @@ async def reindex_notes(
         )
     # A prune is a claim about the corpus, and pods hold different checkouts: rows built from a
     # newer `corpus_revision` than this pass holds are left alone. `None` (no git) is no constraint.
-    revision = await asyncio.to_thread(store.revision)
+    revision = await store.revision()
     retired = await index.retire_absent(
         {note.id for note in notes} | on_disk, built_before=revision
     )

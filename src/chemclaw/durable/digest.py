@@ -25,7 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
-    from chemclaw.kg.conflicts import conflict_index
+    from chemclaw.kg.conflicts import NoteConflicts, conflict_index
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
     from chemclaw.kg.store import note_store
@@ -92,27 +92,36 @@ async def collect_digests() -> list[DigestItem]:
     on when its file was committed (`NoteStore.arrivals`). Notes are read through the
     note store like every other reader.
 
-    The read and match run in one `to_thread` hop: both are blocking and O(subscriptions x notes),
-    and the worker's loop also carries heartbeat timers for long jobs. One hop also keeps
-    `kg.graph._corpus_lock` (a blocking `RLock`) off the loop.
+    The store reads and the match run in worker threads: they are blocking and O(subscriptions x
+    notes), and the worker's loop also carries heartbeat timers for long jobs.
     """
     subscriptions = await all_subscriptions()
-    return await asyncio.to_thread(_match_corpus, subscriptions)
+    return await _match_corpus(subscriptions)
 
 
-def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
-    """Read the corpus and find each subscription's new matches — the whole blocking half."""
+async def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
+    """Read the corpus and find each subscription's new matches."""
     if not subscriptions:
         return []
     store = note_store()
-    notes = store.notes()
+    notes = await store.notes()
     # One conflict scan for every subscription; usually cold in this process, hence the early
     # return above when there are no subscriptions. Scoped `as_of` today so a superseded note is not
     # reported as disagreeing with its own replacement.
-    disputes = conflict_index(settings.knowledge_path, date.today())
+    disputes = await conflict_index(settings.knowledge_path, date.today())
     # When each note reached the corpus, for the notes that carry no `valid_from` — see `_is_new`.
     # One `git log` per run, incremental after the first in this process.
-    arrivals = store.arrivals()
+    arrivals = await store.arrivals()
+    return await asyncio.to_thread(_digests_for, subscriptions, notes, disputes, arrivals)
+
+
+def _digests_for(
+    subscriptions: Sequence[Subscription],
+    notes: list[Note],
+    disputes: Mapping[str, NoteConflicts],
+    arrivals: Mapping[str, date],
+) -> list[DigestItem]:
+    """Each subscription's new matches among `notes`: the O(subscriptions x notes) half."""
     digests: list[DigestItem] = []
     for subscription in subscriptions:
         # Tokenized once per subscription, not per note: this loop is subscriptions x notes.

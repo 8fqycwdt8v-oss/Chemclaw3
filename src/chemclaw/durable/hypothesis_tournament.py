@@ -689,7 +689,7 @@ async def run_computable_check(
     token = set_current_identity(requested_by, frozenset(requested_roles or ()))
     try:
         # A cited-but-undefined id is `None`, not a note.
-        subject = await asyncio.to_thread(note_store().get, call.subject_note_id)
+        subject = await note_store().get(call.subject_note_id)
         smiles, refusal = structure_of(subject, call.subject_note_id)
         if refusal is not None or smiles is None:
             return (
@@ -843,7 +843,7 @@ async def ground_check_template(
                 refusal_code="template-unrunnable-here", refusal_detail=blocked
             )
 
-        subject = await asyncio.to_thread(note_store().get, call.subject_note_id)
+        subject = await note_store().get(call.subject_note_id)
         smiles, refusal = structure_of(subject, call.subject_note_id)
         if refusal is not None or smiles is None:
             code = refusal.code if refusal else "subject-not-found"
@@ -977,9 +977,7 @@ async def ground_check_job(
             return _GroundedJob(refusal_code="job-unavailable", refusal_detail=str(exc))
 
         # One read of the corpus before the loop, even with no subjects, so a corpus error surfaces.
-        subjects = await asyncio.to_thread(
-            note_store().get_many, [i for ids in call.subjects.values() for i in ids]
-        )
+        subjects = await note_store().get_many([i for ids in call.subjects.values() for i in ids])
         structures: dict[str, str] = {}
         for ids in call.subjects.values():
             for note_id in ids:

@@ -15,7 +15,6 @@ ids are candidates, and a person's note is never retired in place: it is counted
 while the replacement still names it.
 """
 
-import asyncio
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import date
@@ -241,7 +240,7 @@ async def rekey_standardization(
         reaction_store: The reaction index.
         as_of: The date a retired note's `valid_to` records.
     """
-    notes = await asyncio.to_thread(note_store(notes_dir).notes)
+    notes = await note_store(notes_dir).notes()
     plan = plan_compound_rekey(notes, as_of)
     if apply and plan.rekeys:
         await apply_compound_rekey(plan, writer())

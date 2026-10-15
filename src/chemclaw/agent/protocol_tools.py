@@ -7,7 +7,6 @@ skills. Resolution of citations (note ids, `reaction-<id>` records, `source:doc_
 lives here so the condenser knows nothing about where protocols come from.
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -142,8 +141,8 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
             "highest-similarity hits — and ask again."
         )
 
-    # One read of the corpus for every lookup, in a worker thread: it may scan the disk.
-    found = await asyncio.to_thread(note_store().get_many, refs)
+    # One read of the corpus for every lookup; the store keeps it off the event loop.
+    found = await note_store().get_many(refs)
     readers = _share_readers()
     protocols: list[Protocol] = []
     missing: list[str] = []

@@ -7,6 +7,7 @@ tests. Bodies are factual and must stand alone: the narrative and distillation s
 only on demand in a chat turn, never automatically.
 """
 
+import asyncio
 import logging
 from datetime import date
 
@@ -41,65 +42,72 @@ class SynthesisUnit(BaseModel):
     retirements: list[Note] = Field(default_factory=list)
 
 
-def build_campaign_notes(
+async def build_campaign_notes(
     reactions: list[OrdReaction], *, corpus_complete: bool = True
 ) -> list[SynthesisUnit]:
     """Detect chains and build (not publish) one `campaign` unit per chain, retirements paired.
 
-    Includes retiring the notes this run's clusters replaced (`_units`), the one part that reads the
-    corpus.
+    The clustering runs in a worker thread, as does the retirement pairing (`_units`), the one part
+    that reads the corpus.
     """
+    notes = await asyncio.to_thread(_campaign_notes, reactions)
+    return await _units(notes, corpus_complete=corpus_complete)
+
+
+def _campaign_notes(reactions: list[OrdReaction]) -> list[Note]:
+    """One `campaign` note per detected chain."""
     by_id = {r.reaction_id: r for r in reactions}
-    return _units(
-        [
-            campaign_note_from_chain(
-                chain, by_id, minted_on=supported_from(chain.reaction_ids, by_id)
-            )
-            for chain in detect_chains(reactions)
-        ],
-        corpus_complete=corpus_complete,
-    )
+    return [
+        campaign_note_from_chain(chain, by_id, minted_on=supported_from(chain.reaction_ids, by_id))
+        for chain in detect_chains(reactions)
+    ]
 
 
-def build_playbook_notes(
+async def build_playbook_notes(
     reactions: list[OrdReaction], *, corpus_complete: bool = True
 ) -> list[SynthesisUnit]:
     """Find cross-project candidates and build a `playbook` unit each, retirements paired."""
+    notes = await asyncio.to_thread(_playbook_notes, reactions)
+    return await _units(notes, corpus_complete=corpus_complete)
+
+
+def _playbook_notes(reactions: list[OrdReaction]) -> list[Note]:
+    """One `playbook` note per cross-project candidate."""
     by_id = {r.reaction_id: r for r in reactions}
-    return _units(
-        [
-            playbook_note(
-                stable_id("playbook", candidate.reaction_ids),
-                _summary(candidate, by_id),
-                [f"reaction-{rid}" for rid in candidate.reaction_ids],
-                minted_on=supported_from(candidate.reaction_ids, by_id),
-                # This producer finds a recurrence but does not generalise it;
-                # `durable/observation_jobs.py` promotes a real claim and passes nothing here.
-                distilled=False,
-            )
-            for candidate in find_playbook_candidates(reactions)
-        ],
-        corpus_complete=corpus_complete,
-    )
+    return [
+        playbook_note(
+            stable_id("playbook", candidate.reaction_ids),
+            _summary(candidate, by_id),
+            [f"reaction-{rid}" for rid in candidate.reaction_ids],
+            minted_on=supported_from(candidate.reaction_ids, by_id),
+            # This producer finds a recurrence but does not generalise it;
+            # `durable/observation_jobs.py` promotes a real claim and passes nothing here.
+            distilled=False,
+        )
+        for candidate in find_playbook_candidates(reactions)
+    ]
 
 
-def build_optimization_notes(
+async def build_optimization_notes(
     reactions: list[OrdReaction], *, corpus_complete: bool = True
 ) -> list[SynthesisUnit]:
     """Group same-transformation runs into optimization units, retirements paired."""
+    notes = await asyncio.to_thread(_optimization_notes, reactions)
+    return await _units(notes, corpus_complete=corpus_complete)
+
+
+def _optimization_notes(reactions: list[OrdReaction]) -> list[Note]:
+    """One `optimization-campaign` note per group of same-transformation runs."""
     by_id = {r.reaction_id: r for r in reactions}
-    return _units(
-        [
-            optimization_campaign_note(
-                stable_id("optimization", campaign.reaction_ids),
-                campaign,
-                by_id,
-                minted_on=supported_from(campaign.reaction_ids, by_id),
-            )
-            for campaign in find_optimization_campaigns(reactions)
-        ],
-        corpus_complete=corpus_complete,
-    )
+    return [
+        optimization_campaign_note(
+            stable_id("optimization", campaign.reaction_ids),
+            campaign,
+            by_id,
+            minted_on=supported_from(campaign.reaction_ids, by_id),
+        )
+        for campaign in find_optimization_campaigns(reactions)
+    ]
 
 
 #: What a note built from a truncated corpus read says about itself, in the body a chemist reads. A
@@ -150,7 +158,7 @@ def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -
     return min(dated) if dated else None
 
 
-def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
+async def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
     """Pair each new note with the retirements it carries.
 
     Applied inside each builder so both publish paths get it. Each retirement from
@@ -169,8 +177,18 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
             "retiring notes on a partial view retracts knowledge that may "
             "still be true"
         )
-        return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
-    existing = note_store().notes()
+        return await asyncio.to_thread(_marked_units, notes)
+    existing = await note_store().notes()
+    return await asyncio.to_thread(_paired, notes, existing)
+
+
+def _marked_units(notes: list[Note]) -> list[SynthesisUnit]:
+    """Each note marked as built from a partial read, with no retirement."""
+    return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
+
+
+def _paired(notes: list[Note], existing: list[Note]) -> list[SynthesisUnit]:
+    """Each note with the retirements `supersede_updates` finds against the existing corpus."""
     units = {note.id: SynthesisUnit(note=note) for note in notes}
     for retired in supersede_updates(notes, existing, date.today()):
         units[carrier_of(retired)].retirements.append(retired)
