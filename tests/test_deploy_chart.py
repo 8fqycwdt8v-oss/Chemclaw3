@@ -2648,7 +2648,7 @@ def _makefile_renders() -> list[list[str]]:
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
     for index, line in enumerate(lines):
-        if "helm template chemclaw" not in line or line.lstrip().startswith("@#"):
+        if "helm template chemclaw " not in line or line.lstrip().startswith("@#"):
             continue
         block = [line]
         cursor = index

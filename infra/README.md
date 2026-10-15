@@ -20,6 +20,12 @@ carries its own compose project name so `phoenix-down` cannot reach the spine's
 Postgres. Not part of the Helm chart, and not meant to be — production traces go
 to whatever collector the cluster runs.
 
+`make restore-drill` (`src/chemclaw/cli/restore_drill.py`) is the backup evidence: it starts its own
+pgvector Postgres and Temporal from the images above, in containers, networks and volumes of its
+own (never `postgres-data`), takes a base backup with archived WAL, restores a second cluster to a
+marked instant and checks it against the first. Procedure and what it proves:
+`docs/guides/runbook.md` § "Backup, restore and PITR".
+
 `live/` holds the scripts the live-test lane is made of. `bootstrap.sh` provides
 what `make up` provides on a machine with no Docker daemon (it defers to the
 compose file whenever one is reachable), and records whether *it* created the

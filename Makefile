@@ -56,7 +56,8 @@ SHELL := bash
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe live-replicas \
-  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval
+  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval \
+  bench-backend-rpc restore-drill
 
 help:  ## List every target, grouped by section.
 	@awk 'BEGIN {FS = ":.*?## "} /^##@ / {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
@@ -110,6 +111,9 @@ upstream-check:  ## Re-check every upstream shape this repo borrows (run on any 
 
 architecture-baseline:  ## Measure the architecture programme's baseline (import, build, prose, sizes) to docs/planning/.
 	uv run python -m chemclaw.cli.architecture_baseline
+
+bench-backend-rpc:  ## Time calculation_key over MCP and over /rpc against CHEMCLAW_CALC_SERVER_URL (a measurement, not a gate).
+	uv run python -m chemclaw.cli.bench_backend_rpc $(ARGS)
 
 mutants:  ## Mutation-test the invariant-bearing modules (see [tool.mutmut]; slow, run deliberately).
 	uv run mutmut run $(ARGS)
@@ -185,6 +189,24 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	      --set retention.unboundedGrowthAccepted=true \
 	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
+	        -schema-location default -schema-location \
+	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
+	  done
+	@# The Postgres chart is a release of its own (it must exist before the application's migrate hook
+	@# runs). Its four shapes go through the same schemas, strictly: the CloudNativePG and Barman Cloud
+	@# CRDs are in the catalogue, so a missing schema is a failure here, not a skip.
+	@set -e; \
+	  base="--set imageName=registry.example/pgvector:16 --set backup.destinationPath=s3://chemclaw-backups/prod --set targets.rpoSeconds=900 --set targets.rtoSeconds=14400"; \
+	  for flags in "" \
+	    "--set temporalDatabases.enabled=true --set temporalDatabases.passwordSecret=temporal-db --set tls.serverCASecret=pg-ca --set tls.serverTLSSecret=pg-tls --set backup.credentialsSecret=backup-keys --set backup.encryption=AES256" \
+	    "--set import.enabled=true --set import.source.host=old-pg.example --set import.source.user=chemclaw --set import.source.passwordSecret.name=old-pg" \
+	    "--set name=chemclaw-pg-r1 --set recovery.enabled=true --set recovery.sourceClusterName=chemclaw-pg --set recovery.targetTime=2026-01-01T00:00:00Z" \
+	    "--set name=pg-rehearsal --set recovery.enabled=true --set recovery.rehearsal=true --set recovery.sourceClusterName=chemclaw-pg --set instances=1" \
+	    "--set import.enabled=true --set import.type=monolith --set import.databases={chemclaw,temporal,temporal_visibility} --set import.roles={temporal} --set import.source.host=old-pg.example --set import.source.user=chemclaw --set import.source.passwordSecret.name=old-pg" \
+	    "--set name=chemclaw-pg-r1 --set recovery.enabled=true --set recovery.sourceClusterName=chemclaw-pg --set temporalDatabases.enabled=true --set temporalDatabases.passwordSecret=temporal-db --set credentialsSecret=pg-owner" \
+	    "--set tls.serverCASecret=pg-ca --set imagePullSecrets={registry-login}"; do \
+	    helm template chemclaw-pg deploy/helm/chemclaw-postgres $$base $$flags \
+	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
 	  done
@@ -431,6 +453,11 @@ phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts>
 	uv run python -m chemclaw.cli.phoenix_publish $(DIR) $(if $(NAME),--name $(NAME),)
 
 ##@ Tools
+
+restore-drill:  ## Back up a throwaway Postgres, restore it to a marked instant, verify (needs Docker; JSON report on stdout, ARGS=--no-temporal to skip Temporal).
+	@# Own containers, network and volumes under a per-run label, all removed on every exit path;
+	@# `ARGS=--prune` removes what a killed run left. Exit 1 = a check failed, 2 = it could not run.
+	@uv run python -m chemclaw.cli.restore_drill $(ARGS)
 
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }

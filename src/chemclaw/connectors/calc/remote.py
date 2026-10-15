@@ -10,14 +10,16 @@ a miss). Nothing here derives a `calc_version`: it is half the cache key and the
 ledger's primary key, and only the server can see what it is built from — a locally derived one
 would be well-formed and match nothing.
 
-One session per call, because MCP transport tasks inherit the context of whoever opened the
-connection, and a shared session would misattribute concurrent callers.
+On `calc_transport="mcp"` that is one session per call, because MCP transport tasks inherit the
+context of whoever opened the connection, and a shared session would misattribute concurrent
+callers. On `"rpc"` it is a handle on the process's pooled HTTP client (`core/backend_rpc.py`),
+whose headers are stamped per request from the calling task; the failures are the same classes.
 """
 
 import logging
 import threading
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import Any
 
@@ -27,9 +29,9 @@ from chemclaw_contracts.calc import (
     PredictSolubilityRequest,
 )
 from chemclaw_contracts.calc import Structure as WireStructure
-from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
 
+from chemclaw.core.backend_rpc import BackendSession, RpcSession, RpcUnsupported, rpc_session
 from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
 from chemclaw.core.errors import AtCapacityError, ChemclawError, SubsystemUnavailableError
@@ -129,28 +131,42 @@ METRICS.bind_gauge(
 )
 
 
-@asynccontextmanager
-async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[ClientSession]:
-    """Open one MCP session to the calculation server, and name its failures for a chemist.
+def _open_transport(timeout_seconds: float) -> AbstractAsyncContextManager[BackendSession]:
+    """The session the configured transport opens to the calculation server."""
+    if settings.calc_transport == "rpc":
+        return rpc_session(
+            settings.calc_server_url,
+            token_env=settings.calc_server_token_env,
+            timeout_seconds=timeout_seconds,
+        )
+    return open_session(
+        settings.calc_server_url,
+        token_env=settings.calc_server_token_env,
+        timeout_seconds=timeout_seconds,
+        # The same hook every connector client carries: trace context, correlation id, actor and
+        # session, plus the origin-strip guard that removes them on a cross-origin redirect
+        # (this client follows redirects).
+        request_hook=turn_identity_hook(settings.calc_server_url),
+    )
 
-    Session mechanics are `core.mcp_session.open_session`'s. This adds the classification: a refused
-    credential is bad data (it never fixes itself), an unreachable host is an outage. It is also
-    where backend load is counted, as sessions held, since every remote calculation passes through
-    here.
+
+@asynccontextmanager
+async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[BackendSession]:
+    """Open one session to the calculation server, and name its failures for a chemist.
+
+    The transport is `calc_transport`'s: `core.mcp_session.open_session` or a handle on the pooled
+    client of `core.backend_rpc`, failing as the same exceptions. This adds the classification: a
+    refused credential is bad data (it never fixes itself), an unreachable host is an outage. It is
+    also where backend load is counted, as sessions held, since every remote calculation passes
+    through here.
 
     `timeout_seconds` overrides the read bound (default `calc_server_timeout_seconds`) for CREST
     searches, which run minutes to hours; a client bound shorter than the server's wastes the work.
     """
     _dispatching(+1)
     try:
-        async with open_session(
-            settings.calc_server_url,
-            token_env=settings.calc_server_token_env,
-            timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
-            # The same hook every connector client carries: trace context, correlation id, actor and
-            # session, plus the origin-strip guard that removes them on a cross-origin redirect
-            # (this client follows redirects).
-            request_hook=turn_identity_hook(settings.calc_server_url),
+        async with _open_transport(
+            timeout_seconds or settings.calc_server_timeout_seconds
         ) as session:
             yield session
     except McpCredentialRefused as exc:
@@ -173,6 +189,21 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             "outage rather than a problem with what was asked; the same request will work once "
             "it is back."
         ) from exc
+    except RpcUnsupported as exc:
+        # Retryable: during a rollout the next call may reach a pod that does. Never answered over
+        # MCP instead, so a deployment on the wrong transport shows.
+        degraded(
+            logger,
+            "calc_server",
+            "the calculation server at %s does not serve the typed HTTP interface; no calculation "
+            "was run",
+            settings.calc_server_url,
+        )
+        raise CalcServerError(
+            f"the calculation service at {settings.calc_server_url} {exc.problem}, so no "
+            "calculation was run. Fix or upgrade the service, or set "
+            "CHEMCLAW_CALC_TRANSPORT=mcp."
+        ) from exc
     finally:
         _dispatching(-1)
 
@@ -186,15 +217,17 @@ def wire_structure(structure: Structure) -> WireStructure:
     return WireStructure.model_validate(structure.model_dump(mode="json"))
 
 
-async def _call(session: ClientSession, request: WireRequest) -> Any:
+async def _call(session: BackendSession, request: WireRequest) -> Any:
     """Invoke one tool and return its decoded payload, in this service's error vocabulary.
 
-    Maps `core.mcp_session.invoke`'s refused / full / broken onto the classes a durable retry policy
-    reads. A domain refusal keeps the server's message (it is the whole content); a saturation
-    refusal is reworded, with the original on `__cause__`.
+    Maps `core.mcp_session.invoke`'s refused / full / broken (raised identically by both transports)
+    onto the classes a durable retry policy reads. A domain refusal keeps the server's message (it
+    is the whole content); a saturation refusal is reworded, with the original on `__cause__`.
     """
     tool = request.tool_name
     try:
+        if isinstance(session, RpcSession):
+            return await session.invoke(tool, request.wire())
         return await invoke(session, tool, request.wire())
     except McpAtCapacity as exc:
         # Must precede `McpRequestRefused`, its base class. A full pod is the gate working, so it
@@ -263,7 +296,7 @@ class KeyedCalculation(BaseModel):
     structure_id: str = ""
 
 
-async def _identity(session: ClientSession, request: WireRequest) -> dict[str, Any]:
+async def _identity(session: BackendSession, request: WireRequest) -> dict[str, Any]:
     """`calculation_key`'s answer for `request`, refused as `CalcToolError` unless an object."""
     tool = request.tool_name
     identity = await _call(session, CalculationKeyRequest(tool=tool, arguments=request.wire()))
@@ -272,7 +305,7 @@ async def _identity(session: ClientSession, request: WireRequest) -> dict[str, A
     return identity
 
 
-async def remote_key(session: ClientSession, request: WireRequest) -> KeyedCalculation | None:
+async def remote_key(session: BackendSession, request: WireRequest) -> KeyedCalculation | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
     `None` when the server reports no derivable key; `cached_remote` treats that as a miswiring. The
@@ -305,7 +338,7 @@ async def remote_key(session: ClientSession, request: WireRequest) -> KeyedCalcu
         ) from exc
 
 
-async def remote_compute(session: ClientSession, request: WireRequest) -> ResultPayload:
+async def remote_compute(session: BackendSession, request: WireRequest) -> ResultPayload:
     """Run one calculation on the server and return its payload as the cache stores it."""
     payload = await _call(session, request)
     if not isinstance(payload, dict):
