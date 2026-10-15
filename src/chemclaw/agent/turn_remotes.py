@@ -11,6 +11,10 @@ Every statement borrows a pooled connection briefly; no LISTEN.
 A request is a lease the asker refreshes as it polls; a dead asker's request lapses after one
 lease and is swept. Naming the `holder` means only the addressed turn can answer it. Both tables
 cascade from `session_owners`. Postgres store only: in memory a session is one process.
+
+Tenancy: the requests are global, because the holder polls those of every turn it holds; each
+records the tenant it was asked in, and the holder writes its frames bound to that tenant, so the
+frames (a tenant's answer text) are covered by the policy and read back only by the asker.
 """
 
 import uuid
@@ -23,6 +27,7 @@ from psycopg.rows import TupleRow
 
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.jsonb import json_column
+from chemclaw.core.tenancy import bound_tenant, current_tenant
 
 #: What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
 #: the holder defers exactly as the local route does.
@@ -52,12 +57,15 @@ class Request(NamedTuple):
     kind: Kind
     actor: str
     state: State
+    #: The tenant the asker acted for: the one to bind while writing this request's frames.
+    tenant: str
 
 
 _HOLDING = "SELECT holder, actor FROM session_turns WHERE session_id = %s AND expires_at > now()"
 _ASK = (
-    "INSERT INTO session_turn_remotes (id, session_id, holder, kind, actor, state, lease_until) "
-    "VALUES (%s, %s, %s, %s, %s, 'asked', now() + make_interval(secs => %s))"
+    "INSERT INTO session_turn_remotes "
+    "(id, session_id, holder, kind, actor, state, lease_until, request_tenant) "
+    "VALUES (%s, %s, %s, %s, %s, 'asked', now() + make_interval(secs => %s), %s)"
 )
 # The asker's poll: refresh its lease and read the holder's answer in one statement. No row means
 # the request is gone — swept by the holder after a lapse, or cascaded away with its session.
@@ -72,7 +80,7 @@ _WITHDRAW = "DELETE FROM session_turn_remotes WHERE id = %s"
 # The holder's poll. `unnest` pairs the two arrays element-wise, so one statement reads every
 # request for any turn this process holds; lapsed requests are excluded (`_SWEEP`).
 _PENDING = (
-    "SELECT r.id, r.session_id, r.holder, r.kind, r.actor, r.state "
+    "SELECT r.id, r.session_id, r.holder, r.kind, r.actor, r.state, r.request_tenant "
     "FROM session_turn_remotes r "
     "JOIN unnest(%s::text[], %s::text[]) AS t(session_id, holder) "
     "  ON r.session_id = t.session_id AND r.holder = t.holder "
@@ -118,7 +126,8 @@ class TurnRemotes:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    _ASK, (request_id, session_id, holder, kind, actor, lease_seconds)
+                    _ASK,
+                    (request_id, session_id, holder, kind, actor, lease_seconds, current_tenant()),
                 )
             await conn.commit()
         return request_id
@@ -188,8 +197,13 @@ class TurnRemotes:
                 await cur.execute(_ANSWER, (state, correlation_id or None, request_id))
             await conn.commit()
 
-    async def relay(self, request_id: str, frames: Sequence[dict[str, Any] | None]) -> None:
+    async def relay(
+        self, request_id: str, frames: Sequence[dict[str, Any] | None], tenant: str
+    ) -> None:
         """Append frames for the asker to take, in order; `None` marks the end of the view.
+
+        Written as `tenant`, the one the request was asked in (`Request.tenant`), because the
+        holder serves every tenant's requests from one loop and binds none of its own.
 
         A request the asker has already withdrawn takes its frames' foreign key with it, so the
         insert fails rather than strand rows nobody will read — `psycopg.errors.
@@ -197,13 +211,14 @@ class TurnRemotes:
         """
         if not frames:
             return
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.executemany(
-                    _RELAY,
-                    [
-                        (request_id, None if frame is None else json_column(frame))
-                        for frame in frames
-                    ],
-                )
-            await conn.commit()
+        with bound_tenant(tenant):
+            async with self._connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.executemany(
+                        _RELAY,
+                        [
+                            (request_id, None if frame is None else json_column(frame))
+                            for frame in frames
+                        ],
+                    )
+                await conn.commit()

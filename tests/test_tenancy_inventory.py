@@ -24,17 +24,52 @@ _GLOBAL: dict[str, str] = {
     "deployment_id": "the release that owns the database: a fact about the database, not a row",
     "session_turns": "the fleet's concurrent-turn ceiling counts leases across tenants",
     "session_turn_remotes": "the relay between replicas polls requests across tenants: leases",
-    "session_turn_frames": "output in transit between replicas, keyed by a relay id",
     "request_buckets": "the per-principal request budget is the deployment's; one row per person",
     "audit_anchors": "retired and empty; nothing writes it",
 }
 
-# Scoped tables whose primary key does not take `tenant_id`, with why a second tenant cannot
-# collide on it. Every other scoped table is in `_KEYED` and must carry it once tenancy is on.
-_MINTED = (
-    "a key this system mints (a session, turn, job, exhibit, design, effect, request or "
-    "plan id), or one that begins with a data source, whose name is unique in a deployment"
-)
+# Scoped tables whose primary key does not take `tenant_id`, each with why a second tenant cannot
+# collide on it. A key is minted here only if this system makes it; a content hash, a name a data
+# source carries, a person and a note slug are not, and those tables are in `_KEYED` below.
+_SERIAL = "a sequence value"
+_SESSION = "a session id the front door mints (a uuid), never chosen by the client"
+_WORKFLOW = "a workflow id, which carries its tenant (`core/tenancy.scope_workflow_id`)"
+
+_MINTED: dict[str, str] = {
+    "audit_events": _SERIAL,
+    "behaviour_proposals": f"{_SERIAL}; the proposal's identity is `_KEYED_CONSTRAINTS`",
+    "bo_suggestions": f"{_SERIAL}; (campaign_id, job_id) is in `_MINTED_UNIQUES`",
+    "effects": f"{_WORKFLOW} (the effect id is the job id)",
+    "experiment_arm_results": _SERIAL,
+    "experiment_protocol_status_events": _SERIAL,
+    "job_records": _WORKFLOW,
+    "note_proposals": f"{_SERIAL}; the proposal's identity is `_KEYED_CONSTRAINTS`",
+    "pending_request_answers": f"{_WORKFLOW} and the run id Temporal mints",
+    "pending_requests": _WORKFLOW,
+    "plan_approvals": _SERIAL,
+    "plan_authors": f"{_SESSION}, and a hash of that session's plan",
+    "predictions": f"{_SERIAL}; the prediction's identity is `_KEYED_CONSTRAINTS`",
+    "result_publications": f"{_SERIAL}; the publication's identity is `_KEYED_CONSTRAINTS`",
+    "session_attachments": "an attachment id the front door mints",
+    "session_events": _SERIAL,
+    "session_exhibit_revisions": "an exhibit id the front door mints, and its revision number",
+    "session_exhibits": "an exhibit id the front door mints",
+    "session_members": f"{_SESSION}, and a member of it",
+    "session_messages": _SERIAL,
+    "session_owners": _SESSION,
+    "session_turn_frames": f"{_SERIAL}; a frame is scoped, the request it answers is not",
+    "session_turn_queue": "a ticket the front door mints",
+    "subscriptions": f"{_SERIAL}; the subscription's identity is `_WIDENED_INDEXES`",
+    "tool_result_links": f"{_SESSION}, and a hash of a result stored under it",
+    "turn_costs": "a turn id the front door mints",
+}
+
+# Unique keys that are not primary keys and stay narrow, each with why. A new one must be added here
+# or widened (`_KEYED_CONSTRAINTS`, `_WIDENED_INDEXES`): that is the decision this test forces.
+_MINTED_UNIQUES: dict[str, str] = {
+    "bo_suggestions_job_idx": "a campaign id and a job id, which is a scoped workflow id",
+    "session_events_dedupe_idx": "a workflow id, the run id Temporal mints, or a minted exhibit id",
+}
 
 _KEYED = {
     "artifact_blobs",
@@ -52,13 +87,34 @@ _KEYED = {
     "structures",
     "tool_result_blobs",
     "user_preferences",
+    # A name a data source carries: two tenants, and two releases of one image, use the same.
+    "commitments",
+    "corpus_cursors",
+    "corpus_reactions",
+    "document_files",
+    "ingest_rejections",
+    "reaction_fingerprints",
+    "reaction_labels",
+    "reaction_records",
+    "reaction_species",
+    "sync_cursors",
+    # A content hash of a document's text.
+    "document_chunks",
+    # A hash of the ask and its owner: one person drafting the same experiment in two tenants.
+    "experiment_protocols",
+    "experiment_protocol_revisions",
 }
 
 # Constraints, not primary keys, that identify a row the same way and are widened with the keys.
 _KEYED_CONSTRAINTS = {
     ("predictions", "predictions_identity"),
     ("result_publications", "result_publications_identity"),
+    ("note_proposals", "note_proposals_version_unique"),
+    ("behaviour_proposals", "behaviour_proposals_version_unique"),
 }
+
+# Unique indexes that are not constraints (an expression or partial index), rebuilt with the tenant.
+_WIDENED_INDEXES = {"subscriptions_identity"}
 
 
 async def _rows(dsn: str, sql: str) -> list[tuple[object, ...]]:
@@ -138,7 +194,25 @@ async def test_the_switch_widens_the_hash_keys_and_nothing_else() -> None:
             if table in _KEYED:
                 assert cols[-1] == "tenant_id" and cols[:-1] == before[table], (table, cols)
             else:
-                assert cols == before[table], f"{table}: {_MINTED} should keep its key"
+                assert cols == before[table], f"{table}: {_MINTED.get(table)} should keep its key"
+        kg = {t for t in after if t.startswith("kg_")}
+        scoped = set(await _scoped_tables(database)) - kg
+        assert scoped - _KEYED == set(_MINTED), (
+            "a scoped table is neither widened nor justified, or a justified one is gone: "
+            f"{sorted((scoped - _KEYED) ^ set(_MINTED))}"
+        )
+        uniques = await _non_primary_unique_keys(database)
+        classified = (
+            {name for _, name in _KEYED_CONSTRAINTS} | _WIDENED_INDEXES | set(_MINTED_UNIQUES)
+        )
+        assert set(uniques) <= classified, (
+            f"a unique key on a scoped table is neither widened nor justified: "
+            f"{sorted(set(uniques) - classified)}"
+        )
+        for name in _WIDENED_INDEXES:
+            assert "tenant_id)" in uniques[name], uniques[name]
+        for name in _MINTED_UNIQUES:
+            assert "tenant_id" not in uniques[name], f"{name} is widened but is listed as minted"
         constraints = {
             (str(r[0]), str(r[1])): str(r[2])
             for r in await _rows(
@@ -157,6 +231,34 @@ async def test_the_switch_widens_the_hash_keys_and_nothing_else() -> None:
         )
         assert len(foreign) == 3
         assert all("tenant_id" in str(definition) for _, definition in foreign), foreign
+
+
+async def _scoped_tables(database: TenancyDatabase) -> list[str]:
+    """Every table of the schema that carries the tenant policy."""
+    rows = await _rows(
+        database.owner_dsn,
+        "SELECT c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid "
+        "WHERE p.polname = 'tenant_isolation' AND c.relnamespace = current_schema()::regnamespace",
+    )
+    return [str(row[0]) for row in rows]
+
+
+async def _non_primary_unique_keys(database: TenancyDatabase) -> dict[str, str]:
+    """Every unique constraint or unique index of a scoped table that is not its primary key.
+
+    Keyed by name, valued by its definition. An index that backs a constraint is the constraint.
+    """
+    rows = await _rows(
+        database.owner_dsn,
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'u' "
+        "AND connamespace = current_schema()::regnamespace "
+        "UNION ALL SELECT i.indexname, i.indexdef FROM pg_indexes i "
+        "WHERE i.schemaname = current_schema() AND i.indexdef LIKE 'CREATE UNIQUE%%' "
+        "AND i.indexname NOT LIKE '%%\\_pkey' "
+        "AND i.indexname NOT IN (SELECT conname FROM pg_constraint "
+        "WHERE connamespace = current_schema()::regnamespace)",
+    )
+    return {str(name): str(definition) for name, definition in rows}
 
 
 async def _primary_keys(database: TenancyDatabase) -> dict[str, list[str]]:

@@ -54,7 +54,7 @@ INSERT INTO experiment_protocols
 VALUES
     (%(design_id)s, %(title)s, %(mode)s, %(status)s, %(project)s, %(opened_by)s, %(session_id)s,
      %(correlation_id)s, %(revision)s, %(arm_count)s, %(blocker_count)s, now(), now())
-ON CONFLICT (design_id) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT experiment_protocols_pkey DO UPDATE SET
     title = EXCLUDED.title,
     mode = EXCLUDED.mode,
     -- Safe to take from the insert because the caller computed it from *this* row a moment ago,

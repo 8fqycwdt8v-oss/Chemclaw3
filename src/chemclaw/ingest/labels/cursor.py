@@ -17,7 +17,8 @@ from chemclaw.core.config import settings
 _SELECT = "SELECT after FROM corpus_cursors WHERE source = %s"
 _UPSERT = (
     "INSERT INTO corpus_cursors (source, after, updated_at) VALUES (%s, %s, now()) "
-    "ON CONFLICT (source) DO UPDATE SET after = EXCLUDED.after, updated_at = now()"
+    "ON CONFLICT ON CONSTRAINT corpus_cursors_pkey "
+    "DO UPDATE SET after = EXCLUDED.after, updated_at = now()"
 )
 
 

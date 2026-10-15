@@ -82,8 +82,8 @@ the pair applies in filename order and neither shadows the other.
 | `session_turns` | 018 (+121 `actor`, +122 `admitted`) | `agent/session_store.py` | released at turn end, and a lease keyed by `session_id` is overwritten in place rather than duplicated, so it does not accumulate. The lease a crashed worker never released is swept with its session's `session_owners` row, in the same transaction; a **live** lease is never touched. **121 records the turn's sender** (`actor`), so a replica that does not hold the turn applies the stop route's sender-or-owner rule before asking the holder to stop it (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica). **122 adds `admitted`**, set by the admission statement under an advisory lock when the turn takes one of the deployment's concurrent-turn slots (`service_fleet_max_concurrent_turns`, `service_max_concurrent_turns_per_actor`); the slot is the lease, so it is freed by the release or by the lease lapsing (D-2026-10-08-limits-and-bookkeeping-live-in-postgres) |
 | `session_members` | 110 (+131 `tenant_id` and its policy) | `agent/session_members.py` | cascades from its session's `session_owners` row, so it goes with the session (delete, retention, the owner's erasure); a member's own rows are erased with them. Who the owner let into a conversation — reach, never authority (D-2026-09-27-in-a-shared-session-the-sender-governs) |
 | `session_turn_queue` | 113 (+131 `tenant_id` and its policy) | `agent/session_queue.py` | a lease per waiting message, deleted when it runs, is withdrawn or its sender is erased; a lapsed one is swept by the next enqueue on its session, and the whole line cascades from its session's `session_owners` row. Order only — no message text and no roles (D-2026-10-01-a-queued-message-waits-in-its-senders-request) |
-| `session_turn_remotes` | 121 | `agent/turn_remotes.py` | a lease per request another replica addresses to a running turn (follow it, stop it), withdrawn by its asker when the view or the stop ends; a lapsed one — its asker died — is swept by the holder's next poll, and the whole set cascades from its session's `session_owners` row. `actor` is the asker, erased by actor (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica) |
-| `session_turn_frames` | 121 | `agent/turn_remotes.py` | a followed turn's frames in transit between two replicas, deleted by the asker as it reads them and by cascade from `session_turn_remotes` when its request goes; bounded by one poll's worth of a view's output |
+| `session_turn_remotes` | 121 (+134 `request_tenant`) | `agent/turn_remotes.py` | a lease per request another replica addresses to a running turn (follow it, stop it), withdrawn by its asker when the view or the stop ends; a lapsed one — its asker died — is swept by the holder's next poll, and the whole set cascades from its session's `session_owners` row. `actor` is the asker, erased by actor (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica) |
+| `session_turn_frames` | 121 (+134 `tenant_id` and its policy) | `agent/turn_remotes.py` | a followed turn's frames in transit between two replicas, deleted by the asker as it reads them and by cascade from `session_turn_remotes` when its request goes; bounded by one poll's worth of a view's output |
 | `session_exhibits` | 115 (+116 the `geometry` kind, +117 `html`, 131 `tenant_id` and its policy) | `exhibits/store.py` | `durable/retention.py` on `retention_session_exhibits_days`, dated by the last revision; deleted with its session (`delete_session`) and by an owner's erasure, as `session_messages` is. The header of an artefact — its head revision, title and who wrote the head — so a listing is one query (D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect). **No foreign key to `session_owners`**, so all three disposals are code's: a pre-115 image rolled back to deletes, erases and forgets sessions without their artefacts, silently — the runbook's *Roll back a release* row gives the clean-up |
 | `session_attachments` | 120 (+131 `tenant_id` and its policy) | `agent/attachments.py` | `durable/retention.py` on the conversation's window (`retention_session_messages_days`), dated by `created_at`; deleted with its session (`delete_session`) and by an erasure — by session for a leaver's own sessions and by `uploaded_by` in anybody else's, as `session_messages` is by `actor`. The parsed text of a file uploaded to a conversation, readable from every front-door replica (D-2026-10-04-an-upload-is-session-state-not-pod-state); before 120 it lived in the memory of the pod that took the upload. Bounded per session by `attachment_max_per_session` and `attachment_store_max_bytes`: past either, the oldest row's `body` is cleared and `evicted_at` stamped, and the row stays so a later turn can say the file was dropped rather than never sent. A dropped row is a name and a size, and those accumulate one per upload until the conversation's window takes them. **No foreign key to `session_owners`**, for `session_exhibits`' reason — the runbook's *Roll back a release* row gives the clean-up a pre-120 image leaves |
 | `session_exhibit_revisions` | 115 (+119 `chemist_figures`, 131 `tenant_id` and its policy) | `exhibits/store.py` | cascades from `session_exhibits`; **INSERT-only by grant** — a revision is what a chemist's edit to an agent's draft *is*, so a credential that could UPDATE one could rewrite the correction it exists to record. **119 records the figures a person's revision introduced**, written with the row, so an agent revision's grounding check reads a set rather than re-parsing every person's revision; a person's NULL row (written before 119, or by a rolled-back image) is derived from its spec and its parent's, and a fork's revision 1 records the union of its source's |
@@ -177,10 +177,11 @@ no `INSERT` names the tenant; `core/db.connection()` sets it from the ambient te
 
 **Global tables**, with no column and no policy, each for a reason `tests/test_tenancy_inventory.py`
 holds: `schema_migrations`, `deployment_id` (the release that owns the database) and `tenants`
-(it defines the tenancy),
-`session_turns`, `session_turn_remotes`, `session_turn_frames` and `request_buckets` (fleet
-coordination: ceilings and the replica relay count across tenants and hold leases and holder ids,
-not content), and the retired `audit_anchors`. LangGraph's tables (`checkpoints*`, `store*`) are
+(it defines the tenancy), `session_turns`, `session_turn_remotes` and `request_buckets` (fleet
+coordination: ceilings and the requests a holder polls count across tenants and hold leases and
+holder ids, not content), and the retired `audit_anchors`. `session_turn_frames` is scoped (134): a
+frame is a tenant's answer text, and the holder writes it bound to the tenant its request records
+in `session_turn_remotes.request_tenant`. LangGraph's tables (`checkpoints*`, `store*`) are
 global too: a thread id or a namespace beginning with the actor, reached only after the session or
 the actor has been resolved through a scoped table.
 
@@ -189,12 +190,19 @@ both produce would otherwise collide, and so would a person moved from one tenan
 primary keys of `artifact_blobs`, `bo_campaigns`, `budget_usage`, `calculation_artifacts`,
 `calculation_claims`, `calculation_results`, `composed_workflows`, `corpus_molecules`,
 `measurements`, `molecule_fingerprints`, `note_index`, `observations`, `structures`,
-`tool_result_blobs` and `user_preferences`, and the constraints `predictions_identity` and `result_publications_identity`
-(unique indexes in 016 and 050, adopted as constraints by 131 without a rebuild). The foreign keys
-that point at them (`calculation_artifacts`, `bo_suggestions`, `tool_result_links`) are re-created
-over the wider key, `NOT VALID` and then `VALIDATE`d. The stores name these keys by constraint
-(`ON CONFLICT ON CONSTRAINT calculation_results_pkey`), which is the same statement under either
-key. A deployment that switched tenancy on cannot go back to an image before 131: that image's
+`tool_result_blobs` and `user_preferences`, and the constraints `predictions_identity` and
+`result_publications_identity` (unique indexes in 016 and 050, adopted as constraints by 131 without
+a rebuild). 133 adds the keys a data source or a person supplies: `commitments`, `corpus_cursors`,
+`corpus_reactions`, `document_chunks` (a content hash), `document_files`, `ingest_rejections`,
+`reaction_fingerprints`, `reaction_labels`, `reaction_records`, `reaction_species`, `sync_cursors`
+and the protocol tables (`experiment_protocols`, `experiment_protocol_revisions`: a design id hashes
+the ask and its owner), the constraints `note_proposals_version_unique` and
+`behaviour_proposals_version_unique`, and the expression index `subscriptions_identity`, rebuilt
+with the tenant. The foreign keys that point at them (`calculation_artifacts`, `bo_suggestions`,
+`tool_result_links`, the protocol children) are re-created over the wider key, `NOT VALID` and then
+`VALIDATE`d. The stores name these keys by constraint
+(`ON CONFLICT ON CONSTRAINT calculation_results_pkey`) or by no target, which is the same statement
+under either key. `tests/test_tenancy_inventory.py` makes every other key say why it stays narrow. A deployment that switched tenancy on cannot go back to an image before 131: that image's
 `ON CONFLICT (key)` no longer matches a constraint.
 
 **Switching it on takes `ACCESS EXCLUSIVE` on every scoped table** for the catalogue change, and on

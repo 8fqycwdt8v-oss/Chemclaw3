@@ -334,7 +334,7 @@ class PostgresLabelIndex(LabelIndex):
             %(source)s, %(reaction_id)s, %(record_smiles)s, %(citation)s, %(performed_on)s,
             %(temperature_c)s, %(time_h)s, %(yield_percent)s, %(workup_text)s
         )
-        ON CONFLICT (source, reaction_id) DO UPDATE SET
+        ON CONFLICT ON CONSTRAINT reaction_labels_pkey DO UPDATE SET
             record_smiles = EXCLUDED.record_smiles,
             citation = EXCLUDED.citation,
             performed_on = EXCLUDED.performed_on,
@@ -365,7 +365,7 @@ class PostgresLabelIndex(LabelIndex):
     _RECORD_SPECIES = """
         INSERT INTO reaction_species (source, reaction_id, ordinal, smiles, role)
         VALUES (%(source)s, %(reaction_id)s, %(ordinal)s, %(smiles)s, %(role)s)
-        ON CONFLICT (source, reaction_id, ordinal) DO UPDATE SET
+        ON CONFLICT ON CONSTRAINT reaction_species_pkey DO UPDATE SET
             smiles = EXCLUDED.smiles,
             role = EXCLUDED.role,
             derived_role = CASE WHEN reaction_species.smiles = EXCLUDED.smiles
