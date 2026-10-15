@@ -88,6 +88,20 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A note view is read in several steps, not one snapshot** [S] — `expand_note` awaits `edges`, `neighborhood`, `get_many` and
   `current_successors` separately, so a write between them can show a neighbour its links do not yet name; the Postgres store answers it with one transaction (`kg/store.py::NoteStore`).
 
+- [ ] **`record_note` still writes files; the transactional write has no caller** [M] — put `put(NoteUnit)` on `NoteStore`, give `record_note` a
+  Postgres arm that builds the unit and books `PutOutcome.notes`, and let the importer set `created_at`; `kg/postgres_store.py::PostgresNoteStore.put`, `kg/record.py::record_note`.
+- [ ] **`NoteStore.search` returns every match, so a common term holds the corpus** [S] — the caller caps afterwards (`graph_max_results`); pass the cap
+  into the statement (20,000 notes, one common term: ~0.9 s and ~60 MB per call, `cli/kg_store_bench.py`); `kg/postgres_store.py::search`.
+
+- [ ] **`content_sha` is the digest of the canonical note, which the 128 header and the W4 ADR call the file text** [S] — they differ when reading the
+  file back changes the note (edge whitespace, CRLF, U+2028); `kg-validate --compare` must compare `rows.canonical_note` values, never fingerprints; `kg/rows.py::content_sha`.
+- [ ] **`PostgresNoteStore.put` trusts `created_by`; the API layer must authenticate first** [S] — W4.8's `PUT /knowledge/notes/{id}` has to decide who may write as
+  `human` before it calls `put`; `kg/postgres_store.py::PostgresNoteStore.put`.
+- [ ] **`neighborhood` walks to `hops` however small the graph** [S] — a recursive CTE cannot see its visited set, so cost is hops x edges reached (callers clamp to
+  `graph_max_hops`); a level-by-level walk would stop early; `kg/postgres_store.py::_NEIGHBORHOOD`.
+- [ ] **A retirement through the Postgres store applies `valid_to` and `superseded-by` only** [S] — the prose the retire helpers append to the body is dropped; stop
+  writing it once the file writer is gone; `kg/postgres_store.py::_closed`, `memory/supersede.py::retire_note`.
+
 ### Everything else
 
 - [ ] **Follow-ups the architecture programme's reviews recorded** [M] — retry-exhaustion counter, note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
