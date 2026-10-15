@@ -90,6 +90,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Everything else
 
+- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — retry-exhaustion counter, note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
 - [ ] **PR #321's review findings never landed** [M] — extract what is still open from its review document into rows, then close #321.
 - [ ] **Dependabot group #431 needs hand-made bumps** [S] — mutmut 3.8 drops `Config.ensure_loaded`; deepagents `task` schema vs the
   900-token bound in `tests/test_context_floor.py`; rdkit 2026.3.6 lands paired with Chemclaw3-mcp (`tests/test_calc_rotation.py`).
@@ -119,6 +120,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on infrastructure this environment does not have
 
+- **The programme's cluster-, tenant- and person-gated items** — the kind `oidc-mock` lane, the Entra registration, UI egress, a real CloudNativePG rehearsal, the `calc_transport=rpc` flip, fleet session affinity and W4.9; steps in `docs/planning/programme-deferred-2026-10.md` §B · *Revisit:* a kind or OpenShift cluster with the operator installed and an Entra tenant (or the mock).
 - **Databricks workspace** — vector store and warehouse driver proven only against fakes; three vendor facts unpinned, score formula first · *Revisit:* a real workspace with a Direct Vector Access index and SQL warehouse.
 - **Per-user reads from the warehouse ELN** — warehouse connects as one service identity · *Revisit:* Databricks plus an Entra tenant and a new OBO decision (D-046).
 - **`X-Chemclaw-Actor` as durable attribution** — the header is unauthenticated · *Revisit:* an OBO exchange or a signed actor memo on core's MCP calls.
@@ -145,6 +147,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a live model budget
 
+- **Model-facing text rewrite (W2.15–W2.17), the deepagents upgrade merge (W5.2), the delegation re-check (W5.14), a semantic default embedder (W7.1) and the retrieval-eval floor (W7.3)** — each ships only behind the live arm; the first step of each is in `docs/planning/programme-deferred-2026-10.md` §A · *Revisit:* a gateway credential in the environment that runs `make live-ab`.
 - **The judge names no claims on 88% of turns** — schema half fixed, measurement half open · *Revisit:* a live run re-counts non-empty `claims`.
 - **Whether a `stated` quote's figure is about this slot** — `agent/protocol_design_tools.py::_quote_supports` cannot attribute · *Revisit:* a deployment's real turns to count over.
 - **An advisor tool** — design fully determined, no second model tier to consult · *Revisit:* an endpoint serving a stronger tier via `build_chat_model("advisor")`.
@@ -153,6 +156,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a scale not yet reached
 
+- **The programme's sequenced remainder** — W3.12 (parallel gate), W4 stage 2c to W4.11, W6.4, W7.8, W7.9, W7.12, W5.4–W5.13 and W8; order and file lists in `docs/planning/programme-deferred-2026-10.md` §C · *Revisit:* ten clean parallel runs on settled `main` (W3.12), `kg-validate --compare` clean for seven days (W4.9), the five flip criteria in §B5 (W6.4).
 - **Delete the `propose_report` activity alias** — old executions may still run · *Revisit:* no `DevelopmentReportWorkflow` started before the rename is running.
 - **Drop `note_proposed` from `evals/live.py`** — older UI builds still send it · *Revisit:* every probed deployment sends `note_recorded`.
 - **Watching for a new ELN run, not just a new note** — no one has asked · *Revisit:* a chemist asks for run-level alerting on a real corpus.
