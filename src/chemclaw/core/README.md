@@ -92,6 +92,7 @@ class composed — and the cross-section startup rules enforced — in its `__in
 | `egress`, `netguard`, `netguard_preload` (+ `netguard_preload.c`) | the LangSmith content-egress decision, and the in-process and compiled egress guards |
 | `vector_schema` | which pgvector column holds an embedding of a given width, the decoded per-row `embedding_key`, and whether a table's rows agree with the configured model (`/readyz`, `make reembed --status`) |
 | `migrate`, `grants` | apply `infra/sql/` migrations (`make db-migrate`) and reconcile the runtime principal's privileges (`make db-grants`) |
+| `restore_check` | the SQL of `make restore-drill`: the fixture it writes, the snapshot it compares and the checks it makes against a restored database; takes a DSN, so the entrypoint layer stays free of the driver |
 | `job_lock` | the cluster-wide, never-awaited advisory lock a single-instance job holds for its pass, so several workers do one effective run |
 | `jsonb`, `manifest_io` | the one `jsonb` write wrapper; the one manifest reader and its rule for fields that execute |
 | `metrics_bridge`, `tracing` | metric updates that cannot break their caller; first-party spans and their cross-process propagation |

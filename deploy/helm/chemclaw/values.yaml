@@ -873,6 +873,12 @@ postgres:
   # declaration can only add a firing condition.
   sessionStoreMaxConnections: 0
 
+  # Backup and restore are not this chart's: the Postgres a release runs on is the separate chart
+  # `deploy/helm/chemclaw-postgres` (a CloudNativePG Cluster with WAL archiving), installed before this
+  # one, because the migrate hook below needs the database to exist when it runs. A site with its own
+  # operator or a managed service holds that Postgres to the same contract instead
+  # (docs/guides/runbook.md § "Backup, restore and PITR").
+
 # The migration hook Job (`pre-install,pre-upgrade,pre-rollback`, D-034): migrations, the store's
 # own tables, then the runtime role's grants (`infra/sql/grants/`), before any app pod changes.
 migrateJob:

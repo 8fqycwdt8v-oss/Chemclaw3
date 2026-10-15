@@ -409,6 +409,32 @@ def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_docker_skips(terminalreporter: TerminalReporter) -> None:
+    """Say plainly that the restore drill did not run, and what that leaves unchecked.
+
+    The drill (`make restore-drill`) needs a Docker daemon and the Postgres and Temporal images;
+    without either its test skips and the run still prints green. Matched on
+    `tests.test_restore_drill.DOCKER_SKIP`.
+    """
+    from tests.test_restore_drill import DOCKER_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if DOCKER_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Restore drill did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because Docker, or an image the drill needs, was not "
+        "available (each skip line says which: no daemon answered, or an image was neither local "
+        "nor pullable), so this run is not evidence that a base backup plus archived WAL restores "
+        "to a chosen instant with the schema, indexes, grants and Temporal's databases intact. "
+        "Start Docker (`sudo -n dockerd &`), pull the images, and run `make restore-drill`."
+    )
+
+
 def _report_lane_skips(terminalreporter: TerminalReporter) -> None:
     """Say plainly that the multi-replica lane did not run, and what that leaves unchecked.
 
@@ -500,6 +526,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     _report_postgres_skips(terminalreporter)
     _report_temporal_skips(terminalreporter)
     _report_lane_skips(terminalreporter)
+    _report_docker_skips(terminalreporter)
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     _report_sibling_skips(terminalreporter)

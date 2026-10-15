@@ -1,0 +1,25 @@
+Postgres "{{ include "chemclaw-postgres.name" . }}" is rendered in {{ .Release.Namespace }}: WAL archiving to {{ .Values.backup.destinationPath }}, a base backup on "{{ .Values.backup.schedule }}".
+Declared targets: RPO {{ .Values.targets.rpoSeconds }} s, RTO {{ .Values.targets.rtoSeconds }} s.
+
+NEXT
+====
+  # wait until the Cluster is healthy and the first Backup is "completed"; nothing is recoverable before then
+  oc get cluster,backup -n {{ .Release.Namespace }}
+
+  # the application chart is installed AFTER this, with:
+  #   CHEMCLAW_POSTGRES_DSN  -> {{ include "chemclaw-postgres.name" . }}-rw.{{ .Release.Namespace }}.svc:5432/{{ .Values.database }} (sslmode=verify-full)
+  #   networkPolicy.egressDestinations -> a peer for pods labelled chemclaw/postgres=true
+  # The DSN is yours to write: a chart cannot read the password out of the {{ .Values.credentialsSecret | default (printf "%s-app" (include "chemclaw-postgres.name" .)) }} Secret.
+{{- if .Values.import.enabled }}
+
+IMPORT: the database is being copied from {{ .Values.import.source.host }}. It is a copy of the moment the import ran;
+keep the application's writers stopped until the application is repointed here.
+{{- end }}
+{{- if .Values.recovery.enabled }}
+
+RECOVERY: restoring {{ .Values.recovery.sourceClusterName }}'s archive{{ if .Values.recovery.targetTime }} to {{ .Values.recovery.targetTime }}{{ else }} to the end of the archived WAL{{ end }}.
+This cluster archives under its own name. Cut the application over to it only after the checks in
+docs/guides/runbook.md § "Backup, restore and PITR" pass.
+{{- end }}
+
+Everything this release created is kept if the release is uninstalled; deleting a database is a deliberate `oc delete`.
