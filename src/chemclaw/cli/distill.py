@@ -12,6 +12,8 @@ from collections import defaultdict
 from chemclaw.agent.distiller import bounded, candidates, propose, scaffold
 from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.cli.trajectory_census import _stored, census
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 
 
 async def _skills_by_session() -> dict[str, frozenset[str]]:
@@ -130,8 +132,13 @@ def main() -> None:
         help="file what survives into the proposal queue (otherwise only report it)",
     )
     parser.add_argument("--json", action="store_true", help="emit the machine-readable form")
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(_run(args.propose, args.json)))
+    try:
+        done = asyncio.run(for_chosen_tenants(args, lambda _t: _run(args.propose, args.json)))
+    except TenantError as exc:
+        raise SystemExit(refusal(exc)) from exc
+    raise SystemExit(max(done.values()))
 
 
 if __name__ == "__main__":  # pragma: no cover - the module entrypoint

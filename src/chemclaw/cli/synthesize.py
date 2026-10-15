@@ -5,6 +5,7 @@ an operator can mine the corpus directly (e.g. after a backfill) instead of aski
 
 Usage: `python -m chemclaw.cli.synthesize <kind> [--fresh] [--actor <id>]` — kinds `campaign`,
 `playbook`, `optimization`, `observation-promotion`; `--fresh` forces a re-mine today.
+With tenancy enabled the run is a tenant's: `--tenant <id>` is required.
 """
 
 import argparse
@@ -18,6 +19,8 @@ from chemclaw.agent.durable_tools import _MEMORY_JOBS, MemoryJobKind, _memory_jo
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 
 
 async def _start(kind: MemoryJobKind, fresh: bool, actor: str) -> str:
@@ -61,8 +64,17 @@ def main() -> int:
         default=settings.service_actor_id,
         help="who is asking — stamped on every proposal the run opens",
     )
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args()
-    print(asyncio.run(_start(cast(MemoryJobKind, args.kind), args.fresh, args.actor)))
+    try:
+        outcome = asyncio.run(
+            for_chosen_tenants(
+                args, lambda _t: _start(cast(MemoryJobKind, args.kind), args.fresh, args.actor)
+            )
+        )
+    except TenantError as exc:
+        return refusal(exc)
+    print(*outcome.values())
     return 0
 
 

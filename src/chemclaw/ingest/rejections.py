@@ -52,7 +52,7 @@ _MIN_WORD_CHARS = 5
 _UPSERT = """
 INSERT INTO ingest_rejections (source, entry_id, reason)
 VALUES (%(source)s, %(entry_id)s, %(reason)s)
-ON CONFLICT (source, entry_id) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT ingest_rejections_pkey DO UPDATE SET
     -- The newest reason wins: a source that changed how it is broken has changed what the answer
     -- to "why was this refused" is, and the row is about the record rather than about one run.
     reason = EXCLUDED.reason,

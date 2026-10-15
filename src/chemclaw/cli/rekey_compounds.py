@@ -3,6 +3,7 @@
     python -m chemclaw.cli.rekey_compounds            # preview: per-kind counts, writes nothing
     python -m chemclaw.cli.rekey_compounds --apply    # writes
     python -m chemclaw.cli.rekey_compounds --apply --dispose-superseded   # and then disposes
+    python -m chemclaw.cli.rekey_compounds --tenant <id> | --all-tenants  # required under tenancy
 
 `make rekey-compounds [APPLY=1 [DISPOSE=1]]`, run after deploying a bump. A shim over
 `chemclaw.memory.compound_rekey.rekey_standardization`; preview by default and idempotent.
@@ -23,6 +24,8 @@ from datetime import date, timedelta
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.migrate import migration_dsn
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.kg.git_writer import default_writer
 from chemclaw.memory.compound_rekey import StandardizationRekeyReport, rekey_standardization
 from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
@@ -143,14 +146,25 @@ def main(argv: list[str] | None = None) -> int:
             "(CHEMCLAW_POSTGRES_MIGRATION_DSN when set). Requires --apply."
         ),
     )
+    add_tenant_flags(parser, all_tenants=True)
     args = parser.parse_args(argv)
     if args.dispose_superseded and not args.apply:
         parser.error("--dispose-superseded requires --apply: a preview rebuilds nothing")
     started = time.perf_counter()
-    report, disposed = asyncio.run(_run(apply=args.apply, dispose=args.dispose_superseded))
-    print(render(report, time.perf_counter() - started))
-    if disposed:
-        print("\n".join(["", "superseded generations:", *(f"  {line}" for line in disposed)]))
+    try:
+        runs = asyncio.run(
+            for_chosen_tenants(
+                args, lambda _t: _run(apply=args.apply, dispose=args.dispose_superseded)
+            )
+        )
+    except TenantError as exc:
+        return refusal(exc)
+    for tenant, (report, disposed) in runs.items():
+        if len(runs) > 1:
+            print(f"== tenant {tenant} ==")
+        print(render(report, time.perf_counter() - started))
+        if disposed:
+            print("\n".join(["", "superseded generations:", *(f"  {line}" for line in disposed)]))
     return 0
 
 

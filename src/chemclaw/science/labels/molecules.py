@@ -52,7 +52,7 @@ class CorpusMolecules:
     _UPSERT = (
         "INSERT INTO corpus_molecules (id, label, bits, definition, pattern_bits) "
         "VALUES (%(id)s, %(label)s, %(bits)s::bit({width}), %(definition)s, %(pattern)s) "
-        "ON CONFLICT (id) DO UPDATE SET "
+        "ON CONFLICT ON CONSTRAINT corpus_molecules_pkey DO UPDATE SET "
         "label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition, "
         "pattern_bits = EXCLUDED.pattern_bits"
     )

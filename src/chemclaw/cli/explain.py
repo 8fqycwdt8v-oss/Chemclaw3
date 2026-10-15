@@ -16,6 +16,8 @@ from chemclaw.agent.session_store import is_degraded_render, message_from_row
 from chemclaw.api.schemas import message_role, message_text
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 
 # One turn's words, in order. `created_at` orders rows written before `correlation_id` existed (they
 # carry '' and form one "unattributed" group).
@@ -316,13 +318,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     Arguments are declared, so flags are not looked up as session ids. A blank id is refused: it
     would match rows written before `session_id` was recorded and print other actors' audit rows. An
     unreachable database or one without this schema is reported in one line with a remedy; anything
-    else still raises, since a bug here is not the database refusing.
+    else still raises, since a bug here is not the database refusing. With tenancy enabled the
+    session is a tenant's: `--tenant <id>`, or the command refuses.
     """
     parser = argparse.ArgumentParser(
         prog="python -m chemclaw.cli.explain",
         description="Reconstruct a session: its turns, the tools each ran, and why.",
     )
     parser.add_argument("session_id", help="the session id to reconstruct.")
+    add_tenant_flags(parser, all_tenants=False)
     options = parser.parse_args(argv)
     if not options.session_id.strip():
         print(
@@ -332,7 +336,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 64
     try:
-        lines = asyncio.run(explain(options.session_id))
+        ((_, lines),) = asyncio.run(
+            for_chosen_tenants(options, lambda _t: explain(options.session_id))
+        ).items()
+    except TenantError as exc:
+        return refusal(exc)
     except ConnectionError as exc:
         # `core.db` raises `ConnectionError` (here `_DatabaseUnavailable`) for an unreachable or
         # saturated database; caught by that documented contract.

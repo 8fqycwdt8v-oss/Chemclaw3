@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _INSERT = """
 INSERT INTO subscriptions (owner, query, note_type)
 VALUES (%s, %s, %s)
-ON CONFLICT (owner, query, coalesce(note_type, '')) DO NOTHING
+ON CONFLICT DO NOTHING
 """
 _COLUMNS = "id, owner, query, note_type, last_seen_at, last_seen_note_ids"
 _SELECT_OWNER = f"SELECT {_COLUMNS} FROM subscriptions WHERE owner = %s ORDER BY id"

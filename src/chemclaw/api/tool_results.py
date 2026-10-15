@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _INSERT_BLOB = """
     INSERT INTO tool_result_blobs (content_hash, byte_size, data)
     VALUES (%s, %s, %s)
-    ON CONFLICT (content_hash) DO UPDATE SET created_at = now()
+    ON CONFLICT ON CONSTRAINT tool_result_blobs_pkey DO UPDATE SET created_at = now()
 """
 
 

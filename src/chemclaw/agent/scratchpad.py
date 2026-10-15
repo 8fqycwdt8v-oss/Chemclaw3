@@ -53,6 +53,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.tenancy import namespace_component
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ def memory_namespace(actor: str) -> tuple[str, ...]:
     Returns:
         The namespace tuple, stable for one actor across processes and restarts.
     """
-    return ("memories", stable_hash(actor))
+    return (namespace_component("memories"), stable_hash(actor))
 
 
 def memory_prefix(actor: str) -> str:

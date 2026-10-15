@@ -102,7 +102,12 @@
 
        So there is no default: a default is precisely what two releases would share. */ -}}
 {{- if not .Values.temporal.namespace }}
-{{- fail (printf "temporal.namespace is not set, and this chart ships no default for it. `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster, and inside it the Temporal namespace is the only thing separating two ChemClaw releases: the background task queue is a constant, every Schedule id is a constant, and a second release's `helm upgrade` rewrites this one's Schedules and deletes the ones it does not itself plan. Give this release a namespace of its own — %q is unique by construction here — and register it on the broker. (A shared Postgres is the same hazard and this does not cover it: two releases need their own database too.)" .Release.Namespace) }}
+{{- fail (printf "temporal.namespace is not set, and this chart ships no default for it. `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster, and inside it the Temporal namespace is the only thing separating two ChemClaw releases: the background task queue is a constant, every Schedule id is a constant, and a second release's `helm upgrade` rewrites this one's Schedules and deletes the ones it does not itself plan. Give this release a namespace of its own — %q is unique by construction here — and register it on the broker. (A shared Postgres is the same hazard and this does not cover it: two releases need their own database too, which the migrate hook enforces with the release stamp `deploymentId`.)" .Release.Namespace) }}
+{{- end }}
+{{- /* The release's identity in its database is derived below, for the reason the Temporal
+       namespace is: written in `config` as well it renders twice and the parser keeps the last. */ -}}
+{{- if hasKey .Values.config "CHEMCLAW_DEPLOYMENT_ID" }}
+{{- fail "config.CHEMCLAW_DEPLOYMENT_ID is derived from `deploymentId` (else the release's namespace and name) rather than written into this block — written by hand it renders the key twice and every parser keeps the last. Remove it and set `deploymentId`." }}
 {{- end }}
 {{- if hasKey .Values.config "CHEMCLAW_TEMPORAL_NAMESPACE" }}
 {{- fail "config.CHEMCLAW_TEMPORAL_NAMESPACE is derived from `temporal.namespace` rather than written into this block — written by hand it renders the key twice, every parser keeps the last, and the gate above would be checking a value nothing reads. Remove it and set `temporal.namespace`." }}
@@ -266,6 +271,10 @@
          value the pods read. Written in both places it renders twice and the parser keeps the
          last — which is why writing it in `config` is refused rather than merged. */}}
   CHEMCLAW_TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}
+  {{- /* Which release owns the database: the migrate hook stamps it, and the front door and every
+         worker compare it on start (`core/deployment.py`). Unique by construction where each
+         release has a namespace of its own; `deploymentId` states it where one does not. */}}
+  CHEMCLAW_DEPLOYMENT_ID: {{ .Values.deploymentId | default (printf "%s/%s" .Release.Namespace .Release.Name) | quote }}
   {{- /* Derived from `.Values.connectors` rather than hand-written in `config`, for the same reason
          the note-repo dir is: the address the front door dials must be the Service that the same
          value block created. Only the enabled connectors appear, so a disabled bundle is simply

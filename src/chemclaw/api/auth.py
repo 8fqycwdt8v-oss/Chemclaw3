@@ -35,6 +35,8 @@ from chemclaw.core.config import settings
 from chemclaw.core.http import default_ssl_context
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tenancy import DEFAULT_TENANT, TenantError, tenant_from_roles
+from chemclaw.core.tenant_registry import is_registered
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +71,17 @@ class Principal(BaseModel):
     oid: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     upn: str = ""
     roles: frozenset[str] = frozenset()
+    #: The tenant this person's rows belong to: the token's one `tenant:<id>` role when
+    #: `tenancy_enabled`, else `default`. Set where the token is read, never from a request.
+    tenant: str = DEFAULT_TENANT
 
 
 class AuthError(Exception):
     """A token could not be validated (bad signature, audience, issuer, or missing identity)."""
+
+
+class TenantRefused(AuthError):
+    """The token is valid but names no tenant, several, or one nobody registered (a 403)."""
 
 
 class IdentityProviderUnavailable(Exception):
@@ -369,7 +378,22 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
         entitlements += [
             f"{GROUP_ROLE_PREFIX}{group}" for group in _string_list_claim(claims, "groups")
         ]
-    return Principal(oid=oid, upn=upn, roles=frozenset(entitlements))
+    roles = frozenset(entitlements)
+    return Principal(oid=oid, upn=upn, roles=roles, tenant=_tenant_of(roles))
+
+
+def _tenant_of(roles: frozenset[str]) -> str:
+    """The tenant a token's roles name; `default` while tenancy is off.
+
+    Raises:
+        TenantRefused: tenancy is on and the token carries none, or more than one.
+    """
+    if not settings.tenancy_enabled:
+        return DEFAULT_TENANT
+    try:
+        return tenant_from_roles(roles)
+    except TenantError as exc:
+        raise TenantRefused(str(exc)) from exc
 
 
 def _string_list_claim(claims: dict[str, Any], name: str) -> list[str]:
@@ -396,9 +420,8 @@ async def require_principal(request: Request) -> Principal:
     _shed_if_the_database_is_known_down(request)
     if not settings.entra_required:
         _refuse_exposed_dev_principal(request)
-        return _bind(
-            request, await _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
-        )
+        dev = Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost", tenant=_dev_tenant())
+        return _bind(request, await _within_budget(await _registered(dev)))
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         # Counted and logged so a client sending no header is distinguishable from no failures.
@@ -418,13 +441,18 @@ async def require_principal(request: Request) -> Principal:
         _count_auth_failure("provider_unavailable")
         logger.warning("identity provider unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="identity provider unavailable") from exc
+    except TenantRefused as exc:
+        # The token is good and names no usable tenant: authenticated, not authorised for any data.
+        _count_auth_failure("tenant")
+        logger.info("token carries no usable tenant: %s", exc)
+        raise HTTPException(status_code=403, detail="no tenant") from exc
     except AuthError as exc:
         # The specific failure reason (audience/issuer/expiry mismatch) is logged for the operator,
         # never disclosed to the caller, who gets a generic 401.
         _count_auth_failure("invalid")
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc
-    return _bind(request, await _within_budget(principal))
+    return _bind(request, await _within_budget(await _registered(principal)))
 
 
 async def reauthorize(request: Request, principal: Principal) -> Principal:
@@ -501,12 +529,39 @@ def _count_auth_failure(reason: str) -> None:
 
 
 def _bind(request: Request, principal: Principal) -> Principal:
-    """Make the authenticated caller ambient for the rest of the request, then return it.
+    """Make the authenticated caller and their tenant ambient for the rest of the request.
 
     Here because every authenticated route funnels through this function, so every log line names
-    its actor. The reset is `api/middleware._RequestObservability`'s, which runs on every exit path.
+    its actor and every database borrow carries its tenant. The reset is
+    `api/middleware._RequestObservability`'s, which runs on every exit path.
     """
-    bind_request_actor(request, principal.oid, principal.roles)
+    bind_request_actor(request, principal.oid, principal.roles, principal.tenant)
+    return principal
+
+
+def _dev_tenant() -> str:
+    """The tenant of the stand-in principal: `default`, or the process's when tenancy is on.
+
+    With tenancy on and no `tenancy_process_tenant` there is none to give, and the request is
+    refused as a token with no tenant role would be.
+    """
+    if not settings.tenancy_enabled:
+        return DEFAULT_TENANT
+    if not settings.tenancy_process_tenant:
+        _count_auth_failure("tenant")
+        raise HTTPException(
+            status_code=403,
+            detail="no tenant (set CHEMCLAW_TENANCY_PROCESS_TENANT for the dev principal)",
+        )
+    return settings.tenancy_process_tenant
+
+
+async def _registered(principal: Principal) -> Principal:
+    """Refuse a tenant nobody registered; with tenancy off there is one and nothing is asked."""
+    if settings.tenancy_enabled and not await is_registered(principal.tenant):
+        _count_auth_failure("tenant")
+        logger.info("tenant %r is not registered", principal.tenant)
+        raise HTTPException(status_code=403, detail="no tenant")
     return principal
 
 

@@ -34,7 +34,7 @@ _UPSERT = """
         (key, calc_type, calc_version, input_hash, params_hash, result, provenance,
          compute_seconds, structure_id, epoch)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (key) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT calculation_results_pkey DO UPDATE SET
         result = EXCLUDED.result,
         provenance = EXCLUDED.provenance,
         -- Keep a recorded geometry when a rewrite does not carry one, by the same rule as the

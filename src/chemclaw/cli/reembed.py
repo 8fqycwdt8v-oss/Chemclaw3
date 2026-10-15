@@ -13,6 +13,11 @@ waits for its verdict; the run is idempotent, so a second start after a failure 
 emptied a rollback heals itself; afterwards a rollback re-embeds the corpus. Run it when the
 release is settled, at the same moment the old columns would be dropped.
 
+With tenancy enabled the embedding model is the deployment's but the rows are the tenants', so
+the command re-embeds every registered tenant in turn (one run each, `<tenant>~embedding-reembed`),
+`--status` reads every tenant's rows, and `--reclaim` empties each tenant's old vectors. There is no
+flag to name one: a model change that reached some tenants would leave the rest unsearchable.
+
 Exit status: 0 when every row is under the configured key, 1 when rows remain, 2 on a refusal.
 """
 
@@ -28,7 +33,9 @@ from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embedding_config_key
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.vector_schema import inspect_tables, live_embedding_keys
+from chemclaw.core.tenancy import TenantError, scope_workflow_id
+from chemclaw.core.tenant_cli import for_chosen_tenants
+from chemclaw.core.vector_schema import inspect_every_tenant, live_embedding_keys
 from chemclaw.durable.document_sync import share_sources
 from chemclaw.durable.reembed import EmbeddingReembedWorkflow, ReembedOutcome, ReembedRequest
 
@@ -51,7 +58,7 @@ async def status() -> str:
         return "\n".join(lines)
     chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
     async with db.connection(settings.postgres_dsn) as conn:
-        for state in await inspect_tables(
+        for state in await inspect_every_tenant(
             conn, settings.embedding_dim, live_embedding_keys(), chunkings
         ):
             width = "missing" if state.column_width is None else f"vector({state.column_width})"
@@ -92,9 +99,28 @@ def _root_cause(exc: BaseException) -> BaseException:
 
 
 async def run(*, reclaim: bool = False) -> tuple[str, int]:
-    """Start (or rejoin) the workflow, wait, and return its summary and the exit status."""
+    """Re-embed (or reclaim for) every tenant, and return the summaries and the worst status.
+
+    Each tenant's run is bound to it, so the workflow and its activities see that tenant's rows and
+    no others. With tenancy off there is one run, as before.
+    """
+    try:
+        runs = await for_chosen_tenants(
+            argparse.Namespace(tenant=None, all_tenants=True),
+            lambda tenant: _run_one(reclaim=reclaim, tenant=tenant),
+        )
+    except TenantError as exc:
+        return f"refused: {exc}", _EXIT_REFUSED
+    if len(runs) == 1:
+        return next(iter(runs.values()))
+    summary = "\n".join(f"[{tenant}] {text}" for tenant, (text, _) in runs.items())
+    return summary, max(code for _, code in runs.values())
+
+
+async def _run_one(*, reclaim: bool, tenant: str) -> tuple[str, int]:
+    """Start (or rejoin) one tenant's workflow, wait, and return its summary and exit status."""
     client = await connect()
-    workflow_id = RECLAIM_WORKFLOW_ID if reclaim else WORKFLOW_ID
+    workflow_id = scope_workflow_id(RECLAIM_WORKFLOW_ID if reclaim else WORKFLOW_ID)
     try:
         handle = await client.start_workflow(
             EmbeddingReembedWorkflow.run,
@@ -127,7 +153,11 @@ def main() -> int:
     args = parser.parse_args()
     configure_logging()
     if args.status:
-        print(asyncio.run(status()))
+        try:
+            print(asyncio.run(status()))
+        except TenantError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return _EXIT_REFUSED
         return 0
     summary, code = asyncio.run(run(reclaim=args.reclaim))
     print(summary)

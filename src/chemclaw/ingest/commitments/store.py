@@ -41,7 +41,7 @@ _UPDATED = ",\n        ".join(f"{name} = EXCLUDED.{name}" for name in _COLUMNS[2
 _UPSERT = f"""
     INSERT INTO commitments ({", ".join(_COLUMNS)})
     VALUES ({", ".join(["%s"] * len(_COLUMNS))})
-    ON CONFLICT (source, external_id) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT commitments_pkey DO UPDATE SET
         {_UPDATED},
         observed_at = now()
 """

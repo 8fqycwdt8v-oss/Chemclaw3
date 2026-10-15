@@ -102,7 +102,7 @@ def _record(outcome: str) -> None:
 _CLAIM = """
     INSERT INTO calculation_claims AS c (key, attempt, state, error, lease_until, claimed_at)
     VALUES (%(key)s, %(attempt)s, 'running', '', now() + make_interval(secs => %(lease)s), now())
-    ON CONFLICT (key) DO UPDATE
+    ON CONFLICT ON CONSTRAINT calculation_claims_pkey DO UPDATE
        SET attempt = EXCLUDED.attempt, state = 'running', error = '',
            lease_until = EXCLUDED.lease_until, claimed_at = EXCLUDED.claimed_at
      WHERE (c.state = 'running' AND c.lease_until < now())

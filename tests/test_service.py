@@ -108,6 +108,19 @@ def _app(agent: ScriptedTurn | None = None, **kwargs: Any) -> FastAPI:
     return create_app(graph_factory=fake.graph_factory, **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _unchecked_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the lifespan's database check: several tests here replace `db.connection` by a double.
+
+    The check has its own tests (`tests/test_deployment_guard.py`), against a real database.
+    """
+
+    async def _unchecked() -> None:
+        return None
+
+    monkeypatch.setattr("chemclaw.api.app.verify_deployment", _unchecked)
+
+
 def _client(
     agent: _FakeAgent,
     connector_factory: Callable[[str | None], list[Any]] = _no_connectors,

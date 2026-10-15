@@ -25,7 +25,7 @@ from chemclaw.core.config import settings
 _BOOK = """
     INSERT INTO budget_usage (actor, window_start, turns, tokens)
     VALUES (%(actor)s, now(), 1, %(tokens)s)
-    ON CONFLICT (actor) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT budget_usage_pkey DO UPDATE SET
         window_start = CASE
             WHEN budget_usage.window_start <= now() - %(window)s::interval
             THEN now() ELSE budget_usage.window_start END,

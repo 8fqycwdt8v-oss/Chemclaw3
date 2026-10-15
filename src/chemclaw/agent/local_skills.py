@@ -39,6 +39,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tenancy import namespace_component
 from chemclaw.core.turn_signals import record_skill_loaded
 
 if TYPE_CHECKING:
@@ -170,7 +171,7 @@ def local_skills_namespace(actor: str) -> tuple[str, ...]:
     Returns:
         The namespace tuple, stable for one actor across processes and restarts.
     """
-    return ("local-skills", stable_hash(actor))
+    return (namespace_component("local-skills"), stable_hash(actor))
 
 
 def local_skills_prefix(actor: str) -> str:

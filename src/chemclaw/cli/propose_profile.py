@@ -18,6 +18,8 @@ from collections import Counter, defaultdict
 import yaml
 
 from chemclaw.agent.behaviour_proposals import Proposal, content_hash, default_proposal_store
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.operations.activity import safe_tool_name
 
 #: How many of one chemist's turns a pair of tools must share to count as a cluster. Low, because
@@ -176,8 +178,13 @@ def main() -> None:
         "--propose", action="store_true", help="file what it finds into the proposal queue"
     )
     parser.add_argument("--json", action="store_true", help="emit the machine-readable form")
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(_run(args.propose, args.json)))
+    try:
+        done = asyncio.run(for_chosen_tenants(args, lambda _t: _run(args.propose, args.json)))
+    except TenantError as exc:
+        raise SystemExit(refusal(exc)) from exc
+    raise SystemExit(max(done.values()))
 
 
 if __name__ == "__main__":  # pragma: no cover - the module entrypoint

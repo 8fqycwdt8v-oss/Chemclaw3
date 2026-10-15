@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 _UPSERT = """
 INSERT INTO user_preferences (owner, key, value, updated_at)
 VALUES (%s, %s, %s, now())
-ON CONFLICT (owner, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+ON CONFLICT ON CONSTRAINT user_preferences_pkey DO UPDATE
+    SET value = EXCLUDED.value, updated_at = now()
 """
 # Bounded rows per owner, because the model chooses keys. The least recently updated preference
 # goes. Runs in the writer's transaction so the bound is exact; `NOT IN` over the keeps makes it one

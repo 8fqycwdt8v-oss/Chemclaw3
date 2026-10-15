@@ -116,7 +116,7 @@ async def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bou
     sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
     for index in range(25):
         await sink.record(_race_event(index))
-    buffered = list(sink._buffer)
+    buffered = [event for _tenant, event in sink._buffer]
     assert len(buffered) <= 10, f"buffer grew past its bound: {len(buffered)}"
     assert [event.latency_ms for event in buffered] == [float(i) for i in range(15, 25)], (
         "the buffer shed the newest events; the oldest are the ones that may go"

@@ -25,14 +25,14 @@ logger = logging.getLogger(__name__)
 _INSERT_BLOB = """
     INSERT INTO artifact_blobs (content_hash, codec, byte_size, stored_bytes, data)
     VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (content_hash) DO NOTHING
+    ON CONFLICT ON CONSTRAINT artifact_blobs_pkey DO NOTHING
 """
 
 _UPSERT_LINK = """
     INSERT INTO calculation_artifacts
         (calc_key, name, content_hash, media_type, compute_seconds)
     VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (calc_key, name) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT calculation_artifacts_pkey DO UPDATE SET
         content_hash = EXCLUDED.content_hash,
         media_type = EXCLUDED.media_type,
         compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_artifacts.compute_seconds),

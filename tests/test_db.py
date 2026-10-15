@@ -256,6 +256,13 @@ _UNBOUNDED_BY_DESIGN = {
     # holds the advisory lock: a pooled connection would be returned to the pool still locked, and
     # the lock lives with the session. It runs one statement to take and one to release the lock.
     "chemclaw/core/job_lock.py",
+    # `cli/tenants.py` registers a tenant under the owning principal (`migration_dsn`), the way the
+    # migrator does: one statement, no pool, and nothing a request can reach.
+    "chemclaw/cli/tenants.py",
+    # `core/deployment.pooler_problem` opens two bare client connections to see what a pooler in
+    # front of Postgres does to a session setting: borrowing from a pool would hide exactly that.
+    # Five short statements each, then both are closed.
+    "chemclaw/core/deployment.py",
 }
 _DEFINITION_SITE = "chemclaw/core/db.py"
 
@@ -405,3 +412,60 @@ def test_every_walk_of_the_pool_registry_is_under_the_registry_lock() -> None:
         if names & {"_POOLS", "_FOREIGN_POOLS"} and "_POOL_REGISTRY_LOCK" not in names:
             unguarded.append(node.name)
     assert not unguarded, f"these walk the pool registry without holding its lock: {unguarded}"
+
+
+# Every way `src/` can open a Postgres connection that does not go through `core.db.connection`,
+# which writes the tenant into `app.tenant` on each borrow. A store that opened one itself would
+# read nothing (policies on) or, as a superuser, everything. Each module says why it is not one.
+_RAW_ENTRY_POINTS = {
+    "chemclaw/agent/checkpointer.py": "LangGraph's checkpoint tables are global: a thread id, "
+    "reached only through a session resolved in a scoped table",
+    "chemclaw/agent/store_setup.py": "creates upstream's tables as the migrator; no tenant data",
+    "chemclaw/publish/drivers/postgres.py": "the external results database, not this system's",
+    "chemclaw/core/restore_check.py": "the restore drill binds its tenant in `_connect`",
+    "chemclaw/cli/restore_drill.py": "the drill's checkpointer setup; global tables",
+}
+_RAW_CALLS = (
+    "psycopg.connect",
+    "psycopg.AsyncConnection.connect",
+    "psycopg.Connection.connect",
+    "AsyncConnectionPool",
+    "ConnectionPool",
+    "from_conn_string",
+)
+
+
+def _raw_connection_calls(source: str) -> set[str]:
+    """The raw connection entry points `source` calls, by dotted name."""
+    tree = ast.parse(source)
+    called = {ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    return {
+        name for name in called for raw in _RAW_CALLS if name == raw or name.endswith(f".{raw}")
+    }
+
+
+def test_the_scan_notices_a_store_that_opens_its_own_connection() -> None:
+    """A store switched to a raw psycopg connect is found, whichever entry point it picks."""
+    for statement in (
+        "psycopg.connect(dsn)",
+        "await psycopg.AsyncConnection.connect(dsn)",
+        "AsyncConnectionPool(dsn)",
+        "async with AsyncPostgresSaver.from_conn_string(dsn) as s: pass",
+    ):
+        assert _raw_connection_calls(f"async def f(dsn):\n    {statement}\n"), statement
+    assert not _raw_connection_calls("async def f():\n    async with db.connection(dsn): pass\n")
+
+
+def test_only_the_named_modules_open_a_postgres_connection_of_their_own() -> None:
+    """Every store goes through `core.db`, so the tenant is bound on every borrow."""
+    root = Path(__file__).resolve().parents[1] / "src"
+    found = {
+        path.relative_to(root).as_posix()
+        for path in sorted(root.rglob("*.py"))
+        if path.relative_to(root).as_posix() != _DEFINITION_SITE
+        and _raw_connection_calls(path.read_text())
+    }
+    assert found == set(_RAW_ENTRY_POINTS), (
+        f"new: {sorted(found - set(_RAW_ENTRY_POINTS))}, "
+        f"gone: {sorted(set(_RAW_ENTRY_POINTS) - found)}"
+    )

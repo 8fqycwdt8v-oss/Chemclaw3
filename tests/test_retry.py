@@ -475,7 +475,8 @@ def _source_trees() -> list[tuple[str, ast.Module]]:
 def _is_dispatch(call: ast.Call) -> bool:
     """Whether `call` schedules an activity.
 
-    The interceptor's `self.next.execute_activity(...)` delegates an already-scheduled activity.
+    An interceptor's `self.next.execute_activity(...)` or `self.next.start_activity(...)` delegates
+    an activity somebody else already scheduled, with the policy they gave it.
     """
     func = call.func
     if isinstance(func, ast.Name):
@@ -600,6 +601,8 @@ def _child_offences(tree: ast.Module, where: str) -> list[str]:
     for call in ast.walk(tree):
         if not (isinstance(call, ast.Call) and _call_name(call) in _CHILD_NAMES):
             continue
+        if isinstance(call.func, ast.Attribute) and ast.unparse(call.func.value) == "self.next":
+            continue  # an interceptor forwarding a child its workflow already described
         if not _states_a_policy(call, enclosing, _CHILD_POLICIES):
             policy = _keywords(call).get("retry_policy")
             given = ast.unparse(policy) if policy else "nothing (the server's default)"

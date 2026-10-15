@@ -10,6 +10,7 @@ and the terminal get the same answer.
 | `chat.py` | the admin chat REPL, and the `chemclaw` console script (`make chat`) |
 | `connectors_dev.py` | every enabled connector in one dev process (`make connectors`) |
 | `schedules.py` | apply the Temporal Schedules (`make schedules-apply`); the logic is `durable/schedules.py` |
+| `tenants.py` | register and list tenants (`make tenant-add TENANT=acme [DEPLOYMENT=<release>]`, `make tenant-assign`, `make tenant-list`); an operator's command, run under the owning principal |
 | `validate_*.py` | the validators `make` runs — one per declaration format; `validate_template_args_live.py` is the argument check `template-validate` cannot make, taken against running servers |
 | `reembed.py` | bring every stored vector to the configured embedding model and width (`make reembed`); the logic is `durable/reembed.py` |
 | `backfill_corpus.py`, `backfill_publications.py`, `refresh_baseline.py`, `synthesize.py`, `sync_share.py` | one-shot operational jobs: notes from existing documents, queueing results computed before a sink existed, the eval baseline, a memory-synthesis job, crawling a mounted share |

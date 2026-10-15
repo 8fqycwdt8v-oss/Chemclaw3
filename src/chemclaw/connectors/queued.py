@@ -42,6 +42,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import scope_workflow_id
 from chemclaw.core.turn_signals import record_job_started, record_tool_queued
 from chemclaw.durable.connector_job import ConnectorJobResult, envelope_from_result, failure_reason
 
@@ -63,10 +64,13 @@ class QueueUnavailable(Exception):
 def queued_workflow_id(connector: str, tool: str, arguments: dict[str, Any]) -> str:
     """The id identical queued calls share, so concurrent ones join one run.
 
-    A function of the call alone, never of who asked, which is why only a tool whose answer depends
-    only on its arguments may be queued (`manifest.QueuedDispatch`).
+    A function of the call and the tenant, never of the person, which is why only a tool whose
+    answer depends only on its arguments may be queued (`manifest.QueuedDispatch`). The tenant is
+    part of it: another tenant's identical call must not join this one's run and read its result.
     """
-    return f"queued-{connector}-{tool}-{stable_hash([connector, tool, arguments])}"
+    return scope_workflow_id(
+        f"queued-{connector}-{tool}-{stable_hash([connector, tool, arguments])}"
+    )
 
 
 def queued_interceptor(

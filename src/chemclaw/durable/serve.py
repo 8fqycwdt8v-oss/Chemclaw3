@@ -19,6 +19,13 @@ from temporalio.worker import Interceptor, Worker
 from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.core import backend_rpc, db
 from chemclaw.core.config import settings
+from chemclaw.core.deployment import (
+    bind_deployment_gauges,
+    checks_anything,
+    deployment_status,
+    recheck_loop,
+    verify_deployment,
+)
 from chemclaw.core.executor import install_default_executor
 from chemclaw.core.logging import log_event
 from chemclaw.core.worker_http import worker_http
@@ -90,7 +97,7 @@ def worker_ready(worker: Worker) -> bool:
     (broker restart, NetworkPolicy change, mTLS rotation); a worker that cannot reach the broker at
     startup exits instead. Module-level so the test drives this definition.
     """
-    return worker.is_running and broker_seen_recently()
+    return worker.is_running and broker_seen_recently() and not deployment_status().problems
 
 
 async def serve_worker(worker: Worker, *, component: str) -> None:
@@ -129,12 +136,23 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
             connector_sessions.pooling(),
             worker_http(component=component, ready=partial(worker_ready, worker)),
         ):
+            # Before the first poll: a worker on a database it does not own would run another
+            # release's workflows' activities against it.
+            await verify_deployment()
+            bind_deployment_gauges()
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
             # Refreshes the open-jobs gauge from the broker (`durable/job_metrics.py`). Kept alive
             # through the drain so `/metrics` does not freeze during shutdown, and cancelled however
             # this function exits.
             polling = asyncio.create_task(poll_open_jobs(worker.client, stop))
+            # A worker that stops agreeing with its database (a role changed, a migration run
+            # backwards) stops reporting ready, and its pod drains instead of acting on it.
+            rechecking = (
+                asyncio.create_task(recheck_loop())
+                if checks_anything() and settings.deployment_recheck_seconds > 0
+                else None
+            )
             # The result outbox's backlog, for the worker that drains it: read from the table on
             # a timer so every replica reports the same truth, not the last pass it ran itself.
             backlog = (
@@ -174,6 +192,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
                 )
             finally:
                 polling.cancel()
+                if rechecking is not None:
+                    rechecking.cancel()
                 if backlog is not None:
                     backlog.cancel()
     finally:

@@ -77,6 +77,12 @@ _TOUCHES = (
     # fail `test_every_migration_statement_is_one_the_rule_understands` rather than pass unread.
     re.compile(rf"^DO\s+\$\$.*?\bALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
 )
+# A block that scopes tables from a list rather than naming one in an `ALTER TABLE`: `131`'s
+# `scoped` array (every table given the tenant column and policy) and `widened` array (every table
+# whose key gains it). Each quoted name in either is a table the statement acts on.
+_NAMES_ITS_TABLES_IN_ARRAYS = re.compile(r"^DO\s+\$\$.*?\bscoped text\[\] := ARRAY\[", re.I)
+_ARRAY_OF_TABLES = re.compile(r"\b(?:scoped|widened) text\[\] := ARRAY\[(.*?)\]", re.I)
+
 # Statements that legitimately name no table.
 #
 # `DROP INDEX` names an index, never its table, so there is nothing to credit. A function defines
@@ -145,6 +151,17 @@ def tables_in_the_inventory() -> set[str]:
     return {name.lower() for name in _ROW.findall(_README.read_text(encoding="utf-8"))}
 
 
+def tables_listed_by(statement: str) -> set[str]:
+    """The tables a block scopes from its arrays (see `_NAMES_ITS_TABLES_IN_ARRAYS`), else none."""
+    if _NAMES_ITS_TABLES_IN_ARRAYS.match(statement) is None:
+        return set()
+    return {
+        name.lower()
+        for body in _ARRAY_OF_TABLES.findall(statement)
+        for name in re.findall(r"'(\w+)'", body)
+    }
+
+
 def table_named_by(statement: str) -> str | None:
     """The table a statement acts on, or `None` for a statement no `_TOUCHES` construct matches."""
     for pattern in _TOUCHES:
@@ -163,11 +180,10 @@ def migrations_that_touch_each_table() -> dict[str, list[str]]:
     tables = tables_on_disk()
     touched: dict[str, list[str]] = {table: [] for table in tables}
     for _, number, statement in _statements():
-        table = table_named_by(statement)
-        if table is None or table not in tables:
-            continue
-        if number not in touched[table]:
-            touched[table].append(number)
+        named = {table_named_by(statement)} | tables_listed_by(statement)
+        for table in sorted(name for name in named if name in tables):
+            if number not in touched[table]:
+                touched[table].append(number)
     return touched
 
 
@@ -242,6 +258,21 @@ def test_a_do_block_is_one_statement_and_names_its_table() -> None:
     assert table_named_by(statements[1]) == "t"
 
 
+def test_a_block_that_scopes_tables_from_a_list_names_each_of_them() -> None:
+    """A `scoped` array credits its migration to each table it lists; an ordinary block, to none.
+
+    Driven on synthetic SQL: the tree's one such block could be rewritten tomorrow into a shape the
+    rule no longer reads, and the Migration column would then go stale without a failure.
+    """
+    block = (
+        "DO $$ DECLARE scoped text[] := ARRAY['a_table', 'b_table']; "
+        "widened text[] := ARRAY['c_table']; BEGIN PERFORM f(); END $$"
+    )
+    assert tables_listed_by(block) == {"a_table", "b_table", "c_table"}
+    assert tables_listed_by("DO $$ BEGIN PERFORM f('x'); END $$") == set()
+    assert tables_listed_by("SELECT 'a_table'") == set()
+
+
 def test_every_migration_statement_is_one_the_rule_understands() -> None:
     """An unrecognised migration statement fails loudly rather than counting as touching nothing.
 
@@ -252,6 +283,7 @@ def test_every_migration_statement_is_one_the_rule_understands() -> None:
         f"{name}: {statement[:60]}"
         for name, _, statement in _statements()
         if not any(pattern.match(statement) for pattern in _TOUCHES + _TABLE_FREE)
+        and not tables_listed_by(statement)
     ]
     assert not unrecognised, (
         "infra/sql statements tests/test_schema_inventory.py cannot classify: "

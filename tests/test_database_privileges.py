@@ -51,10 +51,11 @@ _DYNAMIC: dict[str, set[str]] = {
     **{table: {"DELETE"} for table in _PRUNABLE},
 }
 
-# Written by the migrator alone: the ledger of its own work. A runtime credential that could write
-# it could mark a migration applied that never ran, so `migrate.py`'s INSERT is deliberately not
-# part of the application's matrix.
-_MIGRATOR_ONLY = {"schema_migrations"}
+# Written by the migrator alone: the ledger of its own work, and the stamp of the release that owns
+# the database. A runtime credential that could write the first could mark a migration applied that
+# never ran, and one that could write the second could make a second release look like the first;
+# `migrate.py`'s INSERT is deliberately not part of the application's matrix.
+_MIGRATOR_ONLY = {"schema_migrations", "deployment_id"}
 
 # Modules whose statements belong to an **operator**, not to the running application, and so are
 # outside the runtime role's matrix. Named by path because the scan cannot see who runs SQL.
@@ -65,10 +66,13 @@ _MIGRATOR_ONLY = {"schema_migrations"}
 # `cli/rekey_compounds.py --dispose-superseded` issues the fingerprint `DELETE` that
 # `infra/sql/094_fingerprint_definition_identity.sql` names as an operator statement, through
 # `core.migrate.migration_dsn`, so nothing a turn reaches can prune an index.
+# `cli/tenants.py` registers a tenant under the owning principal; the runtime role reads the
+# registry and a request must not be able to create a tenant.
 # `core/restore_check.py` is the restore drill's fixture and checks (`make restore-drill`): it
 # writes every kind of state into a throwaway server as its superuser, and its `UPDATE audit_events`
 # is a negative test that the runtime role is refused. Never run with the application's credential.
 _ADMIN_ONLY_MODULES = {
+    "cli/tenants.py",
     "cli/rekey_campaigns.py",
     "cli/rekey_compounds.py",
     "core/restore_check.py",
@@ -397,10 +401,13 @@ def test_an_operator_module_exists_and_its_fingerprint_disposal_is_never_the_run
 def test_the_migration_ledger_is_never_granted_a_write_verb() -> None:
     """A role that can write the ledger can mark a migration applied that never ran.
 
-    This checks write verbs only: the blanket `GRANT SELECT` does reach the ledger, intentionally
-    (`app_privileges.sql` says so). `tests/test_runtime_ddl_privilege.py` checks the live ACL.
+    The same holds for the release stamp. This checks write verbs only: the blanket `GRANT SELECT`
+    does reach both, intentionally (`app_privileges.sql` says so).
+    `tests/test_runtime_ddl_privilege.py` checks the live ACL.
     """
-    assert "schema_migrations" not in verbs_the_grant_allows()
+    allowed = verbs_the_grant_allows()
+    for table in sorted(_MIGRATOR_ONLY):
+        assert table not in allowed, f"the runtime role is granted a write on {table}"
 
 
 def test_the_grants_are_not_numbered_migrations() -> None:

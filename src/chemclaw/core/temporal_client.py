@@ -23,6 +23,7 @@ from chemclaw.core.aio import LoopLocalLock
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.temporal_tenancy import TenantInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +108,16 @@ def connect_options() -> dict[str, Any]:
     # W3C trace context across the durable boundary, so a job's spans join the turn that started it.
     # The client half propagates on `start_workflow`; `Worker` carries the reading half
     # (`durable/serve.py`). Only under `otel_enabled`, since otherwise the provider is a no-op.
+    interceptors: list[Any] = []
     if settings.otel_enabled:
-        options["interceptors"] = [TracingInterceptor()]
+        interceptors.append(TracingInterceptor())
+    # The tenant crosses to the workers as a header (`core/temporal_tenancy.py`), which a
+    # single-tenant deployment has no use for. A client's interceptors also wrap the workers built
+    # from it, so one registration covers both halves.
+    if settings.tenancy_enabled:
+        interceptors.append(TenantInterceptor())
+    if interceptors:
+        options["interceptors"] = interceptors
     tls = _tls_config()
     if tls is not None:
         options["tls"] = tls

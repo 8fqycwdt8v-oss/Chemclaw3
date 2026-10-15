@@ -10,6 +10,11 @@ Pooling removes per-call handshakes that otherwise time out on a busy event loop
 `(event loop, dsn, libpq options, max_size)`. A borrowed connection carries
 `pg_statement_timeout_seconds` by default; `connect()`, used by migrations, does not.
 
+With `tenancy_enabled`, every borrow also writes the ambient tenant (`core/tenancy.py`) into the
+connection's `app.tenant` setting, which the row-level-security policies read, and the pool's
+`reset` hook clears it as the connection returns: a pooled connection never carries a previous
+borrower's tenant. With it off nothing is sent.
+
 `existing_tables` and `apply_vector_recall_settings` take an open cursor because several subsystems
 must ask the same question inside their own transaction.
 """
@@ -18,6 +23,7 @@ import asyncio
 import logging
 import threading
 import time
+import weakref
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -32,6 +38,7 @@ from pydantic import BeforeValidator
 from chemclaw.core.config import pg_endpoint, settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.core.tenancy import TENANT_SETTING, current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +127,54 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str:
     return f"{existing} {ours}" if isinstance(existing, str) and existing else ours
 
 
+# Connections whose `app.tenant` this module set and has not yet cleared. A set of what was written,
+# not a read of the setting, so the pool's reset costs a round trip only for a connection that
+# carries something, and never when tenancy was never on.
+_TENANT_BOUND: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+_SET_TENANT = f"SELECT set_config('{TENANT_SETTING}', %s, false)"
+_RESET_TENANT = f"RESET {TENANT_SETTING}"
+
+
+async def _autocommitted(conn: Any, statement: str, params: tuple[str, ...] | None = None) -> None:
+    """Run one statement outside any transaction block, leaving the connection as it was.
+
+    Session-level settings are transactional in Postgres: written inside a transaction that later
+    rolls back, they revert. In autocommit the write is its own transaction, so a `rollback()` by
+    the borrower cannot undo the tenant, and the connection is idle again when this returns (the
+    pool's reset hook requires that).
+    """
+    previous = conn.autocommit
+    await conn.set_autocommit(True)
+    try:
+        await conn.execute(statement, params)
+    finally:
+        await conn.set_autocommit(previous)
+
+
+async def _bind_tenant(conn: Any) -> None:
+    """Make this borrow act for the ambient tenant; nothing is sent while tenancy is off.
+
+    Called before anything else runs on the connection. No tenant bound writes `''`, which no row
+    carries, so the policies return nothing and refuse every insert.
+    """
+    if not settings.tenancy_enabled:
+        return
+    await _autocommitted(conn, _SET_TENANT, (current_tenant(),))
+    _TENANT_BOUND.add(conn)
+
+
+async def _forget_tenant(conn: Any) -> None:
+    """The pool's `reset` hook: clear `app.tenant` on a connection this module bound.
+
+    Runs after the pool has rolled back whatever transaction the borrower left open. If it raises,
+    the pool discards the connection rather than keep it.
+    """
+    if conn in _TENANT_BOUND:
+        await _autocommitted(conn, _RESET_TENANT)
+        _TENANT_BOUND.discard(conn)
+
+
 class _DatabaseUnavailable(ConnectionError):
     """This module's own "there is no connection to hand you" — never a caller's socket error.
 
@@ -191,6 +246,8 @@ def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
             # limit, NAT timeout, `idle_in_transaction_session_timeout`) is replaced instead of
             # handed to a caller.
             check=AsyncConnectionPool.check_connection,
+            # A connection never goes back to the pool carrying the tenant it was lent for.
+            reset=_forget_tenant,
             # Opened by the caller below: constructing with `open=True` schedules the background
             # workers from `__init__`, which psycopg_pool warns about outside a running loop.
             open=False,
@@ -303,12 +360,14 @@ async def connection(
         if not _POOLING:
             conn = await connect(dsn, statement_timeout_seconds=statement_timeout_seconds)
             async with conn:
+                await _bind_tenant(conn)
                 yield conn
             return
         pool = _pool_for(dsn, options, pool_max_size)
         await pool.open()  # idempotent; the first caller starts the pool's background workers
         try:
             async with pool.connection() as conn:
+                await _bind_tenant(conn)
                 # One round trip on the first borrow against an endpoint, so the fleet gauge can
                 # tell one server spelled two ways from two servers; never during a scrape.
                 await _learn_server_identity(conn, dsn)
