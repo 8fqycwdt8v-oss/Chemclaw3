@@ -8,6 +8,7 @@ The chem tools' equivalents live with the `chem` server in `Chemclaw3-mcp`.
 
 import asyncio
 import contextlib
+import gc
 import threading
 import time
 from datetime import UTC, datetime
@@ -97,6 +98,12 @@ def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
 
     The sampler wakes every 5 ms; actual wait minus requested wait is time the loop was held. That
     distinguishes a slow activity (fine) from one that stops the others sharing its loop.
+
+    The garbage collector is frozen and off for the run. A full collection holds the interpreter
+    lock for its whole pass, whichever thread triggers it: on the suite's heap of a few million
+    objects (more under coverage) that is 1.5 s, and it falls in whichever test happens to cross
+    the collector's threshold. That stalls every loop in the process whatever the code under test
+    does, so it would turn this measurement into a measurement of the rest of the suite.
     """
     stalls: list[float] = []
 
@@ -116,7 +123,15 @@ def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
         await sampler
         return [threading.get_ident()]
 
-    loop_thread = asyncio.run(_run())
+    was_enabled = gc.isenabled()
+    gc.freeze()
+    gc.disable()
+    try:
+        loop_thread = asyncio.run(_run())
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.unfreeze()
     return max(stalls, default=0.0), loop_thread
 
 
@@ -511,3 +526,17 @@ def test_expanding_a_hub_note_assembles_its_neighbours_off_the_event_loop(
     assert stall_ms < _HUB_STALL_BOUND_MS, (
         f"expand_note held the loop for {stall_ms:.0f} ms expanding a hub of {_HUB_NEIGHBOURS}"
     )
+
+
+def test_the_stall_measurement_runs_with_the_collector_off_and_leaves_it_as_it_found_it() -> None:
+    """No collection falls inside a measured run, and none is lost for later tests."""
+    states: list[bool] = []
+
+    async def _probe() -> None:
+        states.append(gc.isenabled())
+
+    assert gc.isenabled(), "a test left the collector off"
+    _worst_loop_stall(_probe)
+    assert states == [False]
+    assert gc.isenabled()
+    assert gc.get_freeze_count() == 0
