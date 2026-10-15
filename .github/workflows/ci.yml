@@ -115,12 +115,12 @@ jobs:
     # tests/test_orchestrator.py's fan-out test used to do exactly that). `pytest-timeout`'s
     # per-test cap is the inner bound that names the offending test; this is the outer backstop.
     #
-    # 60: the serial gate is the longest job and its runtime follows the suite's size and the shared
-    # runner's load; the bound has to clear the slowest healthy run, or it cancels a green run and
-    # reports no test name. It stays an outer backstop: `pytest-timeout` (180s, `pyproject.toml`) is
-    # what names a hung test. The parallel gate (`D-2026-10-08-the-test-gate-runs-in-parallel`)
-    # exists to shorten this job.
-    timeout-minutes: 60
+    # 90: the serial gate is the longest job and its runtime follows the suite's size and the shared
+    # runner's load (healthy runs take 45-59 minutes); the bound has to clear the slowest healthy
+    # run, or it cancels a green run and reports no test name. It stays an outer backstop:
+    # `pytest-timeout` (180s, `pyproject.toml`) is what names a hung test. The parallel gate
+    # (`D-2026-10-08-the-test-gate-runs-in-parallel`) exists to shorten this job.
+    timeout-minutes: 90
     # Real Postgres so the calculation-store and session-store integration tests run (not skip).
     services:
       postgres:
