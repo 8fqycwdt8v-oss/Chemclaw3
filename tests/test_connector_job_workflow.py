@@ -42,6 +42,7 @@ from chemclaw.durable.deliver_message import deliver_message_activity
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
+from chemclaw.durable.publish_results import publish_job_result
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import record_note
 from chemclaw.memory.jobs import SynthesisUnit
@@ -217,6 +218,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                     # building unconditionally, so the worker has to serve it even though delivery
                     # is off and the activity therefore returns `[]` on the first line.
                     deliver_message_activity,
+                    publish_job_result,
                     publish_memory_note_activity,
                     record_session_event_activity,
                     record_job,

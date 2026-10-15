@@ -3,7 +3,7 @@
 `ChemclawError` means "this input/data is invalid": every layer's bad-input error derives from it,
 so a reject-and-continue boundary catches one type. It stays a `ValueError`. Temporal matches
 `non_retryable_error_types` by exact class name, so every concrete subclass that can cross an
-activity boundary must also be listed in `chemclaw.durable.publish._BAD_DATA_TYPES`.
+activity boundary must also be listed in `chemclaw.durable.retry._BAD_DATA_TYPES`.
 
 `SubsystemUnavailableError` means "the infrastructure this needs is not answering" and sits
 deliberately outside that hierarchy. Both live here so `surface_domain_errors` can import them
@@ -18,7 +18,7 @@ class ChemclawError(ValueError):
 
     Catch at batch boundaries (reject-and-continue); raise a specific subclass at the point of
     failure. A subclass that can cross a Temporal activity boundary must be added to
-    `chemclaw.durable.publish._BAD_DATA_TYPES`, which Temporal matches by exact name.
+    `chemclaw.durable.retry._BAD_DATA_TYPES`, which Temporal matches by exact name.
     """
 
 

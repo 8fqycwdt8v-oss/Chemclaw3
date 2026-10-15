@@ -570,10 +570,10 @@ def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() ->
 def test_a_pattern_that_cannot_finish_is_still_refused_once_rather_than_retried() -> None:
     """A pattern that cannot finish is refused once rather than retried.
 
-    `durable/publish._BAD_DATA_TYPES` matches the failure's class name, and a retry would run the
+    `durable/retry._BAD_DATA_TYPES` matches the failure's class name, and a retry would run the
     same pattern over the same page.
     """
-    from chemclaw.durable.publish import _BAD_DATA_TYPES
+    from chemclaw.durable.retry import _BAD_DATA_TYPES
 
     assert PatternBudgetError.__name__ in _BAD_DATA_TYPES, (
         "the pattern and the page are both the same on the next attempt, so a retry is the stall "

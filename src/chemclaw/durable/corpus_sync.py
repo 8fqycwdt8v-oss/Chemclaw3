@@ -19,7 +19,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, load_binding
     from chemclaw.ingest.eln.warehouse.connect import open_warehouse
     from chemclaw.ingest.eln.warehouse.driver import Warehouse
@@ -33,7 +33,8 @@ with workflow.unsafe.imports_passed_through():
 import logging
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class CorpusSyncState(BaseModel):
     unfingerprintable: int = 0
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def plan_corpus_sync() -> CorpusSyncPlan:
     """Name the corpora to drain and fix the run's iteration bound."""
@@ -135,7 +136,7 @@ async def plan_corpus_sync() -> CorpusSyncPlan:
 
 # A page has no natural progress point, so liveness is time-based; the eager pre-beat covers a
 # page shorter than one interval.
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
     """Read one page of `source`, resuming after `after`, and record it.
@@ -191,7 +192,7 @@ class ReactionCorpusWorkflow:
                 plan_corpus_sync,
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(plan_corpus_sync),
             )
             state = CorpusSyncState(max_iterations=plan.max_iterations, remaining=plan.sources)
         iterations = 0
@@ -203,7 +204,7 @@ class ReactionCorpusWorkflow:
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(seconds=settings.corpus_sync_heartbeat_timeout_seconds),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(drain_reaction_corpus),
             )
             state.read += page.read
             state.recorded += page.recorded

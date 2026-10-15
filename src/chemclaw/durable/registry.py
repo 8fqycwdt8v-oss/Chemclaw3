@@ -1,7 +1,8 @@
 """Durable-capability registry — workflows and activities declare their own queue.
 
 A workflow or activity declares its queue at its definition site and the worker assembles what it
-serves from this registry, so a written-and-imported workflow cannot be missing from a worker.
+serves from this registry, so a written-and-imported workflow cannot be missing from a worker. An
+activity also declares its `ActivityClass`, which `durable/retry.py` turns into its retry policy.
 
 `background` is core's queue; each connector bundle adds `connector-<name>`
 (`chemclaw.connectors.queues.bundle_queue`). Isolation comes from the import boundary: the
@@ -16,6 +17,7 @@ allowed and ignored: the first object is kept.
 import logging
 from collections import defaultdict
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,32 @@ logger = logging.getLogger(__name__)
 Queue = str
 
 DurableActivity = Callable[..., Any]
+
+
+class ActivityClass(StrEnum):
+    """What an activity does to the outside world, which decides how it may be retried.
+
+    `durable/retry.py` holds the policy of each class and the reason for it.
+    """
+
+    # Short Postgres or in-process work, safe to repeat: reads, small idempotent writes.
+    IO = "io"
+    # One knowledge-note write; a retry meets a contended remote, never a bad note.
+    NOTE_WRITE = "note_write"
+    # A long sweep or computation in the worker; a retry repeats the work.
+    COMPUTE = "compute"
+    # A call to a system or service outside the worker and Postgres, repeatable: a data source, a
+    # mounted share, the model gateway, a labelling or embedding server, an outbound channel.
+    REMOTE = "remote"
+    # A call to the calculation backend, which may be full and which must not be re-run needlessly.
+    CALC = "calc"
+    # A governed tool call or agent turn whose re-run repeats audited side effects.
+    GOVERNED = "governed"
+    # A queued heavy tool call, retried against a full server until its own deadline.
+    QUEUED_TOOL = "queued_tool"
+
+
+_CLASS_ATTRIBUTE = "__chemclaw_activity_class__"
 _WorkflowT = TypeVar("_WorkflowT", bound=type)
 _ActivityT = TypeVar("_ActivityT", bound=DurableActivity)
 
@@ -78,10 +106,28 @@ def durable_workflow(queue: Queue) -> Callable[[_WorkflowT], _WorkflowT]:
     return register
 
 
-def durable_activity(queue: Queue) -> Callable[[_ActivityT], _ActivityT]:
-    """Register an `@activity.defn` function on `queue`. Apply above `activity.defn`."""
+def activity_in_class(activity_class: ActivityClass) -> Callable[[_ActivityT], _ActivityT]:
+    """Declare the `ActivityClass` of an activity whose queue is not fixed at its definition.
+
+    For an activity that is served by workers built per connector, so no `durable_activity` queue
+    names it. The class is stored on the function as its plain value, so it survives the workflow
+    sandbox re-importing this module (two copies of the enum never compare equal).
+    """
+
+    def declare(fn: _ActivityT) -> _ActivityT:
+        setattr(fn, _CLASS_ATTRIBUTE, activity_class.value)
+        return fn
+
+    return declare
+
+
+def durable_activity(
+    queue: Queue, activity_class: ActivityClass
+) -> Callable[[_ActivityT], _ActivityT]:
+    """Register an `@activity.defn` function on `queue`, in `activity_class`. Apply above it."""
 
     def register(fn: _ActivityT) -> _ActivityT:
+        activity_in_class(activity_class)(fn)
         name = temporal_name(fn)
         registered = _ACTIVITIES[queue]
         existing = registered.get(name)
@@ -92,6 +138,21 @@ def durable_activity(queue: Queue) -> Callable[[_ActivityT], _ActivityT]:
         return fn
 
     return register
+
+
+def activity_class_of(activity: DurableActivity) -> ActivityClass:
+    """The class an activity declared with `durable_activity`.
+
+    Raises:
+        LookupError: The function was never registered, so it has no class to be retried under.
+    """
+    declared = getattr(activity, _CLASS_ATTRIBUTE, None)
+    if declared is None:
+        raise LookupError(
+            f"{getattr(activity, '__name__', activity)!r} declares no ActivityClass: decorate it "
+            "with `@durable_activity(queue, ActivityClass.<class>)` or `@activity_in_class(...)`"
+        )
+    return ActivityClass(declared)
 
 
 def registered_workflows(queue: Queue) -> list[type]:

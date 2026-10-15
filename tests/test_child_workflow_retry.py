@@ -181,9 +181,9 @@ def test_the_template_job_step_child_is_not_retried_at_the_workflow_boundary(
 ) -> None:
     """A template `job` step is not retried at the child-workflow boundary.
 
-    Temporal matches `non_retryable_error_types` against the outermost failure, so `BAD_DATA_RETRY`
-    classifies nothing at a child boundary and degrades to plain retries; one deterministic error
-    would rerun the whole connector job (a failed run caches nothing).
+    Temporal matches `non_retryable_error_types` against the outermost failure, so the bad-data
+    retry list classifies nothing at a child boundary and degrades to plain retries; one
+    deterministic error would rerun the whole connector job (a failed run caches nothing).
     """
     start = _template_job_step_child(monkeypatch, "run-a", "compute")
 

@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.documents.index import DocumentIndex, default_document_index
     from chemclaw.ingest.documents.sync import (
         DocumentShareSource,
@@ -36,7 +36,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.registry import active_retrieve_sources
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 # Module-level indirection so tests swap the Postgres backend for the in-memory one.
 _document_index = default_document_index
@@ -102,7 +103,7 @@ class DocumentSyncState(BaseModel):
     reembedded: int = 0
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def plan_document_sync() -> DocumentSyncPlan:
     """Name the shares to crawl, read the sweep reference off the index's own clock, fix the bound.
@@ -122,7 +123,7 @@ async def plan_document_sync() -> DocumentSyncPlan:
 # pre-beat covers a chunk that finishes before the first interval.
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def sync_document_share(source: str, after: str) -> SyncReport:
     """Index one bounded slice of `source`, resuming past `after`."""
@@ -143,7 +144,7 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def reembed_stale_documents() -> ReembedReport:
     """Refresh one bounded batch of vectors whose embedding configuration is superseded.
@@ -160,7 +161,7 @@ async def reembed_stale_documents() -> ReembedReport:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def prune_document_share(source: str, before: datetime, report: SyncReport) -> int:
     """Sweep `source` rows unseen since `before` — a no-op unless the drain evidences absence."""
@@ -191,7 +192,7 @@ class DocumentShareSyncWorkflow:
                 plan_document_sync,
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(plan_document_sync),
             )
             state = DocumentSyncState(
                 started_at=plan.started_at,
@@ -208,7 +209,7 @@ class DocumentShareSyncWorkflow:
                 heartbeat_timeout=timedelta(
                     seconds=settings.document_sync_heartbeat_timeout_seconds
                 ),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(reembed_stale_documents),
             )
             state.reembedded += refresh.embedded
             iterations += 1
@@ -234,7 +235,7 @@ class DocumentShareSyncWorkflow:
                 ),
                 # Bad data rejects-and-continues inside the pass; a bad binding or an unmounted
                 # share is `DocumentShareError`, which no retry can change.
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(sync_document_share),
             )
             state.reports.append(chunk)
             iterations += 1
@@ -260,7 +261,7 @@ class DocumentShareSyncWorkflow:
                 args=[source, state.started_at, drained],
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(prune_document_share),
             )
             state.reports[-1].pruned = pruned
             state.remaining.pop(0)

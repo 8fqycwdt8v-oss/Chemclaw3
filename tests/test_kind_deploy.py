@@ -340,8 +340,8 @@ def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> 
     assert config["CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED"] == "false"
     assert config["CHEMCLAW_ENTRA_PRIVILEGED_ROLES"], "every expensive job would be closed"
     issuer = urlsplit(config["CHEMCLAW_ENTRA_ISSUER"])
-    assert issuer.scheme == "https", "MSAL.js accepts only an https authority"
-    assert f"{issuer.scheme}://{issuer.netloc}/entra/mock-tenant" in _UP, (
+    assert issuer.scheme == "https", "the UI's BFF takes an http authority on loopback only"
+    assert f"{issuer.scheme}://{issuer.netloc}/entra/mock-tenant" == _tenant_url(), (
         "up.sh hands the browser and the mock a different tenant URL than core checks `iss` against"
     )
     env = {
@@ -354,6 +354,62 @@ def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> 
     assert "sslmode=require" in _UP
     # The UI is told the privileged role separately; a mismatch hides actions core would accept.
     assert f"REVIEWER_ROLES={config['CHEMCLAW_ENTRA_PRIVILEGED_ROLES']}" in _UP
+
+
+def _tenant_url() -> str:
+    """`TENANT_URL` with `$TENANT_HOST` expanded, as `up.sh` assigns it."""
+    host = re.search(r'readonly TENANT_HOST="([^"]+)"', _UP)
+    url = re.search(r'readonly TENANT_URL="([^"]+)"', _UP)
+    assert host and url, "up.sh no longer assigns TENANT_HOST and TENANT_URL"
+    return url[1].replace("$TENANT_HOST", host[1])
+
+
+def _oidc_mock_env(variable: str) -> dict[str, str]:
+    """The `KEY=value` lines `up.sh` writes into `variable` (`ui`, `mock`) for oidc-mock."""
+    section = _UP.split("    oidc-mock)\n", 1)[1]
+    match = re.search(rf'^      {variable}="(?P<body>[^"]*)"', section, re.MULTILINE)
+    assert match, f"up.sh has no oidc-mock {variable} environment"
+    body = match["body"].replace("$TENANT_URL", _tenant_url())
+    return dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+
+
+def test_oidc_mock_runs_the_ui_as_a_token_handler_that_can_reach_and_trust_the_tenant() -> None:
+    """The BFF signs in server-side, so the UI pod itself resolves and trusts the mock tenant.
+
+    The browser follows the BFF's redirect to the tenant URL and the BFF discovers the same URL from
+    inside the cluster, so the host must be one a browser resolves to loopback, the UI pod must map
+    it to the `mock-tenant` Service, the mock's certificate must name it, and the cluster CA must be
+    mounted where `NODE_EXTRA_CA_CERTS` points.
+    """
+    docs = _manifests()
+    ui, mock = _oidc_mock_env("ui"), _oidc_mock_env("mock")
+    assert ui["AUTH_MODE"] == "bff"
+    assert ui["ENTRA_CLIENT_AUTH"] == "none", "the mock registers a PKCE client with no secret"
+    authority = urlsplit(ui["ENTRA_AUTHORITY"])
+    assert authority.scheme == "https" and authority.hostname and authority.port
+    assert authority.hostname.endswith(".localhost"), "a browser must resolve it to loopback"
+    assert "DNS:$TENANT_HOST" in _UP, "the mock's certificate does not name the tenant host"
+
+    [deployment] = [d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ui"]
+    pod = deployment["spec"]["template"]["spec"]
+    [alias] = pod["hostAliases"]
+    assert alias["hostnames"] == [authority.hostname]
+    [tenant] = [
+        d for d in docs if d["kind"] == "Service" and d["metadata"]["name"] == "mock-tenant"
+    ]
+    assert tenant["spec"]["clusterIP"] == alias["ip"], "hostAliases names another address"
+    assert [int(p["port"]) for p in tenant["spec"]["ports"]] == [authority.port]
+
+    [container] = pod["containers"]
+    [mount] = container["volumeMounts"]
+    assert ui["NODE_EXTRA_CA_CERTS"] == f"{mount['mountPath']}/ca.crt"
+    [volume] = pod["volumes"]
+    assert volume["name"] == mount["name"] and volume["secret"]["secretName"] == "chemclaw-kind-ca"
+
+    assert mock["MOCK_ENTRA_ISSUER"] == f"{_tenant_url()}/v2.0"
+    assert ui["ENTRA_CLIENT_ID"] == mock["MOCK_ENTRA_SPA_CLIENT_ID"]
+    app = {e["name"]: e.get("value") for e in container["env"]}["APP_ORIGIN"]
+    assert mock["MOCK_ENTRA_REDIRECT_URIS"] == f"{app}/auth/callback"
 
 
 def test_the_lane_scripts_are_executable_in_git() -> None:

@@ -36,7 +36,7 @@ class DataSourceError(ChemclawError):
     """A data-source folder is malformed, or an enabled source does not exist.
 
     A `ChemclawError` (so a `ValueError`), so one `except ValueError` at an entry point catches
-    every misconfiguration. Also listed by class name in `durable.publish._BAD_DATA_TYPES`, since
+    every misconfiguration. Also listed by class name in `durable.retry._BAD_DATA_TYPES`, since
     Temporal matches non-retryable types by exact name.
     """
 
