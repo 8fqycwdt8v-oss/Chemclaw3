@@ -116,6 +116,17 @@ def tenant_from_roles(roles: Iterable[str]) -> str:
     return require_tenant_id(named[0])
 
 
+def namespace_component(base: str) -> str:
+    """`base`, or `base@<tenant>` for any tenant but the default: a store namespace's first part.
+
+    One component, because a store search matches a namespace by whole-component prefix: a second
+    component under `base` would be listed by the default tenant's own search. The default tenant's
+    namespaces are unchanged, so a deployment that never enabled tenancy keeps its stored items.
+    """
+    tenant = current_tenant()
+    return base if tenant == DEFAULT_TENANT else f"{base}@{tenant}"
+
+
 def scope_workflow_id(workflow_id: str) -> str:
     """`workflow_id` as the current tenant starts it: unchanged for `default`, else `<tenant>~<id>`.
 

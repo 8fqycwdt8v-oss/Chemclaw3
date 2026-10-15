@@ -291,3 +291,32 @@ async def test_the_owner_of_a_table_is_subject_to_the_policy_because_it_is_force
     async with acting_as(database, "acme") as conn:
         cursor = await conn.execute("SELECT count(*) FROM user_preferences")
         assert await cursor.fetchone() == (2,), "without FORCE the owner would see both tenants"
+
+
+async def test_the_audit_trail_and_a_cached_results_provenance_are_per_tenant(
+    database: TenancyDatabase,
+) -> None:
+    """Who ran what, and who computed a cached result, are each tenant's own.
+
+    The calculation itself is the same physics for everyone; the row says that *somebody here* asked
+    for it, which is what a competitor must not learn, so the cache is scoped and so is the trail.
+    """
+    for tenant in ("acme", "globex"):
+        async with acting_as(database, tenant) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, actor, tool, arguments, outcome, "
+                "latency_ms) VALUES ('c', %s, 'xtb', '{}', 'ok', 1.0)",
+                (f"chemist of {tenant}",),
+            )
+            await conn.execute(
+                "INSERT INTO calculation_results (key, calc_type, calc_version, input_hash, "
+                "params_hash, result, provenance) VALUES ('k', 't', 'v', 'i', 'p', '{}', %s)",
+                (f"computed for {tenant}",),
+            )
+            await conn.commit()
+    for tenant in ("acme", "globex"):
+        async with acting_as(database, tenant) as conn:
+            cursor = await conn.execute("SELECT actor FROM audit_events")
+            assert await cursor.fetchall() == [(f"chemist of {tenant}",)]
+            cursor = await conn.execute("SELECT provenance FROM calculation_results")
+            assert await cursor.fetchall() == [(f"computed for {tenant}",)]

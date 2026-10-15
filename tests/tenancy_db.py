@@ -54,6 +54,22 @@ async def _owner_connection(base: str) -> psycopg.AsyncConnection:
     return await connect(base)
 
 
+async def _create_checkpoint_tables(owner_dsn: str) -> None:
+    """LangGraph's checkpoint tables in the private schema, as the saver's `setup()` makes them.
+
+    No migration creates them, and a session's deletion and erasure sweep them by thread id, so the
+    routes that delete a session need them to exist. The index builds that cannot run in a
+    transaction are skipped; they change speed, not shape.
+    """
+    from langgraph.checkpoint.postgres import base
+
+    async with await connect(owner_dsn) as conn:
+        for statement in base.MIGRATIONS:
+            if "CONCURRENTLY" not in statement:
+                await conn.execute(statement)
+        await conn.commit()
+
+
 @asynccontextmanager
 async def tenancy_database() -> AsyncIterator[TenancyDatabase]:
     """Migrate a private schema and create a role that row-level security applies to.
@@ -73,13 +89,18 @@ async def tenancy_database() -> AsyncIterator[TenancyDatabase]:
     owner_dsn = schema_dsn(base, schema)
     try:
         await migrate(owner_dsn)
+        await _create_checkpoint_tables(owner_dsn)
         async with await connect(base) as conn:
             # The password is hex, generated above: DDL takes no bind parameter for it.
             await conn.execute(
                 f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS "
                 "NOCREATEDB NOCREATEROLE"
             )
-            await conn.execute(f'GRANT USAGE ON SCHEMA "{schema}", public TO "{role}"')
+            # CREATE as well, as `grants/app_privileges.sql` gives the runtime role: LangGraph's
+            # `setup()` issues `CREATE TABLE IF NOT EXISTS` on every start and the schema's ACL is
+            # checked before the table's existence.
+            await conn.execute(f'GRANT USAGE, CREATE ON SCHEMA "{schema}" TO "{role}"')
+            await conn.execute(f'GRANT USAGE ON SCHEMA public TO "{role}"')
             await conn.execute(
                 f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" '
                 f'TO "{role}"'

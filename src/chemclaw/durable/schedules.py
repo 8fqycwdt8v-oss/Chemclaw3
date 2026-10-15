@@ -34,6 +34,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.temporal_tenancy import tenant_header
+from chemclaw.core.tenancy import current_tenant
 from chemclaw.core.tenant_registry import registered_tenants
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
 from chemclaw.durable.check_in import CheckInWorkflow
@@ -236,7 +237,7 @@ def planned_schedules() -> list[PlannedSchedule]:
 
 
 def tenant_schedules(
-    plan: Sequence[PlannedSchedule], tenants: Sequence[str]
+    plan: Sequence[PlannedSchedule], tenants: Sequence[str], *, strict: bool = True
 ) -> list[PlannedSchedule]:
     """`plan` as the deployment runs it: unchanged while tenancy is off, else bound to tenants.
 
@@ -246,7 +247,8 @@ def tenant_schedules(
 
     Raises:
         ScheduleTenantError: a source-bound job is planned and no `tenancy_process_tenant` names
-            its tenant.
+            its tenant, unless `strict` is false, which drops that job instead: a report of what
+            is scheduled has nothing to say about a job that cannot be applied.
     """
     if not settings.tenancy_enabled:
         return list(plan)
@@ -254,6 +256,8 @@ def tenant_schedules(
     for job in plan:
         if job.schedule_id in _SOURCE_BOUND_JOBS:
             if not settings.tenancy_process_tenant:
+                if not strict:
+                    continue
                 raise ScheduleTenantError(
                     f"the {job.schedule_id} schedule acts for the tenant that owns the data "
                     "sources, and none is named: set CHEMCLAW_TENANCY_PROCESS_TENANT"
@@ -267,10 +271,10 @@ def tenant_schedules(
     return bound
 
 
-async def deployment_schedules() -> list[PlannedSchedule]:
+async def deployment_schedules(*, strict: bool = True) -> list[PlannedSchedule]:
     """The Schedules this deployment applies and reports: the plan, bound to its tenants."""
     tenants = await registered_tenants() if settings.tenancy_enabled else []
-    return tenant_schedules(planned_schedules(), tenants)
+    return tenant_schedules(planned_schedules(), tenants, strict=strict)
 
 
 def _owns(schedule_id: str) -> bool:
@@ -428,7 +432,11 @@ async def describe_schedules(client: Client | None = None) -> list[ScheduleHealt
     twice the probe timeout.
     """
     connection = client if client is not None else await connect()
-    plan = await deployment_schedules()
+    plan = await deployment_schedules(strict=False)
+    if settings.tenancy_enabled:
+        # A tenant's schedules are named after it (`retention@acme`), so another tenant is told only
+        # of its own; a deployment-wide job carries the tenant that owns the sources.
+        plan = [job for job in plan if job.tenant == current_tenant()]
     return list(await asyncio.gather(*(_describe(connection, job) for job in plan)))
 
 
