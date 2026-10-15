@@ -90,7 +90,7 @@ _SEED_DRAW_ROUNDS = 8
 class SurrogateFitError(ChemclawError):
     """BoFire's Bayesian strategy could not fit or query its surrogate.
 
-    Non-retryable: listed by name (do not rename) in `durable.publish._BAD_DATA_TYPES`. Also raised
+    Non-retryable: listed by name (do not rename) in `durable.retry._BAD_DATA_TYPES`. Also raised
     for constraints that admit no point.
     """
 

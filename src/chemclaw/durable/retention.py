@@ -70,10 +70,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.logging import log_event
     from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.heartbeat import beating
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.exhibits.models import PUSH_KIND as EXHIBIT_PUSH_KIND
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -675,7 +676,7 @@ def _window_days(table: str) -> int:
     }[table]
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def prune_expired_rows() -> RetentionOutcome:
     """Run one retention sweep, heartbeating so a dead worker is noticed in a minute not ten.
@@ -1157,11 +1158,11 @@ class RetentionWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(prune_expired_rows),
         )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def prune_exhibit_pushes() -> int:
     """Delete `exhibit` push rows older than `exhibit_push_retention_hours`; return how many went.
@@ -1207,5 +1208,5 @@ class ExhibitPushPruneWorkflow:
             prune_exhibit_pushes,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(prune_exhibit_pushes),
         )

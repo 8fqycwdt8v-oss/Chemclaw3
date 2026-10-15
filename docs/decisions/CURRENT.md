@@ -15,6 +15,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - Python is the runtime — [D-001](D-001-runtime-is-python.md).
 - Layer 1 is a LangGraph graph compiled per turn by `create_deep_agent`, with a Postgres checkpointer — [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md).
 - Durability lives only in Temporal; orchestration and durability stay separate — [D-002](D-002-maf-for-orchestration-temporal-for-durability-kept.md), [D-006](D-006-one-execution-system-temporal-task-queues-no-pg-boss.md).
+- An activity declares an `ActivityClass` and is retried under that class's policy, written only in `durable/retry.py` — [D-2026-10-14-an-activity-states-its-retry-class](D-2026-10-14-an-activity-states-its-retry-class.md).
 - The harness is adopted whole and every default it brings is a decision made here — [D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently](D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently.md).
 - The runaway cap is a first-party `before_model` counter, not upstream's `ModelCallLimitMiddleware` — [D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped](D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped.md).
 - One gateway is the only LLM provider; nothing in `src/` dials a vendor — [D-2026-09-04-a-gateway-is-the-only-provider](D-2026-09-04-a-gateway-is-the-only-provider.md).

@@ -21,7 +21,7 @@ from chemclaw.connectors.bo.calculators import log_s_for
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.registry import durable_activity
+from chemclaw.durable.registry import ActivityClass, durable_activity
 from chemclaw.science.bo.campaign_record import record_suggestion
 from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.objectives import get_objective
@@ -32,7 +32,7 @@ from chemclaw.science.calc.postgres_store import default_store
 # heartbeats and concurrent activities keep flowing.
 
 
-@durable_activity(bundle_queue("bo"))
+@durable_activity(bundle_queue("bo"), ActivityClass.COMPUTE)
 @activity.defn
 async def propose_initial(
     problem: OptimizationProblem, n: int, seed: int | None = None
@@ -45,7 +45,7 @@ async def propose_initial(
     )
 
 
-@durable_activity(bundle_queue("bo"))
+@durable_activity(bundle_queue("bo"), ActivityClass.COMPUTE)
 @activity.defn
 async def propose_next(
     problem: OptimizationProblem,
@@ -61,7 +61,7 @@ async def propose_next(
     )
 
 
-@durable_activity(bundle_queue("bo"))
+@durable_activity(bundle_queue("bo"), ActivityClass.CALC)
 @activity.defn
 async def evaluate_candidates(
     objective_name: str, candidates: list[Candidate]
@@ -94,7 +94,7 @@ async def evaluate_candidates(
     return observations
 
 
-@durable_activity(bundle_queue("bo"))
+@durable_activity(bundle_queue("bo"), ActivityClass.IO)
 @activity.defn
 async def record_campaign_run(
     problem: OptimizationProblem,

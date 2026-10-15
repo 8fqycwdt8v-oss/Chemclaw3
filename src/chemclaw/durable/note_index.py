@@ -13,17 +13,18 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.heartbeat import beating
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.retrieval.vector_index import (
         REINDEX_SKIPPED,
         default_note_index,
         reindex_exclusively,
     )
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def reindex_notes_activity() -> int:
     """Rebuild the derived note index from the knowledge graph; return the note count indexed.
@@ -63,5 +64,5 @@ class NoteReindexWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(reindex_notes_activity),
         )

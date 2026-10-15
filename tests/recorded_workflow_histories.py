@@ -266,7 +266,7 @@ async def _record() -> None:
     @activity.defn(name="run_tool_step")
     async def run_tool_step_stub(step: ToolStepInput) -> Any:
         if step.arguments.get("smiles") == failing:
-            # A `ValueError` is non-retryable under `BAD_DATA_RETRY`, so the failure fixture
+            # A `ValueError` is non-retryable under the bad-data retry list, so the failure fixture
             # records one attempt rather than five.
             raise ValueError("recorded failure fixture")
         return {"ok": True, "tool": step.tool}

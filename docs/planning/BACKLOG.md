@@ -54,6 +54,12 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
+- [ ] **A template tool step retries a governed tool call** [S] — `run_tool_step` is REMOTE (5 attempts) while `run_computable_check`, the same
+  `invoke_governed` path, is GOVERNED (1): a retry repeats the call and its audit row; decide one; `durable/template_activities.py::run_tool_step`, `D-2026-10-14-an-activity-states-its-retry-class`.
+- [ ] **A hypothesis calculation child restarts whole, and a model call retries twice over** [S] — the `ConnectorJobWorkflow` child restarts up to `activity_max_attempts`
+  times on top of its CALC attempts (a child failure is not in the bad-data list), and each LLM activity multiplies Temporal attempts by `llm_max_retries`; `durable/hypothesis_tournament.py::HypothesisTournamentWorkflow._settle_jobs`.
+- [ ] **A hard Postgres outage makes each per-item swallowed write cost the whole IO window** [M] — ~91 s a subscriber in `DigestWorkflow` (about 950 pass `schedule_run_timeout_seconds`
+  = 86400 s), same shape in the `CommitmentSyncWorkflow` and `ReactionCorpusWorkflow` source loops; stop a loop after N consecutive failures; `durable/digest.py::DigestWorkflow`.
 
 ### Where the field moved past us
 

@@ -23,11 +23,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.publish import (
-        BAD_DATA_RETRY,
         activity_failure_reason,
         light_write_queue_wait_timeout,
     )
-    from chemclaw.durable.registry import durable_activity
+    from chemclaw.durable.registry import ActivityClass, durable_activity
+    from chemclaw.durable.retry import retry_for
 
 
 class SessionEventInput(BaseModel):
@@ -53,7 +53,7 @@ def _dedupe_key(workflow_id: str, run_id: str, kind: str, payload: dict[str, Any
     return f"{workflow_id}:{run_id}:{kind}:{digest}"
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def record_session_event_activity(event: SessionEventInput) -> None:
     """Persist a push-back event for a session (called by a completing workflow).
@@ -88,7 +88,7 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         # does not eat the retry budget. Shorter than core's hour because this runs at the end of a
         # job, and a finished job should not wait an hour to tell anyone.
         schedule_to_start_timeout=light_write_queue_wait_timeout(),
-        retry_policy=BAD_DATA_RETRY,
+        retry_policy=retry_for(record_session_event_activity),
     )
 
 
