@@ -56,7 +56,8 @@ SHELL := bash
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe live-replicas \
-  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval restore-drill
+  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval \
+  bench-backend-rpc restore-drill
 
 help:  ## List every target, grouped by section.
 	@awk 'BEGIN {FS = ":.*?## "} /^##@ / {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
@@ -110,6 +111,9 @@ upstream-check:  ## Re-check every upstream shape this repo borrows (run on any 
 
 architecture-baseline:  ## Measure the architecture programme's baseline (import, build, prose, sizes) to docs/planning/.
 	uv run python -m chemclaw.cli.architecture_baseline
+
+bench-backend-rpc:  ## Time calculation_key over MCP and over /rpc against CHEMCLAW_CALC_SERVER_URL (a measurement, not a gate).
+	uv run python -m chemclaw.cli.bench_backend_rpc $(ARGS)
 
 mutants:  ## Mutation-test the invariant-bearing modules (see [tool.mutmut]; slow, run deliberately).
 	uv run mutmut run $(ARGS)
