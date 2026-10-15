@@ -16,7 +16,6 @@ from chemclaw.agent.behaviour_proposals import (
     content_hash,
     default_proposal_store,
 )
-from chemclaw.agent.local_skills import SkillRefused, validated_skill
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
@@ -86,6 +85,8 @@ def _validated(name: str, body: str) -> str:
     Raises:
         ChemclawError: Worded for the model, naming what is wrong and what to send instead.
     """
+    from chemclaw.agent.local_skills import SkillRefused, validated_skill
+
     # Checked before the body, because a name the model got wrong is the cheaper thing to say and
     # `validated_skill` can only report the name the *frontmatter* declares.
     try:

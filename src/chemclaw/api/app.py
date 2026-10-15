@@ -30,7 +30,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.durable_tools import cancel_job, job_status
 from chemclaw.agent.graph_tools import expand_note
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.langgraph_agent import build_langgraph_agent, prepare_imports
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
@@ -212,6 +212,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # to starve authentication. `front_door_reserved()` sizes it for every admitted turn's parallel
     # tool calls; see `core/executor.py`.
     install_default_executor(component="front-door", reserved=front_door_reserved())
+    # The graph builder imports `deepagents` when it compiles, not when it loads; start that
+    # import now, beside the I/O below, and wait for it before serving so the first turn does not
+    # pay for it.
+    warming = asyncio.create_task(asyncio.to_thread(prepare_imports), name="prepare-imports")
 
     # Before serving: a judge endpoint that cannot enforce structured output would silently degrade
     # every verified answer. A no-op unless `verifier_enabled`.
@@ -219,6 +223,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
+        await warming
         relay: TurnRelay | None = app.state.turn_relay
         serving = asyncio.create_task(relay.run(), name="turn-relay") if relay else None
         try:

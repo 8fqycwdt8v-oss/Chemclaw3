@@ -5,8 +5,6 @@ both playbooks and optimization campaigns. Pure and deterministic: no store, no 
 """
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
-from scipy.sparse.csgraph import connected_components
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import OrdReaction
@@ -64,6 +62,10 @@ def cluster_by_similarity(fingerprints: dict[str, str], threshold: float) -> lis
     non-positive threshold (which links everything) is answered up front; for every stored pair
     `union >= 1`.
     """
+    # Imported here: `scipy.sparse` costs a second to import and only this clustering needs it.
+    from scipy.sparse import coo_matrix, csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
     ids = list(fingerprints)
     if not ids:
         return []

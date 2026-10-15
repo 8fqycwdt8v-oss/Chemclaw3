@@ -46,7 +46,6 @@ from chemclaw.agent.plan_gate import (
 )
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.session_store import InterruptedTurn
@@ -1778,6 +1777,8 @@ async def turn_store() -> Any:
     """
     if not personal_skills_available():
         return None
+    from chemclaw.agent.scratchpad import memory_store
+
     return await memory_store()
 
 

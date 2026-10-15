@@ -18,10 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import frontmatter
-from deepagents.middleware.skills import (
-    MAX_SKILL_DESCRIPTION_LENGTH,
-    MAX_SKILL_NAME_LENGTH,
-)
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.metrics_bridge import degraded
@@ -31,12 +27,13 @@ logger = logging.getLogger(__name__)
 # Where a skill's frontmatter lives inside its directory — the Agent Skills spec's filename.
 SKILL_FILENAME = "SKILL.md"
 
-#: The Agent Skills spec's bounds on the two required fields, imported from the loader that applies
-#: them. Upstream truncates over-long values with only a warning; declaring the bounds on
-#: `SkillManifest` makes them a validation error instead (a CI failure for the reviewed tree, a 422
-#: for a chemist's own tier). `tests/test_upstream_surface.py` pins the truncation assumption.
-MAX_SKILL_NAME_CHARS = MAX_SKILL_NAME_LENGTH
-MAX_SKILL_DESCRIPTION_CHARS = MAX_SKILL_DESCRIPTION_LENGTH
+#: The Agent Skills spec's bounds on the two required fields, as the loader that applies them
+#: states them; `tests/test_upstream_surface.py` pins the equality, because importing them here
+#: would import `deepagents`. Upstream truncates over-long values with only a warning; declaring
+#: the bounds on `SkillManifest` makes them a validation error instead (a CI failure for the
+#: reviewed tree, a 422 for a chemist's own tier).
+MAX_SKILL_NAME_CHARS = 64
+MAX_SKILL_DESCRIPTION_CHARS = 1024
 
 
 class SkillManifest(BaseModel):

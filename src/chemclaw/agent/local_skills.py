@@ -1,8 +1,8 @@
 """A chemist's own skills: judgment that shapes their turns and nobody else's.
 
 The chemist writes this tier through `POST /skills/mine` (or by accepting a proposal); no agent path
-writes a skill, and `agent/skill_store.PermittedStoreBackend` raises `SkillsReadOnlyRefusal` on
-every write verb. Invariants:
+writes a skill, and `agent/skill_store_backend.PermittedStoreBackend` raises
+`SkillsReadOnlyRefusal` on every write verb. Invariants:
 
 - **Per-actor, resolved per turn.** The namespace closes over the turn's actor when
   `build_langgraph_agent` builds the backend, so another chemist's turn cannot reach it.
@@ -18,7 +18,7 @@ narrowed by the stored half of `skill_access.SkillNarrowing` (profile, role and 
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import frontmatter
 from pydantic import ValidationError
@@ -27,7 +27,6 @@ from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.skill_manifest import SkillManifest
 from chemclaw.agent.skill_store import (
-    PermittedStoreBackend,
     advisory_writer_lock,
     list_skill_names,
     read_skill_body,
@@ -41,6 +40,9 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.turn_signals import record_skill_loaded
+
+if TYPE_CHECKING:
+    from chemclaw.agent.skill_store_backend import PermittedStoreBackend
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +194,7 @@ def _count_a_local_load(name: str) -> None:
 
 def local_skills_backend(
     store: Any, actor: str, permits: Callable[[str], bool]
-) -> PermittedStoreBackend:
+) -> "PermittedStoreBackend":
     """The mounted read half of one chemist's own tier.
 
     A factory because the namespace, refusal wording and counter are this tier's knowledge.
@@ -203,6 +205,8 @@ def local_skills_backend(
         permits: `agent/skill_access.SkillNarrowing.stored`, the stored half of this turn's
             narrowing, applied per reach.
     """
+    from chemclaw.agent.skill_store_backend import PermittedStoreBackend
+
     namespace = local_skills_namespace(actor)
     return PermittedStoreBackend(
         namespace=lambda _runtime: namespace,

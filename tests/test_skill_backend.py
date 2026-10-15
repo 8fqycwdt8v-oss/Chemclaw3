@@ -391,8 +391,10 @@ def test_the_skills_prompt_refuses_to_trim_a_sentence_upstream_no_longer_writes(
     Without this the bump that changes that sentence leaves `_skills_prompt` returning upstream's
     template unchanged — the removed sentence quietly back — and nothing anywhere says so.
     """
+    from deepagents.middleware import skills
+
     from chemclaw.agent import langgraph_agent
 
-    monkeypatch.setattr(langgraph_agent, "SKILLS_SYSTEM_PROMPT", "{skills_locations}")
+    monkeypatch.setattr(skills, "SKILLS_SYSTEM_PROMPT", "{skills_locations}")
     with pytest.raises(RuntimeError, match="source-label sentence"):
         langgraph_agent._skills_prompt()
