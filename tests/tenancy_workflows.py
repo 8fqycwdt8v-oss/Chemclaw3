@@ -7,6 +7,7 @@ reaches the activity by name.
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 
 @workflow.defn
@@ -41,3 +42,21 @@ class Parent:
         if hop == 0:
             workflow.continue_as_new(1)
         return seen
+
+
+@workflow.defn
+class Strict:
+    """Runs one activity under the retry policy a refusal gets: final, never repeated."""
+
+    @workflow.run
+    async def run(self) -> str:
+        """Run one activity, and report the tenant it saw."""
+        return str(
+            await workflow.execute_activity(
+                "tenant_seen",
+                schedule_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=5, non_retryable_error_types=["TenantError"]
+                ),
+            )
+        )

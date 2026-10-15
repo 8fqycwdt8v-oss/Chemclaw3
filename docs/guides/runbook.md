@@ -3363,12 +3363,19 @@ a 403. No request creates a tenant.
    Set `CHEMCLAW_HNSW_ITERATIVE_SCAN=relaxed_order`: a vector search is filtered by tenant after the
    index returns its nearest rows, and without iterative scan a small tenant gets fewer results than
    it asks for.
-4. **Run the migration** (`make db-migrate`, or the chart's pre-upgrade hook). It enables and forces
+4. **Drain the running workflows before step 3 takes effect on the workers.** A workflow that began before the switch carries no tenant,
+   and once tenancy is on each of its activities fails once with `TenantError: ... started without a
+   tenant` (final, not retried) instead of reading nothing. Let them finish, or cancel and start
+   them again, before this step. Registering a tenant (step 2) creates no Schedules: run
+   `make schedules-apply` (the chart's upgrade does it) after each `make tenant-add`. A tenant
+   handed to another release (`make tenant-assign`) stops being served by the pods that held it
+   within `CHEMCLAW_TENANT_REGISTRY_CACHE_SECONDS` (30).
+5. **Run the migration** (`make db-migrate`, or the chart's pre-upgrade hook). It enables and forces
    the policies and widens the keys two tenants could both produce. Do it in a window: a release
    whose tenancy is off sees nothing once the policies are forced, and the switch takes `ACCESS
    EXCLUSIVE` on every scoped table (`infra/sql/README.md`, *Tenancy*, for pre-building the
    large keys).
-5. **Restart.** Each process checks the database on start and refuses to serve, with the reason, if
+6. **Restart.** Each process checks the database on start and refuses to serve, with the reason, if
    tenancy is on over policies that are not enforced, off over policies that are, over keys that are
    not widened, or as a role the policies do not bind.
 

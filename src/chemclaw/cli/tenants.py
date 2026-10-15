@@ -26,6 +26,12 @@ from chemclaw.core.tenancy import require_tenant_id
 
 logger = logging.getLogger(__name__)
 
+#: What a registered tenant still lacks: its Schedules are made by the apply step, not by the row.
+NEXT_STEP = (
+    "next: `make schedules-apply` (the chart's upgrade hook does the same) creates the Schedules "
+    "for {tenant}; until then no scheduled job (retention, sync, drift) runs for it"
+)
+
 _INSERT = "INSERT INTO tenants (id, deployment_id) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING"
 _ASSIGN = "UPDATE tenants SET deployment_id = %s WHERE id = %s"
 _LIST = "SELECT id, created_at, deployment_id FROM tenants ORDER BY id"
@@ -84,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "add":
         created = asyncio.run(add_tenant(args.tenant, args.deployment))
         print(f"{'registered' if created else 'already registered'}: {args.tenant}")
+        if created:
+            print(NEXT_STEP.format(tenant=args.tenant))
         return 0
     if args.command == "assign":
         found = asyncio.run(assign_tenant(args.tenant, args.deployment))

@@ -384,3 +384,24 @@ def test_a_worker_does_not_poll_on_a_database_it_may_not_serve(
     with pytest.raises(DeploymentRefused):
         asyncio.run(serve())
     assert worker.started is False
+
+
+async def test_a_tenant_handed_to_another_release_stops_being_served_within_the_cache_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tenant-assign` reaches running pods: a positive answer is believed for a short time only."""
+    async with tenancy_database() as database:
+        async with await connect(database.owner_dsn) as conn:
+            await conn.execute("INSERT INTO tenants (id, deployment_id) VALUES ('t', %s)", (A,))
+            await conn.commit()
+        monkeypatch.setattr(settings, "postgres_dsn", database.app_dsn)
+        monkeypatch.setattr(settings, "postgres_migration_dsn", database.owner_dsn)
+        monkeypatch.setattr(settings, "deployment_id", A)
+        monkeypatch.setattr(settings, "tenant_registry_cache_seconds", 0.2)
+        forget_registered_tenants()
+        assert await is_registered("t") is True
+        assert await assign_tenant("t", B) is True
+        assert await is_registered("t") is True, "still believed inside the window"
+        await asyncio.sleep(0.3)
+        assert await is_registered("t") is False, "the pod went on serving a tenant it had lost"
+        forget_registered_tenants()

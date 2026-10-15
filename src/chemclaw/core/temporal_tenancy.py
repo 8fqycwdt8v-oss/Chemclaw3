@@ -21,7 +21,13 @@ from temporalio import client, converter, worker, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
-    from chemclaw.core.tenancy import TENANT_HEADER, bound_tenant, current_tenant
+    from chemclaw.core.tenancy import (
+        TENANT_HEADER,
+        TenantError,
+        bound_tenant,
+        current_tenant,
+        require_tenant_id,
+    )
 
 _Headers = Mapping[str, temporalio.api.common.v1.Payload]
 
@@ -68,8 +74,39 @@ class _ActivityInbound(worker.ActivityInboundInterceptor):
     """Bind the header's tenant for the duration of one activity."""
 
     async def execute_activity(self, input: worker.ExecuteActivityInput) -> Any:
-        """Run the activity for the tenant its header names, or for none."""
+        """Run the activity for the tenant its header names; refuse one that has none to act for.
+
+        With tenancy on, an activity that binds no tenant would read nothing and have every write
+        refused, and Temporal would retry it to its limit. A workflow started before the switch (or
+        by a tool that adds no header) carries none, and a header can name a tenant nobody
+        registered or this release does not serve; each is a `TenantError`, which the retry policy
+        treats as final, saying what to do.
+        """
         payload = input.headers.get(TENANT_HEADER)
+        if not settings.tenancy_enabled:
+            return await self._run(input, payload)
+        from chemclaw.core.tenant_registry import is_registered
+
+        name = getattr(input.fn, "__name__", "an activity")
+        if payload is None:
+            if not current_tenant():
+                raise TenantError(
+                    f"{name} was started without a tenant, so it would act for none. A workflow "
+                    "that began before tenancy was switched on carries no tenant: let it finish "
+                    "before the switch, or start it again"
+                )
+            return await self._run(input, payload)
+        tenant = converter.default().payload_converter.from_payload(payload, str)
+        if not await is_registered(require_tenant_id(tenant)):
+            raise TenantError(
+                f"{name} was started for tenant {tenant!r}, which this release does not serve"
+            )
+        return await self._run(input, payload)
+
+    async def _run(
+        self, input: worker.ExecuteActivityInput, payload: temporalio.api.common.v1.Payload | None
+    ) -> Any:
+        """Run the activity bound to the header's tenant, or to the process's own when none."""
         if payload is None:
             return await self.next.execute_activity(input)
         tenant = converter.default().payload_converter.from_payload(payload, str)

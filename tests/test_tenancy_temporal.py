@@ -12,7 +12,7 @@ from datetime import timedelta
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow, WorkflowFailureError
 from temporalio.worker import Worker
 
 from chemclaw.core.config import settings
@@ -21,12 +21,15 @@ from chemclaw.core.temporal_tenancy import TenantInterceptor
 from chemclaw.core.tenancy import bound_tenant, current_tenant
 from chemclaw.durable.schedules import PlannedSchedule, _build_schedule
 from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
-from tests.tenancy_workflows import Child, Parent
+from tests.tenancy_workflows import Child, Parent, Strict
+
+ATTEMPTS: list[int] = []
 
 
 @activity.defn
 async def tenant_seen() -> str:
     """What this activity acts for."""
+    ATTEMPTS.append(activity.info().attempt)
     return current_tenant()
 
 
@@ -40,9 +43,15 @@ async def _client(env: object) -> Client:
 
 @pytest.fixture
 def tenancy_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tenancy enabled, with no process tenant."""
+    """Tenancy enabled, with no process tenant, and acme and globex registered."""
     monkeypatch.setattr(settings, "tenancy_enabled", True)
     monkeypatch.setattr(settings, "tenancy_process_tenant", "")
+
+    async def registered(tenant: str) -> bool:
+        return tenant in {"acme", "globex", "default"}
+
+    monkeypatch.setattr("chemclaw.core.tenant_registry.is_registered", registered)
+    ATTEMPTS.clear()
 
 
 @pytest.mark.usefixtures("tenancy_on")
@@ -68,25 +77,29 @@ async def test_a_workflow_started_for_a_tenant_acts_for_it_everywhere() -> None:
 
 
 @pytest.mark.usefixtures("tenancy_on")
-async def test_a_workflow_started_with_no_tenant_acts_for_none() -> None:
-    """Nothing bound at the start is nothing at the activity: it fails closed, never to `acme`."""
+async def test_a_workflow_started_with_no_tenant_is_refused_once_by_name() -> None:
+    """Nothing bound at the start: the activity fails with `TenantError` and is not retried."""
     env = await start_env_or_skip()
     async with env:
         client = await _client(env)
         queue = f"tenancy-{uuid.uuid4().hex[:8]}"
-        async with Worker(
-            client, task_queue=queue, workflows=[Parent, Child], activities=[tenant_seen]
-        ):
+        async with Worker(client, task_queue=queue, workflows=[Strict], activities=[tenant_seen]):
             handle = await client.start_workflow(
-                Parent.run, id=f"p-{uuid.uuid4().hex[:8]}", task_queue=queue
+                Strict.run, id=f"s-{uuid.uuid4().hex[:8]}", task_queue=queue
             )
-            assert await handle.result() == ["", ""]
+            with pytest.raises(WorkflowFailureError) as failed:
+                await handle.result()
+        cause = failed.value
+        while cause.__cause__ is not None:
+            cause = cause.__cause__  # type: ignore[assignment]
+        assert getattr(cause, "type", "") == "TenantError", repr(cause)
+        assert "started without a tenant" in str(cause)
+        assert ATTEMPTS == [], "the activity body ran for no tenant"
 
 
+@pytest.mark.usefixtures("tenancy_on")
 async def test_a_schedule_carries_its_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Schedule has no request to inherit from, so the plan's tenant rides on the action."""
-    monkeypatch.setattr(settings, "tenancy_enabled", True)
-    monkeypatch.setattr(settings, "tenancy_process_tenant", "")
     monkeypatch.setattr(settings, "background_task_queue", f"tenancy-{uuid.uuid4().hex[:8]}")
     env = await start_local_env_or_skip()
     async with env:
