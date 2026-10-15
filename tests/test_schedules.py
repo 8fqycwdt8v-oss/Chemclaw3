@@ -173,6 +173,24 @@ def test_reindex_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyP
     assert len({p.schedule_id for p in plan}) == len(plan)
 
 
+def test_the_knowledge_store_comparison_is_scheduled_only_while_both_stores_are_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`kg_store=dual` is the one mode with two stores to compare, so it alone has the Schedule."""
+    from chemclaw.durable.kg_compare import KgCompareWorkflow
+
+    for mode in ("git", "postgres"):
+        monkeypatch.setattr(settings, "kg_store", mode)
+        assert KgCompareWorkflow not in {p.workflow for p in planned_schedules()}
+    monkeypatch.setattr(settings, "kg_store", "dual")
+    monkeypatch.setattr(settings, "kg_compare_schedule_minutes", 720)
+    plan = planned_schedules()
+    compare = next(p for p in plan if p.workflow is KgCompareWorkflow)
+    assert compare.schedule_id == "kg-compare" and compare.interval == timedelta(minutes=720)
+    assert "kg-compare" in OWNED_SCHEDULE_IDS
+    assert len({p.schedule_id for p in plan}) == len(plan)
+
+
 def test_document_sync_schedule_is_added_only_when_a_share_is_mounted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -216,6 +234,7 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
         monkeypatch.setattr(settings, flag, True)
     monkeypatch.setattr(settings, "retention_session_events_days", 30)
     monkeypatch.setattr(settings, "artifact_store_max_bytes", 1)
+    monkeypatch.setattr(settings, "kg_store", "dual")
     monkeypatch.setattr(schedules_module, "share_sources", lambda: {"sharedrive": object()})
     monkeypatch.setattr(schedules_module, "corpus_sources", lambda: {"pistachio": object()})
     monkeypatch.setattr(schedules_module, "active_ingest_source_names", lambda: ["eln-json"])
@@ -228,8 +247,8 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
 
     # The guard is only worth anything if the plan is actually full — an empty plan is a subset of
     # everything. Every conditional job in this file is enabled above, beside the one that is not
-    # conditional at all, which makes fourteen.
-    assert len(planned) == 14, (
+    # conditional at all, which makes fifteen.
+    assert len(planned) == 15, (
         f"the plan is not fully enabled, so the subset below is vacuous: {sorted(planned)}"
     )
     assert planned <= OWNED_SCHEDULE_IDS, (

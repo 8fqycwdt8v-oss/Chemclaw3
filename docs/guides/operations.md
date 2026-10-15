@@ -179,6 +179,7 @@ planned. All fire on `background-jobs` with overlap policy SKIP, a deterministic
 | `orphaned-waits` | `OrphanedWaitsWorkflow` | always | `awaiting_orphan_sweep_minutes` (60) |
 | `result-publish` | `PublishResultsWorkflow` | a sink is enabled in `CHEMCLAW_RESULT_SINKS` | `result_publish_schedule_minutes` (15) |
 | `observations` | `ObservationSynthesisWorkflow` | `observations_enabled` | `observation_schedule_minutes` (1440) |
+| `kg-compare` | `KgCompareWorkflow` | `kg_store = dual` | `kg_compare_schedule_minutes` (1440) |
 
 Knowledge mining (campaign, playbook, optimization synthesis) has **no** Schedule; start it on
 demand with `make synthesize KIND=…`.
@@ -221,6 +222,33 @@ The repo credential is `secrets.keys.knowledgeRepoToken`, handed to git through 
 `deploy/entrypoint.sh` in the front door and background worker, whose note writer pushes. Required
 only once `knowledge.sync.repoUrl` is set. Freshness is `chemclaw_knowledge_sync_age_seconds` (`-1` = the tree holds no note); its
 alert is off until `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero.
+
+#### Filling Postgres with the notes (`kg_store=dual`)
+
+The notes are moving into Postgres (`D-2026-10-14-the-notes-live-in-postgres-and-git-leaves-the-knowledge-path`).
+Until the reads flip, the tree stays the authority and Postgres is a copy that is proven before it
+is read:
+
+1. `make kg-import` loads the notes directory into Postgres, in id order and idempotently (`ARGS=--dry-run`
+   first; `--tenant T` for another tenant). It prints what it wrote and names every file it did not
+   import; exit 1 means some were not. It also links the `note_index` rows to their notes.
+2. Set `CHEMCLAW_KG_STORE=dual` and roll the pods. A note is now written to the tree and then to
+   Postgres; reads still come from the tree. A Postgres failure never fails the chemist's call; it
+   is logged (`kg.dual_write.failed`) and counted, and `ChemclawKnowledgeDualWriteFailing` fires.
+3. The `kg-compare` Schedule (apply with `make schedules-apply`) compares both stores every
+   `kg_compare_schedule_minutes`; `ChemclawKnowledgeStoresDiffer` fires on any difference. By hand:
+   `make kg-validate-compare` (`ARGS="--json"`), and `ARGS=--repair` to copy the tree's notes into
+   Postgres. `kg-import` and `--repair` refuse (exit 2) on a checkout that is not at the remote's tip,
+   so run them where the sync is current. Run `make kg-import` again before the flip to link the index rows of notes recorded
+   since. A note a person edits in the repository reaches Postgres only this way (the mirror is
+   `record_note`'s), so each such edit is a difference until `make kg-import` or `--repair` runs;
+   a window with human edits needs one of them after each.
+   With tenancy on, both commands act for one tenant and refuse without `--tenant <id>`
+   (`ARGS="--tenant acme"`), and the deployment guard refuses a second tenant while the
+   store is `dual`: Postgres holds a copy per tenant but every read is still the one repository.
+4. Seven days with none of the three alerts (`ChemclawKnowledgeDualWriteFailing`, `ChemclawKnowledgeStoresDiffer`, `ChemclawKnowledgeCompareNotRunning`: a comparison that never completes
+   leaves the first two silent) is the condition for moving the reads. `postgres` is refused at
+   startup until that change ships; set `git` to roll back.
 
 ### 4.4 Hook Jobs on every release
 
@@ -396,6 +424,7 @@ Following one request across processes: [troubleshooting § 1](troubleshooting.m
 | `make rekey-compounds [APPLY=1 [DISPOSE=1]]` | carry compound notes and fingerprints across a standardization bump |
 | `make sink-schema` | print the DDL and registry seed a results database needs |
 | `make kg-validate` | validate the knowledge graph |
+| `make kg-import` / `make kg-validate-compare` | load the notes directory into Postgres; compare the two stores (`ARGS=--repair`) |
 | `make skill-validate`, `connector-validate`, `datasource-validate`, `sink-validate`, `channel-validate`, `template-validate`, `eln-validate`, `prose-validate` | validate declarations against the live surface |
 | `make helm-validate` | render the chart and schema-check it (needs `helm`, `kubeconform`, `promtool`) |
 | `make eval-baseline-check` | score the eval case-set against `data/evals/baseline.json` |

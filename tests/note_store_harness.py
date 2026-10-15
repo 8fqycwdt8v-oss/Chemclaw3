@@ -1,9 +1,9 @@
 """The stores `tests/test_note_store.py` and `tests/test_postgres_note_store.py` hold to one suite.
 
-A harness builds an empty store of one kind and puts notes in through that store's own write: the
-git writer on a real repository for `GitNoteStore`, `PostgresNoteStore.put` on a migrated database
-for the other. The assertions read only through `NoteStore`. `corpus()` is the synthetic graph the
-suite uses: links both ways, a dangling target, windows, a supersede chain and cycles.
+A harness builds an empty store of one kind and puts notes in through that store's own `put`: the
+git writer on a real repository for `GitNoteStore`, a migrated database for `PostgresNoteStore`.
+The assertions read only through `NoteStore`. `corpus()` is the synthetic graph the suite uses:
+links both ways, a dangling target, windows, a supersede chain and cycles.
 """
 
 from collections.abc import Awaitable, Callable
@@ -17,11 +17,9 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.kg.git_writer import GitNoteWriter
 from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.note import Note, Relation, note_relative_path
+from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.postgres_store import PostgresNoteStore
-from chemclaw.kg.record import NoteFile, NoteWrite
-from chemclaw.kg.render import render_note
-from chemclaw.kg.store import GitNoteStore, NoteStore, NoteUnit
+from chemclaw.kg.store import GitNoteStore, NoteUnit, WritableNoteStore
 from tests.kg_repo import notes_repo
 from tests.pg import migrated_db_or_skip
 
@@ -111,8 +109,8 @@ class Harness(Protocol):
     """A store under test and the one way the suite puts notes into it."""
 
     @property
-    def store(self) -> NoteStore:
-        """The store the assertions read from."""
+    def store(self) -> WritableNoteStore:
+        """The store the assertions read from, and write to through `put`."""
         ...
 
     async def add(self, *notes: Note) -> None:
@@ -121,21 +119,22 @@ class Harness(Protocol):
 
 
 class GitHarness:
-    """A real bare remote and clone, written by the real git writer, read by `GitNoteStore`."""
+    """A real bare remote and clone, written by `GitNoteStore.put` over the real git writer."""
 
     def __init__(self, root: Path) -> None:
         """Make the remote and the clone under `root`."""
         self.clone = notes_repo(root)
-        self._writer = GitNoteWriter(repo_dir=str(self.clone), base_branch="main", remote="origin")
-        self.store = GitNoteStore(self.clone / "knowledge")
+        writer = GitNoteWriter(repo_dir=str(self.clone), base_branch="main", remote="origin")
+        self.store = GitNoteStore(self.clone / "knowledge", writer)
 
     async def add(self, *notes: Note) -> None:
-        """One commit holding every note."""
-        files = [
-            NoteFile(path=f"knowledge/{note_relative_path(n.type, n.id)}", content=render_note(n))
-            for n in notes
-        ]
-        await self._writer.write(NoteWrite(files=files, message=f"Add {len(notes)} note(s)"))
+        """One commit holding every note: the last is the subject, the rest its dependencies.
+
+        A dependency is written only where the tree has no file, so a call that names an id the
+        tree already holds is one note (a subject, which replaces it).
+        """
+        if notes:
+            await self.store.put(NoteUnit(notes[-1], dependencies=notes[:-1]))
 
 
 class PostgresHarness:

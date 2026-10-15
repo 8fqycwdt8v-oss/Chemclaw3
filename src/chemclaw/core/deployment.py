@@ -29,6 +29,17 @@ from chemclaw.core.tenancy import TENANT_SETTING
 
 logger = logging.getLogger(__name__)
 
+
+def knowledge_is_per_tenant() -> bool:
+    """Whether the notes a tenant reads are held per tenant, which only `kg_store=postgres` does.
+
+    Under `dual` Postgres holds a tenant-scoped copy but every read is still the repository tree,
+    which every tenant would read and write whatever Postgres says: a second tenant would see the
+    first's notes. So `dual` is refused a second tenant exactly as `git` is.
+    """
+    return str(settings.kg_store) == "postgres"
+
+
 #: A table every widened key is checked on: `chemclaw_apply_tenancy` widens all of them or none.
 _KEY_WITNESS = "calculation_results"
 
@@ -213,8 +224,9 @@ def judge(
         if not knowledge_in_postgres:
             problems.append(
                 f"{len(served)} tenants are registered for this release but the knowledge graph is "
-                "one repository for the whole deployment (kg_store=git), which every tenant would "
-                "read and write. Hold the knowledge in Postgres first, or register one tenant"
+                "one repository for the whole deployment (kg_store=git, which kg_store=dual also "
+                "reads), which every tenant would read and write. Hold the knowledge in Postgres "
+                "first, or register one tenant"
             )
         if hnsw_iterative_scan == "off":
             problems.append(
@@ -343,7 +355,7 @@ async def collect_problems() -> list[str] | None:
                 facts,
                 own=settings.deployment_id,
                 enabled=settings.tenancy_enabled,
-                knowledge_in_postgres=str(settings.kg_store) == "postgres",
+                knowledge_in_postgres=knowledge_is_per_tenant(),
                 hnsw_iterative_scan=settings.hnsw_iterative_scan,
             )
             problems.extend(found if label == "postgres_dsn" else [f"{label}: {p}" for p in found])

@@ -292,6 +292,9 @@ _MUST_FAIL = frozenset(
         # Schedule-only, but declared: a failed run reaches an operator through
         # `ScheduleHealth.last_outcome`, while a parked one reaches nobody as the index goes stale.
         "NoteReindexWorkflow",
+        # Schedule-only, and declared for the same reason: a parked comparison reads as the clean
+        # day the read flip waits for (`durable/kg_compare.py`).
+        "KgCompareWorkflow",
         # The check-in over blocked work, the one nightly sweep that fails rather than parks: a
         # parked run reads as "nothing of yours is blocked", and under `SKIP` every later night is
         # silently skipped.

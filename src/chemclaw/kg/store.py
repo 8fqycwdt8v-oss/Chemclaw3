@@ -3,8 +3,9 @@
 `NoteStore` is the read interface to notes. Readers (`agent`, `retrieval`, `durable`, `memory`,
 `evals`) call `note_store()` rather than `kg.graph`, so the backing store is a setting
 (`kg_store`), not a property of the call site. `GitNoteStore` answers from the Markdown tree by
-delegation only. `kg.record.record_note` is the one write path; `NoteUnit` is the value a store
-that can write in one transaction (`kg.postgres_store`) takes, in the order `record` writes files.
+delegation and, through the injected `NoteWriter`, its writes. `kg.record.record_note` is the one
+write path; `NoteUnit` is the value `WritableNoteStore.put` takes, in the order `record` writes
+files. A reader asks for `NoteStore`, so a read-only caller cannot write by type.
 
 Reads are coroutines, so a database store can use the process's one async pool. `GitNoteStore` does
 its file and graph work in a worker thread and never blocks the event loop. `CorpusState` is the
@@ -13,12 +14,12 @@ is; a note is never read through it.
 """
 
 import asyncio
-from collections.abc import Collection, Hashable, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Hashable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, assert_never
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, assert_never
 
 import networkx as nx
 
@@ -27,6 +28,10 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.kg import graph as corpus
 from chemclaw.kg.note import Note, NoteError, Relation, read_note
 from chemclaw.kg.search import term_coverage
+
+if TYPE_CHECKING:
+    from chemclaw.kg.postgres_store import PostgresNoteStore
+    from chemclaw.kg.record import NoteWriter
 
 
 class SearchResult(NamedTuple):
@@ -94,13 +99,19 @@ class NoteUnit:
     The order is dependencies, then the subject, then retirements, each citing the one before
     (`kg.record`). A note id appears once, at its first role. `expected_revision` makes the
     subject's write conditional on the revision the writer read: `None` writes whatever is there,
-    `0` requires the note to be new, `n` requires revision `n`.
+    `0` requires the note to be new, `n` requires revision `n`. `arrived` dates the subject's first
+    appearance when it is imported rather than recorded now; a store that keeps no arrival date of
+    its own (the tree dates a note by its commit) ignores it. `retired_from` maps a retirement's id
+    to the `content_sha` of the note its copy was made from; a store that applies a retirement to
+    the note as it stands keeps the copy's added sentence only if that is still the note it holds.
     """
 
     subject: Note
     dependencies: tuple[Note, ...] = ()
     retirements: tuple[Note, ...] = ()
     expected_revision: int | None = None
+    arrived: date | None = None
+    retired_from: Mapping[str, str] = field(default_factory=dict)
 
     def ordered(self) -> list[tuple[Role, Note]]:
         """The notes in write order, each id once, with the role it is written in."""
@@ -246,6 +257,21 @@ class NoteStore(CorpusState, Protocol):
         ...
 
 
+class WritableNoteStore(NoteStore, Protocol):
+    """A `NoteStore` that can also write a `NoteUnit`: both stores `kg_store` selects.
+
+    Writing is not on `NoteStore` because readers are the great majority of callers and must not be
+    able to write; `kg.record.record_note` is the one caller that does.
+    """
+
+    async def put(self, unit: NoteUnit) -> PutOutcome:
+        """Write `unit` (dependencies, then the subject, then retirements) and say what changed.
+
+        Idempotent: a repeat of the same unit changes nothing and reports an empty `written`.
+        """
+        ...
+
+
 class GitNoteStore:
     """`NoteStore` over a directory of Markdown notes.
 
@@ -255,9 +281,31 @@ class GitNoteStore:
     so it is cheap to make per call and two of them over one directory share the module's caches.
     """
 
-    def __init__(self, notes_dir: Path) -> None:
-        """Serve the notes under `notes_dir`."""
+    def __init__(self, notes_dir: Path, writer: "NoteWriter | None" = None) -> None:
+        """Serve the notes under `notes_dir`; `put` writes through `writer` (default: git's)."""
         self._dir = notes_dir
+        self._writer = writer
+
+    async def put(self, unit: NoteUnit) -> PutOutcome:
+        """Write `unit` as the file writer does: one commit, files in the unit's order.
+
+        The files land under `settings.knowledge_dir` of the writer's checkout, which is the tree
+        this store reads when it is the configured one. The tree keeps no revision numbers, so
+        `revisions` is empty and `expected_revision` is refused rather than ignored.
+        """
+        from chemclaw.kg.git_writer import default_writer
+        from chemclaw.kg.record import _build_write
+
+        if unit.expected_revision is not None:
+            raise NoteWriteError(
+                "the git store keeps no revisions, so a write cannot be conditional on one"
+            )
+        write = _build_write(
+            unit.subject, settings.knowledge_dir, list(unit.dependencies), list(unit.retirements)
+        )
+        outcome = await (self._writer or default_writer()).write(write)
+        written = (unit.subject.id,) if outcome.notes else ()
+        return PutOutcome(subject=unit.subject.id, revisions={}, written=written)
 
     async def get(self, note_id: str) -> Note | None:
         """The note `note_id` names; a cited-but-undefined id is `None`, not a bare node."""
@@ -409,14 +457,28 @@ class GitNoteStore:
         await asyncio.to_thread(partial(corpus.invalidate_cache, self._dir, reparse=reparse))
 
 
-def note_store(notes_dir: Path | None = None) -> NoteStore:
-    """The store `settings.kg_store` selects.
+def postgres_note_store() -> "PostgresNoteStore":
+    """The Postgres store of the tenant the work acts for: where `dual` and `postgres` write.
 
-    `notes_dir` points the git store at another tree, for a fixture or a second checkout. A store
-    that does not keep notes in a directory ignores it.
+    It names no tenant of its own, so it follows the one bound to the work and, with tenancy on,
+    refuses work that has none (`TenantError`) instead of reading or writing nothing.
+    """
+    from chemclaw.kg.postgres_store import PostgresNoteStore
+
+    return PostgresNoteStore()
+
+
+def note_store(notes_dir: Path | None = None) -> NoteStore:
+    """The store `settings.kg_store` selects for reading.
+
+    `dual` reads the tree, which stays the authority until the reads flip. `notes_dir` points the
+    git store at another tree, for a fixture or a second checkout. A store that does not keep notes
+    in a directory ignores it.
     """
     match settings.kg_store:
-        case "git":
+        case "git" | "dual":
             return GitNoteStore(notes_dir if notes_dir is not None else settings.knowledge_path)
+        case "postgres":
+            return postgres_note_store()
         case _:
             assert_never(settings.kg_store)

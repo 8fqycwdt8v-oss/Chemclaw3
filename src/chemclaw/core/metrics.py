@@ -287,6 +287,12 @@ _COUNTERS: dict[str, str] = {
         "Wall-clock seconds accumulated by finished durable jobs, by connector."
     ),
     "chemclaw_notes_recorded_total": "Notes written into the knowledge graph.",
+    # Under `kg_store=dual` the tree is written first and the chemist's write succeeds whatever
+    # Postgres does, so this is the only server-side sign that the two stores have started to
+    # differ (`kg/record.py`). The nightly comparison finds the notes; `--repair` fixes them.
+    "chemclaw_kg_dual_write_failed_total": (
+        "Notes written to the tree whose copy in the Postgres store failed; the stores now differ."
+    ),
     # Unparseable notes are dropped from the graph so one bad file cannot block queries; this makes
     # that visible on the tree a pod actually serves (`kg-validate` only covers the repository).
     "chemclaw_notes_unparseable_total": (
@@ -1023,6 +1029,13 @@ _MAX_SERIES_PER_COUNTER = 256
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
+    # Each background replica holds its own last comparison, so the differences gauge alone cannot
+    # say whose reading is current: a rule selects the series of the newest timestamp. 0 until this
+    # process has completed a comparison.
+    "chemclaw_kg_compare_last_run_timestamp_seconds": (
+        "Unix time at which this process last completed a tree-versus-Postgres comparison "
+        "(0 = none yet)."
+    ),
     "chemclaw_egress_guard_armed": "1 when the in-process egress guard is installed, else 0.",
     # Whether the compiled `LD_PRELOAD` interposer (`netguard_preload.c`) is loaded, separate from
     # the Python guard: sockets opened below the interpreter (gRPC, the OTLP exporter, the Temporal
@@ -1161,6 +1174,11 @@ _GAUGE_FAMILIES: dict[str, str] = {
         "Total relation size of each durable table in bytes, as of the last retention pass "
         "(heap, indexes and TOAST — `pg_total_relation_size`)."
     ),
+    # Set by the last comparison of the two note stores (`durable/kg_compare.py`) and absent until
+    # one has run: a zero in every kind is a clean day, which the read flip waits for.
+    "chemclaw_kg_compare_differences": (
+        "Notes the last tree-versus-Postgres comparison found different, by kind of difference."
+    ),
     "chemclaw_connector_unhealthy": (
         "1 per enabled connector that could not be reached, by connector. The unlabelled "
         "`chemclaw_connectors_unhealthy` says how many; this says which, which is the half "
@@ -1176,6 +1194,7 @@ _GAUGE_FAMILY_LABELS: dict[str, str] = {
     "chemclaw_ingest_cursor_lag_seconds": "source",
     "chemclaw_connector_unhealthy": "connector",
     "chemclaw_connector_tool_schema_tokens": "connector",
+    "chemclaw_kg_compare_differences": "kind",
 }
 
 

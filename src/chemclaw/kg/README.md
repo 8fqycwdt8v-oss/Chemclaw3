@@ -8,13 +8,19 @@ through a dense or lexical index (`retrieval_mode`, default `graph`). Those are 
 the traversal, never a replacement for it.
 
 `store.py` is the read interface the readers of the corpus go through (`NoteStore`, chosen by the
-`kg_store` setting) and `GitNoteStore` the only selectable implementation, a delegation to `graph.py`
-(writes stay with `record.py`). `postgres_store.py` is `PostgresNoteStore`, the same interface over
-the tables of `infra/sql/128_kg_notes.sql` and `129_kg_note_search.sql`, plus `put(NoteUnit)`: a
-subject and what lands with it, written in `record.py`'s order in one transaction, each note as a
-new revision unless its content is unchanged. Nothing selects it yet (`kg_store` has one value);
-`tests/test_note_store.py` holds both stores to one suite. `rows.py` maps a `Note` to those columns
+`kg_store` setting), and `WritableNoteStore`, which adds `put(NoteUnit)`: a subject and what lands
+with it, in `record.py`'s order. `GitNoteStore` is a delegation to `graph.py` that writes through
+the git writer. `postgres_store.py` is `PostgresNoteStore`, the same interfaces over the tables of
+`infra/sql/128_kg_notes.sql` and `129_kg_note_search.sql`, writing each unit in one transaction,
+each note as a new revision unless its content is unchanged. `tests/test_note_store.py` holds both
+stores to one suite. `rows.py` maps a `Note` to those columns
 (`D-2026-10-14-the-notes-live-in-postgres-and-git-leaves-the-knowledge-path`).
+
+`kg_store=dual` writes the tree and then Postgres and reads the tree; `importer.py` loads a
+directory into Postgres and `compare.py` says whether the two serve the same canonical notes and
+edges, and puts Postgres right from the tree
+(`D-2026-10-15-dual-write-keeps-the-tree-the-authority-and-postgres-reads-wait`). `postgres` is
+refused at startup until the reads flip.
 
 `note.py` is the schema and parser, `graph.py` the NetworkX indexer, `search.py` what a note's text
 *is* for a substring search, `relations.py` and `crosslink.py` the link semantics, `validate.py`
