@@ -41,8 +41,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `deploy/helm/chemclaw/templates/prometheusrule.yaml::ChemclawDatabaseUnavailable`, `docs/guides/runbook.md` § Backup, restore and PITR.
 - [ ] **An erasure is not recorded where a restore can find it** [M] — "erasure applies on restore" needs the `make user-erase` runs since the backup, kept outside the database; the command keeps none (the runbook asks the operator to log them);
   `src/chemclaw/cli/erase_actor.py::main`.
-- [ ] **The drill's knowledge arm is written against the draft `kg_*` schema** [S] — when W4 lands, confirm the fixture columns and point `kg-validate` at the Postgres store (W4.10); until then the `kg_tables` check is a named skip;
-  `src/chemclaw/cli/restore_drill_db.py::load_knowledge_rows`, `src/chemclaw/cli/restore_drill.py::kg_checks`.
+- [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
+  `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/cli/restore_drill_db.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised

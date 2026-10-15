@@ -2847,7 +2847,7 @@ drill checks it against the primary as it stood at the marker:
 | `schema_migrations`, `indexes`, `pgvector`, `pgvector_query` | the ledger is identical; every index exists and is valid; the extension is there and an HNSW nearest-neighbour query uses the restored index |
 | `grants`, `app_role` | the runtime role's privileges are intact: it appends to the audit trail and cannot rewrite it |
 | `listen_notify`, `advisory_lock`, `promoted` | the restored server does the coordination work (LISTEN/NOTIFY, session-level advisory locks) and accepts writes, with sequences continuing past the restored rows |
-| `kg_tables`, `kg_validate` | the `kg_*` tables are restored non-empty (a **named skip** while the schema has none); `kg-validate` against the restored database resolves a citation written before the target and refuses one written after it |
+| `kg_tables`, `kg_validate` | the `kg_*` notes, revisions and edges are restored non-empty (a **named skip** on a schema without them); `kg-validate` against the restored database resolves a citation written before the target and refuses one written after it — it validates the citations of a notes directory against the restored calculation cache until W4.10 points it at the notes in Postgres |
 | `temporal` | a second Temporal started on the restored databases lists exactly the workflows running at the target |
 | `wal_archiving` | the archiver reported no failure |
 
