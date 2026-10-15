@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 Status = Literal["pass", "fail", "skip"]
 
@@ -30,6 +31,12 @@ MARKER_AT_TARGET = "target"
 MARKER_AFTER_TARGET = "after-target"
 
 #: The role the runtime principal splits into (`infra/sql/grants/app_privileges.sql`).
+#: The tenant the drill acts for. The drill's connections bind no request, so with tenancy on (the
+#: drill's subprocesses inherit the environment) they would read nothing and be refused every write.
+#: `default` is registered in every database, and is the tenant of a deployment that never enabled
+#: tenancy, so what the drill writes is what that deployment would hold.
+DRILL_TENANT = "default"
+
 APP_ROLE = "chemclaw_app"
 
 #: Tables the wave after the target changes, so a restore that ignored the target is visible.
@@ -58,6 +65,18 @@ class Check:
     def as_dict(self) -> dict[str, str]:
         """The JSON form the drill's report carries."""
         return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+def _connect(dsn: str, **kwargs: Any) -> psycopg.Connection[Any]:
+    """`psycopg.connect`, with the drill's tenant bound for the life of the connection.
+
+    Set through the connection's `options`, merged with any the DSN already carries (a test's
+    `search_path`), so every statement the drill runs is for `DRILL_TENANT` whether the policies are
+    enabled or not.
+    """
+    options = conninfo_to_dict(dsn).get("options", "")
+    bound = f"{options} -c app.tenant={DRILL_TENANT}".strip()
+    return psycopg.connect(make_conninfo(dsn, options=bound), **kwargs)
 
 
 def passed(name: str, detail: str = "") -> Check:
@@ -440,8 +459,8 @@ def notify_check(dsn: str) -> Check:
     """`LISTEN` then `NOTIFY` from another session reaches the listener."""
     channel = "restore_drill"
     with (
-        psycopg.connect(dsn, autocommit=True) as listener,
-        psycopg.connect(dsn, autocommit=True) as sender,
+        _connect(dsn, autocommit=True) as listener,
+        _connect(dsn, autocommit=True) as sender,
     ):
         listener.execute(f"LISTEN {channel}")
         sender.execute("SELECT pg_notify(%s, 'ping')", (channel,))
@@ -455,8 +474,8 @@ def advisory_lock_check(dsn: str) -> Check:
     """A session-level advisory lock excludes a second session and frees on release."""
     key = 0x5245_5354_4F52_45  # "RESTORE"
     with (
-        psycopg.connect(dsn, autocommit=True) as first,
-        psycopg.connect(dsn, autocommit=True) as second,
+        _connect(dsn, autocommit=True) as first,
+        _connect(dsn, autocommit=True) as second,
     ):
         got = first.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()
         contended = second.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()
@@ -491,7 +510,7 @@ def _writable_check(conn: psycopg.Connection[Any]) -> Check:
 
 def app_role_check(dsn: str) -> Check:
     """As the runtime role: it can append to the audit trail and cannot rewrite it."""
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    with _connect(dsn, autocommit=True) as conn:
         conn.execute(_AUDIT_INSERT + "VALUES ('restored', 'drill', 'restore_drill', '{}', 'ok', 0)")
         try:
             conn.execute("UPDATE audit_events SET outcome = 'rewritten'")
@@ -508,7 +527,7 @@ def app_role_check(dsn: str) -> Check:
 def is_ready(dsn: str, *, recovered: bool = False) -> bool:
     """Whether the server answers (and, if `recovered`, has left recovery); False while not."""
     try:
-        with psycopg.connect(dsn, connect_timeout=2) as conn:
+        with _connect(dsn, connect_timeout=2) as conn:
             row = conn.execute("SELECT pg_is_in_recovery()").fetchone()
     except psycopg.Error:
         return False
@@ -517,7 +536,7 @@ def is_ready(dsn: str, *, recovered: bool = False) -> bool:
 
 def clock_now(dsn: str) -> datetime:
     """The server's `clock_timestamp()`: the instant a restore is asked to stop at."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         row = conn.execute("SELECT clock_timestamp()").fetchone()
     if row is None:
         raise RuntimeError("the server returned no clock reading")
@@ -527,7 +546,7 @@ def clock_now(dsn: str) -> datetime:
 
 def switch_wal(dsn: str) -> str:
     """Close the current WAL segment and return its file name, so the caller can wait for it."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         row = conn.execute("SELECT pg_walfile_name(pg_current_wal_lsn())").fetchone()
         conn.execute("SELECT pg_switch_wal()")
     if row is None:
@@ -537,68 +556,68 @@ def switch_wal(dsn: str) -> str:
 
 def archiver_stats(dsn: str) -> tuple[int, int]:
     """`(archived_count, failed_count)` from `pg_stat_archiver`."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         row = conn.execute("SELECT archived_count, failed_count FROM pg_stat_archiver").fetchone()
     return (int(row[0]), int(row[1])) if row else (0, 0)
 
 
 def prepare(dsn: str, app_password: str) -> None:
     """The runtime role the grants name, and the table the marker rows live in."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         _create_app_role(conn, app_password)
         _create_marker_table(conn)
 
 
 def load_wave(dsn: str, tag: str, rows: int, seed: int) -> list[str]:
     """Write one wave of fixture rows; the `kg_*` tables the schema has (empty = none)."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         _load_rows(conn, tag, rows, seed)
         return _knowledge_tables(conn)
 
 
 def change_wave(dsn: str, tag: str) -> None:
     """An update and a delete against the rows of wave `tag`."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         _change_rows(conn, tag)
 
 
 def empty_conversations(dsn: str) -> None:
     """The accident the restore exists for: the conversation table emptied."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         _disaster(conn)
 
 
 def mark(dsn: str, label: str) -> None:
     """Commit one marker row."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         _write_marker(conn, label)
 
 
 def snapshot(dsn: str) -> Snapshot:
     """Read a snapshot of the database at `dsn`."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         return _snapshot(conn)
 
 
 def knowledge_counts(dsn: str) -> dict[str, int]:
     """Row counts of the `kg_*` tables; empty when the schema has none."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         return {table: _count_rows(conn, table) for table in _knowledge_tables(conn)}
 
 
 def nearest_neighbour(dsn: str, probe_id: str) -> str:
     """The id nearest to `probe_id` by Jaccard distance."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         return _nearest_fingerprint(conn, probe_id)[0]
 
 
 def vector_query_check(dsn: str, probe_id: str, expected_id: str) -> Check:
     """The HNSW index answers a nearest-neighbour query with the primary's answer."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         return _pgvector_check(conn, probe_id, expected_id)
 
 
 def promotion_check(dsn: str) -> Check:
     """The promoted cluster accepts writes and its sequences continue past the restored rows."""
-    with psycopg.connect(dsn) as conn:
+    with _connect(dsn) as conn:
         return _writable_check(conn)
