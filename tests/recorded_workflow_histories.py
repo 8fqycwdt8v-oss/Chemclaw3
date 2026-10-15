@@ -144,8 +144,8 @@ def _replay_on_a_private_loop(
     teardown did on the test's own loop. That teardown can park for good: a cancel that lands while
     core is handing out an activation drops it, and the bridge worker's `finalize_shutdown` then
     waits for an activation nobody will complete. Here it costs one abandoned daemon thread and a
-    logged warning; the verdict is already known. The verdict is returned only after the unwind,
-    so a replay never logs into the next one's watcher.
+    logged warning; the verdict is already known. The verdict is returned only after the unwind and
+    that warning, so a replay never logs into the next one's watcher and a waiter sees the warning.
     """
     loop = asyncio.new_event_loop()
     wedged: set[asyncio.Task[object]] = set()
@@ -158,20 +158,21 @@ def _replay_on_a_private_loop(
             _, wedged = loop.run_until_complete(
                 asyncio.wait(leftover, timeout=REPLAY_UNWIND_SECONDS)
             )
+        if wedged:
+            # Left open and referenced: the bridge worker may still call back into this loop, and
+            # collecting it would report its parked tasks as destroyed while another test runs.
+            _ABANDONED_LOOPS.append(loop)
+            # Before the verdict is released, so a waiter that reads the log on waking sees it.
+            logger.warning(
+                "the cancelled replay of %s did not unwind within %ss and was abandoned: the "
+                "SDK's bridge worker could not shut down",
+                archived,
+                REPLAY_UNWIND_SECONDS,
+            )
         verdict.set_result(failure)
     except BaseException as error:  # handed to the awaiting test, not swallowed
         verdict.set_exception(error)
-    if wedged:
-        # Left open and referenced: the bridge worker may still call back into this loop, and
-        # collecting it would report its parked tasks as destroyed while another test runs.
-        _ABANDONED_LOOPS.append(loop)
-        logger.warning(
-            "the cancelled replay of %s did not unwind within %ss and was abandoned: the SDK's "
-            "bridge worker could not shut down",
-            archived,
-            REPLAY_UNWIND_SECONDS,
-        )
-    else:
+    if not wedged:
         loop.close()
 
 

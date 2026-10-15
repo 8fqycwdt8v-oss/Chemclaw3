@@ -315,7 +315,8 @@ def test_remote_call_names_a_refused_credential_bad_data(
 @pytest.mark.parametrize(
     ("mode", "expected", "underneath"),
     [
-        ("at_capacity", LabelToolError, McpAtCapacity),
+        # A full pod ran nothing and the drain asks again, so it is the retryable class.
+        ("at_capacity", LabelServerError, McpAtCapacity),
         ("time_budget", LabelToolError, McpTimeBudget),
         ("refusal", LabelToolError, McpRequestRefused),
         ("fault", LabelServerError, McpServerFault),
