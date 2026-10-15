@@ -10,6 +10,7 @@ somebody who owns the row.
 can search them all for the other tenant's markers.
 """
 
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -43,6 +44,9 @@ OTHER = "person-2"
 REVIEWER = "reviewer"
 #: Every row seeded for ACME carries this, so a response can be searched for it.
 MARKER = "ACME-SECRET"
+
+#: How long one request may take before the test calls it a leak. A stream that opens never ends.
+DEADLINE_SECONDS = 20.0
 
 _AUDIENCE = "api://chemclaw"
 _ISSUER = "https://issuer.test/v2.0"
@@ -91,9 +95,40 @@ class World:
     ) -> Any:
         """One request as `oid` in `tenant`; its body is kept for the search for markers."""
         headers = {"Authorization": f"Bearer {self.token(tenant, oid, roles)}"}
-        response = TestClient(self.app).request(method, path, headers=headers, **kwargs)
+        response = self._answer(tenant, method, path, headers, kwargs)
         self.bodies.append((tenant, f"{method} {path}", response.status_code, response.text))
         return response
+
+    def _answer(
+        self, tenant: str, method: str, path: str, headers: dict[str, str], kwargs: dict[str, Any]
+    ) -> Any:
+        """The response, or a failure naming the route if none arrives within `DEADLINE_SECONDS`.
+
+        A stream that opens for a session it should not reach never ends, so without a deadline a
+        leak shows as a hung test with no hint of which route leaked. The request runs on a daemon
+        thread so that a failure can be reported while it is still open.
+        """
+        outcome: list[Any] = []
+
+        def work() -> None:
+            try:
+                outcome.append(
+                    TestClient(self.app).request(method, path, headers=headers, **kwargs)
+                )
+            except BaseException as exc:
+                outcome.append(exc)
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        thread.join(DEADLINE_SECONDS)
+        if not outcome:
+            raise AssertionError(
+                f"leak: {tenant} {method} {path} gave no response in {DEADLINE_SECONDS:.0f} s; "
+                "a stream that stays open for another tenant's resource is a route that resolved it"
+            )
+        if isinstance(outcome[0], BaseException):
+            raise outcome[0]
+        return outcome[0]
 
     @asynccontextmanager
     async def acting(self, tenant: str) -> AsyncIterator[None]:

@@ -405,3 +405,19 @@ async def test_a_tenant_handed_to_another_release_stops_being_served_within_the_
         await asyncio.sleep(0.3)
         assert await is_registered("t") is False, "the pod went on serving a tenant it had lost"
         forget_registered_tenants()
+
+
+async def test_one_table_losing_its_policy_is_noticed() -> None:
+    """The guard counts the tables that carry a tenant, not the policies that exist."""
+    async with tenancy_database() as database:
+        await enable_tenancy(database)
+        async with await connect(database.owner_dsn) as conn:
+            whole = await read_facts(conn)
+            await conn.execute("DROP POLICY tenant_isolation ON session_messages")
+            await conn.commit()
+            broken = await read_facts(conn)
+        assert whole.scoped_tables > 50 and whole.enforced_tables == whole.scoped_tables
+        assert broken.scoped_tables == whole.scoped_tables
+        assert broken.enforced_tables == whole.enforced_tables - 1
+        problems = _judge(broken, own="", enabled=True)
+        assert any(f"{broken.enforced_tables} of {broken.scoped_tables}" in p for p in problems)

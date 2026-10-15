@@ -641,6 +641,9 @@ async def _start_turn(
                         # request authenticated.
                         actor=runner.oid,
                         roles=runner.roles,
+                        # And the tenant that principal's token named, not the one this task
+                        # happened to inherit.
+                        tenant=runner.tenant,
                         budget=front.budget,
                         dry_run=dry_run,
                         # The profile picks both the graph and its connectors; selecting one without

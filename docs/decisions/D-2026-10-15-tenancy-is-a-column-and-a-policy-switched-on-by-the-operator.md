@@ -83,8 +83,8 @@ than one is a 403, and an id not in the `tenants` registry is a 403 too: a tenan
 operator ran `python -m chemclaw.cli.tenants add <id>`, never because a token said so. The id is a
 slug (`[a-z0-9][a-z0-9_-]{0,62}`), so it can be a header value, a schedule id suffix and a
 namespace component without escaping. `require_principal` binds it to a context variable beside the
-actor; the turn runner binds it again where it re-binds identity, because a turn outlives its
-request.
+actor; the turn runner binds it again where it re-binds identity (`_turn_ambient`, from the sender's principal), because
+a turn outlives its request and may start from a message another request authenticated.
 
 **The connection.** `core/db.connection()` writes `app.tenant` with `set_config(…, false)` on each
 borrow, in autocommit so a later `rollback()` cannot revert it, from the context variable. The pool's
@@ -99,16 +99,22 @@ with `tenancy_process_tenant`; with `tenancy_enabled` and nothing named there is
 **The column.** `tenant_id TEXT NOT NULL DEFAULT 'default'` is added to every tenant-scoped table,
 and its default then becomes `coalesce(nullif(current_setting('app.tenant', true), ''), 'default')`.
 An `INSERT` that does not name the tenant takes the connection's, so no store grows a parameter and
-the policy's `WITH CHECK` is what refuses a row for any other. A key that a source or a hash makes
-and two tenants can both produce (`calculation_results.key`, `structures`, the blobs, the
-fingerprints and measurements, `note_index.note_id`), or that begins with a person who may be moved
-from one tenant to another (preferences, composed workflows, the budget), gains `tenant_id` as its
-**last** column, so a lookup by the old key still leads the index. The key changes when the
-operator switches tenancy on, not in the migration, and the stores name it by constraint
-(`ON CONFLICT ON CONSTRAINT …`), which is the same statement under either key. Keys a
-process mints (session, turn, job, exhibit and design ids) keep their key: a tenant cannot collide
-with them. A name a source gives (`source`, `path`) cannot collide because a data source belongs to
-one tenant and source names are unique in a deployment.
+the policy's `WITH CHECK` is what refuses a row for any other. A key that two tenants can both
+produce gains `tenant_id` as its **last** column, so a lookup by the old key still leads the index:
+a hash (`calculation_results.key`, `structures`, the blobs, `document_chunks.doc_id`, a design id,
+which hashes the ask and its owner), a note slug (`note_index.note_id`, `note_proposals`), a name a
+data source carries (`source`, `path`, `ingest_source`: two tenants use the same ones, and so do two
+releases built from one image sharing a database), or a person who can work in two tenants
+(preferences, composed workflows, the budget, behaviour proposals, the subscription identity). The
+key changes when the operator switches tenancy on, not in the migration (131 and 133), and the
+stores name it by constraint (`ON CONFLICT ON CONSTRAINT …`) or by no target, which is the same
+statement under either key. Keys the front door or Temporal mints (a session, turn, exhibit,
+attachment or run id, a sequence value) keep their key, and so do keys that are workflow ids,
+which carry their tenant (`core/tenancy.scope_workflow_id`: queued tool calls, report, template and
+await runs). `tests/test_tenancy_inventory.py` makes every scoped table and every other unique key
+say which it is, per table, so a new key is classified when it is added; and
+`tests/test_tenancy_keys.py` writes the same key from two tenants through each store that owns one.
+Sessions are minted server-side, which is why `session_id`-led keys stay narrow.
 
 **Shared and not.** Every table that holds a chemist's content, attribution or an access signal is
 tenant-scoped, including the calculation cache and its single-flight claims, the corpora and
@@ -116,9 +122,9 @@ fingerprints derived from a tenant's data, the audit trail, the turn ledger, the
 vector stores (the policy applies to the row; an `embedding_<N>` column is part of it).
 **Global**, each for a stated reason: `schema_migrations` (the ledger), `tenants` and
 `deployment_id` (they define the tenancy), the fleet coordination tables `session_turns`,
-`session_turn_remotes`, `session_turn_frames` and `request_buckets` (the deployment's concurrent-turn
-ceiling and the relay between replicas count across tenants by definition, and hold leases and
-holder ids, not content), the retired `audit_anchors` (empty, unwritten) and the LangGraph tables
+`session_turn_remotes` and `request_buckets` (the deployment's concurrent-turn ceiling and the
+requests a holder polls count across tenants by definition, and hold leases and holder ids, not
+content), the retired `audit_anchors` (empty, unwritten) and the LangGraph tables
 (`checkpoints*`, `store*`: keyed by a session's thread id or a namespace that begins with the actor,
 reached only after the session or actor has been resolved through a scoped table; the organisation
 skill tier, which is shared by design, takes the tenant into its namespace). A shared read-only
@@ -129,6 +135,28 @@ tenant and pays its storage.
 scoped (a `tenant_id` column, the policy, and a registered key class) or in the global register with
 its reason, and the migration, the grants and the README rows agree.
 
+**The relay between replicas.** The frames a holder copies to another replica's reader are a
+tenant's answer text, so `session_turn_frames` is scoped (134). The requests that ask for them stay
+global, because the replica holding a turn polls those of every turn it holds; each records the
+tenant it was asked in (`session_turn_remotes.request_tenant`), and the holder writes the frames
+bound to that tenant, so only the asker can take them.
+
+**Process-wide state.** Anything one process shares between requests is keyed or bound by tenant, or
+it leaks: the audit sink's buffer carries each event's tenant and writes a batch per tenant
+(`agent/audit_store.py`: a flusher inherits the first caller's context), the live-session cache
+entries carry theirs, store namespaces take it as a component, workflow ids as a prefix. A gauge or
+check that must see everyone's rows (the outbox backlog, the embedding configurations a corpus
+holds, the message conversion the migrate hook runs) walks the registry, capped by
+`tenancy_sweep_max_tenants` (`core/tenant_registry.for_each_tenant`) instead of reading nothing.
+
+**Operator commands.** Row-level security binds the owner too, so a command that names no tenant
+sees no row and used to exit 0 over nothing. Each one that touches tenant data takes `--tenant` (and
+`--all-tenants` where its work is the same for everyone), runs once per chosen tenant with that
+tenant bound, and exits non-zero naming the remedy when it was told neither
+(`core/tenant_cli.py`). `erase_actor` and `finish_erasure` also refuse at the library; `make reembed`
+walks every tenant because the model is the deployment's; `make reindex`, `share-sync`, `rekey-*`,
+the backfills, `synthesize`, `distill`, `propose-profile`, `trajectory-census` and `explain` name one.
+
 **Workers.** The tenant crosses Temporal as a header, `x-chemclaw-tenant`, not as a field of each
 payload: a client interceptor stamps it on `start_workflow` from the context variable, a workflow
 interceptor copies it onto the activities and child workflows the workflow starts, and the activity
@@ -137,7 +165,12 @@ need every workflow input to grow one, and a missed one would be a worker that s
 nothing. Scheduled jobs have no request to inherit from, so `planned_schedules()` is expanded per
 registered tenant (`retention@acme`), each Schedule carrying the header; a data source's schedules
 carry the source's tenant. With tenancy off there is one Schedule per job under the same ids as
-today. A job started without a tenant fails closed.
+today. A job started without a tenant fails closed: its activities are refused once, by name
+(`TenantError`, which the retry policy treats as final), rather than read nothing and be retried;
+so is a header naming a tenant this release does not serve, checked against the registry, whose
+positive answer is believed for `tenant_registry_cache_seconds` only, so a tenant handed to another
+release stops being served by the pods that held it. Workflows running when tenancy is switched on
+carry no header: the runbook drains them first.
 
 **Roles.** The policies are `FOR ALL … USING (…) WITH CHECK (…)` for every role, and the tables are
 `FORCE ROW LEVEL SECURITY`, so the owner is subject to them: in a single-principal deployment the
@@ -149,6 +182,12 @@ given `BYPASSRLS`, which no shipped grant does. `tenancy_enabled` makes the migr
 switch on every run (`ENABLE` and `FORCE`); turning it off again is refused while more than one
 tenant is registered.
 
+**The connection endpoint.** `app.tenant` is a session setting, so no DSN may be a
+transaction-mode pooler: the next statement could run on a server connection another client set to
+its tenant. The guard probes each runtime DSN with two client connections (a setting lost between
+statements, a shared backend, a setting visible to the other client) and refuses; the deployment
+documents session mode as the requirement (`deploy/README.md`).
+
 **The deployment guard (W7.6).** `deployment_id` is a one-row table the migrator stamps with the
 release's identity (`deployment_id`, from the chart's release namespace and name). The migrate hook
 and every API and worker start compare it with their own. A different id is refused with both ids
@@ -158,7 +197,12 @@ request for a tenant another release owns is a 403; a tenant owned by none is se
 release, so sharing demands that none is left (the `default` tenant every database starts with is
 given to the release that has been serving it). A refused run in the migrate hook rolls the whole
 run back, the stamp included. Nothing is compared where no identity is configured, and a database
-that cannot be reached is readiness's to report, not a refusal. That is the check `deploy/README.md`
+that cannot be reached is readiness's to report, not a refusal, and says so: `/readyz` carries
+`deployment: unchecked` and a gauge goes to 1. Every runtime DSN is checked (`postgres_dsn` and a
+separate `session_store_dsn`, each for its role, its policies and its pooler), at start and again
+every `deployment_recheck_seconds`; a contradiction found later fails `/readyz` and a worker's
+readiness so the pod drains. The policy check counts the tables that carry a `tenant_id` against
+those that enforce the policy, so one table that lost its policy is noticed. That is the check `deploy/README.md`
 said no chart guard could make, made where the database can answer it.
 
 **What it does not cover, and the guard says so.** A second tenant is refused at start while
@@ -201,3 +245,15 @@ carry twice (then a shared read-only tier is a new decision).
   the other tenant's rows with two tenants' data in a real database.
 - `tests/test_deployment_guard.py` — two releases on one database are refused with both ids unless
   tenancy and distinct tenants say otherwise.
+- `tests/test_tenancy_keys.py` — the same key written from two tenants through each store that owns
+  one leaves a row for each.
+- `tests/test_tenancy_audit.py`, `tests/test_tenancy_sweeps.py` — process-wide buffers and gauges
+  keep the tenants apart or walk them.
+- `tests/test_tenancy_operator_tools.py` — each operator command names a tenant or refuses.
+- `tests/test_tenancy_workflow_ids.py`, `tests/test_tenancy_activity_gate.py` — workflow ids carry
+  their tenant and an activity without one is refused once.
+- `tests/test_tenancy_turn_frames.py`, `tests/test_tenancy_note_store.py`,
+  `tests/test_tenancy_restore_drill.py` — the relay, the Postgres note store and the restore drill
+  under forced policies.
+- `tests/test_tenancy_guard_coverage.py` — every DSN, the pooler probe, the recheck and `/readyz`.
+- `tests/test_db.py` — no module opens a Postgres connection of its own without saying why.

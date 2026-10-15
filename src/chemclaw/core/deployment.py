@@ -52,7 +52,8 @@ class Facts:
     #: The stamped release identity, or `None` when none is stamped (or the table is absent).
     stamp: str | None = None
     tenants: Sequence[Tenant] = field(default_factory=tuple)
-    #: Tables carrying the tenant policy, and how many of them enforce it (enabled and forced).
+    #: Tables carrying a `tenant_id`, and how many of them enforce the policy (present, enabled and
+    #: forced): a table that lost its policy is counted in the first and not the second.
     scoped_tables: int = 0
     enforced_tables: int = 0
     #: Whether the connecting role is a superuser or has `BYPASSRLS`.
@@ -70,9 +71,11 @@ _STAMP = "SELECT deployment_id FROM deployment_id"
 _TENANTS = "SELECT id FROM tenants ORDER BY id"
 _OWNED_TENANTS = "SELECT id, deployment_id FROM tenants ORDER BY id"
 _POLICIES = (
-    "SELECT count(*), count(*) FILTER (WHERE c.relrowsecurity AND c.relforcerowsecurity) "
-    "FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid "
-    "WHERE p.polname = 'tenant_isolation' AND to_regclass(c.relname::text) = c.oid"
+    "SELECT count(*), count(*) FILTER (WHERE c.relrowsecurity AND c.relforcerowsecurity "
+    "AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid "
+    "AND p.polname = 'tenant_isolation')) "
+    "FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id' "
+    "AND NOT a.attisdropped WHERE c.relkind = 'r' AND to_regclass(c.relname::text) = c.oid"
 )
 _ROLE = "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user"
 _WIDENED = (

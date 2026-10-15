@@ -209,3 +209,18 @@ def test_a_workflow_id_names_its_tenant_so_identical_requests_do_not_join_across
     with pytest.raises(TenantError):
         scope_workflow_id("bo-start-abc")
     assert not owns_workflow("bo-start-abc")
+
+
+def test_a_turn_acts_for_its_senders_tenant_whatever_context_it_inherited(
+    tenancy_on: None,
+) -> None:
+    """The turn binds the tenant it is given, and gives back the one it found."""
+    from chemclaw.agent.turn_usage import TurnUsage
+    from chemclaw.api.runner import _turn_ambient
+
+    with bound_tenant("globex"):
+        with _turn_ambient("s", "alice", frozenset(), False, "c", TurnUsage(), [], None, "acme"):
+            assert current_tenant() == "acme"
+        assert current_tenant() == "globex"
+        with _turn_ambient("s", "alice", frozenset(), False, "c", TurnUsage(), [], None):
+            assert current_tenant() == "globex", "no tenant given keeps the caller's"
