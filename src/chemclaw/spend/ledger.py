@@ -28,6 +28,7 @@ from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.turn_cost import TurnCost as TurnCost  # re-exported: the ledger's record
+from chemclaw.spend.limits import load_db
 
 logger = logging.getLogger(__name__)
 
@@ -325,10 +326,12 @@ def default_turn_cost_sink() -> TurnCostSink:
     """The durable sink where a database exists, else the null one.
 
     Keys on `session_store == "postgres"`, as the audit sink and job record do. The Postgres sink
-    imports the pool only when it writes, so a memory-store process never loads psycopg.
+    loads the pool (`load_db`) here, outside the write's `try`, so a broken install raises at the
+    caller instead of being booked as a ledger that is down.
     """
     if settings.session_store != "postgres":
         return NullTurnCostSink()
+    load_db()
     return PostgresTurnCostSink()
 
 
@@ -419,8 +422,7 @@ class PostgresTurnCostSink:
 
     async def record(self, cost: TurnCost) -> None:
         """Insert the cost, replacing any existing row for the *same record*."""
-        from chemclaw.core import db
-
+        db = load_db()
         async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
             await conn.execute(
                 _UPSERT,

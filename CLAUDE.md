@@ -24,11 +24,10 @@ Key mechanisms, each in one place: the tool chain is `@wrap_tool_call` middlewar
 the runaway cap is a first-party `before_model` counter over `ChemclawState.model_calls`
 (`spend/guard.py`) — never upstream's `ModelCallLimitMiddleware`; compaction is
 `agent/compaction.py`; budgets derive from `tests/test_context_floor.py`'s `PREFIX_BOUND` in
-`core/config/agent.py`; per-turn spend is `spend/guard.py` and every spend limit is stated by
-`spend/limits.py`'s `SpendPolicy`. A helper (`task`) gets *its caller's surface ∩ its profile −
-side-effecting tools*; a peer handoff (off by default) gets *the root's surface ∩ its profile*. An
-agent not compiled by `build_langgraph_agent` runs without audit, authorization or plan gate, so
-every agent is compiled there.
+`core/config/agent.py`; per-turn spend is `spend/guard.py`, its limits `spend/limits.py`. A helper
+(`task`) gets *its caller's surface ∩ its profile − side-effecting tools*; a peer handoff (off by
+default) gets *the root's surface ∩ its profile*. An agent not compiled by `build_langgraph_agent`
+runs without audit, authorization or plan gate, so every agent is compiled there.
 
 Knowledge is written directly (`created_by: agent`) and corrected, not pre-approved; a skill
 changes only by blast radius (`skills/` by reviewed commit, the organisation tier by

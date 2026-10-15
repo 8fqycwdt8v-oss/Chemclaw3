@@ -512,6 +512,61 @@ def test_the_budget_admits_and_refuses_as_recorded(
     assert _budget_run(monkeypatch, caplog) == _BUDGET_GOLDEN
 
 
+_EDGES_GOLDEN: list[Any] = [
+    "admitted",
+    "session token budget exhausted (100 tokens)",
+    (3599.0, "user turn budget exhausted (2 turns)"),
+    (3600.0, "admitted"),
+    (3601.0, "admitted"),
+]
+
+
+def _budget_edges(monkeypatch: pytest.MonkeyPatch, tracker_cls: Any = BudgetTracker) -> list[Any]:
+    """Where a negative booking stops counting and where a user window rolls, on a stepped clock."""
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "budget_enabled", True)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.0)
+    monkeypatch.setattr(settings, "budget_max_turns_per_session", 0)
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 100)
+    monkeypatch.setattr(settings, "budget_max_turns_per_user", 2)
+    monkeypatch.setattr(settings, "budget_max_tokens_per_user", 0)
+    monkeypatch.setattr(settings, "budget_window_hours", 1.0)
+    now = [1_000.0]
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+
+    def verdict(tracker: Any, session: str, user: str | None) -> str:
+        try:
+            asyncio.run(tracker.check(session, user))
+        except Exception as refused:  # the refusal's class differs per tracker module
+            return str(refused)
+        return "admitted"
+
+    traced: list[Any] = []
+    tracker = tracker_cls()
+    for tokens in (60, -50):
+        tracker.record("clamp", None, tokens)
+    traced.append(verdict(tracker, "clamp", None))
+    tracker.record("clamp", None, 40)
+    traced.append(verdict(tracker, "clamp", None))
+    for elapsed in (3_599.0, 3_600.0, 3_601.0):
+        now[0] = 1_000.0
+        tracker = tracker_cls()
+        tracker.record("s", "w", 1)
+        # The counter stamped itself with the real clock; anchor it to the stepped one.
+        tracker._users.get("w").started = now[0]
+        now[0] = 1_000.0 + elapsed
+        tracker.record("s", "w", 1)
+        traced.append((elapsed, verdict(tracker, "other", "w")))
+    return traced
+
+
+def test_a_negative_booking_never_lowers_a_count_and_a_window_rolls_at_its_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A negative token count books as zero; a user window is spent exactly at its length."""
+    assert _budget_edges(monkeypatch) == _EDGES_GOLDEN
+
+
 def test_a_disabled_budget_books_and_refuses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """With `budget_enabled` off a check never raises and a record returns no task."""
     monkeypatch.setattr(settings, "budget_enabled", False)

@@ -17,6 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
+from types import ModuleType
 from typing import Any, NamedTuple
 
 from chemclaw.core import bookkeeping
@@ -241,6 +242,7 @@ class BudgetTracker:
             if stored is not None:
                 turns, tokens = _live_counts(self._reconcile(user, stored))
                 turns, tokens = max(turns, stored.turns), max(tokens, stored.tokens)
+        policy = SpendPolicy.current()  # read after the await: the user caps are not held across it
         self._check_scope(
             _Counter(turns=turns, tokens=tokens),
             "user",
@@ -254,6 +256,7 @@ class BudgetTracker:
 
         `None` rather than zeros, so a failed read leaves this pod's counter as it was.
         """
+        load_db()
         try:
             return await usage(user)
         except Exception:
@@ -344,6 +347,7 @@ class BudgetTracker:
         A failed write is logged and lost rather than failing an answered turn; the in-process
         counter still holds the turn.
         """
+        load_db()
 
         async def _write() -> None:
             try:
@@ -498,6 +502,17 @@ def _from_row(row: tuple[Any, ...] | None) -> Window:
     return window._replace(turns=0, tokens=0) if window.expired else window
 
 
+def load_db() -> ModuleType:
+    """The connection-pool module, imported on first use so a memory-store process never loads it.
+
+    Callers invoke it outside their `try`, so a broken install raises where the import is written
+    instead of being read as a database that cannot answer and admitting the turn.
+    """
+    from chemclaw.core import db
+
+    return db
+
+
 def _dsn() -> str:
     """The database the session tier already uses — a budget window has a session's lifetime."""
     return settings.session_store_dsn or settings.postgres_dsn
@@ -508,8 +523,7 @@ async def usage(actor: str) -> Window:
 
     Unknown and expired both read zero; `start` tells them apart for the in-process counter.
     """
-    from chemclaw.core import db
-
+    db = load_db()
     async with db.connection(_dsn()) as conn:
         cursor = await conn.execute(_USAGE, {"actor": actor})
         row = await cursor.fetchone()
@@ -522,8 +536,7 @@ async def book(actor: str, tokens: int) -> Window:
     `tokens` is clamped at zero (the table's `CHECK` refuses negatives too). The totals come from
     `RETURNING`, so the caller's warning check sees exactly what this write produced.
     """
-    from chemclaw.core import db
-
+    db = load_db()
     async with db.connection(_dsn()) as conn:
         cursor = await conn.execute(
             _BOOK,

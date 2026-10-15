@@ -95,8 +95,8 @@ class LlmSettings(BaseSettings):
     verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
     # How many times a flagged answer is sent back to be answered again within the same turn. Counts
     # only agent-initiated rounds (a per-turn local in `api/runner.py`), so a chemist's follow-up
-    # gets a fresh allowance; each round is still counted by `loop_cap`/`spend_cap`. Reachable only
-    # behind `verifier_enabled` or `answer_shape_gate_enabled`. 0 disables.
+    # gets a fresh allowance; each round is still counted by the caps in `spend/guard.py`. Reachable
+    # only behind `verifier_enabled` or `answer_shape_gate_enabled`. 0 disables.
     # `core/config/__init__.py` bounds it against the turn deadline.
     answer_review_max_rounds: int = Field(default=2, ge=0)
     # Whether an answer still flagged after the review rounds opens a durable `review` wait

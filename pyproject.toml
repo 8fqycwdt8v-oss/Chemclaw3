@@ -590,14 +590,15 @@ source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
     # Added by the wave-5 backlog pass. Four refusal gates were outside this list —
-    # `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py` —
+    # `agent/plan_gate.py`, `agent/skill_backend.py` and `spend/guard.py` (then `spend_cap.py` and
+    # `loop_cap.py`) —
     # each a control of the same kind as `authz.py` above: a refusal whose surviving mutant is a tool
     # call that should not have happened. Only **one** lands here, because the row asking for them
     # says why: "the list is short on purpose — the comment above it records that the run is hours
     # long — so each addition needs its runtime measured rather than assumed."
     #
-    # `spend_cap.py` is first because it is the **smallest of the four by source length** (309 lines
-    # against `loop_cap.py`'s 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
+    # `spend_cap.py` (now in `spend/guard.py`) is first because it is the **smallest of the four by source length** (309 lines
+    # against `loop_cap.py`'s (now `spend/guard.py`) 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
     # cheapest available answer to "what does one of these cost". Lines are a proxy for mutant count
     # and not a measurement of it, and **the cost of this addition is not recorded anywhere yet**:
     # `make mutants` has not completed a run since `D-2026-09-22-a-mutation-backstop-that-cannot-start`
@@ -632,7 +633,7 @@ source_paths = [
     # is a hole in the *selection*"). `total` counts it either way, which is how the score reached
     # 44.3% against a floor of 72.0: 1,009 `no_tests`, against 988 that genuinely survived. Measured
     # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-    # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
+    # `skill_backend.py` **51% -> 90%**, `spend/guard.py` (as `loop_cap.py`) **88% -> 100%**.
     "src/chemclaw/agent/plan_gate.py",
     "src/chemclaw/agent/skill_backend.py",
     "src/chemclaw/spend/limits.py",
@@ -736,14 +737,20 @@ pytest_add_cli_args_test_selection = [
     "tests/test_budget.py",
     "tests/test_concurrency_claims.py",
     "tests/test_runner.py",
-    # Added with `agent/spend_cap.py` below, and the pairing is the point: a source path whose own
+    # Added with `spend_cap.py` (now `spend/guard.py`) below, and the pairing is the point: a source path whose own
     # test file is unlisted reports every mutant on the lines that file covers as a survivor, no
     # matter how well tested the module is. Measured before adding it — the only listed file that
-    # touches the module is `test_runner.py`, at **70%** statement coverage of `spend_cap.py`
+    # touches the module is `test_runner.py`, at **70%** statement coverage of `spend_cap.py` (now `spend/guard.py`)
     # (missing 135, 156-159, 191, 215-217, 231, 284-295, 301), against **96%** from
     # `test_spend_cap.py`'s own 18 tests. So ~18 statements' worth of mutants were unkillable by
     # construction, which is exactly the failure this list's comment below warns about.
     "tests/test_spend_cap.py",
+    # Paired with `spend/limits.py`, which now holds the durable window's SQL (`_BOOK`, `_USAGE`,
+    # `Window`, `usage`, `book`) that `api/budget.py` never carried; `test_budget_window.py` is the
+    # file that executes it, and `test_spend_golden.py` pins the decisions of `guard.py` and
+    # `limits.py` over input tables.
+    "tests/test_budget_window.py",
+    "tests/test_spend_golden.py",
     "tests/test_disconnect_teardown.py",
     "tests/test_note.py",
     # Kills 24 of `note.py`'s mutants on its own — every typed-link (`split_link`) and `outgoing_*`
@@ -772,7 +779,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_publish_end_to_end.py",  # publish/outbox.py 31% -> 62%
     "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
     # Paired with the three refusal gates added to `source_paths` in the same edit, and measured
-    # the same way. `loop_cap.py` is the one already mostly reached — `test_runner.py` drives the
+    # the same way. `loop_cap.py` (now `spend/guard.py`) is the one already mostly reached — `test_runner.py` drives the
     # loop — and it is listed anyway, because the 12 points it gains take it to **100%**: the
     # selection alone misses `220-228, 257->exit, 288, 329->333`, and this file closes all of them.
     #
@@ -783,5 +790,5 @@ pytest_add_cli_args_test_selection = [
     # instrument error this repository keeps finding, one directory over.
     "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
     "tests/test_skill_backend.py",  # agent/skill_backend.py   51% ->  90%
-    "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% -> 100%
+    "tests/test_loop_cap_floor.py",  # spend/guard.py       88% -> 100%
 ]

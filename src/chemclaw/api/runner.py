@@ -119,7 +119,7 @@ from chemclaw.exhibits.models import ExhibitRef
 from chemclaw.kg.note import cited_ids
 from chemclaw.spend.guard import loop_hit_cap, spend_hit_cap, turn_billed_tokens
 from chemclaw.spend.ledger import InFlightPrompts, TurnCost, TurnUsage, record_turn_cost
-from chemclaw.spend.limits import BudgetTracker
+from chemclaw.spend.limits import BudgetTracker, SpendPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -1313,15 +1313,16 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
         return None
     # Marked on the ledger: by teardown the watch is gone and `loop_hit_cap()` answers False.
     ledger.loop_capped = True
+    cap = SpendPolicy.current().model_calls_per_turn
     METRICS.increment("chemclaw_turn_loop_caps_total")
     logger.warning(
         "the harness loop for session %s hit its %d-iteration cap with work still open",
         session.session_id,
-        settings.harness_max_loop_iterations,
+        cap,
     )
     return ErrorEvent(
         message=(
-            f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
+            f"The turn reached its {cap}-iteration limit "
             f"and stopped with work still open, {_partial_answer_clause(ledger)} "
             f"(session {session.session_id})."
         ),
@@ -1346,16 +1347,17 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
     # Marked on the ledger: by teardown the watch is gone and `spend_hit_cap()` answers False.
     ledger.spend_capped = True
     billed = turn_billed_tokens()
+    budget = SpendPolicy.current().billed_tokens_per_turn
     METRICS.increment("chemclaw_turn_spend_caps_total")
     logger.warning(
         "the turn for session %s hit its %d billed-token cap after %d tokens",
         session.session_id,
-        settings.agent_max_turn_billed_tokens,
+        budget,
         billed,
     )
     return ErrorEvent(
         message=(
-            f"The turn reached its {settings.agent_max_turn_billed_tokens:,}-token budget "
+            f"The turn reached its {budget:,}-token budget "
             f"after billing {billed:,} and stopped with work still open, "
             f"{_partial_answer_clause(ledger)} (session {session.session_id})."
         ),
