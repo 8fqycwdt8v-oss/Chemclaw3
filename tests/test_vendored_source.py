@@ -103,7 +103,7 @@ def test_a_corpus_that_is_not_utf8_is_named_bad_data_rather_than_escaping_as_a_d
 ) -> None:
     """A non-UTF-8 corpus is named bad data rather than escaping as a decode error.
 
-    `durable/publish._BAD_DATA_TYPES` matches by class name and lists `VendoredDatasetError` because
+    `durable/retry._BAD_DATA_TYPES` matches by class name and lists `VendoredDatasetError` because
     a retry re-reads the same image bytes; a bare `UnicodeDecodeError` would be retried pointlessly.
     The checksum matching is what makes it certainly permanent. The byte and offset are asserted so
     an operator can act on it.
@@ -133,9 +133,9 @@ def test_a_corpus_that_is_not_utf8_is_named_bad_data_rather_than_escaping_as_a_d
         _read_records(directory, manifest)
     assert "checksum matched" in str(raised.value)
 
-    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.retry import _BAD_DATA_TYPES
 
-    assert "VendoredDatasetError" in (BAD_DATA_RETRY.non_retryable_error_types or []), (
+    assert "VendoredDatasetError" in _BAD_DATA_TYPES, (
         "the classification is by class name, so the raise and the register must agree"
     )
 

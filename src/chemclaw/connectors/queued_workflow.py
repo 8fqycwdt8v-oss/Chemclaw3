@@ -18,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.queued_call import QueuedToolCall, call_queued_tool
     from chemclaw.durable.connector_job import ConnectorJobResult, failure_reason
     from chemclaw.durable.notify import notify_session_best_effort
-    from chemclaw.durable.publish import queued_tool_retry
+    from chemclaw.durable.retry import retry_for
 
 #: What `ConnectorJobResult.payload_kind` says for a queued call's envelope.
 PAYLOAD_KIND = "mcp_tool_result"
@@ -70,7 +70,7 @@ class QueuedToolWorkflow:
                 ],
                 start_to_close_timeout=timedelta(seconds=call.call_timeout_seconds),
                 schedule_to_close_timeout=timedelta(seconds=call.queue_timeout_seconds),
-                retry_policy=queued_tool_retry(),
+                retry_policy=retry_for(call_queued_tool),
             )
         except Exception as exc:
             # Suppressed: a failing push-back must not replace the failure this run must end with.

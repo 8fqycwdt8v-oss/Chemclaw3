@@ -26,11 +26,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.deliver.message import Attachment, AttachmentBytes, Message
     from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.publish import (
-        BAD_DATA_RETRY,
         activity_failure_reason,
         light_write_queue_wait_timeout,
     )
-    from chemclaw.durable.registry import durable_activity
+    from chemclaw.durable.registry import ActivityClass, durable_activity
+    from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class OutboundMessage(BaseModel):
     attachments: list[OutboundAttachment] = []
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def deliver_message_activity(payload: OutboundMessage) -> list[str]:
     """Send one message on every enabled outbound channel, and say which ones took it.
@@ -159,7 +159,7 @@ async def deliver_best_effort(message: OutboundMessage) -> list[str]:
             # The wait is bounded separately: `start_to_close` begins only once a worker picks the
             # task up.
             schedule_to_start_timeout=light_write_queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(deliver_message_activity),
         )
     except ActivityError as exc:
         if isinstance(exc.cause, TemporalCancelledError):

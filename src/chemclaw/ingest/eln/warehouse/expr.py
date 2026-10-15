@@ -58,7 +58,7 @@ class PatternBudgetError(Exception):
     Deliberately outside `ChemclawError`: the cost belongs to the pattern, not the data, so the
     sync's per-entry reject-and-continue handler must not swallow it and pay the budget again on
     every row. It reaches the activity boundary and fails loudly. Listed by name in
-    `durable/publish._BAD_DATA_TYPES` (non-retryable), since a retry would run the same pattern over
+    `durable/retry._BAD_DATA_TYPES` (non-retryable), since a retry would run the same pattern over
     the same page.
     """
 

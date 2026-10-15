@@ -23,6 +23,17 @@ declared where the capability is defined rather than in the worker: put
 modules is an error at import; the same definition re-registering is not, because
 Temporal's sandbox re-imports workflow modules to run them.
 
+**How an activity is retried is a property of what it does** (`retry.py`). The decorator states an
+`ActivityClass` (`@durable_activity("background", ActivityClass.REMOTE)`), a workflow dispatches it
+with `retry_policy=retry_for(activity)`, and `retry.py` is the only file that writes a policy.
+`IO` is short Postgres work (many attempts, short capped backoff); `NOTE_WRITE` one note write;
+`COMPUTE` a long sweep in the worker and `REMOTE` a call to a system outside it (few attempts, long
+capped backoff, jittered for the shared dependency); `CALC` the calculation backend; `GOVERNED` an
+activity whose re-run repeats audited side effects (one attempt by default); `QUEUED_TOOL` a heavy
+tool call waiting for a slot. Every class but the last refuses the bad-data list by class name, so
+a deterministic failure costs one attempt. `tests/test_retry.py` holds that every activity has a
+class and every dispatch uses it.
+
 **Adding a durable capability does not mean editing the worker.** The one thing
 still required is that the defining module be *imported* — the same
 side-effect-import contract `chemclaw.agent.chemclaw_agent` has for tools, and why

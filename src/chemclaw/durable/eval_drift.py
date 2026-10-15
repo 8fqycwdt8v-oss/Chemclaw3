@@ -17,7 +17,7 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.evals.baseline import (
         DriftAlert,
         aggregate_metrics,
@@ -27,7 +27,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.evals.harness import load_eval_cases, run_eval
 
 from chemclaw.durable.notify import notify_session
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 # The system push-back channel a drift alert lands on (a `session_events` "session" an operator
 # surface tails). A fixed internal id, not a tunable.
@@ -36,7 +37,7 @@ DRIFT_ALERT_CHANNEL = "system-eval-drift"
 logger = logging.getLogger(__name__)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def check_eval_drift() -> list[DriftAlert]:
     """Score the committed case-set and return the metrics that drifted from the baseline.
@@ -90,7 +91,7 @@ class EvalDriftWorkflow:
             check_eval_drift,
             start_to_close_timeout=timedelta(seconds=settings.eval_drift_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(check_eval_drift),
         )
         for alert in alerts:
             await notify_session(DRIFT_ALERT_CHANNEL, "eval_drift", alert.model_dump())

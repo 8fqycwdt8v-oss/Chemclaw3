@@ -48,7 +48,7 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.registry import durable_activity
+from chemclaw.durable.registry import ActivityClass, durable_activity
 from chemclaw.science.calc.models import (
     FailedBond,
     FailedMedium,
@@ -120,7 +120,7 @@ def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
             reset_current_identity(identity_token)
 
 
-@durable_activity(bundle_queue("calc"))
+@durable_activity(bundle_queue("calc"), ActivityClass.CALC)
 @activity.defn
 async def run_xtb_calculation(
     spec: XtbJobSpec, actor: str = "", correlation_id: str = ""
