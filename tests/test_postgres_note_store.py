@@ -658,6 +658,10 @@ async def test_every_read_names_its_tenant_when_the_same_ids_and_a_link_target_a
     assert await other.neighborhood("p", 2) == {"shared", "extra-b", "p2", "q"}
     with pytest.raises(KeyError):
         await store.neighborhood("only-b")
+    # A link target only the other tenant cites is no node here.
+    with pytest.raises(KeyError):
+        await store.neighborhood("extra-b")
+    assert await other.neighborhood("extra-b") == {"p"}
     assert sorted((e.src, e.dst) for e in await store.edges("shared")) == [("p", "shared")]
     assert sorted((e.src, e.dst) for e in await other.edges("shared")) == [
         ("p", "shared"),
@@ -690,6 +694,24 @@ async def test_every_read_names_its_tenant_when_the_same_ids_and_a_link_target_a
     assert set(await other.fingerprints()) == {"bad", "only-b", "only-b2", "p", "p2", "q"}
     assert await store.unparseable(["bad", "q"]) == []
     assert await other.unparseable(["bad", "q"]) == ["bad"]
+
+
+async def test_a_supersede_link_in_another_tenant_is_not_followed(
+    store: PostgresNoteStore,
+) -> None:
+    """`new-x supersedes old-x` in one tenant says nothing about `old-x` in the other."""
+    other = PostgresNoteStore("other")
+    retired = {"valid_to": date(2026, 1, 1)}
+    for tenant_store in (store, other):
+        await tenant_store.put(NoteUnit(_note("old-x", "Retired.", **retired)))
+    await store.put(NoteUnit(_note("new-x", "Unrelated here.")))
+    await other.put(
+        NoteUnit(_note("new-x", "Replaces it.", relations=[Relation(rel="supersedes", to="old-x")]))
+    )
+    assert await store.current_successor("old-x", _DAY) is None
+    assert (await store.current_successors(["old-x"], _DAY))["old-x"] is None
+    successor = await other.current_successor("old-x", _DAY)
+    assert successor is not None and successor.id == "new-x"
 
 
 async def test_every_write_touches_only_its_tenant(store: PostgresNoteStore) -> None:
