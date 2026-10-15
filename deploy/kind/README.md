@@ -36,7 +36,7 @@ below built locally. The whole system needs about 8 CPU and 12.5 GB of memory on
 | http://sandbox.localhost:15174 | the UI's HTML sandbox listener: the frame an `html` artefact renders in, on its own origin |
 | http://127.0.0.1:18000 | the front door (`/healthz`, `/readyz`, the API) |
 | http://127.0.0.1:18091 | the Temporal UI |
-| https://127.0.0.1:18443/entra/mock-tenant | the mock tenant (oidc-mock mode's sign-in authority) |
+| https://tenant.localhost:18443/entra/mock-tenant | the mock tenant (oidc-mock mode's sign-in authority; `*.localhost` is loopback in a browser) |
 
 The ports avoid 5432 / 8000 / 5173 / 8091, which the compose lanes hold.
 
@@ -113,8 +113,8 @@ non-loopback host, so the mode also runs both over TLS:
 | Certificates | `up.sh` issues one CA per cluster and leaf certificates for Postgres, the Temporal frontend (plus a client certificate), and the mock; the CA key is never stored. `chemclaw-kind-ca` holds the CA certificate — trust it in a browser to sign in without a warning. |
 | Postgres | TLS in every mode; the DSNs carry `sslmode=require` in this one. |
 | Temporal | Frontend TLS with client certificates required (`chemclaw-temporal-tls-env`); the chart's `secrets.temporalTls.enabled` is back to its production `true`. |
-| Mock tenant | `mock-eln` serves https; the browser reaches it at `https://127.0.0.1:18443/entra/mock-tenant` (NodePort 30443), which is also the issuer every token carries. Core fetches the keys in-cluster (`https://mock-eln:8090/...`) and trusts the cluster CA via `CHEMCLAW_ENTRA_CA_BUNDLE`, which reuses the CA already mounted for Temporal. |
-| UI | `chemclaw/ui:<tag>`, `AUTH_MODE=msal`, `ENTRA_AUTHORITY` = the tenant URL above. |
+| Mock tenant | `mock-eln` serves https; the browser reaches it at `https://tenant.localhost:18443/entra/mock-tenant` (NodePort 30443), which is also the issuer every token carries. The UI pod reaches the same address through the `mock-tenant` Service (`hostAliases` in `manifests/ui.yaml` names its fixed ClusterIP, 10.96.0.200, inside kind's default service range). The mock's certificate names `tenant.localhost`; `up.sh` reissues the set when an older one does not. Core fetches the keys in-cluster (`https://mock-eln:8090/...`) and trusts the cluster CA via `CHEMCLAW_ENTRA_CA_BUNDLE`, which reuses the CA already mounted for Temporal. |
+| UI | `chemclaw/ui:<tag>`, `AUTH_MODE=bff`: the BFF signs people in server-side and holds their tokens, `ENTRA_AUTHORITY` = the tenant URL above, `ENTRA_CLIENT_AUTH=none` (the mock registers one client with PKCE and no secret), `APP_ORIGIN` = `http://127.0.0.1:15173` (the one redirect URI the mock allows is `<APP_ORIGIN>/auth/callback`), `NODE_EXTRA_CA_CERTS` = the cluster CA mounted from `chemclaw-kind-ca`. One replica: sessions are in the pod's memory. |
 
 The smoke in this mode mints a token for alice from the tenant, checks an anonymous `POST /sessions`
 is a 401, and runs the same turns and job as alice. Switching modes on a running cluster restarts

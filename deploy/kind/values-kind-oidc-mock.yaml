@@ -20,10 +20,10 @@ config:
   CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED: "false"
   CHEMCLAW_ENTRA_TENANT_ID: "mock-tenant"
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
-  # The issuer is a string compared against `iss`, so it is the address the *browser* reaches the
-  # tenant at (kind-config.yaml maps 18443 to the mock's NodePort) — the value the mock stamps and
-  # MSAL.js signs in against. The keys are fetched in-cluster, by Service name, over https.
-  CHEMCLAW_ENTRA_ISSUER: "https://127.0.0.1:18443/entra/mock-tenant/v2.0"
+  # The issuer is a string compared against `iss`, so it is the address the browser and the UI's BFF
+  # both reach the tenant at (`tenant.localhost`, deploy/kind/up.sh) — the value the mock stamps and
+  # the BFF validates ID tokens against. The keys are fetched in-cluster, by Service name, over https.
+  CHEMCLAW_ENTRA_ISSUER: "https://tenant.localhost:18443/entra/mock-tenant/v2.0"
   CHEMCLAW_ENTRA_JWKS_URL: "https://mock-eln:8090/entra/mock-tenant/discovery/v2.0/keys"
   # The cluster CA that signed the mock's certificate. It is the same CA as Temporal's, so it is
   # already on the front door at the chart's Temporal TLS mount; no second volume is needed.

@@ -394,12 +394,14 @@ BFF's own API-URL variable (`Chemclaw3_ui` `.env.example`; a URL with a path is 
 
 | Presents as | Cause | Diagnose → fix |
 | --- | --- | --- |
-| BFF exits 1 with `config:` lines | the BFF's own startup validation (`AUTH_MODE`, an API URL with a path, missing `ENTRA_*`) | fix the BFF env (`Chemclaw3_ui` README "What the BFF refuses to start with") |
+| BFF exits 1 with `config:` lines | the BFF's own startup validation (`AUTH_MODE` other than `dev`/`bff`, an API URL with a path, missing `ENTRA_*`, `ENTRA_CLIENT_SECRET`, `APP_ORIGIN`) | fix the BFF env (`Chemclaw3_ui` README "What the BFF refuses to start with") |
 | 502 `{"detail":"upstream unavailable","code":…}`; BFF log `upstream error` with `correlation_id` | backend unreachable from the BFF | BFF → `chemclaw-service:8080` reachability; `networkPolicy.serviceIngress`; front door `/readyz` |
 | 503 `no upstream connection available` | the BFF's upstream pool is saturated | BFF log `upstream pool saturated`; BFF pool sizing |
 | every API call 401 after a successful login | token is for the wrong audience or v1 | API scope must be the backend API's (`aud` = `CHEMCLAW_ENTRA_AUDIENCE`); API app registration `accessTokenAcceptedVersion: 2`; backend log `token validation failed: <reason>` |
-| redirect loop at login | SPA redirect URI not registered, or CSP blocks the authority | Entra SPA platform redirect URIs; BFF CSP opens `login.microsoftonline.com` or `ENTRA_AUTHORITY` |
-| "random logout" after about an hour | silent refresh iframe blocked | a proxy overwriting the BFF's CSP |
+| `/auth/login` answers 503 "Sign-in is unavailable" | the UI pod cannot reach the identity provider (discovery), or does not trust its certificate | egress NetworkPolicy or proxy (`NODE_USE_ENV_PROXY=1` with `HTTPS_PROXY`); `ENTRA_AUTHORITY`; a private CA needs `NODE_EXTRA_CA_CERTS` |
+| sign-in fails at Entra (`AADSTS50011`) or after the callback (`invalid_client`, `AADSTS9002327`) | redirect URI not registered, client secret expired or wrong, or the registration is a single-page application | the UI's registration: platform Web, redirect URIs `<APP_ORIGIN>/auth/callback` and `<APP_ORIGIN>/`, a current client secret in `chemclaw3-ui-oidc` |
+| sign-in succeeds, the next page says the browser "did not keep the session" | the request reached a UI pod that never saw the session, or the browser refused the cookie | more than one UI replica without router cookie affinity (the app Route must not set `disable_cookies`); `APP_ORIGIN` exactly the address in the browser |
+| UI `/readyz` stays 503 `upstream accepts anonymous` | the UI runs `AUTH_MODE=bff` over a backend with `CHEMCLAW_ENTRA_REQUIRED=false`, which it refuses on purpose | set `CHEMCLAW_ENTRA_REQUIRED=true` on the release |
 | UI says "budget exhausted" for a 429 | something stripped `Retry-After` — the UI treats a 429 without it as terminal | proxies must pass `Retry-After` |
 | 503 `service misconfigured; refusing to serve` | backend running with `entra_required` off | [§2](#2-a-pod-will-not-boot) |
 | conversation list empty | backend not on `CHEMCLAW_SESSION_STORE=postgres` | set it |
