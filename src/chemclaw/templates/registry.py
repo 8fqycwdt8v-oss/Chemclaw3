@@ -28,6 +28,7 @@ from chemclaw.core.manifest_io import read_manifest
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import scope_workflow_id
 from chemclaw.core.tool_registry import CapabilityTool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
@@ -235,8 +236,10 @@ def run_workflow_id(template: Template, inputs: dict[str, Any], scope: str = "")
     unscoped id.
     """
     if not scope:
-        return f"template-{template.name}-{stable_hash([template.name, inputs])}"
-    return f"composed-{template.name}-{stable_hash([template.name, inputs, scope])}"
+        return scope_workflow_id(f"template-{template.name}-{stable_hash([template.name, inputs])}")
+    return scope_workflow_id(
+        f"composed-{template.name}-{stable_hash([template.name, inputs, scope])}"
+    )
 
 
 def _family(scope: str) -> str:

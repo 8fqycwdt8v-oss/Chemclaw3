@@ -4,9 +4,10 @@
     python -m chemclaw.cli.backfill_publications             # queue it
     python -m chemclaw.cli.backfill_publications --requeue   # also retry rows that gave up
 
-Idempotent (the outbox's identity index) and safe while live. Rows with no projector are skipped;
-rows a projector cannot read are reported separately, since they need a code change. `--dry-run`
-projects too, so its counts match.
+With tenancy enabled the outbox rows are a tenant's: `--tenant <id>` or `--all-tenants`, and with
+neither the command refuses. Idempotent (the outbox's identity index) and safe while live. Rows with
+no projector are skipped; rows a projector cannot read are reported separately, since they need a
+code change. `--dry-run` projects too, so its counts match.
 """
 
 import argparse
@@ -14,6 +15,8 @@ import asyncio
 import logging
 
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
 from chemclaw.publish.registry import publishing_enabled
 
@@ -94,9 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--batch", type=int, default=500, help="rows read per round trip (default: 500)"
     )
+    add_tenant_flags(parser, all_tenants=True)
     args = parser.parse_args(argv)
     configure_logging()
-    return asyncio.run(_run(args))
+    try:
+        statuses = asyncio.run(for_chosen_tenants(args, lambda _tenant: _run(args)))
+    except TenantError as exc:
+        return refusal(exc)
+    return max(statuses.values())
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

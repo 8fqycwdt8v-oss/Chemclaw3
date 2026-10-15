@@ -33,6 +33,9 @@ from temporalio.client import (
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.temporal_tenancy import tenant_header
+from chemclaw.core.tenancy import current_tenant
+from chemclaw.core.tenant_registry import registered_tenants
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
 from chemclaw.durable.check_in import CheckInWorkflow
 from chemclaw.durable.commitment_sync import CommitmentSyncWorkflow
@@ -59,11 +62,35 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PlannedSchedule:
-    """One Schedule to apply: its stable id, the workflow it fires, and how often."""
+    """One Schedule to apply: its stable id, the workflow it fires, and how often.
+
+    `tenant` is the tenant the fired workflow acts for, carried as a header
+    (`core/temporal_tenancy.py`); empty while tenancy is off.
+    """
 
     schedule_id: str
     workflow: type
     interval: timedelta
+    tenant: str = ""
+
+
+class ScheduleTenantError(RuntimeError):
+    """A job that acts for the deployment's data sources has no tenant to act for."""
+
+
+# Jobs bound to the deployment's data sources (or to one evaluation baseline) rather than to each
+# tenant: running them once per tenant would copy every source into every tenant. With tenancy on
+# they act for the one tenant that owns the sources, `tenancy_process_tenant`.
+_SOURCE_BOUND_JOBS = frozenset(
+    {
+        "eln-sync",
+        "eval-drift",
+        "document-sync",
+        "reaction-labels",
+        "reaction-corpus",
+        "commitment-mirror",
+    }
+)
 
 
 # Every Schedule id this module has ever owned — the prune namespace. Pruning deletes only these
@@ -216,6 +243,52 @@ def planned_schedules() -> list[PlannedSchedule]:
     return schedules
 
 
+def tenant_schedules(
+    plan: Sequence[PlannedSchedule], tenants: Sequence[str], *, strict: bool = True
+) -> list[PlannedSchedule]:
+    """`plan` as the deployment runs it: unchanged while tenancy is off, else bound to tenants.
+
+    A job that sweeps tenant-scoped tables becomes one Schedule per registered tenant,
+    `<id>@<tenant>`, each carrying its tenant. A source-bound job stays one Schedule, carrying the
+    tenant that owns the sources. Pure: the registry is read by the caller.
+
+    Raises:
+        ScheduleTenantError: a source-bound job is planned and no `tenancy_process_tenant` names
+            its tenant, unless `strict` is false, which drops that job instead: a report of what
+            is scheduled has nothing to say about a job that cannot be applied.
+    """
+    if not settings.tenancy_enabled:
+        return list(plan)
+    bound: list[PlannedSchedule] = []
+    for job in plan:
+        if job.schedule_id in _SOURCE_BOUND_JOBS:
+            if not settings.tenancy_process_tenant:
+                if not strict:
+                    continue
+                raise ScheduleTenantError(
+                    f"the {job.schedule_id} schedule acts for the tenant that owns the data "
+                    "sources, and none is named: set CHEMCLAW_TENANCY_PROCESS_TENANT"
+                )
+            bound.append(replace(job, tenant=settings.tenancy_process_tenant))
+        else:
+            bound.extend(
+                replace(job, schedule_id=f"{job.schedule_id}@{tenant}", tenant=tenant)
+                for tenant in tenants
+            )
+    return bound
+
+
+async def deployment_schedules(*, strict: bool = True) -> list[PlannedSchedule]:
+    """The Schedules this deployment applies and reports: the plan, bound to its tenants."""
+    tenants = await registered_tenants() if settings.tenancy_enabled else []
+    return tenant_schedules(planned_schedules(), tenants, strict=strict)
+
+
+def _owns(schedule_id: str) -> bool:
+    """Whether a listed Schedule id is one this module made: a base id, or `<base id>@<tenant>`."""
+    return schedule_id.split("@", 1)[0] in OWNED_SCHEDULE_IDS
+
+
 def _jitter(job: PlannedSchedule) -> timedelta:
     """A deterministic per-job offset inside its interval, so co-scheduled jobs do not collide.
 
@@ -234,21 +307,25 @@ def _jitter(job: PlannedSchedule) -> timedelta:
 
 def _build_schedule(job: PlannedSchedule) -> Schedule:
     """Build the Temporal `Schedule` for one planned job (no-arg workflow on the bg queue)."""
+    action = ScheduleActionStartWorkflow(
+        job.workflow.run,  # type: ignore[attr-defined]
+        id=f"{job.schedule_id}-scheduled",
+        task_queue=settings.background_task_queue,
+        # A ceiling on one run: with `SKIP` below, a run that never ends silently skips every
+        # later fire. Activities are already bounded; this backstops hung children, timers and
+        # waits.
+        #
+        # `run_timeout`, not `execution_timeout`: the latter bounds the whole `continue_as_new`
+        # chain, and the draining jobs (`corpus_sync`, `document_sync`, `label_sync`,
+        # `eln_sync`) continue as new, so it would kill a long first load that may have no
+        # cursor to resume from.
+        run_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
+    )
+    if job.tenant:
+        # An attribute, not a constructor argument: the typed overloads do not list `headers`.
+        action.headers = tenant_header(job.tenant)
     return Schedule(
-        action=ScheduleActionStartWorkflow(
-            job.workflow.run,  # type: ignore[attr-defined]
-            id=f"{job.schedule_id}-scheduled",
-            task_queue=settings.background_task_queue,
-            # A ceiling on one run: with `SKIP` below, a run that never ends silently skips every
-            # later fire. Activities are already bounded; this backstops hung children, timers and
-            # waits.
-            #
-            # `run_timeout`, not `execution_timeout`: the latter bounds the whole `continue_as_new`
-            # chain, and the draining jobs (`corpus_sync`, `document_sync`, `label_sync`,
-            # `eln_sync`) continue as new, so it would kill a long first load that may have no
-            # cursor to resume from.
-            run_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
-        ),
+        action=action,
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=job.interval, offset=_jitter(job))],
         ),
@@ -288,14 +365,12 @@ async def _apply(client: Client, job: PlannedSchedule) -> str:
 async def _prune(client: Client, planned_ids: set[str]) -> None:
     """Delete owned Schedules that exist in Temporal but are no longer planned.
 
-    Without this, a job removed from the plan keeps firing forever. Only ids in
-    `OWNED_SCHEDULE_IDS` are ever deleted.
+    Without this, a job removed from the plan keeps firing forever, and so does a tenant's copy of a
+    job once tenancy is switched off. Only Schedules whose base id is in `OWNED_SCHEDULE_IDS` are
+    ever deleted.
     """
-    stale = OWNED_SCHEDULE_IDS - planned_ids
-    if not stale:
-        return
     async for listing in await client.list_schedules():
-        if listing.id in stale:
+        if _owns(listing.id) and listing.id not in planned_ids:
             await client.get_schedule_handle(listing.id).delete()
             logger.info("deleted stale schedule %s (no longer planned)", listing.id)
 
@@ -305,7 +380,7 @@ async def apply_schedules(client: Client, jobs: Sequence[PlannedSchedule] | None
 
     Pruning makes a re-apply declarative: the owned Schedules end up exactly the planned set.
     """
-    plan = list(jobs) if jobs is not None else planned_schedules()
+    plan = list(jobs) if jobs is not None else await deployment_schedules()
     for job in plan:
         action = await _apply(client, job)
         logger.info(
@@ -364,7 +439,12 @@ async def describe_schedules(client: Client | None = None) -> list[ScheduleHealt
     twice the probe timeout.
     """
     connection = client if client is not None else await connect()
-    return list(await asyncio.gather(*(_describe(connection, job) for job in planned_schedules())))
+    plan = await deployment_schedules(strict=False)
+    if settings.tenancy_enabled:
+        # A tenant's schedules are named after it (`retention@acme`), so another tenant is told only
+        # of its own; a deployment-wide job carries the tenant that owns the sources.
+        plan = [job for job in plan if job.tenant == current_tenant()]
+    return list(await asyncio.gather(*(_describe(connection, job) for job in plan)))
 
 
 async def _describe(connection: Client, job: PlannedSchedule) -> ScheduleHealth:

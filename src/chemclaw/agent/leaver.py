@@ -35,6 +35,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tenancy import require_bound_tenant
 from chemclaw.durable.digest import digest_channel
 
 logger = logging.getLogger(__name__)
@@ -508,6 +509,9 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         ErasureError: `actor` is blank (or a bare `unverified:`), a turn is running on one of this
             person's sessions, or the database refused a statement.
     """
+    # Before anything is counted: with tenancy on and no tenant bound every count is zero and the
+    # run reports an erasure of nothing as done.
+    require_bound_tenant("erasing a person's data")
     # Blank is checked on the bare form, since the marked spelling of a blank id is the non-blank
     # `"unverified:"` and would match every marked row.
     actors = _actor_forms(actor)
@@ -787,6 +791,7 @@ async def finish_erasure(sessions: list[str], *, apply: bool = False) -> Residue
         ErasureError: no session was named, a turn is running on one of them, or the database
             refused a statement.
     """
+    require_bound_tenant("finishing an erasure")
     named = [session_id for session_id in dict.fromkeys(sessions) if session_id.strip()]
     if not named:
         raise ErasureError("name at least one session id; refusing to finish an empty erasure")

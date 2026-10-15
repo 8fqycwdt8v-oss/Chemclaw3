@@ -170,12 +170,12 @@ class TurnRelay:
         # The sender reattaching remotely cancels a pending unload stop as a local reattach does.
         turn.resume(request.actor)
         task = asyncio.get_running_loop().create_task(
-            self._relay(request.id, watch), name=f"turn-relay:{request.session_id}"
+            self._relay(request.id, watch, request.tenant), name=f"turn-relay:{request.session_id}"
         )
         self._relays[request.id] = ((request.session_id, request.holder), task)
         task.add_done_callback(lambda _t: self._relays.pop(request.id, None))
 
-    async def _relay(self, request_id: str, watch: Watch) -> None:
+    async def _relay(self, request_id: str, watch: Watch, tenant: str) -> None:
         """Copy one view's frames into rows for its asker, a poll's worth at a time, to its end.
 
         The view is drained into a list as fast as the turn produces, so the turn never waits on
@@ -218,7 +218,7 @@ class TurnRelay:
                 if finished:
                     batch.append(None)
                 try:
-                    await self._store.relay(request_id, batch)
+                    await self._store.relay(request_id, batch, tenant)
                 except psycopg.errors.ForeignKeyViolation:
                     return  # the asker withdrew between two polls; nobody is reading
                 except (ConnectionError, psycopg.Error):

@@ -33,6 +33,7 @@ from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.plan_context import get_current_plan_link
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import scope_workflow_id
 from chemclaw.core.tool_registry import CapabilityTool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import (
@@ -252,9 +253,10 @@ def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
     """The deterministic id of one connector job run: the idempotency key.
 
     Public because it is a contract: a duplicate launch must resolve to this id, and in-flight
-    histories depend on it staying stable.
+    histories depend on it staying stable. Another tenant's run of the same job is another run
+    (`core/tenancy.scope_workflow_id`); the default tenant's id is unchanged.
     """
-    return f"{connector}-{job}-{stable_hash([connector, job, payload])}"
+    return scope_workflow_id(f"{connector}-{job}-{stable_hash([connector, job, payload])}")
 
 
 def require_funded_ceiling(connector: str, job: JobSpec) -> None:

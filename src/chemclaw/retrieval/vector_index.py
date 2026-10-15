@@ -29,6 +29,8 @@ from chemclaw.core.fulltext import (
     reference_tokens,
 )
 from chemclaw.core.job_lock import exclusive_job
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.core.vector_schema import embedding_column
 from chemclaw.kg.search import search_text
 from chemclaw.kg.store import note_store
@@ -260,7 +262,7 @@ class PostgresNoteIndex:
             "updated_at, corpus_commit_count) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
             "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now(), %(corpus)s) "
-            "ON CONFLICT (note_id) DO UPDATE SET "
+            "ON CONFLICT ON CONSTRAINT note_index_pkey DO UPDATE SET "
             f"{column} = EXCLUDED.{column}, lexeme = EXCLUDED.lexeme, "
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
             "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"
@@ -598,7 +600,8 @@ def main(argv: list[str] | None = None) -> int:
     """CLI: rebuild the durable note index from the knowledge graph; print the count.
 
     `--full` re-embeds every note regardless of its stored fingerprint. Exits 3, having changed
-    nothing, when another worker is already running the pass.
+    nothing, when another worker is already running the pass. With tenancy enabled the index is a
+    tenant's: `--tenant <id>` or `--all-tenants`, and with neither the command refuses (exit 2).
     """
     import argparse
 
@@ -606,13 +609,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--full", action="store_true", help="re-embed every note, ignoring stored fingerprints"
     )
+    add_tenant_flags(parser, all_tenants=True)
     args = parser.parse_args(argv)
-    count = asyncio.run(reindex_exclusively(default_note_index(), full=args.full))
-    if count is None:
-        print("skipped: another worker is reindexing; nothing was changed")
-        return _EXIT_SKIPPED
-    print(f"indexed {count} note(s) into note_index" + (" (full rebuild)" if args.full else ""))
-    return 0
+    try:
+        counts = asyncio.run(
+            for_chosen_tenants(
+                args, lambda _tenant: reindex_exclusively(default_note_index(), full=args.full)
+            )
+        )
+    except TenantError as exc:
+        return refusal(exc)
+    for tenant, count in counts.items():
+        label = f" for tenant {tenant}" if settings.tenancy_enabled else ""
+        if count is None:
+            print(f"skipped{label}: another worker is reindexing; nothing was changed")
+        else:
+            print(
+                f"indexed {count} note(s) into note_index{label}"
+                + (" (full rebuild)" if args.full else "")
+            )
+    return _EXIT_SKIPPED if any(count is None for count in counts.values()) else 0
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from chemclaw.science.bo.campaign_record import Campaign, Suggestion
 _UPSERT_CAMPAIGN = """
     INSERT INTO bo_campaigns (campaign_id, objective, direction, problem, opened_by)
     VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (campaign_id) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT bo_campaigns_pkey DO UPDATE SET
         problem = EXCLUDED.problem,
         last_asked_at = now()
     RETURNING (xmax = 0) AS inserted

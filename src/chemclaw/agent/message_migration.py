@@ -238,12 +238,27 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
                 await conn.commit()
 
 
+async def convert_every_tenants_messages(*, batch: int = _BATCH) -> ConversionOutcome:
+    """`convert_stored_messages` for every tenant of this release.
+
+    The rows are the tenants' and the format is the deployment's; a conversion that bound no tenant
+    would read nothing and report success.
+    """
+    from chemclaw.core.tenant_registry import for_each_tenant
+
+    outcomes = await for_each_tenant(lambda _tenant: convert_stored_messages(batch=batch))
+    return ConversionOutcome(
+        converted=sum(outcome.converted for outcome in outcomes.values()),
+        refused=tuple(row for outcome in outcomes.values() for row in outcome.refused),
+    )
+
+
 if __name__ == "__main__":
     # Its own entrypoint rather than a step inside `core.migrate`, which imports no other
     # subpackage. Run after the schema: in the chart the DDL is `pre-upgrade` (additive, safe for
     # the running release) and this pass is `post-upgrade` (it rewrites rows the previous release
     # still serves).
-    outcome = asyncio.run(convert_stored_messages())
+    outcome = asyncio.run(convert_every_tenants_messages())
     print(f"converted {outcome.converted} stored message(s)")
     if outcome.refused:
         ids = ", ".join(str(row_id) for row_id in outcome.refused[:20])

@@ -5,7 +5,10 @@ share exactly as the real crawl does (same binding, filters and order), reads no
 what would be indexed or turned away, per extension — run it before enabling a large share.
 
     python -m chemclaw.cli.sync_share sharedrive --dry-run
-    python -m chemclaw.cli.sync_share sharedrive
+    python -m chemclaw.cli.sync_share sharedrive [--tenant <id>]
+
+A share belongs to one tenant: with tenancy enabled the crawl names it (`--tenant`, or the
+process's own) and refuses otherwise. The dry run reads no database and needs none.
 """
 
 import argparse
@@ -15,6 +18,8 @@ import sys
 
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.ingest.documents.binding import DocumentShareBinding, DocumentShareError
 from chemclaw.ingest.documents.crawl import crawl_share
 from chemclaw.ingest.documents.index import default_document_index
@@ -116,6 +121,11 @@ async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncRe
     return merged
 
 
+async def _crawl(args: argparse.Namespace) -> SyncReport:
+    """Resolve the named share and run the real sync for the tenant that is bound."""
+    return await _drain(args.source, _resolve(args.source), limit=args.limit)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: cost a mounted share, or crawl it into the document index."""
     parser = argparse.ArgumentParser(description=main.__doc__)
@@ -132,12 +142,13 @@ def main(argv: list[str] | None = None) -> int:
         default=1000,
         help="Documents per pass (ignored by --dry-run).",
     )
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args(argv)
     configure_logging()
     try:
-        share = _resolve(args.source)
-        binding = share.share_binding()
         if args.dry_run:
+            share = _resolve(args.source)
+            binding = share.share_binding()
             crawl = crawl_share(binding, limit=_DRY_RUN_LIMIT)
             report = SyncReport(
                 source=args.source,
@@ -149,7 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(_estimate(binding, report))
         else:
-            print(asyncio.run(_drain(args.source, share, limit=args.limit)).model_dump_json())
+            # A dry run reads only the share; the crawl writes the tenant's index.
+            drained = asyncio.run(for_chosen_tenants(args, lambda _tenant: _crawl(args)))
+            ((_, report),) = drained.items()
+            print(report.model_dump_json())
+    except TenantError as exc:
+        return refusal(exc)
     except DocumentShareError as exc:
         print(str(exc), file=sys.stderr)
         return 2

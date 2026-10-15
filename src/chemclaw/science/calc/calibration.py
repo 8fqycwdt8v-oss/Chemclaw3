@@ -22,7 +22,7 @@ INSERT INTO predictions (
     predicted_value, predicted_uncertainty, unit, predicted_at
 )
 VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT predictions_identity DO UPDATE SET
     predicted_value = EXCLUDED.predicted_value,
     predicted_uncertainty = EXCLUDED.predicted_uncertainty,
     predicted_at = now()
@@ -34,7 +34,7 @@ ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
 _UPSERT_MEASUREMENT = """
 INSERT INTO measurements (property, input_hash, subject, value, unit, source, observed_at)
 VALUES (%s, %s, %s, %s, %s, %s, now())
-ON CONFLICT (property, input_hash, source) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT measurements_pkey DO UPDATE SET
     value = EXCLUDED.value,
     unit = EXCLUDED.unit,
     observed_at = now()

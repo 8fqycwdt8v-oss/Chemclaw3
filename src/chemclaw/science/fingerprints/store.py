@@ -609,8 +609,10 @@ class PostgresFingerprintStore:
         beside the first instead of overwriting it, and two writers with different definitions do
         not evict each other.
 
-        `source_keyed` must match the table: it decides the `ON CONFLICT` target, and a wrong key
-        fails to plan rather than silently mis-keying.
+        `source_keyed` must match the table. The upsert names the table's primary-key constraint
+        (`<table>_pkey`), which is the same statement whether or not the key also carries the
+        tenant; a table whose key lacks `definition` (or `source`) is refused before the first
+        write, since naming the constraint would otherwise mis-key it silently.
         """
         if not table.isidentifier():
             raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
@@ -625,7 +627,8 @@ class PostgresFingerprintStore:
         insert_values = "%(source)s, %(id)s" if source_keyed else "%(id)s"
         # The definition is in the key, so a second definition inserts beside the first; a re-write
         # under one definition updates in place.
-        conflict = "(source, id, definition)" if source_keyed else "(id, definition)"
+        conflict = f"ON CONSTRAINT {table}_pkey"
+        self._key_checked = False
         # Ties break by the whole key, matching the in-memory backend's `(source, id)` sort.
         self._order = 'source COLLATE "C", id COLLATE "C"' if source_keyed else 'id COLLATE "C"'
         self._upsert = (
@@ -700,6 +703,27 @@ class PostgresFingerprintStore:
         async with db.connection(self._dsn) as conn:
             yield conn
 
+    async def _require_key_columns(self, conn: psycopg.AsyncConnection[TupleRow]) -> None:
+        """Refuse, once per store, a table whose primary key lacks `definition` (or `source`)."""
+        if self._key_checked:
+            return
+        cursor = await conn.execute(
+            "SELECT coalesce(array_agg(a.attname::text), ARRAY[]::text[]) FROM pg_constraint c "
+            "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) "
+            "WHERE c.conrelid = to_regclass(%s) AND c.contype = 'p'",
+            (self._table,),
+        )
+        row = await cursor.fetchone()
+        key = set(row[0]) if row else set()
+        needed = {"id", "definition"} | ({"source"} if self._source_keyed else set())
+        if not needed <= key:
+            raise FingerprintError(
+                f"{self._table}'s primary key is ({', '.join(sorted(key))}) and must include "
+                f"{', '.join(sorted(needed - key))}: a write would replace another "
+                "generation's row instead of shelving beside it"
+            )
+        self._key_checked = True
+
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by this table's key, in one transaction.
 
@@ -727,6 +751,7 @@ class PostgresFingerprintStore:
                     "cannot be stored in it without losing which corpus it came from"
                 )
         async with self._connection() as conn:
+            await self._require_key_columns(conn)
             for record in records:
                 await conn.execute(
                     self._upsert,
@@ -860,6 +885,9 @@ class PostgresFingerprintStore:
         )
         async with self._connection() as conn:
             async with conn.cursor() as cur:
+                # The shared recall settings first (iterative scan keeps a tenant's policy
+                # filter from starving the candidate list), then this search's own wider width.
+                await db.apply_vector_recall_settings(cur)
                 await cur.execute(
                     "SELECT set_config('hnsw.ef_search', %s, true)", (str(ef_search),)
                 )

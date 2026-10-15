@@ -26,7 +26,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _SELECT = "SELECT cursor FROM sync_cursors WHERE source = %s"
 _UPSERT = (
     "INSERT INTO sync_cursors (source, cursor, updated_at) VALUES (%s, %s, now()) "
-    "ON CONFLICT (source) DO UPDATE SET "
+    "ON CONFLICT ON CONSTRAINT sync_cursors_pkey DO UPDATE SET "
     "cursor = GREATEST(sync_cursors.cursor, EXCLUDED.cursor), updated_at = now() "
     # Return the stored mark, which may differ from the argument under `GREATEST`, so the lag gauge
     # never moves backwards when the table did not.

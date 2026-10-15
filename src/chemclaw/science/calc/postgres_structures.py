@@ -20,7 +20,7 @@ from chemclaw.science.calc.structures import StructureStore
 _INSERT = """
     INSERT INTO structures (structure_id, structure)
     VALUES (%s, %s)
-    ON CONFLICT (structure_id) DO NOTHING
+    ON CONFLICT ON CONSTRAINT structures_pkey DO NOTHING
 """
 
 _SELECT = "SELECT structure FROM structures WHERE structure_id = %s"

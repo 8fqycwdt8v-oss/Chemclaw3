@@ -38,9 +38,11 @@ default, and set only what differs. Five that every environment must state:
   cluster-shared `temporal` namespace, so a constant put every environment on one namespace, one
   task queue and one schedule-id space. Measured, a peer's `helm upgrade` rewrote this release's
   `eln-sync` to a different workflow type at a different interval and deleted its `eval-drift`
-  outright. Two releases need separate **databases** for the same reason and no chart guard can
-  check that half: 44 tables carry no deployment discriminator, and one release's retention sweep
-  would dispose of another's threads.
+  outright. Two releases need separate **databases** for the same reason, and the database checks that
+  half itself: the migrate hook stamps it with `CHEMCLAW_DEPLOYMENT_ID` (`deploymentId`, derived
+  from the release's namespace and name) and refuses a release with another identity, because one
+  release's retention sweep would dispose of another's threads. Sharing one on purpose needs
+  tenancy and a tenant each (`docs/guides/runbook.md`, § Run more than one tenant).
 - `config.CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — empty means every expensive job is refused for
   everyone, and nothing about the deployment looks wrong (`deploy/README.md`).
 

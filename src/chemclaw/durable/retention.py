@@ -276,6 +276,10 @@ _NOT_PRUNED: dict[str, str] = {
     "kg_edges": "derived from the note that asserts them and replaced when it is revised; cascades "
     "from `kg_notes` (`infra/sql/128_kg_notes.sql`)",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
+    "deployment_id": "never: one row by construction, the stamp of the release that owns the "
+    "database; the runtime role cannot write it (`infra/sql/132_deployment_id.sql`)",
+    "tenants": "never: one row per tenant an operator registered, so the bound is the number of "
+    "tenants; deleting one would orphan its rows (`infra/sql/131_tenancy.sql`)",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",
     # Traffic cannot grow the fingerprint pair (upsert on a structural key), but the definition is

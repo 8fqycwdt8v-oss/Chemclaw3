@@ -272,7 +272,7 @@ class PostgresComposedStore:
     _UPSERT = """
         INSERT INTO composed_workflows (owner, name, document, summary, session_id, correlation_id)
         VALUES (%(owner)s, %(name)s, %(document)s, %(summary)s, %(session_id)s, %(correlation_id)s)
-        ON CONFLICT (owner, name) DO UPDATE SET
+        ON CONFLICT ON CONSTRAINT composed_workflows_pkey DO UPDATE SET
             document = EXCLUDED.document,
             summary = EXCLUDED.summary,
             session_id = EXCLUDED.session_id,

@@ -26,6 +26,7 @@ from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.tenancy import DEFAULT_TENANT, current_tenant
 from chemclaw.core.turn_fence import TurnFence
 
 if TYPE_CHECKING:  # `api/turn_relay` reads this module's lease and holder identity at import
@@ -36,11 +37,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LiveSession:
-    """One live conversation: its turn session, who owns it, and which profile it runs under."""
+    """One live conversation: its turn session, who owns it, and which profile it runs under.
+
+    `tenant` is the tenant it was opened for. The cache is shared by every tenant a replica serves,
+    so a hit is honoured only for the tenant that made it.
+    """
 
     session: Any
     owner: str | None
     profile: str | None = None
+    tenant: str = DEFAULT_TENANT
 
 
 class _LiveSessions:
@@ -75,7 +81,7 @@ class _LiveSessions:
         turns in flight are bounded far below the cap by admission, and evicting one would corrupt a
         running conversation.
         """
-        entry = LiveSession(session=session, owner=owner, profile=profile)
+        entry = LiveSession(session=session, owner=owner, profile=profile, tenant=current_tenant())
         self._entries.put(session_id, entry)
         return entry
 

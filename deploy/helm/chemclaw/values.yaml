@@ -1959,12 +1959,21 @@ securityContext:
 # unique by construction where each environment gets one of its own, and it is what the
 # refusal suggests by name.
 #
-# **A shared Postgres is the same hazard and this knob does not cover it** — 44 tables carry no
-# deployment discriminator, and `durable/retention.py`'s expired-thread sweep would prune a peer's
+# **A shared Postgres is the same hazard and this knob does not cover it** — the tables carry no
+# release discriminator, and `durable/retention.py`'s expired-thread sweep would prune a peer's
 # live threads. Two ChemClaw releases need their own database as well as their own Temporal
-# namespace; nothing here can check that, which is why it is written down here.
+# namespace; the database checks that half itself, through `deploymentId` below.
 temporal:
   namespace: ""
+
+# The identity the database holds for the release that owns it (`CHEMCLAW_DEPLOYMENT_ID`). Empty
+# derives `<namespace>/<release name>`, which is unique by construction where each release has a
+# Kubernetes namespace of its own. The migrate hook stamps it into the database the first time,
+# and every later migrate, front door and worker compares it: a release with another identity is
+# refused, naming both, unless tenancy is on and each release has tenants of its own
+# (`docs/guides/runbook.md`, § Run more than one tenant). Renaming a release changes the identity,
+# so state the old one here, or re-stamp the database as the refusal says.
+deploymentId: ""
 
 # **Scaling the interactive workers on their queue's backlog**, through KEDA — OpenShift's Custom
 # Metrics Autoscaler operator, at a version with the `temporal` scaler. Off by default: whether the

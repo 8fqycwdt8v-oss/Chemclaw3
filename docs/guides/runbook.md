@@ -435,8 +435,10 @@ Things that are easy to miss when repointing:
 - **The session layer can live in a second database**: `CHEMCLAW_SESSION_STORE_DSN` (empty means
   `CHEMCLAW_POSTGRES_DSN`) holds the conversation transcripts, LangGraph checkpoints, plan approvals,
   turn costs and the effect ledger. Migrate both.
-- **Two releases need two databases.** Nothing in the schema is namespaced by release, and no
-  chart guard can see that two releases share one.
+- **Two releases need two databases**, unless tenancy is on and each has tenants of its own. The
+  first release to migrate stamps the database with its `CHEMCLAW_DEPLOYMENT_ID`, and the migrate
+  hook, the front door and the workers of any release with another identity refuse to run, naming
+  both. See § Run more than one tenant.
 - **The fingerprint width is coupled to the schema**: the `bit(2048)` columns must match
   `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` — see §(vi) before changing either.
 
@@ -1812,6 +1814,20 @@ answering `200` on `/healthz` and `500` on `/mcp`: `/readyz` said `{"status":"re
 "connectors_unhealthy":0}`, the startup line said `molfp=healthy`, and this alert's series held `0`
 while every tool call to that connector failed. `ChemclawConnectorsDegradingTurns` is the rule for
 that case, and a flat `chemclaw_connectors_unhealthy` is not evidence against it.
+
+#### ChemclawDeploymentUnchecked
+`warning`. A pod's check of its database (release identity, forced policies, the roles it connects
+as, the pooler in front of them) could not read the database, at start and on each repeat. It serves
+anyway, because an outage is `/readyz`'s to report and a crash loop would turn it into a worse one;
+the body says `"deployment": "unchecked"`. Find why the database is not answering
+(`ChemclawDatabaseUnavailable`); the next recheck, `deployment_recheck_seconds` later, clears it.
+
+#### ChemclawDeploymentRefused
+`critical`. The check read the database and found it contradicts the configuration, and the pod is
+unready (`/readyz`: `deployment refused`) so it drains instead of acting on it. The pod's log names
+every reason: a role that is a superuser or has `BYPASSRLS`, a transaction-mode pooler in front of
+tenancy, another release's stamp, policies not enforced, keys not widened. The remedies are in
+§(xv-b).
 
 #### ChemclawConnectorsDegradingTurns
 `warning`. A turn opened this connector and it did not come up, so the turn answered without its
@@ -3367,6 +3383,85 @@ session that still has one** — so it can only finish what is already orphaned 
 delete somebody's live conversation. It runs on the application's own privileges: nothing here needs
 a database owner. Like the actor form it exits `2` if it wrote and did not finish, and its report
 names what it deliberately leaves behind.
+
+## (xv-b) Run more than one tenant, or two releases, on one database
+
+Off by default. With `CHEMCLAW_TENANCY_ENABLED=false` every row belongs to the tenant `default`, the
+row-level-security policies exist and are disabled, and nothing below applies. The design is the
+decision `D-2026-10-15-tenancy-is-a-column-and-a-policy-switched-on-by-the-operator`; this section
+is the procedure and what the startup refusals mean.
+
+**What a tenant is.** A row in `tenants`, registered by an operator, and a person's token carrying
+exactly one app role `tenant:<id>`. A token naming a tenant nobody registered, or none, or two, gets
+a 403. No request creates a tenant.
+
+### Switch it on
+
+1. **Connect through a session-mode endpoint, as a role the policies bind.** The tenant is a
+   session setting, so no DSN may point at a transaction-mode pooler (`deploy/README.md`, *PgBouncer
+   in front of Postgres*); the start refuses one it can detect, and `/readyz` fails if one appears.
+   The runtime role of **every** DSN (`CHEMCLAW_POSTGRES_DSN` and `CHEMCLAW_SESSION_STORE_DSN`) must
+   be neither a superuser nor `BYPASSRLS`, or every tenant reads every other's rows. Use the split
+   principal (*Splitting the database principal*): the migrator owns the schema, `chemclaw_app`
+   serves. A running process checks both again every `CHEMCLAW_DEPLOYMENT_RECHECK_SECONDS` (300; 0
+   checks at start only): a contradiction found later fails `/readyz` (`deployment refused`, reasons
+   in the log and on `chemclaw_deployment_refused`), and a database it cannot read shows as
+   `"deployment": "unchecked"` and on `chemclaw_deployment_unchecked`, which is the state to alert
+   on.
+2. **Register the tenants** under the owning principal: `make tenant-add TENANT=acme`, and
+   `make tenant-list` to read them back. Ids are lowercase letters, digits, `_` and `-`.
+3. **Set `CHEMCLAW_TENANCY_ENABLED=true` on every component** and, for anything that acts for no
+   request (the schedules, a source-bound ingest), `CHEMCLAW_TENANCY_PROCESS_TENANT=<id>`.
+   Set `CHEMCLAW_HNSW_ITERATIVE_SCAN=relaxed_order`: a vector search is filtered by tenant after the
+   index returns its nearest rows, and without iterative scan a small tenant gets fewer results than
+   it asks for.
+4. **Drain the running workflows before step 3 takes effect on the workers.** A workflow that began before the switch carries no tenant,
+   and once tenancy is on each of its activities fails once with `TenantError: ... started without a
+   tenant` (final, not retried) instead of reading nothing. Let them finish, or cancel and start
+   them again, before this step. Registering a tenant (step 2) creates no Schedules: run
+   `make schedules-apply` (the chart's upgrade does it) after each `make tenant-add`. A tenant
+   handed to another release (`make tenant-assign`) stops being served by the pods that held it
+   within `CHEMCLAW_TENANT_REGISTRY_CACHE_SECONDS` (30).
+5. **Run the migration** (`make db-migrate`, or the chart's pre-upgrade hook). It enables and forces
+   the policies and widens the keys two tenants could both produce. Do it in a window: a release
+   whose tenancy is off sees nothing once the policies are forced, and the switch takes `ACCESS
+   EXCLUSIVE` on every scoped table (`infra/sql/README.md`, *Tenancy*, for pre-building the
+   large keys).
+6. **Restart.** Each process checks the database on start and refuses to serve, with the reason, if
+   tenancy is on over policies that are not enforced, off over policies that are, over keys that are
+   not widened, or as a role the policies do not bind.
+
+**Switching it off** is the same migration with the setting false. It is refused while more than one
+tenant is registered: their rows would then be one pool.
+
+**The knowledge graph is not yet tenant-scoped.** With `kg_store=git` it is one repository for the
+whole deployment, so a second tenant is refused at start (the same check, naming it). Register one
+tenant until the knowledge is held in Postgres.
+
+### Two releases on one database
+
+Two releases need two databases; the database enforces it. The first release to migrate stamps the
+single-row `deployment_id` table with its `CHEMCLAW_DEPLOYMENT_ID` (the chart derives
+`<namespace>/<release name>`, or `deploymentId`). A migrate hook, front door or worker whose release
+has another identity is refused, with both identities in the message.
+
+To share one on purpose, tenancy must be on and enforced (above), and the releases must have
+**distinct tenants**:
+
+1. Give every existing tenant to the release that serves it, under the owning principal:
+   `make tenant-assign TENANT=default DEPLOYMENT=<release>` (and any other). A tenant owned by no
+   release would be served by both, and the check refuses that.
+2. Register the second release's tenants for it: `make tenant-add TENANT=globex DEPLOYMENT=<release>`.
+3. Migrate and start the second release. A tenant owned by another release is unknown to this one,
+   so a token naming it gets a 403.
+
+**A renamed release is a different identity.** The refusal names the statement that re-stamps it
+under the owning principal: `UPDATE deployment_id SET deployment_id = '<new identity>'`. The runtime
+role can read the stamp and cannot write it.
+
+**A database that cannot be reached at start is not a refusal**: the check logs
+`deployment.unchecked` and carries on, and `/readyz` reports the outage. It checks nothing where no
+identity is configured, tenancy is off and sessions are in memory.
 
 ## (xvi) Attach an external results database
 

@@ -123,7 +123,7 @@ _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
 VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
         %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s, %(tier)s, %(species)s)
-ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT reaction_records_pkey DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
     -- needed a full corpus parse to do it; here the newer rendering simply wins.

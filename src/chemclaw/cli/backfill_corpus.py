@@ -17,6 +17,8 @@ from chemclaw.agent.attachments import AttachmentError, parse_attachment
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.kg.git_writer import BatchingNoteWriter, default_writer
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import (
@@ -137,14 +139,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report what would be written without committing anything. Run this first.",
     )
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args(argv)
     configure_logging()
     if not args.directory.is_dir():
         print(f"not a directory: {args.directory}", file=sys.stderr)
         return 2
-    written, skipped = asyncio.run(
-        backfill(args.directory, tags=list(args.tag), dry_run=args.dry_run)
-    )
+    try:
+        done = asyncio.run(
+            for_chosen_tenants(
+                args,
+                lambda _tenant: backfill(args.directory, tags=list(args.tag), dry_run=args.dry_run),
+            )
+        )
+    except TenantError as exc:
+        return refusal(exc)
+    ((written, skipped),) = done.values()
     verb = "would write" if args.dry_run else "wrote"
     print(f"{verb} {written} note(s); skipped {skipped} unreadable/unsupported file(s)")
     return 0

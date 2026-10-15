@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.ids import stable_hash
     from chemclaw.core.temporal_client import connect
+    from chemclaw.core.tenancy import scope_workflow_id
     from chemclaw.durable import pending_store
     from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.notify import notify_session_best_effort
@@ -108,10 +109,13 @@ def request_id_for(request: AwaitRequest) -> str:
     """The deterministic workflow id for this question, so asking twice is one wait.
 
     Keyed on what is asked and of whom, not on session or correlation id, so two chemists asking
-    the same thing join one wait.
+    the same thing join one wait, within a tenant (`core/tenancy.scope_workflow_id`).
     """
-    return "await-" + stable_hash(
-        {"kind": request.kind, "subject": request.subject, "asked_of": request.asked_of}
+    return scope_workflow_id(
+        "await-"
+        + stable_hash(
+            {"kind": request.kind, "subject": request.subject, "asked_of": request.asked_of}
+        )
     )
 
 

@@ -602,6 +602,36 @@ spec:
               a missing bearer token, an MCP handshake that never completes — so a flat
               `chemclaw_connectors_unhealthy` is not evidence against it.
 
+        {{- /* A pod that serves a database it has not checked, or one the check refused. The
+               first is silent by design (an outage is readiness's to report), so it needs an alert
+               of its own: tenancy and release identity are exactly what an unchecked pod cannot
+               vouch for. */}}
+        - alert: ChemclawDeploymentUnchecked
+          expr: max(chemclaw_deployment_unchecked) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdeploymentunchecked
+            summary: A pod could not check that its database matches its configuration
+            description: >-
+              The start-up check, and its repeat every `deployment_recheck_seconds`, could not read
+              the database, so release identity, row-level security and the pooler were not
+              checked. The pod serves anyway and `/readyz` carries `deployment: unchecked`.
+
+        - alert: ChemclawDeploymentRefused
+          expr: max(chemclaw_deployment_refused) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdeploymentrefused
+            summary: A pod's database contradicts its configuration, and it is not ready
+            description: >-
+              A recheck found a role that bypasses row-level security, a transaction-mode pooler, a
+              second release on the database or tenancy in a state the migration did not leave.
+              `/readyz` says `deployment refused`; the pod's log names each reason.
+
         {{- /* The request-path sibling of ChemclawDurableUnreachable, and separate from it on
                purpose (D-2026-08-08-a-rollback-that-is-not-a-schema-step): that alert reads a
                per-turn Temporal probe, this one reads per-request shedding for *any* unavailable

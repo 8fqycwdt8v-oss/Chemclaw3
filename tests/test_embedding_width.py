@@ -92,6 +92,29 @@ def _before_width_migration(tmp_path: Path) -> Path:
     return target
 
 
+def _through_width_migration(tmp_path: Path) -> Path:
+    """The migrations up to and including the width one: what the next release adds, no more.
+
+    A later migration is a different release's business; running it here would change objects these
+    tests count and make the width migration stop being the last one applied.
+    """
+    target = tmp_path / "through"
+    target.mkdir(exist_ok=True)
+    for path in sorted(_SQL_DIR.glob("*.sql")):
+        if path.name <= _width_migration():
+            (target / path.name).write_text(path.read_text())
+    return target
+
+
+async def _migrate_the_width_step(
+    scratch: "Scratch", tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Apply what the width release adds to a deployment that has everything before it."""
+    with monkeypatch.context() as patch:
+        patch.setattr(settings, "sql_migrations_dir", str(_through_width_migration(tmp_path)))
+        return await migrate(scratch.dsn)
+
+
 class Scratch:
     """A schema of this test's own, with every Postgres DSN setting pointed into it."""
 
@@ -213,7 +236,7 @@ async def test_a_deployment_that_keeps_its_width_migrates_nothing_and_loses_noth
         (scratch.schema,),
     )
 
-    assert await migrate(scratch.dsn) == [_width_migration()]
+    assert await _migrate_the_width_step(scratch, tmp_path, monkeypatch) == [_width_migration()]
 
     assert (
         await scratch.afetch("SELECT note_id, embedding::text FROM note_index ORDER BY 1") == before
@@ -248,7 +271,7 @@ async def test_a_new_width_adds_a_column_and_an_hnsw_index_beside_the_data(
     chunks = await scratch.afetch("SELECT doc_id, embedding::text FROM document_chunks ORDER BY 1")
 
     monkeypatch.setattr(settings, "embedding_dim", 768)
-    assert await migrate(scratch.dsn) == [_width_migration()]
+    assert await _migrate_the_width_step(scratch, tmp_path, monkeypatch) == [_width_migration()]
 
     for table in ("note_index", "document_chunks"):
         assert await _columns(scratch, table) == {"embedding": 1536, "embedding_768": 768}
@@ -279,7 +302,7 @@ async def test_a_new_width_adds_a_column_and_an_hnsw_index_beside_the_data(
         "SELECT oid FROM pg_class WHERE relnamespace = %s::regnamespace ORDER BY 1",
         (scratch.schema,),
     )
-    assert await migrate(scratch.dsn) == []
+    assert await _migrate_the_width_step(scratch, tmp_path, monkeypatch) == []
     assert (
         await scratch.afetch(
             "SELECT oid FROM pg_class WHERE relnamespace = %s::regnamespace ORDER BY 1",

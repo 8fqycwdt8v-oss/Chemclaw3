@@ -10,7 +10,9 @@ re-key is one transaction (insert under the new id, move suggestions, delete the
 collision merges rather than overwrites — the survivor keeps the earlier `created_at` and the later
 `last_asked_at`.
 
-Run: `python -m chemclaw.cli.rekey_campaigns [--apply]` — a preview unless `--apply` is given
+Run: `python -m chemclaw.cli.rekey_campaigns [--apply] [--tenant <id> | --all-tenants]` — a
+preview unless `--apply` is given. With tenancy enabled the campaigns are a tenant's, so it names
+one (or all) and refuses otherwise.
 """
 
 import argparse
@@ -21,6 +23,8 @@ import sys
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.science.bo.campaign_record import campaign_id_for
 from chemclaw.science.bo.problem import OptimizationProblem
 
@@ -35,7 +39,7 @@ _UPSERT = """
                               created_at, last_asked_at)
     SELECT %s, objective, direction, problem, opened_by, created_at, last_asked_at
       FROM bo_campaigns WHERE campaign_id = %s
-    ON CONFLICT (campaign_id) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT bo_campaigns_pkey DO UPDATE SET
         created_at = LEAST(bo_campaigns.created_at, EXCLUDED.created_at),
         last_asked_at = GREATEST(bo_campaigns.last_asked_at, EXCLUDED.last_asked_at)
 """
@@ -96,11 +100,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Commit the re-key. Without it the rows examined are real and nothing is written.",
     )
+    add_tenant_flags(parser, all_tenants=True)
     args = parser.parse_args(argv)
     configure_logging()
-    examined, moved = asyncio.run(rekey(dry_run=not args.apply))
+    try:
+        counts = asyncio.run(for_chosen_tenants(args, lambda _t: rekey(dry_run=not args.apply)))
+    except TenantError as exc:
+        return refusal(exc)
     verb = "moved" if args.apply else "would move"
-    logger.info("%d campaign(s) examined, %s %d", examined, verb, moved)
+    for tenant, (examined, moved) in counts.items():
+        where = f"tenant {tenant}: " if settings.tenancy_enabled else ""
+        logger.info("%s%d campaign(s) examined, %s %d", where, examined, verb, moved)
     return 0
 
 

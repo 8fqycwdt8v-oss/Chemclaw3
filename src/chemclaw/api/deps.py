@@ -26,6 +26,7 @@ from chemclaw.api.state import LiveSession, SessionOwners, state
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.tenancy import current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,11 @@ async def _resolve_session(request: Request, session_id: str, principal: Princip
     """
     entry = state(request).live_sessions.get(session_id)
     if entry is not None:
+        if entry.tenant != current_tenant():
+            # Another tenant's conversation under an id this tenant also named: unknown to it.
+            raise _refuse(
+                _SESSION, "another tenant's session", principal, session_id, "unknown session"
+            )
         await _refuse_unless_participant(session_id, entry.owner, principal, "unknown session")
         return entry
     return await _rehydrate_session(request, session_id, principal)

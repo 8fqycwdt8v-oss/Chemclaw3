@@ -151,7 +151,7 @@ _COLUMNS = (
 _INSERT = (
     f"INSERT INTO behaviour_proposals ({_COLUMNS}) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), NULL, '', '') "
-    "ON CONFLICT (actor, kind, name, content_hash) DO NOTHING"
+    "ON CONFLICT ON CONSTRAINT behaviour_proposals_version_unique DO NOTHING"
 )
 
 # Everything this person still has open under one name, other than the version just proposed;

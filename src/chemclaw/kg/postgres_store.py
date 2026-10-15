@@ -29,9 +29,9 @@ from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.jsonb import json_column
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tenancy import TenantError, require_bound_tenant
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.rows import (
-    DEFAULT_TENANT,
     canonical_note,
     content_sha,
     edge_columns,
@@ -311,9 +311,30 @@ class PostgresNoteStore:
     them agree.
     """
 
-    def __init__(self, tenant_id: str = DEFAULT_TENANT) -> None:
-        """Serve the notes of `tenant_id`."""
-        self._tenant = tenant_id
+    def __init__(self, tenant_id: str | None = None) -> None:
+        """Serve the notes of `tenant_id`, or of whichever tenant the work in flight acts for."""
+        self._fixed = tenant_id
+
+    @property
+    def _tenant(self) -> str:
+        """The tenant every statement names: the one given, else the one the work is bound to.
+
+        The policies compare each row with the connection's bound tenant, so a store that names a
+        different one would read nothing and have every write refused. With tenancy on that is an
+        error here, naming both, rather than an empty corpus.
+
+        Raises:
+            TenantError: tenancy is on and the store's tenant is not the one bound, or none is.
+        """
+        bound = require_bound_tenant("the notes store")
+        if self._fixed is None or not settings.tenancy_enabled:
+            return bound if self._fixed is None else self._fixed
+        if self._fixed != bound:
+            raise TenantError(
+                f"this store serves tenant {self._fixed!r} but the work acts for {bound!r}: the "
+                "row-level-security policy would hide every row from it"
+            )
+        return self._fixed
 
     @asynccontextmanager
     async def _read(

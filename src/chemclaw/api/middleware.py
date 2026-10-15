@@ -37,6 +37,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.core.tenancy import reset_current_tenant, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,7 @@ _SCOPE_BOUND = "chemclaw.observed"
 # owns every reset because it runs on every exit path.
 _SCOPE_IDENTITY_TOKEN = "chemclaw.identity_token"
 _SCOPE_SESSION_TOKEN = "chemclaw.session_token"
+_SCOPE_TENANT_TOKEN = "chemclaw.tenant_token"
 # The resolved session for the access-log line, never `path_params` (see `_record_request`).
 _SCOPE_SESSION = "chemclaw.session_id"
 # The actor for the access-log line, stamped by the authentication gate once it knows one.
@@ -366,16 +368,21 @@ def _render_errors(errors: list[Any]) -> list[Any]:
     return rendered
 
 
-def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> None:
-    """Make the authenticated caller ambient for the rest of this request.
+def bind_request_actor(
+    request: Request, actor: str, roles: frozenset[str], tenant: str | None = None
+) -> None:
+    """Make the authenticated caller, and the tenant they act for, ambient for this request.
 
     Called from `require_principal`, which every authenticated route passes, so every log line on
-    any route names its actor. A no-op outside `_RequestObservability`, which owns the reset.
+    any route names its actor and every database borrow carries its tenant. A no-op outside
+    `_RequestObservability`, which owns the reset.
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
     request.scope[_SCOPE_ACTOR] = actor
     request.scope[_SCOPE_IDENTITY_TOKEN] = set_current_identity(actor, roles)
+    if tenant:
+        request.scope[_SCOPE_TENANT_TOKEN] = set_current_tenant(tenant)
 
 
 def bind_request_session(request: Request, session_id: str) -> None:
@@ -392,11 +399,14 @@ def bind_request_session(request: Request, session_id: str) -> None:
 
 
 def _reset_request_identity(scope: Scope) -> None:
-    """Undo whatever the two binders above stamped, in reverse order."""
+    """Undo whatever the binders above stamped, in reverse order."""
     scope.pop(_SCOPE_SESSION, None)
     session_token = scope.pop(_SCOPE_SESSION_TOKEN, None)
     if session_token is not None:
         reset_current_session_id(session_token)
+    tenant_token = scope.pop(_SCOPE_TENANT_TOKEN, None)
+    if tenant_token is not None:
+        reset_current_tenant(tenant_token)
     identity_token = scope.pop(_SCOPE_IDENTITY_TOKEN, None)
     if identity_token is not None:
         reset_current_identity(identity_token)

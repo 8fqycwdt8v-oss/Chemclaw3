@@ -108,6 +108,7 @@ from chemclaw.core.session_context import (
     set_current_session_id,
 )
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import reset_current_tenant, set_current_tenant
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_fence import (
     ClaimUnverifiable,
@@ -200,6 +201,7 @@ async def run_turn(
     resume: ResumePoint | None = None,
     fence: TurnFence | None = None,
     on_started: Callable[[], None] | None = None,
+    tenant: str | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then an answer or an error).
 
@@ -216,6 +218,7 @@ async def run_turn(
         graph_factory: Builds the turn's compiled graph; the seam tests use instead of a model.
         deadline: Loop-clock time the caller's whole-turn timeout fires, to tell a timeout from a
             stop; `None` treats every cancellation as an abandonment.
+        tenant: The tenant the turn acts for, bound for its duration; `None` keeps the caller's.
         exhibit_refs: Artefacts the message points at, already resolved by the route.
         resume: A turn whose process died, to continue from its checkpoint as the turn it was: its
             correlation id, question, written-ahead row and dry-run flag replace this call's, and
@@ -267,6 +270,7 @@ async def run_turn(
             ledger.usage,
             [*earlier_said, user_message],
             fence,
+            tenant,
         ),
         start_span(
             "chemclaw.turn",
@@ -900,8 +904,13 @@ def _turn_ambient(
     usage: TurnUsage,
     user_texts: Sequence[str],
     fence: TurnFence | None = None,
+    tenant: str | None = None,
 ) -> Iterator[None]:
     """Stamp the ambients only a request can supply, and unstamp every one on the way out.
+
+    The tenant is one of them: a turn outlives the request that started it and may start from a
+    queued message another request authenticated, so the turn acts for the tenant its sender's
+    principal names and not for whichever request's context it happens to have inherited.
 
     Synchronous on purpose: the resets run under cancellation, where an `await` would re-raise and
     leak this turn's identity into the next. Ambient rather than arguments: the session (for job
@@ -910,6 +919,7 @@ def _turn_ambient(
     cannot be handed at build time. The cap watches come from `agent.turn_ambient.turn_caps`. Resets
     run in reverse order.
     """
+    tenant_token = set_current_tenant(tenant) if tenant is not None else None
     session_token = set_current_session_id(session_id)
     user_texts_token = set_current_user_texts(user_texts)
     identity_token = set_current_identity(actor, roles) if actor is not None else None
@@ -931,6 +941,8 @@ def _turn_ambient(
         _unstamp(session_id, reset_current_correlation_id, correlation_token)
         if identity_token is not None:
             _unstamp(session_id, reset_current_identity, identity_token)
+        if tenant_token is not None:
+            _unstamp(session_id, reset_current_tenant, tenant_token)
 
 
 def _unstamp(session_id: str, reset: Callable[[Any], None], token: Any) -> None:
