@@ -1111,7 +1111,7 @@ def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
     `store_prefixes` against the namespace the tier writes under.
     """
     from chemclaw.agent.leaver import store_prefixes
-    from chemclaw.agent.org_skills import org_skills_namespace, org_versions_namespace
+    from chemclaw.skills.store import org_skills_namespace, org_versions_namespace
 
     prefixes = store_prefixes(["alice-oid", "unverified:alice"])
     org = ".".join(org_skills_namespace())

@@ -77,9 +77,9 @@ def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
     Declarations resolve against in-process tools, every connector's MCP tools and every declared
     job, so moving a tool across the process boundary breaks no skill.
     """
-    from chemclaw.agent.skill_manifest import SkillManifest
     from chemclaw.cli.validate_skills import _dependency_problems
     from chemclaw.connectors.registry import connector_tool_names
+    from chemclaw.skills.manifest import SkillManifest
 
     out_of_process = set(connector_tool_names())
     assert "predict_pka" in out_of_process  # a connector MCP tool
@@ -96,8 +96,8 @@ def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
 
 def test_an_invented_tool_is_still_rejected() -> None:
     """Widening the lookup must not weaken it: an unknown name is still a failure."""
-    from chemclaw.agent.skill_manifest import SkillManifest
     from chemclaw.cli.validate_skills import _dependency_problems
+    from chemclaw.skills.manifest import SkillManifest
 
     problems = _dependency_problems(
         Path("probe/SKILL.md"),
@@ -113,8 +113,8 @@ def test_a_required_tool_outside_the_declaration_is_reported() -> None:
     A `requires` typo is caught by nothing else, and `ToolScopedSkills._permits` would then hide the
     skill everywhere.
     """
-    from chemclaw.agent.skill_manifest import SkillManifest
     from chemclaw.cli.validate_skills import _requires_problems
+    from chemclaw.skills.manifest import SkillManifest
 
     problems = _requires_problems(
         Path("probe/SKILL.md"),
@@ -135,8 +135,8 @@ def test_a_real_tool_still_has_to_be_declared_to_be_required() -> None:
 
     `ToolScopedSkills` reads both lists for the same skill, so they must describe one capability.
     """
-    from chemclaw.agent.skill_manifest import SkillManifest
     from chemclaw.cli.validate_skills import _requires_problems
+    from chemclaw.skills.manifest import SkillManifest
 
     problems = _requires_problems(
         Path("probe/SKILL.md"),

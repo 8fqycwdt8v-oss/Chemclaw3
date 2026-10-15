@@ -22,6 +22,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | --- | --- | --- |
 | `core/` | — | The shared kernel every layer imports: config, database, HTTP, ids, logging, metrics, the egress guard (including the `LD_PRELOAD` half in `core/netguard_preload.c`) and the ambient-turn primitives. It imports no sibling at module scope and has exactly one declared lazy exception, to `connectors.registry`. |
 | `agent/` | 1 | Conversation orchestration: the compiled graph (`agent/langgraph_agent.py`), its tool surface and middleware chain, the checkpointer, sessions, authorization, the plan gate and the turn's filesystem. |
+| `skills/` | 1 + 3 | The code behind Agent Skills: `SkillStore` over three tiers (reviewed tree, organisation, a chemist's own), the one access predicate (who sees a skill, who may change a tier), the manifest and the backends a turn reads through. The `SKILL.md` files are data, in the top-level `skills/` and each bundle's `skills/`. |
 | `api/` | 1 | The FastAPI + SSE front door behind OIDC; `create_app` in `api/app.py` is the composition root and `api/routes/` holds one module per resource. |
 | `durable/` | 2 | Temporal workflows, activities and the `background-jobs` worker. |
 | `connectors/` | 2 + 3 | The capability seam: one bundle per `connector.yaml`, with its worker, its skills and, where this repo runs it, its MCP server. The manifest of a `Chemclaw3-mcp` server this repo does not run is not here: it arrives with the installed `chemclaw-contracts` package, and the directory beside it holds only the `skills/` for it. |
@@ -64,6 +65,8 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
   expose it. For `calc` the engines themselves are `Chemclaw3-mcp`'s.
 - **`skills/` vs `connectors/*/skills/`**: a bundled skill ships with its connector, a global one
   belongs to none; one discovery mechanism (`CHEMCLAW_SKILLS_DIR`) finds both.
+- **`skills/` vs `src/chemclaw/skills/`**: the first is the global `SKILL.md` data; the second is
+  the code that stores, narrows and mounts every tier of them.
 - **`core/quantities.py` vs `core/units.py`**: a `Quantity` is a number a tool returned under its
   key; a `Measurement` is a physical quantity with unit, uncertainty and conversions.
 - **`core/metrics.py` vs `evals/metric.py` vs `evals/metrics.py`**: the Prometheus registry, the

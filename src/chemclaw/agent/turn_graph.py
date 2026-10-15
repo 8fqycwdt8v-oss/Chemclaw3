@@ -33,10 +33,10 @@ from chemclaw.agent.langgraph_agent import bindable_capability_tools, build_lang
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.state import PEER_DEPTH_ATTR, ChemclawState
-from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.agent.subagents import roster_names
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.skills.store import StoredSkillTools
 
 logger = logging.getLogger(__name__)
 

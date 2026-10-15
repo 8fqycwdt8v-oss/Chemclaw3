@@ -1108,7 +1108,7 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     from chemclaw.agent.langgraph_agent import _subagents
     from chemclaw.agent.scratchpad import MEMORY_ROOT, scratchpad_backend
-    from chemclaw.agent.skill_access import SkillNarrowing
+    from chemclaw.skills.access import SkillNarrowing
 
     class _Skills:
         """The one attribute `scratchpad_backend` reads off a skills backend."""

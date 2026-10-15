@@ -33,7 +33,6 @@ from chemclaw.agent.exhibit_notes import exhibit_turn_note, mark_told
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.llm_provider import classify_model_failure
-from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.agent.loop_cap import loop_hit_cap
 from chemclaw.agent.plan_gate import (
     PLAN_APPROVAL_PROMPT,
@@ -49,10 +48,8 @@ from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.session_store import InterruptedTurn
-from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
-from chemclaw.agent.stored_skill_tools import stored_skill_declarations
 from chemclaw.agent.tool_result_size import (
     bounded_content,
     reset_full_result_sink,
@@ -122,6 +119,8 @@ from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_t
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.exhibits.models import ExhibitRef
 from chemclaw.kg.note import cited_ids
+from chemclaw.skills.manifest import skill_fingerprint
+from chemclaw.skills.store import personal_skills_available, stored_skill_declarations
 
 logger = logging.getLogger(__name__)
 
@@ -1783,7 +1782,7 @@ async def _turn_checkpointer() -> Any:
 async def turn_store() -> Any:
     """This turn's durable memory store, or `None` where the deployment keeps none.
 
-    Gated by `local_skills.personal_skills_available`; built here so `build_langgraph_agent` stays
+    Gated by `skills.store.personal_skills_available`; built here so `build_langgraph_agent` stays
     synchronous; public because `api/routes/skills.py` reads the same store. Whether the turn has an
     actor is `scratchpad_backend`'s decision. Returns an `AsyncPostgresStore` or `None`.
     """

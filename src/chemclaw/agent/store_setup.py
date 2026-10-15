@@ -15,9 +15,9 @@ import logging
 
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
-from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.core.logging import configure_logging, log_event
 from chemclaw.core.migrate import migration_dsn
+from chemclaw.skills.store import personal_skills_available
 
 logger = logging.getLogger(__name__)
 

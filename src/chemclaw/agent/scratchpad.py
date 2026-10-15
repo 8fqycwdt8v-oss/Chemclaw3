@@ -6,7 +6,7 @@ routes over one `CompositeBackend`:
 - **`/scratch/…` → `StateBackend`.** Per-thread files in the graph's state; never on disk, gone with
   the checkpoint.
 - **`/skills/…` → `NarrowedSkillsBackend`.** Read-only; writes are refused by the backend
-  (`agent/skill_backend.py`).
+  (`skills/backends.py`).
 - **`/memories/…` → `StoreBackend`** over `AsyncPostgresStore`, when the deployment enables it *and*
   the turn has an actor. The only route that outlives the session.
 
@@ -43,17 +43,13 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
-from chemclaw.agent.local_skills import (
-    LOCAL_SKILLS_ROOT,
-    local_skills_backend,
-)
-from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, org_skills_backend
-from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.tenancy import namespace_component
+from chemclaw.skills.access import SkillNarrowing, Tier
+from chemclaw.skills.store import LOCAL_SKILLS_ROOT, ORG_SKILLS_ROOT, SkillStore
 
 logger = logging.getLogger(__name__)
 
@@ -457,12 +453,12 @@ def scratchpad_backend(
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
         routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
         # The chemist's own skills need a store and an actor too; a separate first namespace
-        # component keeps the tiers separately erasable (see `agent/local_skills.py`).
-        routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits.stored)
+        # component keeps the tiers separately erasable (see `skills/store.py`).
+        routes[LOCAL_SKILLS_ROOT] = SkillStore(store, actor=actor).mount(Tier.MINE, permits.stored)
     # The organisation's tier needs a store but no actor: it is one shared namespace every turn
-    # resolves, with no per-actor prefix to erase (see `agent/org_skills.py`).
+    # resolves, with no per-actor prefix to erase (see `skills/store.py`).
     if store is not None:
-        routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits.stored)
+        routes[ORG_SKILLS_ROOT] = SkillStore(store).mount(Tier.ORG, permits.stored)
     return CompositeBackend(default=BoundedStateBackend(), routes=routes)
 
 

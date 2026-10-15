@@ -15,11 +15,11 @@ from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 
 from chemclaw.agent.langgraph_agent import shipped_skill_names
-from chemclaw.agent.local_skills import save_local_skill
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import skills as skills_routes
 from chemclaw.core.config import settings
+from chemclaw.skills.store import save_local_skill
 
 _ALICE = Principal(oid="u-alice", upn="alice@example.com", roles=frozenset())
 _BOB = Principal(oid="u-bob", upn="bob@example.com", roles=frozenset())
@@ -219,7 +219,7 @@ def test_a_padded_oid_saves_where_the_turn_reads(app: FastAPI, store: InMemorySt
     A dev or configured principal `' u-alice '` saved under the padded namespace while her turns
     mounted `'u-alice'`, so the skill never acted. `Principal` strips at construction.
     """
-    from chemclaw.agent.local_skills import list_local_skills
+    from chemclaw.skills.store import list_local_skills
 
     padded = Principal(oid=" u-alice ", upn="alice@example.com", roles=frozenset())
     saved = _as(app, padded).post("/skills/mine", json={"body": _body()})

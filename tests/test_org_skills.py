@@ -12,27 +12,30 @@ import pytest
 from langgraph.store.memory import InMemoryStore
 
 from chemclaw.agent.langgraph_agent import skills_backend
-from chemclaw.agent.local_skills import SkillRefused, save_local_skill
-from chemclaw.agent.org_skills import (
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.scratchpad import scratchpad_backend
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.access import SkillNarrowing
+from chemclaw.skills.backends import (
+    PermittedStoreBackend,
+    SkillsReadOnlyRefusal,
+    org_skills_backend,
+)
+from chemclaw.skills.manifest import SkillRefused
+from chemclaw.skills.store import (
     ORG_SKILLS_LABEL,
     ORG_SKILLS_ROOT,
     activate_org_version,
     content_hash,
     list_org_skills,
     list_org_versions,
-    org_skills_backend,
     org_skills_namespace,
     read_org_skill,
     retire_org_skill,
+    save_local_skill,
     save_org_skill,
 )
-from chemclaw.agent.profiles import AgentProfile
-from chemclaw.agent.scratchpad import scratchpad_backend
-from chemclaw.agent.skill_access import SkillNarrowing
-from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
-from chemclaw.agent.skill_store_backend import PermittedStoreBackend
-from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 
 def _body(name: str, description: str = "how this deployment does it") -> str:
@@ -98,8 +101,8 @@ def test_the_tier_needs_a_store_and_not_an_actor(store: InMemoryStore) -> None:
     The organisation's judgment belongs to nobody, so `agent/scratchpad.py` mounts it outside the
     `and actor` branch.
     """
-    from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT
     from chemclaw.agent.scratchpad import MEMORY_ROOT
+    from chemclaw.skills.store import LOCAL_SKILLS_ROOT
 
     anonymous = _mounted(store, "")
     assert ORG_SKILLS_ROOT in anonymous.routes
@@ -369,7 +372,7 @@ def test_an_organisation_skill_may_take_a_name_a_chemist_already_uses(
     served = backend.read(f"{ORG_SKILLS_ROOT}house-workup/SKILL.md")
     assert "what we all do" in str(served.file_data)
     # Her own document is untouched and still visible on the route that lists it.
-    from chemclaw.agent.local_skills import read_local_skill
+    from chemclaw.skills.store import read_local_skill
 
     assert asyncio.run(read_local_skill(store, "alice-oid", "house-workup")) == mine
 
@@ -407,8 +410,8 @@ def test_the_namespaces_do_not_collide(store: InMemoryStore) -> None:
     The organisation's carries no actor at all — which is what makes it everybody's, and what keeps
     the system prefix byte-identical between two sessions.
     """
-    from chemclaw.agent.local_skills import local_skills_namespace
     from chemclaw.agent.scratchpad import memory_namespace
+    from chemclaw.skills.store import local_skills_namespace
 
     firsts = {
         org_skills_namespace()[0],
@@ -421,7 +424,7 @@ def test_the_namespaces_do_not_collide(store: InMemoryStore) -> None:
 
 def test_a_key_that_names_no_skill_lists_as_nothing_in_either_tier(store: InMemoryStore) -> None:
     """Both listings use one strict parse, so a body at `/SKILL.md` is not a skill named `""`."""
-    from chemclaw.agent.local_skills import list_local_skills, local_skills_namespace
+    from chemclaw.skills.store import list_local_skills, local_skills_namespace
 
     for namespace in (org_skills_namespace(), local_skills_namespace("alice-oid")):
         store.put(namespace, "/SKILL.md", {"content": "stray", "encoding": "utf-8"})

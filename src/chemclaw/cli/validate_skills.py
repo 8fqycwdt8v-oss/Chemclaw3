@@ -30,10 +30,10 @@ from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported f
 from chemclaw.agent.chemclaw_agent import declared_tool_names
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
-from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
 from chemclaw.cli.validate_prose_contract import taught_tool_names
 from chemclaw.connectors.registry import declared_skills_dirs as connector_skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.skills.manifest import SKILL_FILENAME, SkillManifest
 
 
 def validate_skills(skills_dirs: list[str]) -> list[str]:

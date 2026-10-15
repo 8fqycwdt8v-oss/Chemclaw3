@@ -62,19 +62,32 @@ def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
 #: that adding one is a diff a reader sees.
 _ARGUED = {
     # The proposer imports the queue for `propose` and `content_hash`; it must not reach `decide`,
-    # which the symbol check holds. `local_skills` is imported for `validated_skill`, a read of the
-    # tier's admission rules; its writes (`save_local_skill`, `delete_local_skill`) are in
-    # `_WRITES_BEHAVIOUR`.
-    "chemclaw.agent.proposal_tools": {"behaviour_proposals", "local_skills"},
+    # which the symbol check holds. The skills package is reached for `manifest.validated_skill`, a
+    # read of the tiers' admission rules; `skills.store`, where every write lives, is forbidden to a
+    # tool module outright (`_FORBIDDEN_MODULES`).
+    "chemclaw.agent.proposal_tools": {"behaviour_proposals"},
     # The generated `run_*` job launchers resolve a manifest's `module:attribute` reference, so
     # `importlib` is their purpose; `check_driver_module` guards it and they name nothing in
     # `_WRITES_BEHAVIOUR`. Present only once `_register_generated_tools()` has run.
     "chemclaw.connectors.jobs": {"importlib"},
 }
 
-#: What a turn must not be able to reach. Two writes into the personal skills tier, and the one
+#: What a turn must not be able to reach. Every write into the stored skills tiers, and the one
 #: call that turns a proposal into behaviour.
-_WRITES_BEHAVIOUR = frozenset({"save_local_skill", "delete_local_skill", "decide"})
+_WRITES_BEHAVIOUR = frozenset(
+    {
+        "save_local_skill",
+        "delete_local_skill",
+        "save_org_skill",
+        "retire_org_skill",
+        "activate_org_version",
+        "SkillStore",
+        "decide",
+    }
+)
+
+#: The module every write into a stored skills tier lives in: no tool-defining module imports it.
+_FORBIDDEN_MODULES = frozenset({"chemclaw.skills.store"})
 
 
 def _tool_defining_modules() -> dict[str, pathlib.Path]:
@@ -129,11 +142,32 @@ def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
             f"{name} defines a tool and names {sorted(reaches)}, which writes behaviour; a turn "
             "proposes and a person decides"
         )
-        forbidden_imports = (imported - _ARGUED.get(name, set())) & {
-            "local_skills",
-            "behaviour_proposals",
-            "importlib",
-        }
+        dotted = (
+            {
+                node.module
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            }
+            | {
+                f"{node.module}.{alias.name}"
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+                for alias in node.names
+            }
+            | {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+        )
+        forbidden_imports = (
+            (imported - _ARGUED.get(name, set()))
+            & {
+                "behaviour_proposals",
+                "importlib",
+            }
+        ) | (dotted & _FORBIDDEN_MODULES)
         assert not forbidden_imports, (
             f"{name} defines a tool and imports {sorted(forbidden_imports)}; add an argued "
             "entry to "
@@ -146,10 +180,11 @@ def test_the_symbols_that_absence_test_names_still_exist() -> None:
 
     So a rename fails the guard rather than satisfying it.
     """
-    from chemclaw.agent import behaviour_proposals, local_skills
+    from chemclaw.agent import behaviour_proposals
+    from chemclaw.skills import store
 
-    assert callable(local_skills.save_local_skill)
-    assert callable(local_skills.delete_local_skill)
+    for name in _WRITES_BEHAVIOUR - {"decide"}:
+        assert callable(getattr(store, name)), f"{name} is no longer where the guard looks"
     assert callable(behaviour_proposals.ProposalStore.decide)
 
 

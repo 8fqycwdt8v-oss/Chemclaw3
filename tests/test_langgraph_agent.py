@@ -33,16 +33,12 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
-from chemclaw.agent.local_skills import PERSONAL_TIER_TOOLS, personal_skills_available
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import PLAN_GATE_REASON, harness_enabled_for, plan_approval_refusal
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT, scratchpad_tools
-from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import REFUSED
-from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.api.events import ToolFailedEvent
@@ -57,6 +53,10 @@ from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal, ToolFailureSignal
 from chemclaw.kg.note import NoteError
+from chemclaw.skills.access import skill_permits
+from chemclaw.skills.backends import REFUSED
+from chemclaw.skills.manifest import declared_tools, required_tools
+from chemclaw.skills.store import PERSONAL_TIER_TOOLS, personal_skills_available
 from tests.fakes import ScriptedModel
 from tests.fakes_langgraph import ScriptedChatModel
 

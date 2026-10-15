@@ -12,9 +12,9 @@ import pytest
 
 from chemclaw.agent.langgraph_agent import skills_backend
 from chemclaw.agent.profiles import AgentProfile
-from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.skills.backends import NarrowedSkillsBackend
 
 
 @pytest.fixture

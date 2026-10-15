@@ -16,7 +16,6 @@ import pytest
 from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.profile_discovery import _load
 from chemclaw.agent.profiles import DEFAULT_PROFILE
-from chemclaw.agent.skill_access import skill_permits
 from chemclaw.core.config import settings
 from chemclaw.evals.live_judge import Judgement
 from chemclaw.evals.probe import Probe
@@ -26,6 +25,7 @@ from chemclaw.evals.tool_utility import (
     by_bucket,
     paired_tasks,
 )
+from chemclaw.skills.access import skill_permits
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONTROL_PROFILE = _REPO_ROOT / "data/evals/profiles/no-tools.yaml"

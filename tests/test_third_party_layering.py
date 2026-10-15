@@ -133,6 +133,12 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # agent: layer 1. "LangGraph — conversation orchestration" is the definition of the layer.
     ("chemclaw.agent", "langgraph"): "layer 1 IS LangGraph (D-2026-08-10)",
     ("chemclaw.agent", "postgres"): "durable sessions, preferences and plan approvals (F3)",
+    # skills: the backends and middleware the skills tiers are read through subclass deepagents'.
+    ("chemclaw.skills", "langgraph"): (
+        "skills/backends.py subclasses deepagents' `FilesystemBackend`, `StoreBackend` and "
+        "`SkillsMiddleware`; skills/store.py names `StoreBackend` only inside the one function "
+        "that writes a stored tier"
+    ),
     # api: layer 1's front door (F2).
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",

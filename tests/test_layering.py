@@ -213,6 +213,15 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
+    ("chemclaw.agent", "chemclaw.skills"): (
+        "the graph builder mounts the three skills tiers and narrows them per turn, and the "
+        "scratchpad, distiller and erasure sweep reach the stored tiers' keys"
+    ),
+    ("chemclaw.skills", "chemclaw.agent"): (
+        "a refused skill write is an `AuthorizationError` carrying the shared refusal footer, a "
+        "stored tier's writer lock borrows the session store's connection, and the backends bound "
+        "model-authored paths with `audit.bounded_repr`"
+    ),
     ("chemclaw.connectors", "chemclaw.ingest"): (
         "a bundle serving structural hits asks the transcription store two questions no "
         "fingerprint index can answer about its own contents: whether the source has withdrawn the "
@@ -255,6 +264,8 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
     ("chemclaw.api", "chemclaw.protocols"),
+    # The skills routes are the only door to the organisation's and a chemist's own tier.
+    ("chemclaw.api", "chemclaw.skills"),
     # Like `protocols`: a front-door route decides on a stored document this layer owns (the
     # composed-workflow approval is a column on `composed_workflows`), so it reaches the store
     # directly.
@@ -286,6 +297,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `science.bo.campaign_record.campaign_id_for`; a re-key must not carry a second copy of the
     # derivation it applies.
     ("chemclaw.cli", "chemclaw.science"),
+    ("chemclaw.cli", "chemclaw.skills"),
     ("chemclaw.cli", "chemclaw.templates"),
     ("chemclaw.connectors", "chemclaw.agent"),
     ("chemclaw.connectors", "chemclaw.core"),
@@ -366,6 +378,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # The `results` bundle's job re-queues stored calculations via `publish.backfill`, which lives
     # in `publish` rather than `cli` so a connector does not import a terminal entrypoint.
     ("chemclaw.connectors", "chemclaw.publish"),
+    ("chemclaw.skills", "chemclaw.core"),
     ("chemclaw.retrieval", "chemclaw.core"),
     ("chemclaw.retrieval", "chemclaw.kg"),
     ("chemclaw.retrieval", "chemclaw.science"),

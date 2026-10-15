@@ -20,16 +20,11 @@ from chemclaw.agent.behaviour_proposals import (
     ProposalKind,
     default_proposal_store,
 )
-from chemclaw.agent.local_skills import (
-    SkillRefused,
-    delete_local_skill,
-    read_local_skill,
-    save_local_skill,
-    validated_skill,
-)
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
+from chemclaw.skills.manifest import SkillRefused, validated_skill
+from chemclaw.skills.store import delete_local_skill, read_local_skill, save_local_skill
 
 logger = logging.getLogger(__name__)
 

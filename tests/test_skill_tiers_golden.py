@@ -7,8 +7,8 @@ blast-radius rule (`CLAUDE.md`: "a skill changes only by blast radius") holds ho
 implements it is arranged:
 
 - visibility: the listing a model is shown, per actor and role, and the two predicates behind it;
-- reads: another actor's tier is unreachable, a gated skill is refused with the same words as an
-  absent one;
+- reads: another actor's tier is unreachable, and a gated skill is refused in words that do not say
+  whether it exists;
 - writes: no turn writes any tier, the organisation's tier changes only for the privileged role,
   a chemist's own tier only for its owner, and no route writes the reviewed tree.
 """
@@ -31,28 +31,26 @@ from chemclaw.agent.langgraph_agent import (
     skill_narrowing,
     skills_backend,
 )
-from chemclaw.agent.local_skills import (
-    _LOCAL_READ_ONLY,
-    local_skills_backend,
-    save_local_skill,
-)
-from chemclaw.agent.org_skills import _ORG_READ_ONLY, org_skills_backend, save_org_skill
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
-from chemclaw.agent.skill_access import skill_permits
-from chemclaw.agent.skill_backend import (
-    _READ_ONLY,
-    REFUSED,
-    NarrowedSkillsBackend,
-    SkillsReadOnlyRefusal,
-)
-from chemclaw.agent.stored_skill_tools import stored_skill_declarations
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import org_skills as org_routes
 from chemclaw.api.routes import skills as mine_routes
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.access import skill_permits
+from chemclaw.skills.backends import (
+    _LOCAL_READ_ONLY,
+    _ORG_READ_ONLY,
+    _READ_ONLY,
+    REFUSED,
+    NarrowedSkillsBackend,
+    SkillsReadOnlyRefusal,
+    local_skills_backend,
+    org_skills_backend,
+)
+from chemclaw.skills.store import save_local_skill, save_org_skill, stored_skill_declarations
 
 _ADMIN = Principal(oid="u-admin", upn="admin@example.com", roles=frozenset({"chemclaw.reviewer"}))
 _ALICE = Principal(oid="u-alice", upn="alice@example.com", roles=frozenset())
@@ -322,13 +320,13 @@ def test_a_profile_that_names_skills_narrows_every_tier(
     assert _listing(populated, tree, "alice-oid", frozenset(), frozenset()) == []
 
 
-# --- reads: refused in the same words as absent ---
+# --- reads: a refusal reveals nothing ---
 
 
-def test_a_read_outside_what_the_actor_may_reach_is_refused_in_the_same_words(
+def test_a_read_outside_what_the_actor_may_reach_reveals_nothing(
     populated: InMemoryStore, tree: list[tuple[str, str]]
 ) -> None:
-    """A gated skill, another chemist's skill and a skill that does not exist all read alike."""
+    """A gated skill is refused in fixed words; another chemist's skill reads as an absent one."""
     profile = AgentProfile(name="default")
     with _as("alice-oid"):
         permits = skill_narrowing(profile, [], tree, available={"find_notes"})

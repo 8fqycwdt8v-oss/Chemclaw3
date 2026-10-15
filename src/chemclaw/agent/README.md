@@ -59,13 +59,13 @@ provenance column — so the split is structural: an in-process result carries n
 framed twice, and a connector result cannot escape by being new
 (`docs/decisions/D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so.md`).
 
-**Skill visibility (`skill_access`)** is three narrowings over one discovered set, none of which can
+**Skill visibility (`skills/access.py`)** is three narrowings over one discovered set, none of which can
 widen it: what the deployment enabled (`skills_enabled`), what this agent can actually *do*, and who
 the caller is (`skill_role_gates`, the Phase-6 seam). The middle one reads each skill's declared
 `tools:` and drops a skill whose whole declared capability is absent from the advertised surface —
 judgment about a tool the agent cannot call reads to the model as an available path, which is the
 same defect `cli/validate_prose_contract` exists to catch, arriving through the skill rather than
-through the prompt. The predicate is enforced on the **backend** (`skill_backend.py`), not on the
+through the prompt. The predicate is enforced on the **backend** (`skills/backends.py`), not on the
 advertised list: `deepagents.SkillsMiddleware` publishes each skill's *path* into the system prompt
 and expects the model to fetch the body with a file-read tool, so a listing-only filter would hide
 a role-gated skill and then hand it to anyone who guessed the path the prompt has already taught.
@@ -99,5 +99,5 @@ and read what is outstanding), `dialogue_tools` (`ask_clarifying_question`), `pr
 | Plans | `plan_gate`, `plan_scope`, `plan_link`, `plan_state`, `plan_approval_store` |
 | Cost and context | `compaction`, `context_budget`, `spend_cap`, `loop_cap`, `model_calls`, `turn_usage`, `turn_cost` + `turn_cost_store` |
 | Sessions | `session` (the handle a turn runs against), `session_store`, `session_events`, `session_queue`, `turn_remotes` (requests to a turn another replica holds), `turn_resume` (whether a turn whose pod died can continue from its checkpoint), `session_members`, `session_fork`, `message_pairing`, `message_migration` (the one stored-shape converter), `turn_ambient` (the per-turn ambients a driver opens), `job_results` (wait in-turn for jobs this turn started) |
-| Skills | `skill_access`, `skill_backend`, `skill_manifest`, `skill_store` (keys, paging and the writer lock), `skill_store_backend` (the narrowed read half of a stored tier), `reloading_skills` (upstream's skills middleware, re-narrowed each run), `skill_fingerprint`, `stored_skill_tools`, `org_skills`, `local_skills`, `behaviour_proposals`, `distiller` |
+| Skills | `behaviour_proposals`, `distiller`; the skills themselves (access, store, backends, manifest) are the `skills/` package |
 | The rest | `llm_provider` (the one chat-model import), `scratchpad` (the filesystem without `execute`/`delete`), `preferences`, `verifier`, `template_surface`, `leaver` (erase a departed person's conversational data), `store_setup` |

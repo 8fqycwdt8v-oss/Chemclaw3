@@ -968,7 +968,7 @@ def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> 
     entitlements; sending a chemist to request access for them is wrong.
     """
     from chemclaw.agent.authz import AuthorizationError
-    from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
+    from chemclaw.skills.backends import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
 
     def subclasses(cls: type) -> set[type]:
         found = set(cls.__subclasses__())

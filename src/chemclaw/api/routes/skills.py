@@ -1,7 +1,7 @@
 """A chemist's own skills over HTTP: the only way one is written, listed or removed.
 
 A route, never a tool, so a model cannot change its own behaviour
-(`agent/skill_backend.SkillsReadOnlyRefusal`). Read and delete let a chemist inspect and withdraw
+(`skills.backends.SkillsReadOnlyRefusal`). Read and delete let a chemist inspect and withdraw
 what acts on their turns. Owner-scoped via a namespace derived from `principal.oid`; available
 exactly when the memory store is.
 """
@@ -9,17 +9,12 @@ exactly when the memory store is.
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from chemclaw.agent.local_skills import (
-    SkillRefused,
-    delete_local_skill,
-    list_local_skills,
-    read_local_skill,
-    save_local_skill,
-    validated_skill,
-)
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
+from chemclaw.skills.access import Tier, Writer
+from chemclaw.skills.manifest import SkillRefused, validated_skill
+from chemclaw.skills.store import SkillStore
 
 
 class LocalSkillIn(BaseModel):
@@ -57,25 +52,26 @@ class LocalSkillsOut(BaseModel):
     skills: list[str]
 
 
-async def _store_or_refuse() -> object:
-    """This deployment's store, or a 503 saying the tier is unavailable rather than empty."""
-    return store_or_503(
+async def _skills_of(principal: CurrentUser) -> SkillStore:
+    """The caller's skill store, or a 503 saying the tier is unavailable rather than empty."""
+    store = store_or_503(
         await turn_store(),
         "this deployment keeps no personal skills: it needs the durable memory store "
         "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
     )
+    return SkillStore(store, actor=principal.oid)
 
 
 async def list_skills(principal: CurrentUser) -> LocalSkillsOut:
     """Every skill acting on this chemist's own turns."""
-    store = await _store_or_refuse()
-    return LocalSkillsOut(skills=await list_local_skills(store, principal.oid))
+    skills = await _skills_of(principal)
+    return LocalSkillsOut(skills=await skills.names(Tier.MINE))
 
 
 async def read_skill(name: str, principal: CurrentUser) -> LocalSkillOut:
     """One of this chemist's own skills, verbatim — the body a turn is actually given."""
-    store = await _store_or_refuse()
-    body = await read_local_skill(store, principal.oid, name)
+    skills = await _skills_of(principal)
+    body = await skills.read(Tier.MINE, name)
     if body is None:
         raise HTTPException(404, f"you have no personal skill named {name!r}")
     return LocalSkillOut(name=name, body=body)
@@ -87,14 +83,14 @@ async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOu
     Replaced, not versioned, so "what acts on my turns" has one answer; the response echoes what was
     stored.
     """
-    store = await _store_or_refuse()
+    skills = await _skills_of(principal)
     try:
         name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
     # The cap is the writer's: it is counted and spent under one lock.
     try:
-        await save_local_skill(store, principal.oid, name, body.body)
+        await skills.save(Tier.MINE, name, body.body, writer=Writer(actor=principal.oid))
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
     return LocalSkillOut(name=name, body=body.body)
@@ -102,10 +98,10 @@ async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOu
 
 async def forget_skill(name: str, principal: CurrentUser) -> LocalSkillsOut:
     """Remove one of this chemist's own skills, and answer with what is left."""
-    store = await _store_or_refuse()
-    if not await delete_local_skill(store, principal.oid, name):
+    skills = await _skills_of(principal)
+    if not await skills.remove(Tier.MINE, name, writer=Writer(actor=principal.oid)):
         raise HTTPException(404, f"you have no personal skill named {name!r}")
-    return LocalSkillsOut(skills=await list_local_skills(store, principal.oid))
+    return LocalSkillsOut(skills=await skills.names(Tier.MINE))
 
 
 def register(app: FastAPI) -> None:

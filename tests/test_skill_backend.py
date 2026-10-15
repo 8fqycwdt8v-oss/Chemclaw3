@@ -20,7 +20,7 @@ from deepagents.backends.protocol import BackendProtocol
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, SkillsReadOnlyRefusal
+from chemclaw.skills.backends import REFUSED, NarrowedSkillsBackend, SkillsReadOnlyRefusal
 
 _SKILLS = ("alpha", "beta", "gamma")
 
@@ -215,7 +215,7 @@ def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call()
     """
     from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
 
-    from chemclaw.agent.skill_backend import SKILL_READ_TOOL
+    from chemclaw.skills.backends import SKILL_READ_TOOL
 
     assert f"`{SKILL_READ_TOOL}`" in SKILLS_SYSTEM_PROMPT
 
@@ -322,7 +322,7 @@ def test_a_skill_longer_than_the_read_default_says_so_rather_than_stopping_silen
     notice discloses the window instead. Fails if a read-limit constant returns without a seam, or
     if upstream drops the disclosure.
     """
-    from chemclaw.agent import skill_backend
+    from chemclaw.skills import backends as skill_backend
 
     assert not hasattr(skill_backend, "_SKILL_READ_LIMIT"), (
         "a read-limit default is back in this module, and there is still nowhere to spend it: "

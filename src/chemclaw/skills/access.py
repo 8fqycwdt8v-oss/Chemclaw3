@@ -1,20 +1,13 @@
-"""Skill visibility: independent narrowings, each answering a different question.
+"""Who may see which skill, and who may change which tier — the one access predicate.
 
-`EnabledSkills`: is it turned on in this deployment? `ProfileScopedSkills`: is this agent about it?
-`ToolScopedSkills`: can this agent do any of what it teaches? `RoleScopedSkills`: may this caller
-see it? `UnreservedNames` (stored tiers only): does a reviewed tree already own the name? Each only
-removes skills, so their order does not change the answer; `skill_permits` returns one predicate per
-kind of tier (`SkillNarrowing`).
-
-Capability scoping exists because the tool surface is narrowed per deployment and profile, and a
-skill about tools the agent cannot reach misleads the model into planning around them. The basis a
-turn passes is what the graph binds, not what manifests advertise.
-
-Role scoping is the one gate with a security posture: a skill named in `settings.skill_role_gates`
-is hidden from a caller holding none of its roles; an ungated skill is visible to all. A typo'd gate
-key is therefore an ungated skill, which is why `make skill-validate` checks the keys. Roles come
-from the turn's ambient identity (`chemclaw.core.identity_context`); off the request path there are
-none, so only ungated skills show.
+Reading: independent narrowings (`EnabledSkills`, `ProfileScopedSkills`, `ToolScopedSkills`,
+`RoleScopedSkills`, and `UnreservedNames` for the stored tiers), each only removing skills, so their
+order does not change the answer; `skill_permits` returns one predicate per kind of tier. Role
+scoping has a security posture: a typo'd key in `settings.skill_role_gates` is an ungated skill,
+which is why `make skill-validate` checks the keys. Writing: `may_write` is the blast-radius rule
+(CLAUDE.md) in one function. The reviewed tree changes by a reviewed commit and never at run time,
+the organisation's tier through `POST /skills/org` by the privileged role, a chemist's own through
+`POST /skills/mine` by its owner, and no model turn ever writes any of them.
 """
 
 from __future__ import annotations
@@ -22,15 +15,66 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 
+from chemclaw.agent.authz import AuthorizationError
 from chemclaw.core.identity_context import get_current_roles
+
+
+class Tier(StrEnum):
+    """The three places a skill can live, ordered by the blast radius of changing one."""
+
+    REPO = "repo"
+    ORG = "org"
+    MINE = "mine"
+
+
+@dataclass(frozen=True)
+class Writer:
+    """Who is asking to change a tier.
+
+    A person at a route is `Writer(actor=<oid>, reviewer=<holds the privileged role>)`. A model
+    turn is `Writer(by_model=True)` however it was authenticated: the chemist a turn runs for has
+    not decided anything by the turn's inference.
+    """
+
+    actor: str = ""
+    reviewer: bool = False
+    by_model: bool = False
+
+
+class SkillWriteRefused(AuthorizationError):
+    """A writer that a tier's rule does not admit tried to change it.
+
+    An `AuthorizationError`, so a tool call that raises it is relayed behind `Refused:` (an
+    access-control decision, not a fault to retry) and the audit row records a refusal.
+    """
+
+
+def may_write(tier: Tier, writer: Writer, *, owner: str = "") -> bool:
+    """Whether `writer` may change `tier` — the answer every door and every backend defers to.
+
+    Args:
+        tier: The tier being changed.
+        writer: Who is asking.
+        owner: Whose tier it is, for a chemist's own: only that person writes it.
+
+    Returns:
+        False for a model turn on every tier and for the reviewed tree always; the privileged role
+        for the organisation's tier; the owner alone for their own.
+    """
+    if writer.by_model or tier is Tier.REPO:
+        return False
+    if tier is Tier.ORG:
+        return writer.reviewer
+    return bool(writer.actor) and writer.actor == owner
 
 
 class _Narrowing:
     """One reason a skill may be hidden, as a predicate over its name.
 
     A subclass says only whether it narrows at all (`_narrows`) and which skills survive
-    (`_permits`). `skill_backend` calls `permits` rather than reimplementing it, so "may this caller
+    (`_permits`). The backends call `permits` rather than reimplementing it, so "may this caller
     see this skill" has one answer.
     """
 
@@ -85,7 +129,7 @@ class ToolScopedSkills(_Narrowing):
 
     Args:
         declared: `{skill name: declared tool names}`
-        (`chemclaw.agent.skill_manifest.declared_tools`), read from disk because a loaded skill's
+        (`chemclaw.skills.manifest.declared_tools`), read from disk because a loaded skill's
         frontmatter model drops `tools:`.
         available: The tool names this agent can reach. A turn passes what its graph binds (a
         manifest does not move when a server is unreachable); a corpus check passes what the tree
@@ -252,8 +296,8 @@ def skill_permits(
 
     Args:
         enabled: The deployment's enable-list; empty means every discovered skill.
-        declared: `{skill name: declared tool names}` from `skill_manifest.declared_tools`.
-        required: `{skill name: required tool names}` from `skill_manifest.required_tools`, the
+        declared: `{skill name: declared tool names}` from `manifest.declared_tools`.
+        required: `{skill name: required tool names}` from `manifest.required_tools`, the
         subset without which a skill misleads. Usually empty.
         available: The tool names this agent advertises, both halves of the surface.
         gates: `{skill name: allowed roles}`; a skill absent from the map is ungated.

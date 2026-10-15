@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpoint_thread_delete_statements
-from chemclaw.agent.local_skills import local_skills_prefix
 from chemclaw.agent.scratchpad import memory_prefix
 from chemclaw.agent.session_store import (
     SessionTurnClaims,
@@ -37,6 +36,7 @@ from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tenancy import require_bound_tenant
 from chemclaw.durable.digest import digest_channel
+from chemclaw.skills.store import local_skills_prefix
 
 logger = logging.getLogger(__name__)
 

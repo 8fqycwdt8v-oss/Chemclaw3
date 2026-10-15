@@ -6,7 +6,7 @@ must map a `SkillRefused` and a missing store to the same status codes. Holds no
 
 from fastapi import HTTPException
 
-from chemclaw.agent.local_skills import SkillRefused
+from chemclaw.skills.manifest import SkillRefused
 
 
 def skill_refusal_http(error: SkillRefused) -> HTTPException:

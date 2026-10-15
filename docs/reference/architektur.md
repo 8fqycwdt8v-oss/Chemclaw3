@@ -74,7 +74,7 @@ Agent-Tool "get_qm_job_status(job_id)"
 
 ## 3. Tool-Integrationsschicht: Skill-basierter Ansatz (Agent Skills / SKILL.md)
 
-Der offene **Agent Skills**-Standard (SKILL.md, Dezember 2025 von Anthropic veröffentlicht, seither von Microsoft/Google/OpenAI übernommen) wird von jedem hier ernsthaft erwogenen Framework getragen; die dreistufige Offenlegung ist deshalb eine Architektur-Eigenschaft und keine Framework-Wette. Heute liefert sie `deepagents.SkillsMiddleware` über ein *verengtes* Backend (`agent/skill_backend.py`).
+Der offene **Agent Skills**-Standard (SKILL.md, Dezember 2025 von Anthropic veröffentlicht, seither von Microsoft/Google/OpenAI übernommen) wird von jedem hier ernsthaft erwogenen Framework getragen; die dreistufige Offenlegung ist deshalb eine Architektur-Eigenschaft und keine Framework-Wette. Heute liefert sie `deepagents.SkillsMiddleware` über ein *verengtes* Backend (`skills/backends.py`).
 
 **Funktionsprinzip (Progressive Disclosure):**
 1. **Advertise** (~100 Token/Skill): Name + Kurzbeschreibung jedes Skills wird ins System-Prompt injiziert.
@@ -274,7 +274,7 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 
 **Kurzfassung:** Reine Nebenläufigkeit (viele gleichzeitige Nutzer) ist in allen vier Schichten gut gelöst. Differenzierte Rechte pro Nutzer/Rolle waren zum Zeitpunkt dieses Entwurfs nirgends vorhanden.
 
-> **Stand heute (D-052, D-2026-08-01):** Zwei der hier als offen beschriebenen Punkte sind gebaut. Rollenbewusstes Skill-Filtering existiert als `RoleScopedSkills` in `src/chemclaw/agent/skill_access.py` (D-052). Die Tool-Autorisierung liegt **nicht** im MCP-Server, sondern in `src/chemclaw/agent/authz.py` und `src/chemclaw/agent/tool_authz.py` — ein Gate, das jeder Tool-Aufruf passiert, unabhängig davon, ob das Tool in-process oder hinter einem Connector liegt. Die Tabelle unten ist der ursprüngliche Befund und wird als solcher gelesen.
+> **Stand heute (D-052, D-2026-08-01):** Zwei der hier als offen beschriebenen Punkte sind gebaut. Rollenbewusstes Skill-Filtering existiert als `RoleScopedSkills` in `src/chemclaw/skills/access.py` (D-052). Die Tool-Autorisierung liegt **nicht** im MCP-Server, sondern in `src/chemclaw/agent/authz.py` und `src/chemclaw/agent/tool_authz.py` — ein Gate, das jeder Tool-Aufruf passiert, unabhängig davon, ob das Tool in-process oder hinter einem Connector liegt. Die Tabelle unten ist der ursprüngliche Befund und wird als solcher gelesen.
 
 Schicht für Schicht:
 

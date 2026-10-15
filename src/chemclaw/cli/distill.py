@@ -10,10 +10,10 @@ import json
 from collections import defaultdict
 
 from chemclaw.agent.distiller import bounded, candidates, propose, scaffold
-from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.cli.trajectory_census import _stored, census
 from chemclaw.core.tenancy import TenantError
 from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
+from chemclaw.skills.store import personal_skills_available
 
 
 async def _skills_by_session() -> dict[str, frozenset[str]]:
