@@ -1062,6 +1062,16 @@ _GAUGES: dict[str, str] = {
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
+    # A process that cannot look at its databases cannot say they agree with its configuration; 1 is
+    # the state to alert on, because the pod then serves unchecked (`core/deployment.py`).
+    "chemclaw_deployment_unchecked": (
+        "1 when the last deployment check could not read the database, so release identity and "
+        "tenancy were not checked (0 = checked)."
+    ),
+    "chemclaw_deployment_refused": (
+        "1 when the last deployment check found a contradiction between this process's "
+        "configuration and its databases (0 = none)."
+    ),
     # Age of the synced knowledge corpus. The sync loop swallows a failed refresh, so a pod can
     # serve a frozen graph; read from the volume by the serving process (`kg/graph.py`), needing no
     # sidecar.

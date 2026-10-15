@@ -23,6 +23,7 @@ from chemclaw.api.state import FrontDoorState, state
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core import db
 from chemclaw.core.config import MAX_VECTOR_DIM, settings
+from chemclaw.core.deployment import deployment_status
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.migrate import newest_shipped_migration
@@ -360,6 +361,11 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
                 if not front.schema_current
                 else "vector width behind config"
             )
+    deployment = deployment_status()
+    if deployment.problems:
+        # The reasons are in the log and on `chemclaw_deployment_refused`; this body is public.
+        ready = False
+        status = "deployment refused"
     if not ready:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     body: dict[str, str | int] = {
@@ -368,6 +374,10 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
         # counts.
         "connectors_unhealthy": sum(1 for item in health if item.unhealthy),
     }
+    if deployment.unchecked:
+        # The database could not be read, so release identity and tenancy were not checked: serving,
+        # but unverified, which an operator should see without grepping a log.
+        body["deployment"] = "unchecked"
     if state(request).embedding_corpus_mixed:
         # Degraded, not unready: lexical and graph retrieval answer, and dense retrieval ranks only
         # the rows already under the live configuration. A flag, not names: this body is public.

@@ -547,6 +547,17 @@ that is what the fleet's pools are checked against, and size `default_pool_size`
 alias so that all server-side connections plus Temporal's and any hand-run `psql` fit the server's
 `max_connections`.
 
+**With tenancy on (`CHEMCLAW_TENANCY_ENABLED=true`) no DSN may be a transaction-mode pooler.** The
+tenant a statement runs for is a session setting (`app.tenant`) written when a connection is
+borrowed. A transaction-mode pooler can hand the next statement a different server connection,
+carrying whichever tenant its last client set: a read across tenants. Point `CHEMCLAW_POSTGRES_DSN`
+at the `session`-mode alias or the server itself, and size `postgres.maxConnections` for what that
+costs (a session-mode alias multiplexes nothing). Each start and every `deployment_recheck_seconds`
+after it, the process opens two probe connections to every runtime DSN and refuses to start (or fails
+`/readyz`) when they lose a setting between statements or share a backend, naming the setting that
+points at a pooler. The probe is a heuristic and cannot prove a session-mode endpoint, so the
+configuration above is the control and the probe is its alarm.
+
 **Connections that must bypass a transaction pooler** (they hold session state across statements, or
 need a statement a pooled transaction cannot run), and where each dials:
 

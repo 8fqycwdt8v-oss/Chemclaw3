@@ -91,7 +91,12 @@ from chemclaw.connectors.health import check_connectors_at_startup, probe_connec
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import backend_rpc, bookkeeping, db
 from chemclaw.core.config import settings
-from chemclaw.core.deployment import verify_deployment
+from chemclaw.core.deployment import (
+    bind_deployment_gauges,
+    checks_anything,
+    recheck_loop,
+    verify_deployment,
+)
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
 from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
@@ -227,6 +232,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Before serving: a release that shares a database it does not own, or runs tenancy in a
         # state the database contradicts, must not take traffic.
         await verify_deployment()
+        bind_deployment_gauges()
+        rechecking = (
+            asyncio.create_task(recheck_loop(), name="deployment-recheck")
+            if checks_anything() and settings.deployment_recheck_seconds > 0
+            else None
+        )
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
         await warming
@@ -235,6 +246,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            if rechecking is not None:
+                rechecking.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await rechecking
             # Inside `db.pooling()` and before the closes: a draining turn still writes through
             # them.
             running_turns: RunningTurns = app.state.running_turns

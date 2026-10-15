@@ -107,6 +107,10 @@ class StoreSettings(BaseSettings):
     # compares (`core/deployment.py`); a different one is refused unless tenancy lets two releases
     # share. Empty (a laptop, CI) stamps and checks nothing.
     deployment_id: str = ""
+    # How often a running process checks again that its databases still agree with its configuration
+    # (the roles the policies bind, the pooler in front of them, the stamp). A contradiction found
+    # then fails readiness so the pod drains; 0 checks at start only.
+    deployment_recheck_seconds: float = Field(default=300.0, ge=0)
     # Keep a calculation's by-products (Hessians, geometries, ensembles) for reuse; bounded by the
     # cap below.
     artifact_store_enabled: bool = True

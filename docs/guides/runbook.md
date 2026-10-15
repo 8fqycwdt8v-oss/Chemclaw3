@@ -3345,9 +3345,17 @@ a 403. No request creates a tenant.
 
 ### Switch it on
 
-1. **Connect as a role the policies bind.** The runtime role must be neither a superuser nor
-   `BYPASSRLS`, or every tenant reads every other's rows. Use the split principal (*Splitting the
-   database principal*): the migrator owns the schema, `chemclaw_app` serves.
+1. **Connect through a session-mode endpoint, as a role the policies bind.** The tenant is a
+   session setting, so no DSN may point at a transaction-mode pooler (`deploy/README.md`, *PgBouncer
+   in front of Postgres*); the start refuses one it can detect, and `/readyz` fails if one appears.
+   The runtime role of **every** DSN (`CHEMCLAW_POSTGRES_DSN` and `CHEMCLAW_SESSION_STORE_DSN`) must
+   be neither a superuser nor `BYPASSRLS`, or every tenant reads every other's rows. Use the split
+   principal (*Splitting the database principal*): the migrator owns the schema, `chemclaw_app`
+   serves. A running process checks both again every `CHEMCLAW_DEPLOYMENT_RECHECK_SECONDS` (300; 0
+   checks at start only): a contradiction found later fails `/readyz` (`deployment refused`, reasons
+   in the log and on `chemclaw_deployment_refused`), and a database it cannot read shows as
+   `"deployment": "unchecked"` and on `chemclaw_deployment_unchecked`, which is the state to alert
+   on.
 2. **Register the tenants** under the owning principal: `make tenant-add TENANT=acme`, and
    `make tenant-list` to read them back. Ids are lowercase letters, digits, `_` and `-`.
 3. **Set `CHEMCLAW_TENANCY_ENABLED=true` on every component** and, for anything that acts for no
