@@ -3,8 +3,14 @@
 # The auth mode is two things `up.sh` chooses together, so this file names neither as a literal
 # that could disagree with the other: the image (`chemclaw/ui:kind-devauth` — built with
 # ALLOW_DEV_AUTH — or `chemclaw/ui:kind` for oidc-mock) is substituted at apply time, and the
-# environment (`AUTH_MODE`, and the tenant/client/scope in oidc-mock) arrives through the
-# `chemclaw-ui-auth` ConfigMap `up.sh` writes per mode.
+# environment (`AUTH_MODE` `dev` or `bff`, and in oidc-mock the tenant, client, scope and
+# `NODE_EXTRA_CA_CERTS`) arrives through the `chemclaw-ui-auth` ConfigMap `up.sh` writes per mode.
+#
+# **Under `bff` the pod itself calls the identity provider** (discovery, keys, token endpoint), so
+# it must resolve and trust the mock tenant: `hostAliases` maps the tenant host the browser also
+# uses to the `mock-tenant` Service (manifests/mock.yaml, the same fixed address), and the cluster
+# CA is mounted for `NODE_EXTRA_CA_CERTS`. Both are inert in devauth. The BFF keeps sessions in
+# memory, so this Deployment stays at one replica; more than one needs router affinity.
 #
 # **The HTML sandbox is a second listener on a distinct origin** (`Chemclaw3_ui` README, "HTML
 # sandbox"): `SANDBOX_PORT` serves `GET /sandbox/frame` and nothing else. The browser reaches it at
@@ -59,6 +65,10 @@ spec:
     spec:
       enableServiceLinks: false
       automountServiceAccountToken: false
+      # `tenant.localhost` → the `mock-tenant` Service's fixed ClusterIP (manifests/mock.yaml).
+      hostAliases:
+        - ip: 10.96.0.200
+          hostnames: [tenant.localhost]
       securityContext:
         runAsNonRoot: true
         # The image's `node` user, by number, so `runAsNonRoot` can verify it.
@@ -108,3 +118,13 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: kind-ca
+              mountPath: /etc/chemclaw-kind-ca
+              readOnly: true
+      volumes:
+        # The cluster CA `up.sh` issues; read only when `NODE_EXTRA_CA_CERTS` names it (oidc-mock).
+        - name: kind-ca
+          secret:
+            secretName: chemclaw-kind-ca
+            optional: true
