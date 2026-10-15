@@ -72,6 +72,11 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A note view is read in several steps, not one snapshot** [S] — `expand_note` awaits `edges`, `neighborhood`, `get_many` and
   `current_successors` separately, so a write between them can show a neighbour its links do not yet name; the Postgres store answers it with one transaction (`kg/store.py::NoteStore`).
 
+- [ ] **`record_note` still writes files; the transactional write has no caller** [M] — put `put(NoteUnit)` on `NoteStore`, give `record_note` a
+  Postgres arm that builds the unit and books `PutOutcome.notes`, and let the importer set `created_at`; `kg/postgres_store.py::PostgresNoteStore.put`, `kg/record.py::record_note`.
+- [ ] **`NoteStore.search` returns every match, so a common term holds the corpus** [S] — the caller caps afterwards (`graph_max_results`); pass the cap
+  into the statement (20,000 notes, one common term: ~0.9 s and ~60 MB per call, `cli/kg_store_bench.py`); `kg/postgres_store.py::search`.
+
 ### Everything else
 
 - [ ] **PR #321's review findings never landed** [M] — extract what is still open from its review document into rows, then close #321.

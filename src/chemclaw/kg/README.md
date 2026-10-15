@@ -8,9 +8,12 @@ through a dense or lexical index (`retrieval_mode`, default `graph`). Those are 
 the traversal, never a replacement for it.
 
 `store.py` is the read interface the readers of the corpus go through (`NoteStore`, chosen by the
-`kg_store` setting) and `GitNoteStore` the only implementation today, a delegation to `graph.py`
-(writes stay with `record.py`); `rows.py` maps a `Note` to the columns of `kg_notes` and `kg_edges`
-(`infra/sql/128_kg_notes.sql`), which nothing reads yet
+`kg_store` setting) and `GitNoteStore` the only selectable implementation, a delegation to `graph.py`
+(writes stay with `record.py`). `postgres_store.py` is `PostgresNoteStore`, the same interface over
+the tables of `infra/sql/128_kg_notes.sql` and `129_kg_note_search.sql`, plus `put(NoteUnit)`: a
+subject and what lands with it, written in `record.py`'s order in one transaction, each note as a
+new revision unless its content is unchanged. Nothing selects it yet (`kg_store` has one value);
+`tests/test_note_store.py` holds both stores to one suite. `rows.py` maps a `Note` to those columns
 (`D-2026-10-14-the-notes-live-in-postgres-and-git-leaves-the-knowledge-path`).
 
 `note.py` is the schema and parser, `graph.py` the NetworkX indexer, `search.py` what a note's text

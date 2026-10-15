@@ -41,9 +41,9 @@ from chemclaw.kg.search import term_coverage
 from chemclaw.kg.store import (
     Edge,
     HumanNoteProtected,
+    NoteRevisionConflict,
     NoteUnit,
     PutOutcome,
-    NoteRevisionConflict,
     SearchResult,
 )
 
@@ -340,34 +340,57 @@ class PostgresNoteStore:
         return _grouped(rows)
 
     async def current_successor(self, note_id: str, as_of: date) -> Note | None:
-        """The first note current on `as_of` that a chain of supersede links leads to.
+        """The first note current on `as_of` that a chain of supersede links leads to."""
+        return (await self.current_successors([note_id], as_of))[note_id]
 
-        Breadth-first, a level per statement and in id order, so the answer is the one
-        `kg.graph.current_successor` gives; a cycle ends the walk and `note_id` is never the answer.
+    async def current_successors(
+        self, note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
+        """`current_successor` for each id, one statement per level of the chains for all of them.
+
+        Each id is walked breadth-first in id order, so its answer is the one
+        `kg.graph.current_successor` gives; a cycle ends a walk and an id is never its own answer.
+        The statements share one snapshot, and their number is the longest chain, not the ids.
         """
-        seen = {note_id}
-        frontier = [note_id]
+        answers: dict[str, Note | None] = dict.fromkeys(note_ids)
+        seen = {origin: {origin} for origin in answers}
+        frontier = {origin: [origin] for origin in answers}
         async with self._read(consistent=True) as conn:
             while frontier:
+                nodes = sorted({node for walk in frontier.values() for node in walk})
                 cursor = await conn.execute(
-                    _REPLACEMENTS, {"tenant": self._tenant, "frontier": frontier}
+                    _REPLACEMENTS, {"tenant": self._tenant, "frontier": nodes}
                 )
                 level: dict[str, dict[str, Note | None]] = {}
                 for row in await cursor.fetchall():
                     level.setdefault(row[0], {})[row[1]] = (
                         None if row[2] is None else _note_or_none(row[2:])
                     )
-                following: list[str] = []
-                for current in frontier:
-                    for candidate, note in level.get(current, {}).items():
-                        if candidate in seen:
-                            continue
-                        seen.add(candidate)
-                        if note is not None and note.is_current(as_of):
-                            return note
-                        following.append(candidate)
+                following: dict[str, list[str]] = {}
+                for origin, walk in frontier.items():
+                    step = self._step(level, walk, seen[origin], as_of)
+                    if isinstance(step, Note):
+                        answers[origin] = step
+                    elif step:
+                        following[origin] = step
                 frontier = following
-        return None
+        return answers
+
+    @staticmethod
+    def _step(
+        level: dict[str, dict[str, Note | None]], walk: list[str], seen: set[str], as_of: date
+    ) -> Note | list[str]:
+        """One level of one walk: the first current replacement, else the nodes to expand next."""
+        following: list[str] = []
+        for current in walk:
+            for candidate, note in level.get(current, {}).items():
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if note is not None and note.is_current(as_of):
+                    return note
+                following.append(candidate)
+        return following
 
     async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         """The notes current on `as_of` that contain at least one of `terms`, in id order.
@@ -475,11 +498,19 @@ class PostgresNoteStore:
         """
         planned = [(role, canonical_note(note)) for role, note in unit.ordered()]
         ids = sorted({note.id for _, note in planned})
+        dependencies = {note.id for role, note in planned if role == "dependency"}
         recorded_by = get_current_actor()
         revisions: dict[str, int] = {}
         written: list[str] = []
         async with connection(settings.postgres_dsn, operation="kg_notes_write") as conn:
-            await conn.execute(_LOCK_IDS, {"tenant": self._tenant, "ids": ids})
+            # A dependency that exists is never written, so it needs no lock: taking one would make
+            # every writer that names a shared compound queue behind the others.
+            lock = ids
+            if unit.dependencies:
+                cursor = await conn.execute(_SELECT_HELD, (self._tenant, ids))
+                present = {row[0] for row in await cursor.fetchall()}
+                lock = [i for i in ids if i not in present or i not in dependencies]
+            await conn.execute(_LOCK_IDS, {"tenant": self._tenant, "ids": lock})
             cursor = await conn.execute(_SELECT_HELD, (self._tenant, ids))
             held = {row[0]: _Held(row[1], row[2], row[3]) for row in await cursor.fetchall()}
             for role, note in planned:
