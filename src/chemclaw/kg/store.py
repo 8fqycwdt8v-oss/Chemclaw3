@@ -458,7 +458,11 @@ class GitNoteStore:
 
 
 def postgres_note_store() -> "PostgresNoteStore":
-    """The Postgres store of this deployment's tenant: where `dual` and `postgres` write."""
+    """The Postgres store of the tenant the work acts for: where `dual` and `postgres` write.
+
+    It names no tenant of its own, so it follows the one bound to the work and, with tenancy on,
+    refuses work that has none (`TenantError`) instead of reading or writing nothing.
+    """
     from chemclaw.kg.postgres_store import PostgresNoteStore
 
     return PostgresNoteStore()

@@ -114,10 +114,19 @@ note Postgres lacks is left alone, as the file writer leaves it.
 - Each background replica keeps its own last result, so the differences alert and the panel read
   the series of the pod with the newest completion timestamp; a `max()` over the family would keep
   an old finding alive for as long as its pod lived.
-- After the tenancy change (#606) merges, the import and compare commands bind the tenant
-  (`bound_tenant`) and `postgres_note_store()` takes its tenant from the ambient one. Until then
-  `PostgresNoteStore` holds `default`, and with row-level security on, the import, the comparison
-  and the dual-write mirror would refuse or read nothing.
+- With tenancy on, `postgres_note_store()` follows the tenant the work acts for. The dual-write
+  mirror therefore runs in the writer's bound tenant, and work with none bound fails closed there
+  (`TenantError`): the Postgres copy is not made, and it is logged and counted as any other
+  dual-write failure, never the chemist's error. `kg-import` and `validate_kg --compare` take
+  `--tenant` (not `--all-tenants`: a directory is one corpus, and copying it into every tenant
+  would share it) and refuse, naming the flag, when tenancy is on and none is given. The
+  `kg-compare` Schedule expands to one per registered tenant like any tenant-scoped job, and its
+  gauges stay one series per pod (one tenant's result at a time, since a second tenant is refused
+  while `dual`), so the alert and panel logic is unchanged.
+- **`dual` does not lift the deployment guard's refusal of a second tenant.** Postgres holds a
+  tenant-scoped copy under `dual`, but every read is still the repository tree, which every tenant
+  would read and write: a second tenant would see the first's notes. Only `kg_store=postgres`,
+  after the flip, holds the knowledge per tenant (`core/deployment.knowledge_is_per_tenant`).
 - The compare reads both corpora and both graphs whole, so its memory is the corpus twice. That is
   not measured at 20,000 notes (`cli/kg_store_bench` is where to measure it); a keyset-paged pass
   is the change if it matters.
@@ -146,6 +155,11 @@ environment, and an outbox is worth its table), or the comparison's own run time
   one note's database error not stopping the rest, the dry run, one note in memory at a time.
 - `tests/test_kg_stale_clone.py`: a second clone behind the remote is refused by `--repair` and
   `kg-import`, warned about by the comparison, and accepted once it has caught up.
+- `tests/test_kg_tenancy.py`: with tenancy on, as a role the policies bind and two tenants, each
+  tenant's note lands in its own tenant; a mirror with no tenant is refused and counted while the
+  tree write stands; import and comparison for one tenant never read or change the other; the
+  scheduled comparison is per tenant; the commands refuse without `--tenant`; and a second tenant
+  is refused under `git` and `dual` and admitted under `postgres`.
 - `tests/test_kg_compare_chart.py`: `promtool` drives the differences alert over two replicas and
   the not-running alert over a stopped, a never-run and an unreported comparison; the pause the
   chart derives; the settings relation.

@@ -195,16 +195,15 @@ Done: `WritableNoteStore.put`, the `kg_store` literal and `dual` mode, the Postg
 the nightly `kg-compare` Schedule
 (`D-2026-10-15-dual-write-keeps-the-tree-the-authority-and-postgres-reads-wait`). Left, in order:
 (1) switch a deployment to `kg_store=dual` after `make kg-import`, and count seven days with neither
-`ChemclawKnowledgeDualWriteFailing` nor `ChemclawKnowledgeStoresDiffer` firing; (2) after #606 merges,
-default `kg-import --tenant` and the stores' tenant from `tenancy_process_tenant`; (3) flip reads
+`ChemclawKnowledgeDualWriteFailing` nor `ChemclawKnowledgeStoresDiffer` firing; (2) flip reads
 (W4.7: move the readers that still take a notes directory, then remove the validator in
 `core/config/kg.py` that refuses `postgres`), then `PUT /knowledge/notes/{id}` and `cli/kg_export`
 (W4.8, privileged role for others' notes; the API authenticates before calling `put`, which trusts
-`note.created_by`); (4) migrate release of `note_index`: read `kg_tenant_id`/`kg_note_id` in place of
+`note.created_by`); (3) migrate release of `note_index`: read `kg_tenant_id`/`kg_note_id` in place of
 the fingerprint and commit-count columns (the keys are filled by `kg-import`; a note recorded after
-the last import is linked by running it again); (5) `kg-validate` on the Postgres store (W4.10; the
+the last import is linked by running it again); (4) `kg-validate` on the Postgres store (W4.10; the
 restore drill's `kg_checks` still reads a notes directory until then:
-`core/restore_check.py::load_knowledge_rows`); (6) confirm the UI reads notes only through the API
+`core/restore_check.py::load_knowledge_rows`); (5) confirm the UI reads notes only through the API
 (W4.11).
 
 ### C3. W6.4 — remove MCP from the backends

@@ -10,7 +10,8 @@ An unreachable database or an empty corpus fails the gate loudly rather than pas
 
 `--compare` is a different question: whether the notes directory and the Postgres store serve the
 same canonical notes and edges (`kg.compare`). Exit 0 when they do, 1 when any note differs, 2 when
-the comparison could not run. A difference must persist across `--settle-seconds` (default
+the comparison could not run (2 also when tenancy is on and no `--tenant` names whose store is
+compared: one tenant at a time). A difference must persist across `--settle-seconds` (default
 `kg_compare_settle_seconds`) to be reported. `--repair` (under `kg_store=dual` only) then copies the
 directory's version of each differing note into Postgres, and refuses (exit 2) unless the directory
 is a checkout at the remote's tip: from one behind it, it would put old notes over newer ones.
@@ -26,11 +27,12 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.db import pooling
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.kg.compare import Comparison, Repair, compare_stores, repair_from_tree
 from chemclaw.kg.git_writer import GitNoteWriter
 from chemclaw.kg.postgres_store import PostgresNoteStore
-from chemclaw.kg.rows import DEFAULT_TENANT
 from chemclaw.kg.store import GitNoteStore
 from chemclaw.kg.validate import (
     calc_citations,
@@ -41,18 +43,32 @@ from chemclaw.kg.validate import (
 )
 from chemclaw.science.calc.postgres_store import PostgresStore
 
+_Result = tuple[Comparison, Repair | None, Comparison | None]
+
+
+async def _compare_for_bound_tenant(
+    notes_dir: Path, settle_seconds: float, repair: bool
+) -> _Result:
+    """Compare the directory with the bound tenant's store; if asked, repair and compare again."""
+    tree, store = GitNoteStore(notes_dir), PostgresNoteStore()
+    found = await compare_stores(tree, store, settle_seconds=settle_seconds)
+    if not repair or found.clean:
+        return found, None, None
+    repaired = await repair_from_tree(tree, store, found.differences)
+    return found, repaired, await compare_stores(tree, store)
+
 
 async def _compare(
-    notes_dir: Path, tenant: str, settle_seconds: float, repair: bool
-) -> tuple[Comparison, Repair | None, Comparison | None]:
-    """Compare the directory with the tenant's store; if asked, repair and compare again."""
+    notes_dir: Path, options: argparse.Namespace, settle_seconds: float, repair: bool
+) -> _Result:
+    """The comparison for the one tenant the flags choose (tenancy off: the only one)."""
     async with pooling():
-        tree, store = GitNoteStore(notes_dir), PostgresNoteStore(tenant)
-        found = await compare_stores(tree, store, settle_seconds=settle_seconds)
-        if not repair or found.clean:
-            return found, None, None
-        repaired = await repair_from_tree(tree, store, found.differences)
-        return found, repaired, await compare_stores(tree, store)
+        chosen = await for_chosen_tenants(
+            options,
+            lambda _tenant: _compare_for_bound_tenant(notes_dir, settle_seconds, repair),
+        )
+    (result,) = chosen.values()
+    return result
 
 
 def _print_comparison(found: Comparison) -> None:
@@ -84,9 +100,9 @@ def _compare_main(options: argparse.Namespace, notes_dir: Path) -> int:
             return 2
         if lagging is not None:
             print(f"WARNING: {lagging}; differences below may be that lag.", file=sys.stderr)
-        found, repaired, after = asyncio.run(
-            _compare(notes_dir, options.tenant, settle, options.repair)
-        )
+        found, repaired, after = asyncio.run(_compare(notes_dir, options, settle, options.repair))
+    except TenantError as exc:
+        return refusal(exc)
     except Exception as exc:
         print(f"the comparison could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -133,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--repair", action="store_true", help="with --compare: put right what differs (dual only)."
     )
     parser.add_argument("--json", action="store_true", help="with --compare: print JSON.")
-    parser.add_argument("--tenant", default=DEFAULT_TENANT, help="with --compare: the tenant.")
+    add_tenant_flags(parser, all_tenants=False)
     parser.add_argument(
         "--settle-seconds",
         type=float,

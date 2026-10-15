@@ -243,6 +243,9 @@ is read:
    since. A note a person edits in the repository reaches Postgres only this way (the mirror is
    `record_note`'s), so each such edit is a difference until `make kg-import` or `--repair` runs;
    a window with human edits needs one of them after each.
+   With tenancy on, both commands act for one tenant and refuse without `--tenant <id>`
+   (`ARGS="--tenant acme"`), and the deployment guard refuses a second tenant while the
+   store is `dual`: Postgres holds a copy per tenant but every read is still the one repository.
 4. Seven days with none of the three alerts (`ChemclawKnowledgeDualWriteFailing`, `ChemclawKnowledgeStoresDiffer`, `ChemclawKnowledgeCompareNotRunning`: a comparison that never completes
    leaves the first two silent) is the condition for moving the reads. `postgres` is refused at
    startup until that change ships; set `git` to roll back.

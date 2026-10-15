@@ -170,7 +170,6 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a scale not yet reached
 
-- **Tenant binding for the note store's commands** — after #606 merges, bind the tenant (`bound_tenant`) in `cli/kg_import` and `validate_kg --compare`, and have `kg.store.postgres_note_store()` take it from the ambient tenant: `PostgresNoteStore` holds `default`, so with row-level security on, the import, the comparison and the dual-write mirror (`kg/record.py`) would refuse or read nothing · *Revisit:* #606 merged.
 - **The programme's sequenced remainder** — W3.12 (parallel gate), W4.7 to W4.11, W6.4, W7.8, W7.9, W7.12, W5.4–W5.13 and W8; order and file lists in `docs/planning/programme-deferred-2026-10.md` §C · *Revisit:* ten clean parallel runs on settled `main` (W3.12), `kg-validate --compare` clean for seven days (W4.9), the five flip criteria in §B5 (W6.4).
 - **Delete the `propose_report` activity alias** — old executions may still run · *Revisit:* no `DevelopmentReportWorkflow` started before the rename is running.
 - **Drop `note_proposed` from `evals/live.py`** — older UI builds still send it · *Revisit:* every probed deployment sends `note_recorded`.

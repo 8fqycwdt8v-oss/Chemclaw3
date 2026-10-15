@@ -15,10 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chemclaw.core.tenancy import current_tenant
 from chemclaw.kg.graph import note_arrivals, scan_notes_dir
 from chemclaw.kg.note import NoteError, read_note
 from chemclaw.kg.postgres_store import PostgresNoteStore
-from chemclaw.kg.rows import DEFAULT_TENANT, canonical_note, content_sha
+from chemclaw.kg.rows import canonical_note, content_sha
 from chemclaw.kg.store import NoteUnit
 
 
@@ -71,9 +72,12 @@ class ImportSummary:
 
 
 async def import_notes(
-    source: Path, *, tenant: str = DEFAULT_TENANT, dry_run: bool = False
+    source: Path, *, tenant: str | None = None, dry_run: bool = False
 ) -> ImportSummary:
-    """Put every note under `source` into `tenant`'s store in id order; link the note index to them.
+    """Put every note under `source` into one tenant's store in id order; link the note index.
+
+    The tenant is `tenant`, else the one the work acts for. With tenancy on it must be the bound
+    tenant (the store refuses another), so an import for one tenant cannot read or write a second.
 
     A dry run reads the store's digests and writes nothing; it does not predict a refusal (an
     agent's note over a human's), which only the write can know. A second file for an id already
@@ -82,7 +86,7 @@ async def import_notes(
     since.
     """
     store = PostgresNoteStore(tenant)
-    summary = ImportSummary(source=str(source), tenant=tenant, dry_run=dry_run)
+    summary = ImportSummary(source=str(source), tenant=tenant or current_tenant(), dry_run=dry_run)
     arrivals = await asyncio.to_thread(note_arrivals, source)
     # Read before any note is attempted: a database that is not there is the run's failure, while
     # one that fails on a single note is that note's.

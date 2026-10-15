@@ -4,9 +4,11 @@ Run: `python -m chemclaw.cli.kg_import [DIR] [--tenant T] [--dry-run] [--json]`.
 
 Exit codes: 0 every note file was imported or was already there; 1 some were not (unparseable,
 a second file for one id, a note the store refuses, a database error on that note; all named); 2 the
-import could not run (no such directory, database unreachable, or the directory is a checkout that
-is not at the remote's tip: it would copy old notes over newer ones; `--allow-stale` is for a
-directory that is a copy, not the deployment's clone). The logic is `kg.importer`.
+import could not run (no such directory, database unreachable, the directory is a checkout that is
+not at the remote's tip: it would copy old notes over newer ones, `--allow-stale` being for a
+directory that is a copy; or tenancy is on and no `--tenant` names whose notes these are).
+One tenant at a time: a directory is one corpus, and copying it into every tenant would share it.
+The logic is `kg.importer`.
 """
 
 import argparse
@@ -19,14 +21,20 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.db import pooling
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.kg.git_writer import GitNoteWriter
 from chemclaw.kg.importer import ImportSummary, import_notes
-from chemclaw.kg.rows import DEFAULT_TENANT
 
 
-async def _run(source: Path, tenant: str, dry_run: bool) -> ImportSummary:
+async def _run(source: Path, options: argparse.Namespace) -> ImportSummary:
     async with pooling():
-        return await import_notes(source, tenant=tenant, dry_run=dry_run)
+        chosen = await for_chosen_tenants(
+            options,
+            lambda tenant: import_notes(source, tenant=tenant, dry_run=options.dry_run),
+        )
+    (summary,) = chosen.values()
+    return summary
 
 
 def _print(summary: ImportSummary) -> None:
@@ -53,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=f"the notes directory (default: {settings.knowledge_path}).",
     )
-    parser.add_argument("--tenant", default=DEFAULT_TENANT, help="the tenant to import into.")
+    add_tenant_flags(parser, all_tenants=False)
     parser.add_argument("--dry-run", action="store_true", help="report; write nothing.")
     parser.add_argument("--json", action="store_true", help="print the summary as JSON.")
     parser.add_argument(
@@ -76,7 +84,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if lagging is not None:
             print(f"the import was refused: {lagging}", file=sys.stderr)
             return 2
-        summary = asyncio.run(_run(source, options.tenant, options.dry_run))
+        summary = asyncio.run(_run(source, options))
+    except TenantError as exc:
+        return refusal(exc)
     except Exception as exc:
         print(f"the import could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
