@@ -114,7 +114,7 @@ _POOLS_LOCK = threading.Lock()
 def rpc_base_url(mcp_url: str) -> str:
     """The origin-and-prefix a backend's `/rpc` and `/healthz` live under, from its MCP URL.
 
-    The URL settings name the MCP endpoint (`http://host:8860/mcp`); the routes sit beside it, so
+    The URL settings name the MCP endpoint (`http://<service>:8860/mcp`); the routes sit beside it, so
     the trailing `/mcp` is dropped.
     """
     parts = urlsplit(mcp_url)
