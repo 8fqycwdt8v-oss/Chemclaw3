@@ -313,6 +313,23 @@ _RETAINED_IN_PAYLOAD: tuple[tuple[str, str, str, str], ...] = (
         "who asked for a result to be published and why — the receipt for a record that now also "
         "lives in a results store this system does not own, and cannot erase from",
     ),
+    (
+        "kg_notes",
+        "frontmatter",
+        "frontmatter ->> 'actor' = ANY(%(actors)s)",
+        "an agent-written note names the person it was written for, and a note is the record: it "
+        "is corrected by a later note, not removed (`created_by` here is `human` or `agent`, "
+        "never a person)",
+    ),
+    (
+        "kg_note_revisions",
+        "frontmatter",
+        "frontmatter ->> 'actor' = ANY(%(actors)s) OR recorded_by = ANY(%(actors)s)",
+        "every revision of a note keeps the person it was written for (`actor` in the "
+        "frontmatter) and the person whose turn or edit wrote it (`recorded_by`). This is the "
+        "history that replaces the repository log, and a history with its authors removed is not "
+        "one",
+    ),
 )
 
 # Places that name a person and that this command can neither erase nor count, with the reason.
@@ -355,8 +372,9 @@ _BEYOND_REACH: dict[str, str] = {
     "deletes the session or leaves. Find those sessions before erasing with "
     "`SELECT session_id FROM session_members WHERE actor = '<id>'`",
     "knowledge notes (`actor:` frontmatter)": "an agent-written note names the person it was "
-    "written for, and the note lives in the knowledge repository rather than in this database, so "
-    "this command neither counts nor clears it. Find them with `git grep -l 'actor: <id>'` in the "
+    "written for, and the note lives in the knowledge repository rather than in this database "
+    "(the Postgres copy, `kg_notes`, is counted in the retained tier), so this command neither "
+    "counts nor clears the repository's. Find them with `git grep -l 'actor: <id>'` in the "
     "note repository. The note is the record and stays, as the audit trail does; removing the name "
     "from it is a rewrite of that repository's history, which is its owner's decision",
 }

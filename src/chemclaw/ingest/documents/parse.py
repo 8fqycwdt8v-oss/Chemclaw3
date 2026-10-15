@@ -17,16 +17,16 @@ import zipfile
 from collections.abc import Callable
 
 from charset_normalizer import from_bytes
-from docx import Document
-from openpyxl import load_workbook
-from pptx import Presentation
 from pydantic import BaseModel
-from pypdf import PdfReader
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.documents.formats import EXTENSIONS, content_type_for
 
 logger = logging.getLogger(__name__)
+
+# The format libraries (`pypdf`, `python-docx`, `openpyxl`, `python-pptx`) are imported inside the
+# parser that uses each: together they cost about a second to import, and a process that never
+# parses a document should not pay it.
 
 
 class DocumentParseError(ValueError):
@@ -201,6 +201,8 @@ def _parse_pdf(raw: bytes) -> tuple[str, int]:
     text is refused as a scan; the test is zero characters, not a minimum length, so a one-line CoA
     is still read.
     """
+    from pypdf import PdfReader
+
     reader = PdfReader(io.BytesIO(raw))
     pages = [(page.extract_text() or "").strip() for page in reader.pages]
     if not any(pages):
@@ -221,6 +223,8 @@ def _parse_pptx(raw: bytes) -> tuple[str, int]:
 
     Notes are included because a deck's reasoning often lives there.
     """
+    from pptx import Presentation
+
     deck = Presentation(io.BytesIO(raw))
     blocks: list[str] = []
     slides = list(deck.slides)
@@ -246,6 +250,8 @@ def _parse_docx(raw: bytes) -> tuple[str, int]:
     Tables use the same `|` separator as `_parse_csv`, so a table reads identically whatever its
     source.
     """
+    from docx import Document
+
     document = Document(io.BytesIO(raw))
     parts = [p.text.strip() for p in document.paragraphs if p.text.strip()]
     rows = 0
@@ -262,6 +268,8 @@ def _parse_xlsx(raw: bytes) -> tuple[str, int]:
     `data_only=True` reads cached values of formula cells rather than the formulas; a workbook saved
     without cached values yields visibly empty cells there.
     """
+    from openpyxl import load_workbook
+
     book = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
     try:
         blocks: list[str] = []

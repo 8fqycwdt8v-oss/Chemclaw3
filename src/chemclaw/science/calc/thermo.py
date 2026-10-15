@@ -14,7 +14,6 @@ from collections.abc import Sequence
 import numpy as np
 from pydantic import BaseModel, Field
 from rdkit import Chem
-from scipy.linalg import null_space
 
 from chemclaw.core.config import settings
 from chemclaw.core.units import HARTREE_TO_KCAL as HARTREE_TO_KCAL
@@ -189,6 +188,8 @@ def _vibrational_basis(masses: np.ndarray, positions: np.ndarray) -> np.ndarray:
 
     # Orthonormalize the external subspace, then return its complement.
     left, _, _ = np.linalg.svd(np.column_stack(columns), full_matrices=False)
+    from scipy.linalg import null_space
+
     return np.asarray(null_space(left.T))
 
 

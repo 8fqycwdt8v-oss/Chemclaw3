@@ -15,7 +15,6 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from deepagents.backends.utils import create_file_data
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -248,6 +247,13 @@ def rewritten_command_files(
     if dropped or reverted:
         where = _notice_path(rewritten)
         room = reserve - len(where) + (remaining or 0)
+        # Imported here: `deepagents` costs seconds to import and only this branch builds a file.
+
+        # Imported here: `deepagents` costs seconds to import and only this branch builds a file.
+
+        # Imported here: `deepagents` costs seconds to import and only this branch builds a file.
+        from deepagents.backends.utils import create_file_data
+
         rewritten[where] = create_file_data(_dropped_notice(dropped, reverted, room))
         logger.warning(
             "could not store %d file(s) a helper wrote and %d it edited: this call's share of the "

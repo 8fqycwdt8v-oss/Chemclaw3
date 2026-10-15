@@ -21,7 +21,7 @@ from typing import Any, TypeVar
 from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
 from chemclaw.core.db import close_pools_of_this_loop
 from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
-from chemclaw.kg.graph import scan_notes_dir
+from chemclaw.kg.store import note_store
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _T = TypeVar("_T")
@@ -92,15 +92,10 @@ _RETRIEVAL_MEMO: dict[tuple[str, tuple[int, int], str, frozenset[tuple[str, str]
 def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
     """A cheap content signature of the corpus: (note-file count, newest mtime_ns).
 
-    Stat-only over the same note set the retriever parses (`chemclaw.kg.graph.scan_notes_dir`), so
-    any add, edit or delete invalidates the memo.
+    Cheap and over the same note set the retriever reads (`NoteStore.signature`), so any add, edit
+    or delete invalidates the memo.
     """
-    count = 0
-    newest = 0
-    for _, stat in scan_notes_dir(Path(corpus_dir)):
-        count += 1
-        newest = max(newest, stat.st_mtime_ns)
-    return count, newest
+    return note_store(Path(corpus_dir)).signature()
 
 
 # The retrieval path this module can actually score. Anything else is a *different* retriever, and

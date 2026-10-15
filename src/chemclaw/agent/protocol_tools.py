@@ -18,8 +18,8 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.kg.graph import build_graph, note_in
 from chemclaw.kg.note import Note, external_record_ref, resolves_outside_graph
+from chemclaw.kg.store import note_store
 
 logger = logging.getLogger(__name__)
 
@@ -142,12 +142,13 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
             "highest-similarity hits — and ask again."
         )
 
-    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    # One read of the corpus for every lookup, in a worker thread: it may scan the disk.
+    found = await asyncio.to_thread(note_store().get_many, refs)
     readers = _share_readers()
     protocols: list[Protocol] = []
     missing: list[str] = []
     for ref in refs:
-        note = note_in(graph, ref)
+        note = found[ref]
         if isinstance(note, Note):
             protocols.append(
                 Protocol(

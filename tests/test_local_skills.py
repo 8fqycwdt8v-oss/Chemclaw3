@@ -26,7 +26,7 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
 from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
-from chemclaw.agent.skill_store import PermittedStoreBackend
+from chemclaw.agent.skill_store_backend import PermittedStoreBackend
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
