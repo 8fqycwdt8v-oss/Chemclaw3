@@ -17,7 +17,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.datastructures import Headers
 
-from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import (
     JobStartedEvent,
@@ -35,6 +34,7 @@ from chemclaw.api.middleware import (
 from chemclaw.api.runner import _OUTCOMES, _deadline_passed, _settle_outcome, _TurnLedger
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.spend.ledger import TurnUsage
 from tests.conftest import log_field
 from tests.test_service import _app, _FakeAgent
 

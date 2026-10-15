@@ -7,10 +7,9 @@ nothing in `src/` reads the ledger this way. Skips without Postgres; tests use d
 `correlation_id`/actor prefixes because the schema is shared.
 """
 
-from chemclaw.agent.turn_cost import TurnCost
-from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.spend.ledger import PostgresTurnCostSink, TurnCost
 from tests.pg import migrated_db_or_skip
 
 # What one actor's rows sum to. Written here rather than imported, because the production reader

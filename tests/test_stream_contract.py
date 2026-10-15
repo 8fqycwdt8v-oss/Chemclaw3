@@ -459,8 +459,8 @@ async def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambien
 
     Each contextvar reset raises `ValueError` there; the teardown tolerates it so later resets run.
     """
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _turn_ambient
+    from chemclaw.spend.ledger import TurnUsage
 
     async def _turn() -> AsyncIterator[str]:
         """Stand in for `run_turn`: stamp the turn's ambients, then park at a yield."""

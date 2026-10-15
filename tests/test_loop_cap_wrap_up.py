@@ -6,7 +6,7 @@ halves, asserted on a compiled graph because both live in the wiring:
 - the helper's report says it was cut short (`agent/tool_result_shape.cut_short_report`), so the
   caller cannot read narration as findings;
 - every graph reaching the cap gets one tool-less call to write its answer
-  (`loop_cap.enforce_loop_cap` + `loop_cap.AnswerAtTheCap`), and only a second arrival ends it.
+  (`guard.enforce_loop_cap` + `guard.AnswerAtTheCap`), and only a second arrival ends it.
 """
 
 import asyncio
@@ -21,7 +21,10 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.loop_cap import (
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.state import turn_input
+from chemclaw.core.config import settings
+from chemclaw.spend.guard import (
     WRAP_UP_NOTE,
     begin_loop_watch,
     end_loop_watch,
@@ -29,9 +32,6 @@ from chemclaw.agent.loop_cap import (
     loop_capped,
     loop_hit_cap,
 )
-from chemclaw.agent.profiles import AgentProfile
-from chemclaw.agent.state import turn_input
-from chemclaw.core.config import settings
 
 #: What a helper says just before the cap stops it — the dl-01 shape, verbatim.
 _NARRATION = "Let me also check one more thing — whether the reaction store has any chlorides."

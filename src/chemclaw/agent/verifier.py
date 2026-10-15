@@ -25,13 +25,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_id
-from chemclaw.agent.turn_usage import off_stream_metering
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.model_prose import ModelProse
 from chemclaw.kg.note import cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.harness import Claim, groundable_ids, verify_claims
+from chemclaw.spend.ledger import off_stream_metering
 
 logger = logging.getLogger(__name__)
 

@@ -35,7 +35,6 @@ from chemclaw.api.auth import (
     Principal,
     reauthorize,
 )
-from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
 from chemclaw.api.deps import CurrentSession, CurrentUser, _resolve_session, require_owner
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
@@ -71,6 +70,7 @@ from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_fence import Claim, TurnFence
 from chemclaw.exhibits.models import ExhibitRef, UnknownExhibit
+from chemclaw.spend.limits import BudgetExceeded, check_thread_size, refused_metric
 
 logger = logging.getLogger(__name__)
 

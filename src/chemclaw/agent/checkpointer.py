@@ -215,7 +215,7 @@ async def stored_thread_bytes(thread_id: str) -> int:
     """How many bytes of conversation a turn on `thread_id` would load, or 0 if it loads none.
 
     Every turn loads the whole thread (compaction trims only what is sent), so
-    `api/budget.check_thread_size` holds this against `session_max_thread_bytes`. Read on the pool
+    `spend/limits.check_thread_size` holds this against `session_max_thread_bytes`. Read on the pool
     directly so the admission check does not queue behind the saver's lock. 0 without durable turn
     state or before the first checkpoint.
     """

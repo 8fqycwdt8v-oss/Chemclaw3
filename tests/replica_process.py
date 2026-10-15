@@ -58,8 +58,8 @@ async def _as_header_user(request: Request) -> Principal:
 
 def _delay_writes(seconds: float) -> None:
     """Make the cost ledger and the durable budget window slow to write, by `seconds` each."""
-    from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
-    from chemclaw.api import budget_store
+    from chemclaw.spend import limits as budget_store
+    from chemclaw.spend.ledger import PostgresTurnCostSink
 
     record: Any = PostgresTurnCostSink.record
     book: Any = budget_store.book

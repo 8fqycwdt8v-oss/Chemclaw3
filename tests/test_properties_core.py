@@ -20,13 +20,13 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings as config
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, Relation, cited_ids, mentioned_ids, parse_note
 from chemclaw.kg.record import _build_write
 from chemclaw.kg.render import render_note
+from chemclaw.spend.limits import BudgetExceeded, BudgetTracker
 
 # JSON-native values, which is exactly what `stable_hash` documents itself as taking. Bounded in
 # size because the property is about canonicalisation, not about throughput, and an unbounded

@@ -16,7 +16,11 @@ from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.spend_cap import (
+from chemclaw.agent.state import TurnTotal, turn_input
+from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.tool_registry import registered_tool_names
+from chemclaw.spend.guard import (
     MeterTurnSpend,
     begin_spend_watch,
     end_spend_watch,
@@ -24,10 +28,6 @@ from chemclaw.agent.spend_cap import (
     spend_hit_cap,
     turn_billed_tokens,
 )
-from chemclaw.agent.state import TurnTotal, turn_input
-from chemclaw.core.config import settings
-from chemclaw.core.metrics import METRICS
-from chemclaw.core.tool_registry import registered_tool_names
 
 
 def _billing(*costs: int) -> list[AIMessage]:
@@ -349,7 +349,7 @@ def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
         f"{offenders} passes an explicit `config` to a model call "
         "from a module that holds a registered tool. An explicit callbacks config replaces the "
         "inherited ones, taking the call off the turn's stream — so its tokens stop reaching the "
-        "ledger `agent/spend_cap.py` enforces against, and that class of spend becomes invisible "
+        "ledger `spend/guard.py` enforces against, and that class of spend becomes invisible "
         "to the cap again."
     )
 
@@ -362,7 +362,7 @@ def test_the_cap_reads_the_turn_ledger_not_only_its_own_channel(
     `MeterTurnSpend` misses in-tool calls and retried attempts. The ledger is seeded directly,
     since which reading `enforce_spend_cap` trusts is under test.
     """
-    from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
+    from chemclaw.spend.ledger import TurnUsage, reset_turn_usage, set_turn_usage
 
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     usage = TurnUsage()
@@ -442,8 +442,8 @@ def test_a_turn_with_no_watch_has_billed_exactly_nothing() -> None:
 def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
     """`enforce_spend_cap` marks its watch via the public `record_spend_cap`."""
     sources = {
-        "spend": (Path("src/chemclaw/agent/spend_cap.py"), "enforce_spend_cap", "record_spend_cap"),
-        "loop": (Path("src/chemclaw/agent/loop_cap.py"), "enforce_loop_cap", "record_loop_cap"),
+        "spend": (Path("src/chemclaw/spend/guard.py"), "enforce_spend_cap", "record_spend_cap"),
+        "loop": (Path("src/chemclaw/spend/guard.py"), "enforce_loop_cap", "record_loop_cap"),
     }
     for cap, (module, enforcer, recorder) in sources.items():
         tree = ast.parse(module.read_text("utf-8"))

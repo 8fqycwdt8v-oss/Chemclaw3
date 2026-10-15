@@ -63,11 +63,11 @@ from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.text_overlay import DIGEST_CHARS, active, block_text
 from chemclaw.agent.turn_ambient import turn_caps
-from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
+from chemclaw.spend.ledger import TurnUsage
 from chemclaw.templates.registry import discovered as templates
 from chemclaw.templates.registry import tool_name
 

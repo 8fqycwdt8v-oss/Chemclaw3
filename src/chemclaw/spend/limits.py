@@ -1,16 +1,14 @@
-"""Per-session and per-user turn/token budgets — the runaway-cost guard across turns.
+"""Every spend limit in one policy, and the per-session and per-user budget that enforces them.
 
-The loop cap bounds one turn's iterations, not the number of turns: a client or a push-back loop
-could keep posting turns. The front door meters each turn's tokens, counts turns per session and per
-user, and refuses (429) a turn that would exceed a cap. `check()` runs before a turn and `record()`
-after it, so these caps bound a sequence of turns; one turn's own spend is bounded by
-`agent/spend_cap.py`.
+`SpendPolicy.current()` reads the limits from settings at the moment of a decision, so no site holds
+a stale copy: model calls and billed tokens per turn (enforced by `spend.guard`), turns and tokens
+per session and per user window, the conversation's size ceiling, and the window itself.
 
-The per-user scope is durable (`api/budget_store.py`, one Postgres row per principal on a rolling
-window) wherever `session_store == "postgres"`; the per-session scope is in-process because a
-session dies with its process. The in-process and durable counts are combined with `max()`: the
-local counter has this pod's just-ended turn at once, the durable row has every pod's turns a
-moment later. Off by default (`budget_enabled`).
+`BudgetTracker.check()` runs before a turn and `record()` after it, so these caps bound a sequence
+of turns (429 when exceeded). The per-session scope is in-process; the per-user scope is one
+Postgres row per principal on a rolling window wherever `session_store == "postgres"`, combined with
+the local count by `max()`: the local counter has this pod's just-ended turn at once, the durable
+row has every pod's turns a moment later. Off by default (`budget_enabled`).
 """
 
 import asyncio
@@ -18,17 +16,68 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import timedelta
+from typing import Any, NamedTuple
 
 from chemclaw.core import bookkeeping
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded, record_metric
 
-if TYPE_CHECKING:
-    from chemclaw.api import budget_store
-
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SpendPolicy:
+    """Every limit one reading of the settings states; a budget cap of 0 is unlimited.
+
+    A snapshot, built per decision by `current()`, so a changed setting is seen by the next
+    decision and no site keeps a copy. `model_calls_per_turn` is at least 1 by its setting;
+    `billed_tokens_per_turn` of 0 switches that cap off.
+    """
+
+    model_calls_per_turn: int
+    billed_tokens_per_turn: int
+    budget_enabled: bool
+    turns_per_session: int
+    tokens_per_session: int
+    turns_per_user: int
+    tokens_per_user: int
+    window_hours: float
+    warn_fraction: float
+    thread_bytes: int
+
+    @classmethod
+    def current(cls) -> "SpendPolicy":
+        """The limits as the settings now state them."""
+        return cls(
+            model_calls_per_turn=settings.harness_max_loop_iterations,
+            billed_tokens_per_turn=settings.agent_max_turn_billed_tokens,
+            budget_enabled=settings.budget_enabled,
+            turns_per_session=settings.budget_max_turns_per_session,
+            tokens_per_session=settings.budget_max_tokens_per_session,
+            turns_per_user=settings.budget_max_turns_per_user,
+            tokens_per_user=settings.budget_max_tokens_per_user,
+            window_hours=settings.budget_window_hours,
+            warn_fraction=settings.budget_warn_fraction,
+            thread_bytes=settings.session_max_thread_bytes,
+        )
+
+    @property
+    def window_seconds(self) -> float:
+        """The user window's length, for the in-process clock."""
+        return self.window_hours * 3600.0
+
+    @property
+    def window(self) -> timedelta:
+        """The user window as the interval the durable statements bind."""
+        return timedelta(hours=self.window_hours)
+
+    def cap(self, scope: str, unit: str) -> int:
+        """The cap for one scope (`"session"` or `"user"`) and unit (`"turns"` or `"tokens"`)."""
+        if scope == "session":
+            return self.turns_per_session if unit == "turns" else self.tokens_per_session
+        return self.turns_per_user if unit == "turns" else self.tokens_per_user
 
 
 class BudgetExceeded(Exception):
@@ -48,8 +97,8 @@ class _Counter:
     #: Monotonic start of the window these counts belong to, for the *user* scope only — a session
     #: counter carries one too and nothing reads it, because `_book` only rolls what it is told to.
     started: float = field(default_factory=time.monotonic)
-    #: The durable window (`budget_store.Window.start`) this counter has been reconciled with, or
-    #: `None` while it has only ever been booked in process. User scope only.
+    #: The durable window (`Window.start`) this counter has been reconciled with, or `None` while
+    #: it has only ever been booked in process. User scope only.
     window: float | None = None
 
 
@@ -59,7 +108,7 @@ def _rolled(counter: _Counter) -> bool:
     The in-process counter must roll with the durable row, or `max()` would pin a long-lived pod's
     principal at their lifetime spend while other pods admit them.
     """
-    return time.monotonic() - counter.started >= settings.budget_window_hours * 3600.0
+    return time.monotonic() - counter.started >= SpendPolicy.current().window_seconds
 
 
 def _live_counts(counter: _Counter | None) -> tuple[int, int]:
@@ -79,7 +128,7 @@ def _near(cap: int, used: int) -> bool:
 
     A cap of 0 is unlimited, and usage at the cap is the refusal's business.
     """
-    fraction = settings.budget_warn_fraction
+    fraction = SpendPolicy.current().warn_fraction
     if cap <= 0 or fraction <= 0:
         return False
     return used >= cap * fraction and used < cap
@@ -102,9 +151,10 @@ def _warn(scope: str, identity: str, turns: int, tokens: int, booked: int) -> No
     derived without per-principal state — so one crossing produces one warning, as the alert rule
     assumes.
     """
+    policy = SpendPolicy.current()
     caps = (
-        ("turns", turns, turns - 1, _cap(scope, "turns")),
-        ("tokens", tokens, tokens - booked, _cap(scope, "tokens")),
+        ("turns", turns, turns - 1, policy.cap(scope, "turns")),
+        ("tokens", tokens, tokens - booked, policy.cap(scope, "tokens")),
     )
     for unit, used, before, cap in caps:
         if not _near(cap, used) or _near(cap, before):
@@ -120,19 +170,6 @@ def _warn(scope: str, identity: str, turns: int, tokens: int, booked: int) -> No
             cap,
             identity,
         )
-
-
-def _cap(scope: str, unit: str) -> int:
-    """The configured cap for one scope and unit, so the warning and the refusal read one source."""
-    if scope == "session":
-        return (
-            settings.budget_max_turns_per_session
-            if unit == "turns"
-            else settings.budget_max_tokens_per_session
-        )
-    if unit == "turns":
-        return settings.budget_max_turns_per_user
-    return settings.budget_max_tokens_per_user
 
 
 def _book(
@@ -189,17 +226,13 @@ class BudgetTracker:
         and durable counts; an unreachable database degrades to the in-process count rather than
         failing the turn.
         """
-        if not settings.budget_enabled:
+        policy = SpendPolicy.current()
+        if not policy.budget_enabled:
             return
         with self._lock:
             session = self._sessions.get(session_id)
             local = self._users.get(user) if user is not None else None
-        self._check_scope(
-            session,
-            "session",
-            settings.budget_max_turns_per_session,
-            settings.budget_max_tokens_per_session,
-        )
+        self._check_scope(session, "session", policy.turns_per_session, policy.tokens_per_session)
         if user is None:
             return
         turns, tokens = _live_counts(local)
@@ -211,20 +244,18 @@ class BudgetTracker:
         self._check_scope(
             _Counter(turns=turns, tokens=tokens),
             "user",
-            settings.budget_max_turns_per_user,
-            settings.budget_max_tokens_per_user,
+            policy.turns_per_user,
+            policy.tokens_per_user,
         )
 
     @staticmethod
-    async def _stored(user: str) -> "budget_store.Window | None":
+    async def _stored(user: str) -> "Window | None":
         """This principal's durable window, or `None` if the database cannot answer.
 
         `None` rather than zeros, so a failed read leaves this pod's counter as it was.
         """
-        from chemclaw.api import budget_store
-
         try:
-            return await budget_store.usage(user)
+            return await usage(user)
         except Exception:
             degraded(
                 logger,
@@ -235,7 +266,7 @@ class BudgetTracker:
             )
             return None
 
-    def _reconcile(self, user: str, stored: "budget_store.Window") -> _Counter | None:
+    def _reconcile(self, user: str, stored: "Window") -> _Counter | None:
         """Re-anchor this pod's counter for `user` to the durable window; return the counter.
 
         The local counter starts when this pod first books the user, which may be long after the
@@ -254,7 +285,7 @@ class BudgetTracker:
             with self._lock:
                 return self._users.get(user)
         now = time.monotonic()
-        span = settings.budget_window_hours * 3600.0
+        span = SpendPolicy.current().window_seconds
         with self._lock:
             local = self._users.get(user)
             if local is None:
@@ -292,7 +323,7 @@ class BudgetTracker:
         write is scheduled as its own task, returned for a caller that can wait on it
         (`core.bookkeeping.settle`). `None` when there is no durable write to wait for.
         """
-        if not settings.budget_enabled:
+        if not SpendPolicy.current().budget_enabled:
             return None
         with self._lock:
             session = _book(self._sessions, session_id, tokens)
@@ -313,11 +344,10 @@ class BudgetTracker:
         A failed write is logged and lost rather than failing an answered turn; the in-process
         counter still holds the turn.
         """
-        from chemclaw.api import budget_store
 
         async def _write() -> None:
             try:
-                stored = await budget_store.book(user, tokens)
+                stored = await book(user, tokens)
             except asyncio.CancelledError:
                 # Cancellation is not an `Exception` and is the usual loss mode here, so record it
                 # separately.
@@ -371,7 +401,7 @@ async def check_thread_size(session_id: str) -> None:
     before a claim) and again after the permit (the binding check). An unreachable database admits
     the turn.
     """
-    cap = settings.session_max_thread_bytes
+    cap = SpendPolicy.current().thread_bytes
     if not cap:
         return
     from chemclaw.agent.checkpointer import stored_thread_bytes
@@ -392,3 +422,112 @@ async def check_thread_size(session_id: str) -> None:
             f"against {cap / 1024**2:.1f} MiB). Start a new session to continue — this one's "
             "transcript stays readable."
         )
+
+
+# --- the per-user window, in Postgres ---------------------------------------------------------
+#
+# One row per principal, reset in place inside the upsert's `ON CONFLICT` arm, so the table is
+# bounded by the number of principals and needs no sweep, and no process sees a half-reset row. The
+# window is rolling and anchored at first use, so allowances do not all reset at one instant; a user
+# who spends everything at once waits the full window. Only the user scope is durable: a session
+# dies with its process.
+
+#: Book one turn against a principal, resetting the window first if it has rolled over.
+#:
+#: The `CASE` arms repeat one predicate rather than use a CTE, keeping the reset in the same
+#: statement. Under concurrency a conflicting writer blocks on the row lock and re-evaluates against
+#: the latest committed row, not its snapshot, so no update is lost; `tests/test_budget_window.py`
+#: pins this.
+_BOOK = """
+    INSERT INTO budget_usage (actor, window_start, turns, tokens)
+    VALUES (%(actor)s, now(), 1, %(tokens)s)
+    ON CONFLICT ON CONSTRAINT budget_usage_pkey DO UPDATE SET
+        window_start = CASE
+            WHEN budget_usage.window_start <= now() - %(window)s::interval
+            THEN now() ELSE budget_usage.window_start END,
+        turns = CASE
+            WHEN budget_usage.window_start <= now() - %(window)s::interval
+            THEN 1 ELSE budget_usage.turns + 1 END,
+        tokens = CASE
+            WHEN budget_usage.window_start <= now() - %(window)s::interval
+            THEN %(tokens)s ELSE budget_usage.tokens + %(tokens)s END,
+        updated_at = now()
+    RETURNING turns, tokens,
+        EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
+"""
+
+#: A principal's row, live or expired, with where its window started and how old it is.
+#:
+#: Returned even when expired, so `BudgetTracker._reconcile` can tell "window ended" from "never
+#: booked". The age uses Postgres's `now()`, the same clock as `_BOOK`.
+_USAGE = """
+    SELECT turns, tokens,
+        EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
+    FROM budget_usage WHERE actor = %(actor)s
+"""
+
+
+class Window(NamedTuple):
+    """What a principal has spent in the current durable window, and which window that is.
+
+    `start` identifies the window (`window_start` as epoch seconds, identical on every pod); `age`
+    is its elapsed seconds by Postgres's clock, which the in-process counter uses to roll with it.
+    """
+
+    turns: int
+    tokens: int
+    #: `None` when the principal has no row at all — nothing has ever been booked durably.
+    start: float | None = None
+    age: float = 0.0
+
+    @property
+    def expired(self) -> bool:
+        """Whether a row exists and its window has run out, so the next booking opens a new one."""
+        return self.start is not None and self.age >= SpendPolicy.current().window.total_seconds()
+
+
+def _from_row(row: tuple[Any, ...] | None) -> Window:
+    """A `Window` from `(turns, tokens, start, age)`, with an expired window's counts read as zero.
+
+    `Any` because that is psycopg's row type; `EXTRACT` arrives as a `Decimal`.
+    """
+    if row is None:
+        return Window(0, 0)
+    turns, tokens, start, age = row
+    window = Window(int(turns), int(tokens), float(start), float(age))
+    return window._replace(turns=0, tokens=0) if window.expired else window
+
+
+def _dsn() -> str:
+    """The database the session tier already uses — a budget window has a session's lifetime."""
+    return settings.session_store_dsn or settings.postgres_dsn
+
+
+async def usage(actor: str) -> Window:
+    """What this principal has spent in the current window; zero counts if it has rolled.
+
+    Unknown and expired both read zero; `start` tells them apart for the in-process counter.
+    """
+    from chemclaw.core import db
+
+    async with db.connection(_dsn()) as conn:
+        cursor = await conn.execute(_USAGE, {"actor": actor})
+        row = await cursor.fetchone()
+    return _from_row(row)
+
+
+async def book(actor: str, tokens: int) -> Window:
+    """Add one turn and its tokens to this principal's window; return the window's new totals.
+
+    `tokens` is clamped at zero (the table's `CHECK` refuses negatives too). The totals come from
+    `RETURNING`, so the caller's warning check sees exactly what this write produced.
+    """
+    from chemclaw.core import db
+
+    async with db.connection(_dsn()) as conn:
+        cursor = await conn.execute(
+            _BOOK,
+            {"actor": actor, "tokens": max(tokens, 0), "window": SpendPolicy.current().window},
+        )
+        row = await cursor.fetchone()
+    return _from_row(row)

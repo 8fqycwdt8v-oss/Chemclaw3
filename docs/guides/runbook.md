@@ -1906,7 +1906,7 @@ refused yet; the rule above is what fires once they are.
 **The scope is not on the series, so do not look for it there.** A budget scope is a session id or
 an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values for the cardinality
 reason the per-metric series cap (D-152) enforces. The identity is in the WARNING log line from
-`chemclaw.api.budget`, which names the scope, the unit, the percentage, both numbers and the
+`chemclaw.spend.limits`, which names the scope, the unit, the percentage, both numbers and the
 session id or `oid` itself:
 
     oc logs -l app.kubernetes.io/name=chemclaw --since=1h | grep 'budget .* spent'

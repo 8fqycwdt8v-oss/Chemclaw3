@@ -85,7 +85,7 @@ def _agent_build() -> dict[str, Any]:
 
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
     from chemclaw.agent.turn_ambient import turn_caps
-    from chemclaw.agent.turn_usage import TurnUsage
+    from chemclaw.spend.ledger import TurnUsage
 
     class _Model(GenericFakeChatModel):
         def bind_tools(self, tools: Any, **kwargs: Any) -> Any:

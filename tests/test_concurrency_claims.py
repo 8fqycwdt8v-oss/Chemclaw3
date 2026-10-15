@@ -20,12 +20,12 @@ from pathlib import Path
 import pytest
 
 from chemclaw.agent.session_store import SessionTurnClaims
-from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.api.state import claim_holder
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.executor import install_default_executor
 from chemclaw.kg.git_writer import GitWriteError, _checkout_lock
+from chemclaw.spend.limits import BudgetExceeded, BudgetTracker
 from tests.pg import migrated_db_or_skip
 
 

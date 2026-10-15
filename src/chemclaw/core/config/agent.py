@@ -169,11 +169,12 @@ class AgentSettings(BaseSettings):
     plan_max_tools_per_step: int = Field(default=32, ge=1)
 
     # Billed tokens one turn may spend (input, output and cache, helpers included) before
-    # `agent/spend_cap.py` ends it with a partial answer and `spend_cap_reached`. The loop cap
-    # counts calls, not cost, and `api/budget.py` meters only between turns. A runaway backstop, not
-    # a budget: derived as `harness_max_loop_iterations` calls each at `agent_context_token_budget`,
-    # so a lawful turn never hits it (`tests/test_spend_cap.py` holds that). Set lower from
-    # `turn_costs` to buy a cost ceiling, knowing it refuses work. 0 means no cap.
+    # `spend/guard.py` ends it with a partial answer and `spend_cap_reached`. The loop cap
+    # counts calls, not cost, and `spend/limits.py` meters only between turns. A runaway backstop,
+    # not a budget: derived as `harness_max_loop_iterations` calls each at
+    # `agent_context_token_budget`, so a lawful turn never hits it (`tests/test_spend_cap.py` holds
+    # that). Set lower from `turn_costs` to buy a cost ceiling, knowing it refuses work. 0 means no
+    # cap.
     agent_max_turn_billed_tokens: int = Field(default=3_000_000, ge=0)
 
     # Supersteps one model call costs, for deriving `agent_recursion_limit`. The framework default
@@ -362,7 +363,7 @@ class AgentSettings(BaseSettings):
         """The graph step ceiling one turn runs under (`agent.state.turn_config`).
 
         Derived from `harness_max_loop_iterations` so the loop cap always fires first and the
-        ceiling only catches a bug. `agent/loop_cap.enforce_loop_cap` allows one wrap-up call past
+        ceiling only catches a bug. `spend/guard.enforce_loop_cap` allows one wrap-up call past
         the cap, hence `cap + 1` calls. Measured cost is `5 * N + 7` supersteps; the formula grants
         `agent_supersteps_per_model_call * (cap + 1) + 8`, a margin that grows with the cap, because
         an exact fit breaks the first time a middleware is added. Re-measure multiplier and constant

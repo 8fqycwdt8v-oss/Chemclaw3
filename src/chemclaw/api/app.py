@@ -40,7 +40,6 @@ from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.contract import API_CONTRACT_VERSION, payload_schemas
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
@@ -103,6 +102,7 @@ from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
+from chemclaw.spend.limits import BudgetTracker
 
 # The module's surface and its test seam: tests patch route collaborators on this module by name,
 # and route modules read them back through it at call time (`from chemclaw.api import app as

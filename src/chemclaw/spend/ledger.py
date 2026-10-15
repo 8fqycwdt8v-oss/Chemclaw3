@@ -1,20 +1,22 @@
-"""One turn's model usage, read off a message and split along the dimensions it is priced along.
+"""What a turn spent: the usage arithmetic, the ambient ledger and the durable `turn_costs` row.
 
-The turn's arithmetic, pure enough to test on an object rather than a turn. In `chemclaw.agent`
-so both the front door and a template's `agent` step (`durable`, which may not import `api`) meter
-with one implementation; booking the numbers stays with each caller.
+A model call inside a graph node, tool bodies included, inherits the graph's callbacks and is
+metered by the stream; an explicit `callbacks` config would replace them and unmeter it. The one
+call outside the graph (the verifier's judge) books into the ambient ledger (`set_turn_usage`,
+`off_stream_metering`), and `InFlightPrompts` estimates an abandoned call's prompt.
 
-A model call made inside a graph node — including from a tool body — inherits the graph's
-callbacks via LangChain's config contextvar and is metered by the stream. Passing an explicit
-`callbacks` config would replace the inherited ones and unmeter it. The one call outside the graph
-is the verifier's judge, which books itself into the task-local ambient ledger below.
+`record_turn_cost` is synchronous because teardown calls it where an `await` re-raises a pending
+cancellation; the write is its own tracked task and upserts on a `turn_id` minted per record, never
+on the caller-chosen correlation id. `TurnCost` lives in `chemclaw.core.turn_cost` so
+`chemclaw.evals` can score it without importing `agent`.
 """
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import SystemMessage
@@ -22,6 +24,10 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import LLMResult
 
 from chemclaw.agent.context_budget import estimator_ratio, prefix_tokens
+from chemclaw.core import bookkeeping
+from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.turn_cost import TurnCost as TurnCost  # re-exported: the ledger's record
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +183,7 @@ def metered_turn_tokens() -> int:
     """What this turn has been metered so far, or 0 where nothing is metering.
 
     The runner hands one `TurnUsage` to `set_turn_usage` and the stream, so this includes model
-    calls made by tool bodies, which no `wrap_model_call` sees; `agent/spend_cap.py` reads it for
+    calls made by tool bodies, which no `wrap_model_call` sees; `spend/guard.py` reads it for
     that. A floor, not live-exact: a call in flight is not fully counted.
 
     Returns:
@@ -294,3 +300,130 @@ def off_stream_metering() -> dict[str, Any]:
         ledger the handler books nothing.
     """
     return {"callbacks": [_OffStreamMeter()]}
+
+
+# --- the durable ledger: `turn_costs` (`infra/sql/033_cost_attribution.sql`) -------------------
+
+
+class TurnCostSink(Protocol):
+    """Where a turn's cost goes. One method, so a deployment without Postgres needs no database."""
+
+    async def record(self, cost: TurnCost) -> None:
+        """Persist one turn's cost."""
+        ...
+
+
+class NullTurnCostSink:
+    """Drops costs — the fallback for a deployment with no database configured."""
+
+    async def record(self, cost: TurnCost) -> None:
+        """Log at debug level and keep nothing."""
+        logger.debug("turn cost dropped (no durable store): %s", cost.correlation_id)
+
+
+def default_turn_cost_sink() -> TurnCostSink:
+    """The durable sink where a database exists, else the null one.
+
+    Keys on `session_store == "postgres"`, as the audit sink and job record do. The Postgres sink
+    imports the pool only when it writes, so a memory-store process never loads psycopg.
+    """
+    if settings.session_store != "postgres":
+        return NullTurnCostSink()
+    return PostgresTurnCostSink()
+
+
+def record_turn_cost(cost: TurnCost) -> asyncio.Task[None] | None:
+    """Book one turn's cost without awaiting — see the module docstring.
+
+    Synchronous by contract: its callers (`api/runner._book_turn_spend` and
+    `durable/template_activities._book_step_spend`) may run in teardown, where an `await` would
+    re-raise a pending cancellation and skip what follows. The write runs as its own task; a failure
+    is logged at warning level and lost rather than failing a turn that already answered. Returns
+    the task for a caller that can wait, or `None` when there is nothing to wait for (no database,
+    or no event loop).
+    """
+    sink = default_turn_cost_sink()
+    if isinstance(sink, NullTurnCostSink):
+        return None
+
+    async def _write() -> None:
+        try:
+            await sink.record(cost)
+        except Exception:
+            degraded(
+                logger,
+                "cost_ledger",
+                "could not record the cost of turn %s; the spend is lost to the ledger "
+                "(the metrics counters still carry it in aggregate)",
+                cost.correlation_id,
+            )
+
+    task = bookkeeping.schedule(_write())
+    if task is None:
+        logger.debug("no event loop to record the cost of turn %s", cost.correlation_id)
+    return task
+
+
+# Every column the writer sets; the INSERT list, placeholder count and `DO UPDATE` list are derived
+# from it.
+_COLUMNS = (
+    "turn_id",
+    "correlation_id",
+    "session_id",
+    "actor",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "estimated_tokens",
+    "duration_seconds",
+    "completed",
+    "outcome",
+    "error_code",
+    "model",
+    "tool_calls",
+    "tool_failures",
+    "tool_refusals",
+    "jobs_started",
+    "ttft_seconds",
+    "compacted",
+    "context_unreducible",
+    "retrieval_calls",
+    "capture_calls",
+    "answer_confidence",
+    "review_required",
+    "notes_cited",
+    "skills_loaded",
+)
+
+# `turn_id` is the conflict target, so it is the one column the update must not re-set — and it is
+# deliberately first in `_COLUMNS`, so the slice below cannot drift from the `ON CONFLICT` clause.
+_UPDATED = ",\n        ".join(f"{name} = EXCLUDED.{name}" for name in _COLUMNS[1:])
+
+_UPSERT = f"""
+    INSERT INTO turn_costs ({", ".join(_COLUMNS)})
+    VALUES ({", ".join(["%s"] * len(_COLUMNS))})
+    ON CONFLICT ({_COLUMNS[0]}) DO UPDATE SET
+        {_UPDATED},
+        recorded_at = now()
+"""
+
+
+class PostgresTurnCostSink:
+    """Writes each completed turn's cost to `turn_costs`, one connection per row.
+
+    Write-only here; the single reader is `chemclaw.operations.activity.spend`. The write upserts on
+    `turn_id`, so a retried write replaces rather than double-counts.
+    """
+
+    async def record(self, cost: TurnCost) -> None:
+        """Insert the cost, replacing any existing row for the *same record*."""
+        from chemclaw.core import db
+
+        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+            await conn.execute(
+                _UPSERT,
+                tuple(getattr(cost, name) for name in _COLUMNS),
+            )
+            await conn.commit()

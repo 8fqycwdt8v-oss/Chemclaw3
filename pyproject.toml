@@ -604,7 +604,10 @@ source_paths = [
     # found it failing before any mutant is tested. An earlier draft of this comment said the cost
     # was "recorded below" — there is nothing below that records it. `mutants/mutmut-stats.json` is
     # the file that will, and the `BACKLOG.md` row carries what is left to do.
-    "src/chemclaw/agent/spend_cap.py",
+    "src/chemclaw/spend/guard.py",
+    # `spend/guard.py` is the former `spend_cap.py` and `loop_cap.py` (one entry now), and
+    # `spend/limits.py` the former `api/budget.py` plus the durable window; the recorded floor
+    # predates that merge.
     # The other three, added 2026-09-23 once the row's premise had been measured away. It asked for
     # each addition's runtime to be priced first, on the ground that "the run is hours long"; the
     # first completed run was **87 minutes**, and `spend_cap.py`'s own share of it was **29
@@ -632,8 +635,7 @@ source_paths = [
     # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
     "src/chemclaw/agent/plan_gate.py",
     "src/chemclaw/agent/skill_backend.py",
-    "src/chemclaw/agent/loop_cap.py",
-    "src/chemclaw/api/budget.py",
+    "src/chemclaw/spend/limits.py",
     "src/chemclaw/api/runner_trace.py",
     "src/chemclaw/core/chem.py",
     "src/chemclaw/core/fulltext.py",

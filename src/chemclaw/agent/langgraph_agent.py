@@ -50,7 +50,6 @@ from chemclaw.agent.local_skills import (
     PERSONAL_TIER_TOOLS,
     personal_skills_available,
 )
-from chemclaw.agent.loop_cap import AnswerAtTheCap, enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -62,7 +61,6 @@ from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profil
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.skill_access import SkillNarrowing, skill_permits
 from chemclaw.agent.skill_manifest import declared_tools, required_tools
-from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.agent.subagents import (
@@ -93,6 +91,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.graph_durability import ignoring_inherited_durability
 from chemclaw.core.logging import log_event
 from chemclaw.core.model_prose import ModelProse
+from chemclaw.spend.guard import AnswerAtTheCap, MeterTurnSpend, enforce_loop_cap, enforce_spend_cap
 
 if TYPE_CHECKING:
     from deepagents.backends import CompositeBackend
@@ -724,7 +723,7 @@ def _bound_surface(
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """The plan/execute harness's todo list, and the runaway caps every profile gets.
 
-    The loop cap (`agent/loop_cap.py`) and the spend cap (`agent/spend_cap.py`) are unconditional: a
+    The loop cap (`spend/guard.py`) and the spend cap (`spend/guard.py`) are unconditional: a
     runaway is a property of the model/tool cycle, and without them the only bound is
     `agent_recursion_limit`, whose `GraphRecursionError` discards the turn's work. The loop cap
     counts in `before_model`, where no jump can skip it. The spend cap is a `before_model` enforcer

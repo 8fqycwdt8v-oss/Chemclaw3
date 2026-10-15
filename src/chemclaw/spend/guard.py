@@ -1,35 +1,37 @@
-"""Make the model loop's runaway cap observable, so a capped turn stops looking finished.
+"""The two per-turn brakes, and the calls that make them observable: runaway cap and spend cap.
 
-`enforce_loop_cap` is a `before_model` hook over `ChemclawState.model_calls`: it counts each model
-call, and at `harness_max_loop_iterations` it ends the graph and marks the turn, so the number that
-enforces the limit is the number that records it. The channels are untracked (`TurnTotal`,
-`TurnFlag`), so the count is per run with nothing to reset; a resumed turn is floored by the thread
-itself (`calls_already_made`), and a fan-out by a shared per-turn watch.
-
-A graph that reaches the cap gets exactly one further call with tools switched off and a note asking
-for the answer from what it has (`AnswerAtTheCap`); only a second arrival ends it. The last
-iteration of a capped loop is one that wanted a tool, so stopping there would leave narration or
-nothing. The cost is one call per graph run that reaches the cap.
-
-Two readers: `loop_capped(state)` reads the flag off the state a finished run returns (tests,
-template steps); `loop_hit_cap()` reads a task-local mutable record the hook marks, for
-`chemclaw.api.runner`, which never gets the final state back.
+Both are `before_model` hooks, which no later hook can skip
+(`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`), counted in state channels
+(`ChemclawState.model_calls`, `billed_tokens`: `TurnTotal`s, so one budget spans subagents and a
+fan-out folds additively). Each ends the run rather than raising, so the last answer still goes
+out, marked partial by `chemclaw.api.runner`, which reads `loop_hit_cap()` / `spend_hit_cap()`
+because a streaming driver never gets the final state back (`loop_capped(state)` /
+`spend_capped(state)` read it where it does). The runaway cap grants one tool-less wrap-up call
+(`AnswerAtTheCap`); the spend cap has none, since past the budget there is nothing left to spend.
+`MeterTurnSpend` is the only hook that sees a response's bill. Limits come from `SpendPolicy`.
 """
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse, before_model
+from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.types import Command
 
 from chemclaw.agent.compaction import request_note
-from chemclaw.core.config import settings
+from chemclaw.agent.state import ChemclawState
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.model_prose import ModelProse
+from chemclaw.spend.ledger import graph_usage_tokens, metered_turn_tokens
+from chemclaw.spend.limits import SpendPolicy
 
 logger = logging.getLogger(__name__)
+
+# --- the runaway cap: model calls per turn ------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -40,7 +42,7 @@ class _LoopWatch:
     number every concurrent branch reads and advances. `SubAgentMiddleware` hands every helper in a
     `task` batch the same pre-superstep `model_calls`, so without a shared count each of `W`
     branches would spend the whole remaining allowance. The contextvar is copied into each branch's
-    task but the object is shared, as with `spend_cap`'s `TurnUsage`. Off the request path there is
+    task but the object is shared, as with `ledger.TurnUsage`. Off the request path there is
     no watch and the cap falls back to the channel and the thread.
     """
 
@@ -48,17 +50,17 @@ class _LoopWatch:
     calls: int = 0
 
 
-_watch: ContextVar[_LoopWatch | None] = ContextVar("chemclaw_loop_watch", default=None)
+_loop_watch: ContextVar[_LoopWatch | None] = ContextVar("chemclaw_loop_watch", default=None)
 
 
 def begin_loop_watch() -> object:
     """Start watching this turn's loop decisions; returns a token for `end_loop_watch`."""
-    return _watch.set(_LoopWatch())
+    return _loop_watch.set(_LoopWatch())
 
 
 def end_loop_watch(token: object) -> None:
     """Tear the turn's watch down (mirrors every other ambient's reset)."""
-    _watch.reset(token)  # type: ignore[arg-type]
+    _loop_watch.reset(token)  # type: ignore[arg-type]
 
 
 def loop_hit_cap() -> bool:
@@ -66,7 +68,7 @@ def loop_hit_cap() -> bool:
 
     `False` off the request path (no watch). The state-side answer is `loop_capped`.
     """
-    watch = _watch.get()
+    watch = _loop_watch.get()
     return watch is not None and watch.capped
 
 
@@ -77,7 +79,7 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     """Authorise this turn's next model call, or end the run because the cap is reached.
 
     The increment counts authorisations, not completions: `before_model` is the one hook no later
-    middleware can skip, so a later jumping hook (`spend_cap.enforce_spend_cap`) can leave an
+    middleware can skip, so a later jumping hook (`enforce_spend_cap`) can leave an
     increment for a call never made.
 
     First-party rather than `ModelCallLimitMiddleware`, which counts in `after_model` (skippable by
@@ -95,14 +97,14 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     # at the comparison. The turn-wide watch count is the only floor a sibling branch can move, so a
     # fan-out of width `W` does not spend `W` allowances. (The billed-token budget has no thread
     # floor and still resets on resume.)
-    watch = _watch.get()
+    watch = _loop_watch.get()
     # Two numbers: `own` (this branch's count) is what the channel advances to, so `TurnTotal` folds
     # one advance per real call; `turn` is what the cap compares against. Writing `turn + 1` would
     # over-count a fan-out.
     own = max(int(state.get("model_calls", 0)), calls_already_made(state.get("messages")))
     turn = max(own, watch.calls if watch is not None else 0)
     calls = turn
-    if calls >= settings.harness_max_loop_iterations:
+    if calls >= SpendPolicy.current().model_calls_per_turn:
         record_loop_cap()
         # `loop_capped` is written only here: a capped turn and one that used its last call and
         # finished both reach exactly `cap`, so only a flag set by the branch that fires
@@ -219,9 +221,9 @@ def record_loop_cap() -> None:
     `chemclaw_turn_loop_caps_total`, since a streaming driver never gets the final state. This
     records only the fact; the count stays in `model_calls`.
     """
-    watch = _watch.get()
+    watch = _loop_watch.get()
     if watch is not None:
-        # Mutated rather than rebound, for the reason the module docstring gives: the runner must
+        # Mutated rather than rebound, for the reason `_LoopWatch` gives: the runner must
         # see it even when the stream is driven from a task of its own.
         watch.capped = True
 
@@ -264,3 +266,181 @@ def calls_already_made(messages: Any) -> int:
             start = index
             break
     return sum(1 for message in history[start:] if isinstance(message, AIMessage))
+
+
+# --- the spend cap: billed tokens per turn ------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _SpendWatch:
+    """One turn's spend mark — what it billed, and whether the cap is what stopped it."""
+
+    capped: bool = False
+    billed: int = 0
+
+
+_spend_watch: ContextVar[_SpendWatch | None] = ContextVar("chemclaw_spend_watch", default=None)
+
+
+def begin_spend_watch() -> object:
+    """Start watching this turn's spend; returns a token for `end_spend_watch`."""
+    return _spend_watch.set(_SpendWatch())
+
+
+def end_spend_watch(token: object) -> None:
+    """Tear the turn's watch down (mirrors every other ambient's reset)."""
+    _spend_watch.reset(token)  # type: ignore[arg-type]
+
+
+def spend_hit_cap() -> bool:
+    """Whether this turn was stopped by its spend cap.
+
+    `False` off the request path. The state-side answer is `spend_capped`; this one is for a
+    streaming driver, which is not handed the final state.
+    """
+    watch = _spend_watch.get()
+    return watch is not None and watch.capped
+
+
+def turn_billed_tokens() -> int:
+    """What this turn has billed so far, or 0 off the request path.
+
+    The runner reports it beside the refusal, so a chemist sees how much the turn spent.
+    """
+    watch = _spend_watch.get()
+    return watch.billed if watch is not None else 0
+
+
+def record_spend_cap(billed: int) -> None:
+    """Mark this turn as stopped by its spend cap, having billed `billed`.
+
+    The counterpart to `record_loop_cap`, called by `enforce_spend_cap` and by tests;
+    `api/runner._spend_cap_event` reads the result. `billed` is an absolute reading, so it is folded
+    with `max` against what `_meter` accumulated rather than added.
+
+    Args:
+        billed: What the turn had billed when the cap fired.
+    """
+    watch = _spend_watch.get()
+    if watch is None:
+        return
+    # Mutated rather than rebound, for the reason `_LoopWatch` gives: a stream
+    # driven from a task of its own must still be able to see it.
+    watch.billed = max(watch.billed, billed)
+    watch.capped = True
+
+
+def _meter(billed: int) -> None:
+    """Add one model call's own bill to this turn's running total.
+
+    Added, not `max`ed: every branch of a fan-out starts from the same base, so the largest absolute
+    total would count only one branch. This is the same fold `state.TurnTotal` performs.
+    """
+    watch = _spend_watch.get()
+    if watch is None:
+        return
+    watch.billed += billed
+
+
+@before_model(can_jump_to=["end"], state_schema=ChemclawState)
+def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
+    """End the turn before a model call that would put it past its billed-token budget.
+
+    Checked before the call, the only placement that bounds anything. The cap therefore bounds spend
+    before the next call; the last allowed call may overshoot by at most one call's bill, since a
+    call's cost cannot be predicted reliably beforehand. `can_jump_to` is what connects the jump to
+    an edge.
+
+    Args:
+        state: The graph state, carrying `billed_tokens` as this turn's calls have folded it.
+        runtime: LangGraph's runtime, unused — the budget is a deployment setting rather than a
+        per-run one.
+
+    Returns:
+        `{"jump_to": "end", "spend_capped": True}` when the turn is over budget, else `None`.
+    """
+    budget = SpendPolicy.current().billed_tokens_per_turn
+    if not budget:
+        return None
+    # The larger of two readings, because each sees calls the other cannot. `billed_tokens` sees
+    # what this middleware metered; a model call made inside a tool body (e.g. `agent/condense.py`)
+    # is not a graph node and never reaches it, but it does reach the turn's own ledger
+    # (`ledger.metered_turn_tokens`). Off the request path the ledger is 0 and the channel
+    # is the only reading.
+    billed = max(int(state.get("billed_tokens", 0)), metered_turn_tokens())
+    if billed < budget:
+        return None
+    logger.warning("the turn hit its %d billed-token cap after %d tokens", budget, billed)
+    record_spend_cap(billed)
+    return {"jump_to": "end", "spend_capped": True}
+
+
+def spend_capped(state: Mapping[str, Any]) -> bool:
+    """Whether this turn was stopped by its spend cap — read, not inferred.
+
+    Args:
+        state: The state the finished run **returned**. Not `graph.get_state(config).values`: the
+        channel is untracked, so it is absent from a restored checkpoint and would read `False`.
+
+    Returns:
+        Whether the run reached its billed-token budget.
+    """
+    return bool(state.get("spend_capped", False))
+
+
+class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
+    """Add each model call's bill to the turn's running total, so `before_model` can read it.
+
+    The bill exists only on the response, so the write is a state update returned from
+    `wrap_model_call` (via `ExtendedModelResponse`'s `Command`), applied through `TurnTotal`'s
+    additive fold so fan-out branches sum.
+
+    Both sync and async hooks, because `create_agent` puts the middleware in both chains and an
+    async-only one would fail `graph.invoke()`.
+
+    Never fails a turn: a response with no usage meters 0, so the cap cannot bind on a provider that
+    reports nothing; `ledger.graph_usage_tokens` counts unreadable usage separately.
+    """
+
+    #: Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
+    #: `build_langgraph_agent` already passes `state_schema=ChemclawState`, so this is a safeguard
+    #: for other graphs.
+    state_schema = ChemclawState
+
+    def _update(self, request: ModelRequest[Any], response: Any) -> Any:
+        """The response, plus a command carrying this turn's new absolute billed total.
+
+        Absolute rather than a delta, because `TurnTotal` folds `base + max(value - base, 0)`. The
+        ambient watch accumulates instead, so it gets this call's own bill. Guarded end to end:
+        metering is an observation and must never end a turn.
+        """
+        try:
+            message = response.result[0] if getattr(response, "result", None) else response
+            billed = int(graph_usage_tokens(message).total)
+            if billed <= 0:
+                return response
+            prior = cast(int, request.state.get("billed_tokens", 0) or 0)
+            total = int(prior) + billed
+            # The channel gets the absolute total and the watch gets this call's own bill, each what
+            # its fold is defined against (see `TurnTotal` and `_meter`).
+            _meter(billed)
+            return ExtendedModelResponse(
+                model_response=response, command=Command(update={"billed_tokens": total})
+            )
+        except Exception:
+            degraded(logger, "spend_cap", "could not meter this model call's bill")
+            return response
+
+    def wrap_model_call(
+        self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], Any]
+    ) -> Any:
+        """Run the call, then book what it billed (sync path)."""
+        return self._update(request, handler(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
+    ) -> Any:
+        """The path a turn actually takes."""
+        return self._update(request, await handler(request))

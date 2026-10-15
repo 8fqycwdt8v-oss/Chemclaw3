@@ -43,7 +43,7 @@ _TYPES_ONLY: dict[str, str] = {
 # Modules that name a provider distribution for one *function* and neither dial nor deserialise a
 # frame. Kept separate from `_TYPES_ONLY`, whose grant rests on the target being a `.types` module.
 _HELPERS_ONLY: dict[str, str] = {
-    "agent/turn_usage.py": (
+    "spend/ledger.py": (
         "reads `_create_usage_metadata` to normalise the usage block of a call the gateway billed "
         'and nothing metered: with `method="json_schema"` the SDK parses inside `_agenerate`, so '
         "a judge reply that fails validation raises before `on_llm_end` and booked 1,100 tokens of "

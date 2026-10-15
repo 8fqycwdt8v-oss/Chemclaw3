@@ -52,15 +52,15 @@ _EXPECTED_SUBSYSTEMS = {
     # `agent/context_budget.MeasureRequestPrefix`. An unmeasurable prefix is budgeted as zero (the
     # generous direction), which silently reverts the budget to the configured constant.
     "context_budget",
-    # `api/budget.py`, both halves of the durable spend window. An unreadable meter degrades to this
-    # pod's own counters, so the cap silently binds per process again
+    # `spend/limits.py`, both halves of the durable spend window. An unreadable meter degrades to
+    # this pod's own counters, so the cap silently binds per process again
     # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`).
     "budget_window",
     # `core/bookkeeping.drain`: writes a turn owed the record that a shutdown could not wait for.
     "bookkeeping",
-    # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
-    # database cannot answer — the load that follows reads the same database. Silent otherwise: the
-    # memory bound it enforces would simply stop binding.
+    # `spend/limits.check_thread_size`, whose read of a thread's stored size admits the turn when
+    # the database cannot answer — the load that follows reads the same database. Silent
+    # otherwise: the memory bound it enforces would simply stop binding.
     "thread_size",
     "cost_ledger",
     # A retrieval source that could not be asked — the degradation a chemist feels as evidence

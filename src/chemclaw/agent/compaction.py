@@ -87,7 +87,7 @@ def request_note(text: str) -> HumanMessage:
     """A human-role note for one request, which the conversation window will not treat as a turn.
 
     A group is a chemist's message and what answers it; treating a request-only note (e.g.
-    `loop_cap.AnswerAtTheCap`'s wrap-up) as the newest group would let the window cut the chemist's
+    `guard.AnswerAtTheCap`'s wrap-up) as the newest group would let the window cut the chemist's
     actual question. Marked in `response_metadata`, which is never sent to the provider.
     """
     return HumanMessage(text, response_metadata={_REQUEST_NOTE: True})

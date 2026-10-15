@@ -3,7 +3,7 @@
 `run_turn` opens the turn's MCP connectors, compiles the turn's graph over them, and streams it as
 typed `chemclaw.api.events` (`api/graph_stream.py`); a failure becomes one user-safe `ErrorEvent`.
 This module owns the lifecycle (exit stack, state rollback, ambient contextvars); the pure parts are
-`runner_trace`, `runner_usage` and `runner_answer`.
+`runner_trace` and `runner_answer`.
 """
 
 import asyncio
@@ -34,7 +34,6 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.agent.local_skills import personal_skills_available
-from chemclaw.agent.loop_cap import loop_hit_cap
 from chemclaw.agent.plan_gate import (
     PLAN_APPROVAL_PROMPT,
     approval_stands,
@@ -50,7 +49,6 @@ from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.session_store import InterruptedTurn
 from chemclaw.agent.skill_fingerprint import skill_fingerprint
-from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.stored_skill_tools import stored_skill_declarations
 from chemclaw.agent.tool_result_size import (
@@ -59,7 +57,6 @@ from chemclaw.agent.tool_result_size import (
     set_full_result_sink,
 )
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
-from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
 from chemclaw.agent.turn_resume import (
     Refusal,
@@ -68,8 +65,6 @@ from chemclaw.agent.turn_resume import (
     resume_point,
     resume_point_fresh,
 )
-from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     AnswerEvent,
     ApprovalRequestEvent,
@@ -122,6 +117,9 @@ from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_t
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.exhibits.models import ExhibitRef
 from chemclaw.kg.note import cited_ids
+from chemclaw.spend.guard import loop_hit_cap, spend_hit_cap, turn_billed_tokens
+from chemclaw.spend.ledger import InFlightPrompts, TurnCost, TurnUsage, record_turn_cost
+from chemclaw.spend.limits import BudgetTracker
 
 logger = logging.getLogger(__name__)
 
@@ -1305,7 +1303,7 @@ def _partial_answer_clause(ledger: _TurnLedger) -> str:
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
     """Say out loud that the runaway guard fired, or `None` if it did not.
 
-    The iteration cap (`chemclaw.agent.loop_cap`) stopped work the loop still wanted to do. Said
+    The iteration cap (`chemclaw.spend.guard`) stopped work the loop still wanted to do. Said
     before the answer so a surface can mark it partial. The turn is not failed: the answer ships and
     is billed as completed (`loop_cap_reached` shares its turn with an answer, as does
     `_spend_cap_event`'s).

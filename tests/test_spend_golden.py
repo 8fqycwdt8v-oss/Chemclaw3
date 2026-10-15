@@ -22,48 +22,49 @@ from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
-from chemclaw.agent import turn_cost as cost_module
-from chemclaw.agent.loop_cap import (
+from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
+from chemclaw.spend import ledger as cost_module
+from chemclaw.spend import limits as budget_store
+from chemclaw.spend.guard import (
     WRAP_UP_NOTE,
     AnswerAtTheCap,
+    MeterTurnSpend,
     begin_loop_watch,
+    begin_spend_watch,
     end_loop_watch,
+    end_spend_watch,
     enforce_loop_cap,
+    enforce_spend_cap,
     loop_capped,
     loop_hit_cap,
-)
-from chemclaw.agent.spend_cap import (
-    MeterTurnSpend,
-    begin_spend_watch,
-    end_spend_watch,
-    enforce_spend_cap,
     spend_capped,
     spend_hit_cap,
     turn_billed_tokens,
 )
-from chemclaw.agent.turn_cost import NullTurnCostSink, TurnCost, record_turn_cost
-from chemclaw.agent.turn_cost_store import _COLUMNS, _UPSERT
-from chemclaw.agent.turn_usage import (
+from chemclaw.spend.ledger import (
+    _COLUMNS,
+    _UPSERT,
     InFlightPrompts,
+    NullTurnCostSink,
+    TurnCost,
     TurnUsage,
     _prompt_estimate,
     error_result_usage,
     graph_usage_tokens,
     llm_result_usage,
     metered_turn_tokens,
+    record_turn_cost,
     reset_turn_usage,
     set_turn_usage,
 )
-from chemclaw.api import budget_store
-from chemclaw.api.budget import (
+from chemclaw.spend.limits import (
     BudgetExceeded,
     BudgetTracker,
     ThreadTooLong,
     check_thread_size,
     refused_metric,
 )
-from chemclaw.core.config import settings
-from chemclaw.core.metrics import METRICS
 
 
 def _digest(text: str) -> str:
@@ -772,8 +773,8 @@ def _ambient(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         reset_turn_usage(token)
     traced.append(metered_turn_tokens())
 
-    monkeypatch.setattr("chemclaw.agent.turn_usage.prefix_tokens", lambda: 5_000)
-    monkeypatch.setattr("chemclaw.agent.turn_usage.estimator_ratio", lambda: 1.5)
+    monkeypatch.setattr("chemclaw.spend.ledger.prefix_tokens", lambda: 5_000)
+    monkeypatch.setattr("chemclaw.spend.ledger.estimator_ratio", lambda: 1.5)
     prompt = [[HumanMessage("x" * 400)]]
     traced += [_prompt_estimate(prompt), _prompt_estimate(None), _prompt_estimate(7)]
 

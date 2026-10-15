@@ -1,6 +1,6 @@
 """The shape of one turn's spend — the record, not the machinery that writes it.
 
-`agent/turn_cost.py` owns writing it (the sink, scheduling, booking a disconnected turn), and
+`spend/ledger.py` owns writing it (the sink, scheduling, booking a disconnected turn), and
 `chemclaw.evals` scores it (`turn_cost_ratio`). The eval layer may not import `chemclaw.agent` (the
 scorer must not depend on the scored), so the shared data shape lives in `core`, keeping case files
 from drifting from what the ledger produces.
@@ -45,7 +45,7 @@ class TurnCost(BaseModel):
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_write_tokens: int = Field(default=0, ge=0)
     # Tokens billed but never reported (usage arrives only on the terminal chunk, so an abandoned
-    # turn's prompt is estimated by `agent/turn_usage.InFlightPrompts`). Kept apart from the
+    # turn's prompt is estimated by `spend/ledger.InFlightPrompts`). Kept apart from the
     # measured four so inference never passes for a provider's number; the budget meters the sum.
     # `0` on completed turns.
     estimated_tokens: int = Field(default=0, ge=0)

@@ -191,7 +191,7 @@ class ServiceSettings(BaseSettings):
     # Distinct users the in-process budget tracker keeps counters for; the least recently active is
     # evicted. Per-session counters are bounded by `service_max_live_sessions`.
     budget_max_tracked_users: int = Field(default=10_000, gt=0)
-    # Rolling window for the durable per-user counters (`api/budget_store.py`), anchored at a
+    # Rolling window for the durable per-user counters (`spend/limits.py`), anchored at a
     # principal's first turn in the window. Durable counting engages exactly when `session_store ==
     # "postgres"`; there is no separate flag.
     budget_window_hours: float = Field(default=24.0, gt=0)
