@@ -8,7 +8,6 @@ substructure search through the shared functions, and definition-keyed generatio
 import asyncio
 import random
 
-import psycopg
 import pytest
 
 from chemclaw.core import db
@@ -20,6 +19,7 @@ from chemclaw.science.fingerprints.molfp.search import (
     record_for,
 )
 from chemclaw.science.fingerprints.store import (
+    FingerprintError,
     FingerprintRecord,
     InMemoryFingerprintStore,
     PostgresFingerprintStore,
@@ -562,8 +562,8 @@ async def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -
 async def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
     """Binding the store to a table whose key omits `definition` fails loudly.
 
-    The conflict target names a key the table lacks, so the write fails to plan rather than silently
-    mis-keying. A scratch table with the old key is used.
+    The upsert names the table's key constraint, so the store checks the key's columns before its
+    first write rather than silently mis-keying. A scratch table with the old key is used.
     """
     await migrated_db_or_skip()
     async with await db.connect(settings.postgres_dsn) as conn:
@@ -577,9 +577,9 @@ async def test_a_table_still_keyed_without_its_definition_refuses_the_write() ->
         store = PostgresFingerprintStore(
             "molfp_old_key_probe", settings.ecfp_bits, molecule_definition()
         )
-        with pytest.raises(psycopg.errors.InvalidColumnReference) as refusal:
+        with pytest.raises(FingerprintError) as refusal:
             await store.add(record_for("probe", "CCO"))
-        assert "ON CONFLICT" in str(refusal.value)
+        assert "must include definition" in str(refusal.value)
     finally:
         async with await db.connect(settings.postgres_dsn) as conn:
             await conn.execute("DROP TABLE IF EXISTS molfp_old_key_probe")
