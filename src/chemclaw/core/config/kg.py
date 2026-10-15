@@ -31,11 +31,13 @@ class KgSettings(BaseSettings):
     kg_store: Literal["git", "dual", "postgres"] = "git"
     # The nightly tree-versus-Postgres comparison under `dual` (`durable/kg_compare.py`). The settle
     # pause is how long a difference must persist before it is reported, so a note another pod just
-    # wrote (whose clone has not synced yet) is not read as a divergence; keep it above the sync
-    # interval. The timeout bounds the whole run, pause included.
+    # wrote (whose clone has not synced yet) is not read as a divergence. A clone lags by up to two
+    # sync intervals (a sleep, then a refresh the writer's lock can skip once) plus the graph cache,
+    # so the default is 2 x the chart's 300 s + 120 s; the chart derives it from its own interval.
+    # The timeout bounds the whole run, pause included, and must be longer than the pause.
     kg_compare_schedule_minutes: float = Field(default=1440.0, gt=0)
-    kg_compare_settle_seconds: float = Field(default=330.0, ge=0)
-    kg_compare_timeout_seconds: float = Field(default=900.0, gt=0)
+    kg_compare_settle_seconds: float = Field(default=720.0, ge=0)
+    kg_compare_timeout_seconds: float = Field(default=1200.0, gt=0)
     # Directory of note files the indexer reads; retrieval traverses their [[wikilinks]].
     knowledge_dir: str = "knowledge"
     # Upper bound on `expand_note`'s model-supplied `hops`; larger values are clamped, not rejected.
@@ -89,6 +91,17 @@ class KgSettings(BaseSettings):
                 "notes directory, so a Postgres-only deployment would answer some questions from "
                 "an empty tree. Use kg_store='dual' (reads from the tree, writes both, compared "
                 "nightly) until the read flip ships."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_comparison_budget_outlasts_its_pause(self) -> Self:
+        """The comparison's activity budget must be longer than the pause it sleeps through."""
+        if self.kg_compare_timeout_seconds <= self.kg_compare_settle_seconds:
+            raise ValueError(
+                f"kg_compare_timeout_seconds={self.kg_compare_timeout_seconds} does not outlast "
+                f"kg_compare_settle_seconds={self.kg_compare_settle_seconds}: the run would be "
+                "cancelled during its own pause. Raise the timeout or lower the pause."
             )
         return self
 

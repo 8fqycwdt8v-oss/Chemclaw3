@@ -250,8 +250,16 @@ spec:
               A note was written to the tree and its Postgres copy failed. The chemist's write
               succeeded and nothing is lost, but the stores now differ and the clean-comparison
               window the read flip waits for restarts.
+        {{- /* Each background replica publishes its own last comparison, and a gauge keeps its
+               value until the process dies, so `max()` over the family would keep one pod's old
+               finding alive after another pod's later run found none. The series that count are
+               those of the pod whose `last_run_timestamp` is the newest. */}}
         - alert: ChemclawKnowledgeStoresDiffer
-          expr: max(chemclaw_kg_compare_differences) > 0
+          expr: >-
+            (sum by (pod) (chemclaw_kg_compare_differences)
+            and on (pod) (chemclaw_kg_compare_last_run_timestamp_seconds
+            == scalar(max(chemclaw_kg_compare_last_run_timestamp_seconds))))
+            > 0
           for: 0m
           labels:
             severity: warning
@@ -262,6 +270,33 @@ spec:
               The last nightly comparison found notes that differ between the tree and Postgres.
               The `kind` label says how: missing from one side, different content, a different
               validity window, or different edges.
+{{- if eq (dig "CHEMCLAW_KG_STORE" "git" .Values.config) "dual" }}
+
+        {{- /* A comparison that never completes reads as the clean days the read flip counts: a
+               paused Schedule, a worker that never came back, a run failing every attempt all leave
+               the differences gauge as it was and `ChemclawKnowledgeStoresDiffer` silent. The
+               timestamp is republished by every completed comparison, difference or none, so its
+               age is the liveness. It is 0 in a process that has not completed one, so the same
+               expression covers a fresh install (the hold keeps that from paging, as for the
+               absence rules below) and a family nobody reports. Rendered only under
+               `CHEMCLAW_KG_STORE=dual`, the one mode with a comparison to be missing. */}}
+        - alert: ChemclawKnowledgeCompareNotRunning
+          expr: >-
+            time() - max(chemclaw_kg_compare_last_run_timestamp_seconds)
+            > {{ mul 2 60 (int (dig "CHEMCLAW_KG_COMPARE_SCHEDULE_MINUTES" 1440 .Values.config)) }}
+            or absent(chemclaw_kg_compare_last_run_timestamp_seconds)
+          for: {{ int (dig "CHEMCLAW_KG_COMPARE_SCHEDULE_MINUTES" 1440 .Values.config) }}m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgecomparenotrunning
+            summary: The notes tree has not been compared with Postgres for two schedule intervals
+            description: >-
+              No background worker has completed a comparison in twice
+              `CHEMCLAW_KG_COMPARE_SCHEDULE_MINUTES`. The days since then are not clean days, they
+              are unobserved ones. Check the `kg-compare` Schedule (`/schedules`), the background
+              workers, and `last_outcome` of the Schedule's run.
+{{- end }}
 
     - name: chemclaw.correctness
       rules:

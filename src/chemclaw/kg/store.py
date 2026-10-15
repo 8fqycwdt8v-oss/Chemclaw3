@@ -14,8 +14,8 @@ is; a note is never read through it.
 """
 
 import asyncio
-from collections.abc import Collection, Hashable, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Hashable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 from pathlib import Path
@@ -101,7 +101,9 @@ class NoteUnit:
     subject's write conditional on the revision the writer read: `None` writes whatever is there,
     `0` requires the note to be new, `n` requires revision `n`. `arrived` dates the subject's first
     appearance when it is imported rather than recorded now; a store that keeps no arrival date of
-    its own (the tree dates a note by its commit) ignores it.
+    its own (the tree dates a note by its commit) ignores it. `retired_from` maps a retirement's id
+    to the `content_sha` of the note its copy was made from; a store that applies a retirement to
+    the note as it stands keeps the copy's added sentence only if that is still the note it holds.
     """
 
     subject: Note
@@ -109,6 +111,7 @@ class NoteUnit:
     retirements: tuple[Note, ...] = ()
     expected_revision: int | None = None
     arrived: date | None = None
+    retired_from: Mapping[str, str] = field(default_factory=dict)
 
     def ordered(self) -> list[tuple[Role, Note]]:
         """The notes in write order, each id once, with the role it is written in."""

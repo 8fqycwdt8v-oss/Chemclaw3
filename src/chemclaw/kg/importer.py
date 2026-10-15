@@ -19,7 +19,7 @@ from chemclaw.kg.graph import note_arrivals, scan_notes_dir
 from chemclaw.kg.note import NoteError, read_note
 from chemclaw.kg.postgres_store import PostgresNoteStore
 from chemclaw.kg.rows import DEFAULT_TENANT, canonical_note, content_sha
-from chemclaw.kg.store import NoteUnit, NoteWriteError
+from chemclaw.kg.store import NoteUnit
 
 
 @dataclass
@@ -84,8 +84,12 @@ async def import_notes(
     store = PostgresNoteStore(tenant)
     summary = ImportSummary(source=str(source), tenant=tenant, dry_run=dry_run)
     arrivals = await asyncio.to_thread(note_arrivals, source)
+    # Read before any note is attempted: a database that is not there is the run's failure, while
+    # one that fails on a single note is that note's.
+    await store.signature()
     held = await store.fingerprints() if dry_run else {}
-    files = sorted((path for path, _ in scan_notes_dir(source)), key=lambda p: (p.stem, str(p)))
+    # Id order; files of one id stay in path order, as the graph resolves a duplicate.
+    files = sorted((path for path, _ in scan_notes_dir(source)), key=lambda p: (p.stem, p))
     claimed: dict[str, Path] = {}
     for path in files:
         try:
@@ -113,7 +117,9 @@ async def import_notes(
                     summary.updated += 1
                 continue
             outcome = await store.put(NoteUnit(note, arrived=arrivals.get(note.id)))
-        except (NoteWriteError, NoteError) as exc:
+        except Exception as exc:
+            # One note's failure (a refusal, or a database error on that statement) does not stop
+            # the notes after it: the run is incomplete, and says which.
             summary.skipped.append((note.id, f"{type(exc).__name__}: {exc}"))
             continue
         if not outcome.written:

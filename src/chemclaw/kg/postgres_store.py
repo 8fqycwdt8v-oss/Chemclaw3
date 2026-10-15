@@ -33,6 +33,7 @@ from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.rows import (
     DEFAULT_TENANT,
     canonical_note,
+    content_sha,
     edge_columns,
     note_columns,
     note_from_columns,
@@ -270,15 +271,16 @@ def _admit_subject(unit: NoteUnit, note: Note, current: _Held | None) -> None:
         raise NoteRevisionConflict(note.id, unit.expected_revision, actual)
 
 
-def _closed(current: Note, retirement: Note) -> Note:
+def _closed(current: Note, retirement: Note, read_sha: str | None) -> Note:
     """`current` with the window and the `superseded-by` relations of `retirement` applied.
 
     The rest of the copy a retirement carries was read at some earlier revision and may have been
-    edited since, so it is not applied, with one exception: a body that is the stored body with
-    text added after it is the retirement helper's own sentence (`close_refuted_note`,
-    `retire_note`) and is kept, which is what the file writer does with the same copy. A body that
-    does not extend the stored one was written from a stale read and is left out. A window that
-    would end before the note starts is refused.
+    edited since, so it is not applied, with one exception: the sentence the retirement helper
+    added after the body (`close_refuted_note`, `retire_note`), which the file writer keeps too. It
+    is kept only when `read_sha`, the digest of the note the copy was made from, is the digest of
+    the note stored now, and the copy's body extends it. A text compare alone cannot tell an
+    extension from a stored note edited shorter since, and would put the deleted text back. A
+    window that would end before the note starts is refused.
     """
     known = {(r.rel, r.to) for r in current.outgoing_relations()}
     relations = [*current.relations]
@@ -289,7 +291,11 @@ def _closed(current: Note, retirement: Note) -> Note:
     changes: dict[str, Any] = {"relations": relations}
     if retirement.valid_to is not None:
         changes["valid_to"] = retirement.valid_to
-    if retirement.body != current.body and retirement.body.startswith(current.body):
+    if (
+        read_sha is not None
+        and read_sha == content_sha(current)
+        and retirement.body.startswith(current.body)
+    ):
         changes["body"] = retirement.body
     try:
         return canonical_note(Note(**{**current.model_dump(), **changes}))
@@ -523,6 +529,16 @@ class PostgresNoteStore:
 
     # --- Writing ---------------------------------------------------------------------------
 
+    async def note_revision(self, note_id: str) -> int:
+        """The revision `note_id` is at, or 0 when there is no such note.
+
+        The value `NoteUnit.expected_revision` takes for a write conditional on it.
+        """
+        async with self._read() as conn:
+            cursor = await conn.execute(_SELECT_HELD, (self._tenant, [note_id]))
+            row = await cursor.fetchone()
+        return 0 if row is None else int(row[1])
+
     async def link_note_index(self) -> int:
         """Point each unlinked `note_index` row at the note of the same id; return how many.
 
@@ -586,20 +602,25 @@ class PostgresNoteStore:
                     continue
                 if role == "subject":
                     _admit_subject(unit, note, current)
+                if role == "retirement" and (
+                    note.created_by == "human" if current is None else current.created_by == "human"
+                ):
+                    # A person's note is not retired in place, whether or not this store holds it
+                    # yet: the file writer leaves the copy alone either way, and a closed copy
+                    # inserted here would be a note the tree does not have.
+                    log_event(
+                        log,
+                        "kg.write.amendment_left_alone",
+                        "left %s alone: it is a human's note, so it is not retired in place "
+                        "— the note recorded alongside it still lands and marks it as "
+                        "contradicted",
+                        note.id,
+                        level=logging.WARNING,
+                        note_id=note.id,
+                    )
+                    continue
                 if role == "retirement" and current is not None:
-                    if current.created_by == "human":
-                        log_event(
-                            log,
-                            "kg.write.amendment_left_alone",
-                            "left %s alone: it is a human's note, so it is not retired in place "
-                            "— the note recorded alongside it still lands and marks it as "
-                            "contradicted",
-                            note.id,
-                            level=logging.WARNING,
-                            note_id=note.id,
-                        )
-                        continue
-                    note = _closed(stored[note.id], note)
+                    note = _closed(stored[note.id], note, unit.retired_from.get(note.id))
                 row = note_columns(note)
                 if current is not None and current.content_sha == row["content_sha"]:
                     await self._repair_derived(conn, note, row)

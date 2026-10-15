@@ -22,6 +22,7 @@ from chemclaw.core.db import connect, pooling
 from chemclaw.kg.importer import import_notes
 from chemclaw.kg.note import Note
 from chemclaw.kg.postgres_store import PostgresNoteStore
+from chemclaw.kg.render import render_note
 from chemclaw.kg.store import NoteUnit
 from tests.kg_repo import notes_repo, write_notes
 from tests.note_store_harness import empty_note_tables
@@ -261,3 +262,38 @@ async def test_the_command_exits_zero_one_or_two(
     monkeypatch.setattr(settings, "postgres_dsn", "postgresql://nobody@127.0.0.1:1/none")
     assert await _run(str(source)) == 2
     assert "the import could not run" in capsys.readouterr().err
+
+
+async def test_a_duplicate_id_is_won_by_the_first_file_in_path_order_as_the_graph_resolves_it(
+    source: Path,
+) -> None:
+    """`a/` sorts before `a-b/` as a path, and after it as a string: the graph goes by the path."""
+    for directory, body in (("a", "From a."), ("a-b", "From a-b.")):
+        (source / directory).mkdir()
+        (source / directory / "dup.md").write_text(
+            render_note(_note("dup", body)), encoding="utf-8"
+        )
+    summary = await import_notes(source)
+    stored = await PostgresNoteStore().get("dup")
+    assert stored is not None and stored.body == "From a."
+    assert [i for i, _ in summary.skipped] == ["dup"]
+
+
+async def test_a_database_error_on_one_note_is_that_notes_and_the_rest_are_imported(
+    source: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_notes(source, *(_note(i) for i in ("one", "two", "three")))
+    real_put = PostgresNoteStore.put
+
+    async def flaky(self: PostgresNoteStore, unit: NoteUnit) -> Any:
+        if unit.subject.id == "three":
+            raise RuntimeError("deadlock detected")
+        return await real_put(self, unit)
+
+    monkeypatch.setattr(PostgresNoteStore, "put", flaky)
+    summary = await import_notes(source)
+    assert summary.created == 2 and not summary.complete
+    assert summary.skipped == [("three", "RuntimeError: deadlock detected")]
+    assert {n.id for n in await PostgresNoteStore().notes()} == {"one", "two"}
+    assert await _run(str(source)) == 1
+    assert "SKIPPED three: RuntimeError: deadlock detected" in capsys.readouterr().out

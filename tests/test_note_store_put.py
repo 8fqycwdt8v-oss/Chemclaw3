@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from chemclaw.kg.note import Note, Relation
+from chemclaw.kg.rows import canonical_note, content_sha
 from chemclaw.kg.store import NoteUnit, NoteWriteError, PutOutcome
 from tests.note_store_harness import STORES, Harness
 
@@ -68,7 +69,10 @@ async def test_a_retirement_closes_the_note_and_keeps_the_sentence_that_says_why
             "body": f"{stored.body}\n\nSuperseded by [[new]]: kept for the record.",
         }
     )
-    await harness.store.put(NoteUnit(_note("new", "Replaces [[old]]."), retirements=(retired,)))
+    made_from = {"old": content_sha(canonical_note(stored))}
+    await harness.store.put(
+        NoteUnit(_note("new", "Replaces [[old]]."), retirements=(retired,), retired_from=made_from)
+    )
     closed = await harness.store.get("old")
     assert closed is not None
     assert closed.valid_to == date(2026, 3, 31)

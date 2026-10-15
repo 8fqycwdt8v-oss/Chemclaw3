@@ -3,8 +3,10 @@
 Run: `python -m chemclaw.cli.kg_import [DIR] [--tenant T] [--dry-run] [--json]`.
 
 Exit codes: 0 every note file was imported or was already there; 1 some were not (unparseable,
-a second file for one id, a note the store refuses; all named); 2 the import could not run (no such
-directory, database unreachable). The logic is `kg.importer`.
+a second file for one id, a note the store refuses, a database error on that note; all named); 2 the
+import could not run (no such directory, database unreachable, or the directory is a checkout that
+is not at the remote's tip: it would copy old notes over newer ones; `--allow-stale` is for a
+directory that is a copy, not the deployment's clone). The logic is `kg.importer`.
 """
 
 import argparse
@@ -17,6 +19,7 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.db import pooling
 from chemclaw.core.logging import configure_logging
+from chemclaw.kg.git_writer import GitNoteWriter
 from chemclaw.kg.importer import ImportSummary, import_notes
 from chemclaw.kg.rows import DEFAULT_TENANT
 
@@ -53,6 +56,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tenant", default=DEFAULT_TENANT, help="the tenant to import into.")
     parser.add_argument("--dry-run", action="store_true", help="report; write nothing.")
     parser.add_argument("--json", action="store_true", help="print the summary as JSON.")
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="import even if the directory is a checkout that is not at the remote's tip.",
+    )
     options = parser.parse_args(argv)
     source = options.source if options.source is not None else settings.knowledge_path
     if not source.is_dir():
@@ -60,6 +68,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     configure_logging()
     try:
+        lagging = (
+            None
+            if options.allow_stale
+            else asyncio.run(GitNoteWriter(repo_dir=str(source)).lagging_reason())
+        )
+        if lagging is not None:
+            print(f"the import was refused: {lagging}", file=sys.stderr)
+            return 2
         summary = asyncio.run(_run(source, options.tenant, options.dry_run))
     except Exception as exc:
         print(f"the import could not run: {type(exc).__name__}: {exc}", file=sys.stderr)

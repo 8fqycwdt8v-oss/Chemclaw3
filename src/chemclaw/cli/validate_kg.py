@@ -10,8 +10,10 @@ An unreachable database or an empty corpus fails the gate loudly rather than pas
 
 `--compare` is a different question: whether the notes directory and the Postgres store serve the
 same canonical notes and edges (`kg.compare`). Exit 0 when they do, 1 when any note differs, 2 when
-the comparison could not run. `--repair` (under `kg_store=dual` only) then copies the directory's
-version of each differing note into Postgres.
+the comparison could not run. A difference must persist across `--settle-seconds` (default
+`kg_compare_settle_seconds`) to be reported. `--repair` (under `kg_store=dual` only) then copies the
+directory's version of each differing note into Postgres, and refuses (exit 2) unless the directory
+is a checkout at the remote's tip: from one behind it, it would put old notes over newer ones.
 """
 
 import argparse
@@ -26,6 +28,7 @@ from chemclaw.core.db import pooling
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.kg.compare import Comparison, Repair, compare_stores, repair_from_tree
+from chemclaw.kg.git_writer import GitNoteWriter
 from chemclaw.kg.postgres_store import PostgresNoteStore
 from chemclaw.kg.rows import DEFAULT_TENANT
 from chemclaw.kg.store import GitNoteStore
@@ -61,6 +64,11 @@ def _print_comparison(found: Comparison) -> None:
 
 def _compare_main(options: argparse.Namespace, notes_dir: Path) -> int:
     """`--compare` (and `--repair`): print the report as text or JSON; return the exit code."""
+    settle = (
+        options.settle_seconds
+        if options.settle_seconds is not None
+        else settings.kg_compare_settle_seconds
+    )
     if options.repair and settings.kg_store != "dual":
         print(
             f"--repair is for kg_store=dual, and this is kg_store={settings.kg_store}: with only "
@@ -70,8 +78,14 @@ def _compare_main(options: argparse.Namespace, notes_dir: Path) -> int:
         )
         return 2
     try:
+        lagging = asyncio.run(GitNoteWriter(repo_dir=str(notes_dir)).lagging_reason())
+        if lagging is not None and options.repair:
+            print(f"--repair refused: {lagging}", file=sys.stderr)
+            return 2
+        if lagging is not None:
+            print(f"WARNING: {lagging}; differences below may be that lag.", file=sys.stderr)
         found, repaired, after = asyncio.run(
-            _compare(notes_dir, options.tenant, options.settle_seconds, options.repair)
+            _compare(notes_dir, options.tenant, settle, options.repair)
         )
     except Exception as exc:
         print(f"the comparison could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -123,8 +137,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--settle-seconds",
         type=float,
-        default=0.0,
-        help="with --compare: look again after this pause and report only what persists.",
+        default=None,
+        help="with --compare: look again after this pause and report only what persists "
+        "(default: kg_compare_settle_seconds; 0 looks once).",
     )
     options = parser.parse_args(argv)
     if (options.repair or options.json) and not options.compare:

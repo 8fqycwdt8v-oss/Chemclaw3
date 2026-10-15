@@ -68,7 +68,8 @@ operator repairs (2); the settings refuse `postgres` (2).**
 
 Why the failed-write order cannot be the inverse: `record_note` awaits the tree's writer and only
 then calls `put`, so Postgres is written only after the tree has the note. A tree failure raises
-before Postgres is asked; a cancelled call between the two leaves the tree ahead, which the
+before Postgres is asked; a call cancelled between the two leaves the tree ahead, which is
+counted and logged like a failure (the note is in the tree whatever happened to the task) and the
 comparison finds. The one exception is a batching writer (`backfill_corpus`), which returns before
 its commit, so a backfill under a non-git store writes each note on its own.
 
@@ -78,11 +79,25 @@ locked, because a lock spanning the tree and the database would hold a pooled co
 write for a mode that exists to be removed. The comparison finds it and the repair ends it, and a
 test drives it.
 
-Differences are reported only if they persist across `kg_compare_settle_seconds` (default 330, above
-the 300 s clone sync), so a note another pod has written, whose clone has not synced, is not a
-finding. A retirement's added sentence is kept by Postgres when it extends the stored body (the
-file writer keeps it); a copy that does not extend it was read before someone's edit and only its
-window and `superseded-by` edge are applied.
+The comparison looks twice: a difference seen at the first look is reported only if it is still
+there after `kg_compare_settle_seconds`, and a clean first look is final. A clone lags a write by up
+to two sync intervals (the sidecar's sleep, then a refresh the writer's lock can skip once), so the
+pause is 2 x `knowledge.sync.intervalSeconds` + 120 s, which the chart derives and the code default
+equals for the chart's 300 s; a pod holding a commit it has not pushed never catches up and reports
+its notes until its next write pushes them.
+
+A command that copies the tree into Postgres (`kg-import`, `--repair`) refuses unless the
+directory is a checkout at the remote's tip, from a fetch: from a clone behind it, the comparison
+calls Postgres's newer note a difference and the repair would put the old one back, then compare
+against the same clone and say OK. A repair is also conditional on the note being as compared
+(its digest) and its `put` on the revision read just before.
+
+A retirement copy is its note plus the sentence the helper added. Postgres keeps the sentence (the
+file writer does) only on the note the copy was made from, named by digest in the unit
+(`retired_from`, taken by `record_note` from the store being read before the write); otherwise it
+applies the window and the `superseded-by` edge alone, since a text comparison cannot tell an
+extension from a note edited shorter and would put deleted text back. A retirement of a person's
+note Postgres lacks is left alone, as the file writer leaves it.
 
 ## Consequences
 
@@ -90,9 +105,19 @@ window and `superseded-by` edge are applied.
 - A note a person edits in the repository is not written through `record_note`, so it reaches
   Postgres only by `make kg-import` or `--repair`; until then it is a difference, and the window
   of clean days needs one of them after each such edit.
-- A deployment on `dual` gets a `kg-compare` Schedule (`KgCompareWorkflow`), two alerts
-  (`ChemclawKnowledgeDualWriteFailing`, `ChemclawKnowledgeStoresDiffer`) and a dashboard panel. The
-  seven clean days before the flip are days with neither alert.
+- A deployment on `dual` gets a `kg-compare` Schedule (`KgCompareWorkflow`), three alerts
+  (`ChemclawKnowledgeDualWriteFailing`, `ChemclawKnowledgeStoresDiffer`,
+  `ChemclawKnowledgeCompareNotRunning`) and a dashboard panel. The seven clean days before the flip
+  are days with none of the three: a comparison that never completes leaves the other two silent,
+  so the third (no completion in two schedule intervals, from the completion timestamp) is what
+  makes a day observed.
+- Each background replica keeps its own last result, so the differences alert and the panel read
+  the series of the pod with the newest completion timestamp; a `max()` over the family would keep
+  an old finding alive for as long as its pod lived.
+- After the tenancy change (#606) merges, the import and compare commands bind the tenant
+  (`bound_tenant`) and `postgres_note_store()` takes its tenant from the ambient one. Until then
+  `PostgresNoteStore` holds `default`, and with row-level security on, the import, the comparison
+  and the dual-write mirror would refuse or read nothing.
 - The compare reads both corpora and both graphs whole, so its memory is the corpus twice. That is
   not measured at 20,000 notes (`cli/kg_store_bench` is where to measure it); a keyset-paged pass
   is the change if it matters.
@@ -109,14 +134,21 @@ environment, and an outbox is worth its table), or the comparison's own run time
 - `tests/test_kg_dual_write.py`: both stores equal after writes of every shape (dependencies,
   retirements, a refutation, a person's note, a repeat); a Postgres failure leaves the commit, bumps
   the counter, logs at ERROR, is found by the comparison and fixed by the repair; a tree failure
-  leaves Postgres untouched; two writers of one note end repaired; `git` mode never touches
-  Postgres; the `postgres` arm writes Postgres only; the settings accept `dual` and refuse
+  leaves Postgres untouched; a retirement of a person's note Postgres lacks is left alone; a
+  cancelled call is counted and logged; two writers of one note end repaired; `git` mode never
+  touches Postgres; the `postgres` arm writes Postgres only; the settings accept `dual` and refuse
   `postgres`.
 - `tests/test_kg_compare.py`: a negative control for each difference class, the hand-laid file that
   is not a difference, the settle pause, repair and what it refuses, the command's exit codes, and
   the committed `knowledge/` corpus compared clean after import.
 - `tests/test_kg_import.py`: id order, idempotence, arrival dates from a dated git history, a
-  person's note as a subject, every skipped file named, the dry run, one note in memory at a time.
+  person's note as a subject, every skipped file named, a duplicate won as the graph resolves it,
+  one note's database error not stopping the rest, the dry run, one note in memory at a time.
+- `tests/test_kg_stale_clone.py`: a second clone behind the remote is refused by `--repair` and
+  `kg-import`, warned about by the comparison, and accepted once it has caught up.
+- `tests/test_kg_compare_chart.py`: `promtool` drives the differences alert over two replicas and
+  the not-running alert over a stopped, a never-run and an unreported comparison; the pause the
+  chart derives; the settings relation.
 - `tests/test_kg_compare_workflow.py`, `tests/test_schedules.py`, `tests/test_deploy_chart.py`: the
   activity, the workflow under Temporal's sandbox, the Schedule that exists only under `dual`, and a
   consumer for each new metric.

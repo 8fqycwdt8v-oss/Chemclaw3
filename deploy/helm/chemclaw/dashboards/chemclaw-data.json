@@ -1090,7 +1090,7 @@
       "id": 26,
       "type": "graph",
       "title": "Knowledge stores: dual-write failures and differing notes",
-      "description": "Only meaningful under `kg_store=dual`, where a note is written to the notes tree and then to Postgres. `dual-write failures` counts notes that reached the tree but not Postgres: the chemist's write succeeded and the stores now differ until a repeat of the write or `make kg-validate-compare ARGS=--repair`. The other series is the last nightly comparison's count of differing notes by kind (`missing_in_postgres`, `missing_in_git`, `canonical`, `validity`, `edges`); it is absent until a comparison has run, and every kind at zero for seven days is what the read flip waits for.",
+      "description": "Only meaningful under `kg_store=dual`, where a note is written to the notes tree and then to Postgres. `dual-write failures` counts notes that reached the tree but not Postgres: the chemist's write succeeded and the stores now differ until a repeat of the write or `make kg-validate-compare ARGS=--repair`. The other series is the last nightly comparison's count of differing notes by kind (`missing_in_postgres`, `missing_in_git`, `canonical`, `validity`, `edges`); only the pod that compared last is shown (each replica keeps its own last result); it is absent until a comparison has run, and every kind at zero for seven days, with the not-running alert silent, is what the read flip waits for.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1104,7 +1104,7 @@
           "refId": "A"
         },
         {
-          "expr": "max by (kind) (chemclaw_kg_compare_differences)",
+          "expr": "max by (kind) (chemclaw_kg_compare_differences and on (pod) (chemclaw_kg_compare_last_run_timestamp_seconds == scalar(max(chemclaw_kg_compare_last_run_timestamp_seconds))))",
           "legendFormat": "differing notes: {{kind}}",
           "refId": "B"
         }

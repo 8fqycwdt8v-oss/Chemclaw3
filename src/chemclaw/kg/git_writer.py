@@ -369,6 +369,44 @@ class GitNoteWriter:
         # A non-zero exit is an answer here ("no such ref"), not an error.
         return None if returncode != 0 else stdout
 
+    async def lagging_reason(self) -> str | None:
+        """Why this checkout is not at the remote's tip, or `None` when it is (or is no clone).
+
+        For a command that copies the tree somewhere else (an import, a repair): a clone behind the
+        remote would copy old notes over newer ones. Fetches the base branch, then compares `HEAD`
+        with `<remote>/<base>`. It never changes the working tree: the sync sidecar and the writer
+        own that, so a clone that is behind is reported, not fast-forwarded. A directory that is no
+        checkout, or has no such remote, has no tip to be behind.
+        """
+        if await self._read("rev-parse", "--is-inside-work-tree") is None:
+            return None
+        returncode, url, _ = await self._exec(("config", "--get", f"remote.{self._remote}.url"))
+        if returncode != 0 or not url:
+            return None
+        try:
+            await self._git("fetch", self._remote, self._base, transient=True)
+        except GitWriteError as exc:
+            return f"cannot reach {self._remote} to check that this checkout is current: {exc}"
+        tip_ref = f"{self._remote}/{self._base}"
+        head, tip = await self._read("rev-parse", "HEAD"), await self._read("rev-parse", tip_ref)
+        if head is None or tip is None:
+            return f"cannot resolve HEAD and {tip_ref} to check that this checkout is current"
+        if head == tip:
+            return None
+        behind = (await self._exec(("merge-base", "--is-ancestor", head, tip)))[0] == 0
+        ahead = (await self._exec(("merge-base", "--is-ancestor", tip, head)))[0] == 0
+        if behind:
+            return (
+                f"this checkout is behind {tip_ref} ({head[:9]} against {tip[:9]}): it would copy "
+                "older notes over newer ones. Let the sync bring it up to date, then run again"
+            )
+        if ahead:
+            return (
+                f"this checkout holds commits {tip_ref} lacks ({head[:9]} against {tip[:9]}), "
+                "a note written here that has not been pushed; the next write pushes it"
+            )
+        return f"this checkout and {tip_ref} have diverged ({head[:9]} against {tip[:9]})"
+
     def _contained_note_path(self, relative: str) -> Path:
         """Resolve the note path inside the notes checkout and refuse anything escaping it.
 

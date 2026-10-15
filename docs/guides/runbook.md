@@ -1635,10 +1635,26 @@ holds a note the tree does not: an interrupted batch backfill, or a clone that h
 `canonical`, `validity` and `edges` (the content, the validity window, or the stored edges differ).
 List them with `make kg-validate-compare` (`ARGS=--json` for a machine-readable list). A
 difference that did not persist for `CHEMCLAW_KG_COMPARE_SETTLE_SECONDS` is not reported, so a note
-another pod wrote a minute before the run is not a finding. `ARGS=--repair` copies the tree's note
-into Postgres for each difference; it leaves what it cannot decide (a note only Postgres holds) and
-says why. The scheduled run only compares: a repair that ran by itself would turn every divergence
+another pod wrote a minute before the run is not a finding. (A clone lags a write by up to two
+sync intervals; the chart derives the pause from `knowledge.sync.intervalSeconds` as 2 x interval +
+120 s. A pod that holds a commit it has not pushed never catches up, and reports its notes as
+differences until its next write pushes them.) Each replica keeps its own last result; the alert
+and the panel read the pod with the newest `chemclaw_kg_compare_last_run_timestamp_seconds`.
+`ARGS=--repair` copies the tree's note
+into Postgres for each difference; it leaves what it cannot decide (a note only Postgres holds, a
+note that changed in Postgres after it was compared) and says why, and it refuses outright unless the
+checkout is at the remote's tip. The scheduled run only compares: a repair that ran by itself would turn every divergence
 into a clean day.
+
+#### ChemclawKnowledgeCompareNotRunning
+`warning`, rendered only under `CHEMCLAW_KG_STORE=dual`. No background worker has completed the
+nightly comparison in two schedule intervals (`chemclaw_kg_compare_last_run_timestamp_seconds` is
+the newest completion across the replicas; 0 in a process that has not completed one). The days
+since are unobserved, not clean, so they do not count toward the seven the read flip waits for.
+Check the `kg-compare` Schedule is present and not paused (`/schedules`, `make schedules-apply`),
+that a `background-jobs` worker is running, and the Schedule's `last_outcome`: a run that fails
+every attempt (the database, or the settle pause outlasting `CHEMCLAW_KG_COMPARE_TIMEOUT_SECONDS`)
+leaves exactly this signal and nothing else.
 
 #### ChemclawKnowledgeCorpusStale
 `warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —

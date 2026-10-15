@@ -260,6 +260,20 @@
          containers take their publish target from the same pair (`chemclaw.knowledgePublishPath`)
          instead of a `publishPath` value of their own. */}}
   CHEMCLAW_NOTE_REPO_DIR: {{ .Values.knowledge.noteRepoPath | quote }}
+  {{- /* While both note stores are written, the nightly comparison waits out the clone lag before it
+         calls a difference one. A pod's clone is behind by up to two sync intervals (the sidecar's
+         sleep, then a refresh the writer's lock can skip once), so the pause derives from
+         `knowledge.sync.intervalSeconds` and cannot be left shorter than the sync it waits for;
+         the run's budget outlasts the pause. Either is still stated in `config` to override it. */}}
+  {{- if eq (dig "CHEMCLAW_KG_STORE" "git" .Values.config) "dual" }}
+  {{- $settle := int (dig "CHEMCLAW_KG_COMPARE_SETTLE_SECONDS" (add (mul 2 (int .Values.knowledge.sync.intervalSeconds)) 120) .Values.config) }}
+  {{- if not (hasKey .Values.config "CHEMCLAW_KG_COMPARE_SETTLE_SECONDS") }}
+  CHEMCLAW_KG_COMPARE_SETTLE_SECONDS: {{ $settle | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "CHEMCLAW_KG_COMPARE_TIMEOUT_SECONDS") }}
+  CHEMCLAW_KG_COMPARE_TIMEOUT_SECONDS: {{ add $settle 480 | quote }}
+  {{- end }}
+  {{- end }}
   {{- /* Derived from `temporal.namespace` rather than hand-written in `config`, for the reason the
          two above are and one more: this is the only string separating two releases on one broker,
          so the value the gate at the top of this file refused to leave unstated has to be the same

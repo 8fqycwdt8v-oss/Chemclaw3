@@ -14,6 +14,7 @@ an agent's copy would replace).
 """
 
 import logging
+import time
 from asyncio import sleep
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -23,8 +24,9 @@ import networkx as nx
 
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, NoteError
-from chemclaw.kg.rows import canonical_note
-from chemclaw.kg.store import NoteStore, NoteUnit, NoteWriteError, WritableNoteStore
+from chemclaw.kg.postgres_store import PostgresNoteStore
+from chemclaw.kg.rows import canonical_note, content_sha
+from chemclaw.kg.store import NoteStore, NoteUnit, NoteWriteError
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +36,19 @@ KINDS = ("missing_in_postgres", "missing_in_git", "canonical", "validity", "edge
 _WINDOW = frozenset({"valid_from", "valid_to"})
 _Edge = tuple[str, str, object, object, object]
 
-# The last published count per kind, read by `chemclaw_kg_compare_differences`. Kept here and not in
-# the workflow module, which Temporal's sandbox imports again and would rebind the gauge to an
-# empty copy. Not seeded: a process that has not compared publishes no series rather than an
-# invented clean day.
+# The last published count per kind, read by `chemclaw_kg_compare_differences`, and when it was
+# published, read by `chemclaw_kg_compare_last_run_timestamp_seconds` (0 until this process has
+# completed a comparison). Kept here and not in the workflow module, which Temporal's sandbox
+# imports again and would rebind the gauges to empty copies. The counts are not seeded: a process
+# that has not compared publishes no series rather than an invented clean day. Replicas each hold
+# their own pair, so a reader selects the series of the newest timestamp.
 _PUBLISHED: dict[str, float] = {}
+_LAST_RUN = [0.0]
 
 record_metric(lambda m: m.bind_gauge_family("chemclaw_kg_compare_differences", lambda: _PUBLISHED))
+record_metric(
+    lambda m: m.bind_gauge("chemclaw_kg_compare_last_run_timestamp_seconds", lambda: _LAST_RUN[0])
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,9 @@ class Difference:
     note_id: str
     kinds: tuple[str, ...]
     fields: tuple[str, ...] = ()
+    #: The digest of the note Postgres held when it was compared (`None`: it held none), so a repair
+    #: can tell that the note moved since.
+    postgres_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,12 +154,13 @@ def _difference(
         kinds.append("canonical")
     if tree_edges != stored_edges:
         kinds.append("edges")
-    return Difference(note_id, tuple(kinds), fields) if kinds else None
+    return Difference(note_id, tuple(kinds), fields, content_sha(stored)) if kinds else None
 
 
 def publish_differences(comparison: Comparison) -> None:
-    """Make `chemclaw_kg_compare_differences` read this comparison's count of each kind."""
+    """Make the gauges read this comparison's count of each kind, and the time it completed."""
     _PUBLISHED.update({kind: float(count) for kind, count in comparison.counts().items()})
+    _LAST_RUN[0] = time.time()
 
 
 async def _unparseable(store: NoteStore, note_ids: Iterable[str]) -> set[str]:
@@ -226,14 +238,18 @@ async def compare_stores(
 
 
 async def repair_from_tree(
-    tree: NoteStore, postgres: WritableNoteStore, differences: Iterable[Difference]
+    tree: NoteStore, postgres: PostgresNoteStore, differences: Iterable[Difference]
 ) -> Repair:
     """Put the tree's version of every differing note into Postgres, and say what could not be.
 
     A note only Postgres holds is left: the tree is the authority but nothing here deletes a note,
     so someone decides whether it is a write the tree lost or one Postgres should not have. A note
-    the store refuses (an agent's copy over a human's note) is left with the store's reason. A
-    repair is a `put`, so repeating it changes nothing.
+    the store refuses (an agent's copy over a human's note) is left with the store's reason. A note
+    that changed in Postgres since it was compared is left too, and the put itself is conditional
+    on the revision read just before, so a write that lands between the two is refused rather than
+    overwritten. The caller owes the check that the tree is current
+    (`GitNoteWriter.lagging_reason`): a repair from a clone behind the remote would put old notes
+    over newer ones. A repair is a `put`, so repeating it changes nothing.
     """
     arrivals = await tree.arrivals()
     repaired: list[str] = []
@@ -243,8 +259,7 @@ async def repair_from_tree(
             unrepaired.append(
                 (
                     difference.note_id,
-                    "only Postgres holds it; the tree is the authority and no "
-                    "repair deletes a note",
+                    "only Postgres holds it; the tree is the authority and no repair deletes it",
                 )
             )
             continue
@@ -252,8 +267,17 @@ async def repair_from_tree(
         if note is None:
             unrepaired.append((difference.note_id, "the tree does not serve it (unparseable?)"))
             continue
+        revision = await postgres.note_revision(difference.note_id)
+        held = await postgres.get(difference.note_id)
+        if (None if held is None else content_sha(held)) != difference.postgres_sha:
+            unrepaired.append(
+                (difference.note_id, "Postgres changed it after the comparison; compare again")
+            )
+            continue
         try:
-            await postgres.put(NoteUnit(note, arrived=arrivals.get(note.id)))
+            await postgres.put(
+                NoteUnit(note, expected_revision=revision, arrived=arrivals.get(note.id))
+            )
         except (NoteWriteError, NoteError) as exc:
             unrepaired.append((difference.note_id, f"{type(exc).__name__}: {exc}"))
             continue

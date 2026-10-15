@@ -308,3 +308,52 @@ def _commit_log(clone: Path) -> list[str]:
         ["git", "-C", str(clone), "log", "--format=%H"], capture_output=True, text=True, check=True
     )
     return done.stdout.split()
+
+
+async def test_a_retirement_of_a_persons_note_postgres_lacks_is_left_alone_as_the_file_is(
+    dual: Dual,
+) -> None:
+    """Postgres does not insert the closed copy of a note the tree leaves alone."""
+    human = Note(id="curated", type="playbook", created_by="human", body="A person's playbook.")
+    await dual.curated(human)
+    closed = Note(
+        id="curated",
+        type="playbook",
+        created_by="human",
+        body="A person's playbook.",
+        valid_to=date(2026, 1, 1),
+    )
+    await dual.record(_note("successor", "Contradicts [[curated]]."), superseded=[closed])
+    assert (await dual.git.get("curated")).valid_to is None  # type: ignore[union-attr]
+    assert await dual.postgres.get("curated") is None
+    assert await dual.differences() == {"curated": ("missing_in_postgres",)}
+
+
+async def test_a_cancellation_after_the_tree_commit_is_counted_logged_and_re_raised(
+    dual: Dual, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The note is in the tree whatever happened to the task: both counters say so."""
+    started = asyncio.Event()
+    real_put = PostgresNoteStore.put
+
+    async def hang(self: PostgresNoteStore, unit: Any) -> Any:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(PostgresNoteStore, "put", hang)
+    failed, recorded = METRICS.value(_FAILED), METRICS.value(_RECORDED)
+    task = asyncio.ensure_future(dual.record(_note("interrupted", "Cancelled mid-mirror.")))
+    await asyncio.wait_for(started.wait(), 60)
+    task.cancel()
+    with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
+        await task
+    assert (dual.clone / "knowledge" / "playbook" / "interrupted.md").exists()
+    assert METRICS.value(_FAILED) == failed + 1
+    assert METRICS.value(_RECORDED) == recorded + 1
+    assert any(
+        "kg.dual_write.failed" in r.getMessage() and "interrupted" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
+    monkeypatch.setattr(PostgresNoteStore, "put", real_put)
+    assert await dual.differences() == {"interrupted": ("missing_in_postgres",)}

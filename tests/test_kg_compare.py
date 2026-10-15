@@ -8,6 +8,8 @@ note) is not a difference. The committed `knowledge/` corpus, imported, compares
 import asyncio
 import hashlib
 import json
+import re
+import time
 from collections.abc import AsyncIterator
 from datetime import date
 from pathlib import Path
@@ -40,6 +42,12 @@ from tests.kg_repo import write_notes
 from tests.note_store_harness import corpus, empty_note_tables
 
 _SHIPPED = Path(__file__).resolve().parents[1] / "knowledge"
+
+
+@pytest.fixture(autouse=True)
+def _look_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command's default pause is the setting's (minutes); these tests look once."""
+    monkeypatch.setattr(settings, "kg_compare_settle_seconds", 0.0)
 
 
 @pytest.fixture
@@ -267,6 +275,10 @@ def test_a_comparison_reports_every_kind_and_serialises() -> None:
 def test_the_last_comparison_is_what_the_gauge_reads() -> None:
     publish_differences(Comparison(1, 1, (Difference("a", ("validity",)),)))
     text = METRICS.render()
+    sample = re.search(r"^chemclaw_kg_compare_last_run_timestamp_seconds (\S+)$", text, re.M)
+    assert sample is not None
+    stamp = float(sample.group(1))
+    assert abs(stamp - time.time()) < 60
     assert 'chemclaw_kg_compare_differences{kind="validity"} 1' in text
     assert 'chemclaw_kg_compare_differences{kind="edges"} 0' in text
     publish_differences(Comparison(1, 1, ()))
@@ -341,3 +353,45 @@ async def test_the_command_exits_two_when_it_cannot_compare(
     monkeypatch.setattr(settings, "postgres_dsn", "postgresql://nobody@127.0.0.1:1/none")
     assert await _run("--compare", str(pair[2])) == 2
     assert "the comparison could not run" in capsys.readouterr().err
+
+
+# --- A repair puts back only what it compared ---------------------------------------------------
+
+
+async def test_a_repair_leaves_a_note_that_moved_in_postgres_after_it_was_compared(
+    pair: tuple[GitNoteStore, PostgresNoteStore, Path],
+) -> None:
+    git, postgres, _ = pair
+    await _fill(pair, _note("moved", "The tree's version."), only="git")
+    await _fill(pair, _note("moved", "An old version."), only="postgres")
+    found = await compare_once(git, postgres)
+    await postgres.put(NoteUnit(_note("moved", "Someone's newer edit.")))
+    result = await repair_from_tree(git, postgres, found.differences)
+    assert result.repaired == ()
+    assert "changed it after the comparison" in dict(result.unrepaired)["moved"]
+    stored = await postgres.get("moved")
+    assert stored is not None and stored.body == "Someone's newer edit."
+
+
+async def test_a_write_landing_between_the_repairs_check_and_its_put_is_not_overwritten(
+    pair: tuple[GitNoteStore, PostgresNoteStore, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put is conditional on the revision read first, so a late writer is refused, not lost."""
+    git, postgres, _ = pair
+    await _fill(pair, _note("racy", "The tree's version."), only="git")
+    await _fill(pair, _note("racy", "An old version."), only="postgres")
+    found = await compare_once(git, postgres)
+    real_get = PostgresNoteStore.get
+
+    async def racing_get(self: PostgresNoteStore, note_id: str) -> Note | None:
+        held = await real_get(self, note_id)
+        monkeypatch.setattr(PostgresNoteStore, "get", real_get)
+        await PostgresNoteStore().put(NoteUnit(_note("racy", "A writer got in between.")))
+        return held
+
+    monkeypatch.setattr(PostgresNoteStore, "get", racing_get)
+    result = await repair_from_tree(git, postgres, found.differences)
+    assert result.repaired == ()
+    assert "NoteRevisionConflict" in dict(result.unrepaired)["racy"]
+    stored = await postgres.get("racy")
+    assert stored is not None and stored.body == "A writer got in between."

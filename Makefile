@@ -132,7 +132,7 @@ mutant-stats:  ## Write the last run's per-category counts to mutants/mutmut-cic
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
 	uv run python -m chemclaw.cli.validate_kg
 
-kg-validate-compare:  ## Compare the notes directory with the Postgres note store, canonical notes and edges (ARGS="--repair --json --settle-seconds 330").
+kg-validate-compare:  ## Compare the notes directory with the Postgres note store, canonical notes and edges (waits out the settle pause when anything differs; ARGS="--repair --json --settle-seconds 0").
 	uv run python -m chemclaw.cli.validate_kg --compare $(ARGS)
 
 kg-import:  ## Load the notes directory into the Postgres note store, idempotently (ARGS="--dry-run --tenant T --json").

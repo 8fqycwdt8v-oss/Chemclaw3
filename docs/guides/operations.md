@@ -238,11 +238,13 @@ is read:
 3. The `kg-compare` Schedule (apply with `make schedules-apply`) compares both stores every
    `kg_compare_schedule_minutes`; `ChemclawKnowledgeStoresDiffer` fires on any difference. By hand:
    `make kg-validate-compare` (`ARGS="--json"`), and `ARGS=--repair` to copy the tree's notes into
-   Postgres. Run `make kg-import` again before the flip to link the index rows of notes recorded
+   Postgres. `kg-import` and `--repair` refuse (exit 2) on a checkout that is not at the remote's tip,
+   so run them where the sync is current. Run `make kg-import` again before the flip to link the index rows of notes recorded
    since. A note a person edits in the repository reaches Postgres only this way (the mirror is
    `record_note`'s), so each such edit is a difference until `make kg-import` or `--repair` runs;
    a window with human edits needs one of them after each.
-4. Seven days with neither alert is the condition for moving the reads. `postgres` is refused at
+4. Seven days with none of the three alerts (`ChemclawKnowledgeDualWriteFailing`, `ChemclawKnowledgeStoresDiffer`, `ChemclawKnowledgeCompareNotRunning`: a comparison that never completes
+   leaves the first two silent) is the condition for moving the reads. `postgres` is refused at
    startup until that change ships; set `git` to roll back.
 
 ### 4.4 Hook Jobs on every release

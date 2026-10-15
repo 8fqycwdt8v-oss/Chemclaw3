@@ -1028,6 +1028,13 @@ _MAX_SERIES_PER_COUNTER = 256
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
+    # Each background replica holds its own last comparison, so the differences gauge alone cannot
+    # say whose reading is current: a rule selects the series of the newest timestamp. 0 until this
+    # process has completed a comparison.
+    "chemclaw_kg_compare_last_run_timestamp_seconds": (
+        "Unix time at which this process last completed a tree-versus-Postgres comparison "
+        "(0 = none yet)."
+    ),
     "chemclaw_egress_guard_armed": "1 when the in-process egress guard is installed, else 0.",
     # Whether the compiled `LD_PRELOAD` interposer (`netguard_preload.c`) is loaded, separate from
     # the Python guard: sockets opened below the interpreter (gRPC, the OTLP exporter, the Temporal
