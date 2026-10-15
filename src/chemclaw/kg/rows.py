@@ -4,10 +4,12 @@ The mapping is pure so the schema (`infra/sql/128_kg_notes.sql`, `129_kg_note_se
 model agree in one place: `id`, `type`, `created_by`, the validity window and `body` are columns;
 every other `Note` field is the `frontmatter` JSONB, in the shape
 `Note.model_dump(mode="json", exclude_none=True)` gives. A field the model grows needs no migration.
-`content_sha` is the digest of the canonical render: the Markdown `render_note` produces with this
-process's credentials redacted, the text `record_note` would commit. It is not the digest of a
-file's bytes, which also depends on how a person laid the file out. A store keeps `canonical_note`,
-so what it holds is what that text parses back to.
+`content_sha` is the digest of the canonical render of the note as stored: `render_note` of
+`canonical_note(n)`, with credentials redacted. A store keeps `canonical_note`, so what it holds is
+what that text parses back to. That is the text `record_note` commits unless reading the file back
+changes the note (whitespace at the edges of a body, CRLF, U+2028); then the file's bytes and this
+digest differ, and so do both from a hand-laid file. Compare stores by canonical note, never by
+digest.
 """
 
 import hashlib
@@ -41,11 +43,11 @@ def canonical_note(note: Note) -> Note:
 
 
 def content_sha(note: Note) -> str:
-    """`sha256:<hex>` of the canonical, redacted render of `note`.
+    """`sha256:<hex>` of the redacted render of `note`, as given.
 
-    The same text `kg.record` writes to a file, so a note recorded through the writer has the same
-    digest as the file it produced. A hand-edited file differs from its canonical render, and so
-    from this.
+    For a note already in canonical form (`canonical_note`, what a store holds) this is the stored
+    digest. For any other it is the digest of the text `kg.record` would write for that note, which
+    differs from the stored one when reading that text back changes the note.
     """
     canonical = redact_secrets(render_note(note))
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"

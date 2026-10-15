@@ -10,8 +10,10 @@
 --
 -- Additive and expand-only: the column defaults to '' and nothing reads it before the Postgres
 -- store, which also writes it. `kg_notes` holds no row when this runs (nothing wrote it before
--- the store that writes this column), so there is nothing to backfill; a change to
--- `search_text()` is a re-put of the notes, which the importer already is.
+-- the store that writes this column), so there is nothing to backfill. The haystack is a function
+-- of the note's content, which `content_sha` does not cover, so a change to `search_text()` or a
+-- row written without the column is repaired by writing the same note again: the store refreshes
+-- the haystack and the edges of an unchanged note without adding a revision.
 --
 -- A term shorter than three characters yields no trigram and scans the table, as `085` states for
 -- job records; at the size of a note corpus that is milliseconds, and two-letter terms (`Pd`) are

@@ -43,7 +43,9 @@ from chemclaw.kg.store import (
     HumanNoteProtected,
     NoteRevisionConflict,
     NoteUnit,
+    NoteWriteError,
     PutOutcome,
+    Role,
     SearchResult,
 )
 
@@ -163,25 +165,33 @@ _SELECT_HELD = (
 )
 _INSERT_NOTE = (
     "INSERT INTO kg_notes (tenant_id, id, type, frontmatter, body, created_by, valid_from, "
-    "valid_to, revision, content_sha, search_text) "
+    "valid_to, revision, content_sha, search_text, created_at, updated_at) "
     "VALUES (%(tenant)s, %(id)s, %(type)s, %(frontmatter)s, %(body)s, %(created_by)s, "
-    "%(valid_from)s, %(valid_to)s, %(revision)s, %(content_sha)s, %(search_text)s) "
+    "%(valid_from)s, %(valid_to)s, %(revision)s, %(content_sha)s, %(search_text)s, "
+    "clock_timestamp(), clock_timestamp()) "
     "ON CONFLICT (tenant_id, id) DO NOTHING"
 )
 _UPDATE_NOTE = (
     "UPDATE kg_notes SET type = %(type)s, frontmatter = %(frontmatter)s, body = %(body)s, "
     "created_by = %(created_by)s, valid_from = %(valid_from)s, valid_to = %(valid_to)s, "
     "revision = %(revision)s, content_sha = %(content_sha)s, search_text = %(search_text)s, "
-    "updated_at = now() "
+    "updated_at = clock_timestamp() "
     "WHERE tenant_id = %(tenant)s AND id = %(id)s AND revision = %(held)s"
 )
 _INSERT_REVISION = (
     "INSERT INTO kg_note_revisions (tenant_id, note_id, revision, type, frontmatter, body, "
-    "created_by, valid_from, valid_to, content_sha, recorded_by) "
+    "created_by, valid_from, valid_to, content_sha, recorded_by, recorded_at) "
     "VALUES (%(tenant)s, %(id)s, %(revision)s, %(type)s, %(frontmatter)s, %(body)s, "
-    "%(created_by)s, %(valid_from)s, %(valid_to)s, %(content_sha)s, %(recorded_by)s)"
+    "%(created_by)s, %(valid_from)s, %(valid_to)s, %(content_sha)s, %(recorded_by)s, "
+    "clock_timestamp())"
 )
 _DELETE_EDGES = "DELETE FROM kg_edges WHERE tenant_id = %s AND src = %s"
+_SELECT_DERIVED = (
+    "SELECT n.search_text, e.rel, e.dst, e.valid_from, e.valid_to, e.confidence "
+    "FROM kg_notes n LEFT JOIN kg_edges e ON e.tenant_id = n.tenant_id AND e.src = n.id "
+    "WHERE n.tenant_id = %s AND n.id = %s"
+)
+_REFRESH_SEARCH_TEXT = "UPDATE kg_notes SET search_text = %s WHERE tenant_id = %s AND id = %s"
 _INSERT_EDGE = (
     "INSERT INTO kg_edges (tenant_id, src, rel, dst, valid_from, valid_to, confidence) "
     "VALUES (%(tenant)s, %(src)s, %(rel)s, %(dst)s, %(valid_from)s, %(valid_to)s, %(confidence)s)"
@@ -254,6 +264,27 @@ def _admit_subject(unit: NoteUnit, note: Note, current: _Held | None) -> None:
     actual = 0 if current is None else current.revision
     if unit.expected_revision is not None and unit.expected_revision != actual:
         raise NoteRevisionConflict(note.id, unit.expected_revision, actual)
+
+
+def _closed(current: Note, retirement: Note) -> Note:
+    """`current` with the window and the `superseded-by` relations of `retirement` applied.
+
+    Only those: the rest of the copy a retirement carries was read at some earlier revision and
+    may have been edited since. A window that would end before the note starts is refused.
+    """
+    known = {(r.rel, r.to) for r in current.outgoing_relations()}
+    relations = [*current.relations]
+    for relation in retirement.relations:
+        if relation.rel == "superseded-by" and (relation.rel, relation.to) not in known:
+            known.add((relation.rel, relation.to))
+            relations.append(relation)
+    changes: dict[str, Any] = {"relations": relations}
+    if retirement.valid_to is not None:
+        changes["valid_to"] = retirement.valid_to
+    try:
+        return canonical_note(Note.model_validate({**current.model_dump(), **changes}))
+    except ValidationError as exc:
+        raise NoteWriteError(f"cannot retire note {current.id!r} as it now stands: {exc}") from exc
 
 
 class PostgresNoteStore:
@@ -487,14 +518,24 @@ class PostgresNoteStore:
 
         Each note is stored as its redacted canonical render reads back, with a new revision row.
         A dependency that exists is left alone. A subject or retirement whose content is identical
-        to what is stored writes nothing, so a repeat is a no-op. A retirement of a human's note is
-        left alone and logged, and the subject still lands. The subject is refused
-        (`HumanNoteProtected`) when it is agent-authored and a human's note holds the id, and
-        `expected_revision` that differs from the stored one raises `NoteRevisionConflict`. Either
-        raises before any row changes: the transaction rolls back whole.
+        to what is stored writes no revision, so a repeat is a no-op; it does repair the columns
+        derived from the content (the search haystack and the edges) if they differ.
+
+        A retirement closes the note as it is *now*: its `valid_to` and its `superseded-by`
+        relations are applied to the stored revision, and nothing else of the copy it carries is.
+        A copy read before someone else's edit therefore cannot undo that edit, which the file
+        writer, replacing the whole file, can. A retirement of a human's note is left alone and
+        logged, and the subject still lands.
+
+        The subject is refused (`HumanNoteProtected`) when it is agent-authored and a human's note
+        holds the id, and an `expected_revision` that differs from the stored one raises
+        `NoteRevisionConflict`. `created_by` is taken as given: whoever calls `put` has
+        authenticated the author. Either refusal raises before any row changes: the transaction
+        rolls back whole.
 
         Writers of the same ids queue on a transaction-scoped advisory lock taken in id order, so
-        two units that share a note neither interleave nor deadlock.
+        two units that share a note neither interleave nor deadlock. Timestamps are taken after the
+        lock, so a note's `recorded_at` never runs backwards with its revision.
         """
         planned = [(role, canonical_note(note)) for role, note in unit.ordered()]
         ids = sorted({note.id for _, note in planned})
@@ -513,33 +554,94 @@ class PostgresNoteStore:
             await conn.execute(_LOCK_IDS, {"tenant": self._tenant, "ids": lock})
             cursor = await conn.execute(_SELECT_HELD, (self._tenant, ids))
             held = {row[0]: _Held(row[1], row[2], row[3]) for row in await cursor.fetchall()}
+            stored = await self._stored_for_retirement(conn, planned, held)
             for role, note in planned:
                 current = held.get(note.id)
                 if current is not None:
                     revisions[note.id] = current.revision
-                row = note_columns(note)
                 if role == "dependency" and current is not None:
                     continue
                 if role == "subject":
                     _admit_subject(unit, note, current)
-                if role == "retirement" and current is not None and current.created_by == "human":
-                    log_event(
-                        log,
-                        "kg.write.amendment_left_alone",
-                        "left %s alone: it is a human's note, so it is not retired in place — the "
-                        "note recorded alongside it still lands and marks it as contradicted",
-                        note.id,
-                        level=logging.WARNING,
-                        note_id=note.id,
-                    )
-                    continue
+                if role == "retirement" and current is not None:
+                    if current.created_by == "human":
+                        log_event(
+                            log,
+                            "kg.write.amendment_left_alone",
+                            "left %s alone: it is a human's note, so it is not retired in place "
+                            "— the note recorded alongside it still lands and marks it as "
+                            "contradicted",
+                            note.id,
+                            level=logging.WARNING,
+                            note_id=note.id,
+                        )
+                        continue
+                    note = _closed(stored[note.id], note)
+                row = note_columns(note)
                 if current is not None and current.content_sha == row["content_sha"]:
+                    await self._repair_derived(conn, note, row)
                     continue
                 revision = 1 if current is None else current.revision + 1
                 await self._write(conn, note, row, current, revision, recorded_by)
                 revisions[note.id] = revision
                 written.append(note.id)
         return PutOutcome(subject=unit.subject.id, revisions=revisions, written=tuple(written))
+
+    async def _stored_for_retirement(
+        self,
+        conn: psycopg.AsyncConnection[TupleRow],
+        planned: list[tuple[Role, Note]],
+        held: dict[str, _Held],
+    ) -> dict[str, Note]:
+        """The stored copy of every note a retirement is about to close, read under the lock."""
+        closing = [
+            note.id
+            for role, note in planned
+            if role == "retirement" and note.id in held and held[note.id].created_by != "human"
+        ]
+        if not closing:
+            return {}
+        cursor = await conn.execute(_SELECT_SOME, (self._tenant, closing))
+        stored: dict[str, Note] = {}
+        for row in await cursor.fetchall():
+            if (note := _note_or_none(row)) is None:
+                raise NoteWriteError(f"note {row[0]!r} is stored in a form the schema refuses")
+            stored[row[0]] = note
+        return stored
+
+    async def _repair_derived(
+        self, conn: psycopg.AsyncConnection[TupleRow], note: Note, row: dict[str, Any]
+    ) -> None:
+        """Make the search haystack and the edges match `note` without adding a revision.
+
+        They are functions of the content, so unchanged content normally leaves them right. They
+        are wrong for a row written before the haystack column existed, or by an older definition
+        of either, and an identical write is the repair.
+        """
+        cursor = await conn.execute(_SELECT_DERIVED, (self._tenant, note.id))
+        found = await cursor.fetchall()
+        stored_edges = {tuple(r[1:]) for r in found if r[1] is not None}
+        wanted_edges = {
+            (e["rel"], e["dst"], e["valid_from"], e["valid_to"], e["confidence"])
+            for e in edge_columns(note)
+        }
+        if found and found[0][0] != row["search_text"]:
+            await conn.execute(_REFRESH_SEARCH_TEXT, (row["search_text"], self._tenant, note.id))
+        if stored_edges != wanted_edges:
+            await self._derive_edges(conn, note, replace=True)
+
+    async def _derive_edges(
+        self, conn: psycopg.AsyncConnection[TupleRow], note: Note, *, replace: bool
+    ) -> None:
+        """Write the edges `note` asserts, first removing the ones it asserted before."""
+        if replace:
+            await conn.execute(_DELETE_EDGES, (self._tenant, note.id))
+        edges = edge_columns(note)
+        if edges:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    _INSERT_EDGE, [{"tenant": self._tenant, **edge} for edge in edges]
+                )
 
     async def _write(
         self,
@@ -564,11 +666,4 @@ class PostgresNoteStore:
             latest = await (await conn.execute(_SELECT_HELD, (self._tenant, [note.id]))).fetchone()
             raise NoteRevisionConflict(note.id, values["held"], 0 if latest is None else latest[1])
         await conn.execute(_INSERT_REVISION, {**values, "recorded_by": recorded_by})
-        if current is not None:
-            await conn.execute(_DELETE_EDGES, (self._tenant, note.id))
-        edges = edge_columns(note)
-        if edges:
-            async with conn.cursor() as cur:
-                await cur.executemany(
-                    _INSERT_EDGE, [{"tenant": self._tenant, **edge} for edge in edges]
-                )
+        await self._derive_edges(conn, note, replace=current is not None)
