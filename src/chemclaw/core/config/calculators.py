@@ -169,6 +169,14 @@ class CalculatorSettings(BaseSettings):
     # Bound on one remote calculation (minutes for a Hessian); a durable job's activity bounds the
     # same wait again.
     calc_server_timeout_seconds: float = Field(default=900.0, gt=0)
+    # How this process reaches the fleet's backends, `calc` and `rxnlabel` alike: `mcp` opens an MCP
+    # session per call; `rpc` posts typed JSON to `/rpc/<tool>` over pooled connections and refuses
+    # a server whose `/healthz` contract_version predates it (no silent fall back). One setting so
+    # the rollback is one value.
+    calc_transport: Literal["rpc", "mcp"] = "mcp"
+    # How long the pool keeps an idle `rpc` connection. Keep it below the backend's uvicorn
+    # `--timeout-keep-alive` (5 s), or the server closes a connection the pool is about to reuse.
+    backend_rpc_keepalive_seconds: float = Field(default=4.0, gt=0)
     # Bound for a CREST search, matched to the server's `crest_timeout_seconds`: a shorter client
     # bound saves nothing, since the server keeps computing and the answer is discarded.
     calc_sampling_timeout_seconds: float = Field(default=14400.0, gt=0)

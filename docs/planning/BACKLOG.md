@@ -33,6 +33,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
+- [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms) and a cluster run on `rpc`; then delete the MCP path for backends:
+  `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `short_connect_client`, `invoke`), `connectors/calc/remote.py::_open_transport`, `ingest/labels/labeller.py::_open_transport`, `core/backend_rpc.py::BackendSession`, the `calc_transport` setting and `tests/test_backend_rpc_fleet.py`'s MCP arms.
 - [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
   clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
 - [ ] **The turn relay polls Postgres 8 times a second per held turn and per remote watcher** [L] — measured (two processes, defaults): idle holder 0.4 → 8.3 xact/s, +8.0 per remote watcher; remote attach 0.35 s vs 0.05 s local, remote Stop 0.32 s vs 0.07 s;
