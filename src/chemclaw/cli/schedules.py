@@ -12,6 +12,7 @@ import asyncio
 import logging
 import sys
 
+from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.schedules import (
@@ -34,6 +35,11 @@ def _print_plan() -> None:
     print(f"{len(plan)} schedule(s) planned by this configuration:")
     for job in plan:
         print(f"  apply  {job.schedule_id} (every {job.interval}) -> {job.workflow.__name__}")
+    if settings.tenancy_enabled:
+        print(
+            "tenancy is on: each job that sweeps tenant data is applied once per registered "
+            "tenant as <id>@<tenant> (the registry is not read in a dry run)"
+        )
     stale = sorted(OWNED_SCHEDULE_IDS - {job.schedule_id for job in plan})
     print(f"{len(stale)} owned schedule id(s) not planned, deleted if they exist in Temporal:")
     for schedule_id in stale:

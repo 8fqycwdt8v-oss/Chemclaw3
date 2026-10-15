@@ -625,7 +625,11 @@ class PostgresFingerprintStore:
         insert_values = "%(source)s, %(id)s" if source_keyed else "%(id)s"
         # The definition is in the key, so a second definition inserts beside the first; a re-write
         # under one definition updates in place.
-        conflict = "(source, id, definition)" if source_keyed else "(id, definition)"
+        conflict = (
+            "(source, id, definition)"
+            if source_keyed
+            else "ON CONSTRAINT molecule_fingerprints_pkey"
+        )
         # Ties break by the whole key, matching the in-memory backend's `(source, id)` sort.
         self._order = 'source COLLATE "C", id COLLATE "C"' if source_keyed else 'id COLLATE "C"'
         self._upsert = (

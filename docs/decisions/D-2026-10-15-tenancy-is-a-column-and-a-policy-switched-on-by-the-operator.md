@@ -101,8 +101,11 @@ and its default then becomes `coalesce(nullif(current_setting('app.tenant', true
 An `INSERT` that does not name the tenant takes the connection's, so no store grows a parameter and
 the policy's `WITH CHECK` is what refuses a row for any other. A key that a source or a hash makes
 and two tenants can both produce (`calculation_results.key`, `structures`, the blobs, the
-fingerprints and measurements, `note_index.note_id`) gains `tenant_id` as its **last** column, so a
-lookup by the old key still leads the index and `ON CONFLICT` names `(…, tenant_id)`. Keys a
+fingerprints and measurements, `note_index.note_id`), or that begins with a person who may be moved
+from one tenant to another (preferences, composed workflows, the budget), gains `tenant_id` as its
+**last** column, so a lookup by the old key still leads the index. The key changes when the
+operator switches tenancy on, not in the migration, and the stores name it by constraint
+(`ON CONFLICT ON CONSTRAINT …`), which is the same statement under either key. Keys a
 process mints (session, turn, job, exhibit and design ids) keep their key: a tenant cannot collide
 with them. A name a source gives (`source`, `path`) cannot collide because a data source belongs to
 one tenant and source names are unique in a deployment.

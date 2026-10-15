@@ -49,7 +49,7 @@ SHELL := bash
   mutants mutant-results mutant-stats kg-validate eval eval-strict eval-baseline-check \
   eval-baseline eln-validate skill-validate connector-validate datasource-validate sink-validate \
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
-  db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
+  db-grants schedules-apply tenant-add tenant-list connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
   kind-smoke synthesize reindex reindex-full reembed share-estimate share-sync rekey-compounds user-erase \
   openapi sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
@@ -290,6 +290,13 @@ db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on
 
 schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
 	uv run python -m chemclaw.cli.schedules
+
+tenant-add:  ## Register a tenant: make tenant-add TENANT=acme. Idempotent; run under the owning principal.
+	@test -n "$(TENANT)" || { echo "tenant-add: name the tenant, e.g. make tenant-add TENANT=acme" >&2; exit 2; }
+	uv run python -m chemclaw.cli.tenants add $(TENANT)
+
+tenant-list:  ## List the registered tenants.
+	uv run python -m chemclaw.cli.tenants list
 
 connectors:  ## Run every enabled local connector's FastAPI app in one dev process.
 	uv run python -m chemclaw.cli.connectors_dev

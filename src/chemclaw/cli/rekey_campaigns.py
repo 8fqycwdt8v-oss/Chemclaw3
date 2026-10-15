@@ -35,7 +35,7 @@ _UPSERT = """
                               created_at, last_asked_at)
     SELECT %s, objective, direction, problem, opened_by, created_at, last_asked_at
       FROM bo_campaigns WHERE campaign_id = %s
-    ON CONFLICT (campaign_id) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT bo_campaigns_pkey DO UPDATE SET
         created_at = LEAST(bo_campaigns.created_at, EXCLUDED.created_at),
         last_asked_at = GREATEST(bo_campaigns.last_asked_at, EXCLUDED.last_asked_at)
 """

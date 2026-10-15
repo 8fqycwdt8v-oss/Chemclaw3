@@ -192,6 +192,29 @@ async def _ensure_vector_width(conn: psycopg.AsyncConnection[TupleRow]) -> None:
     await conn.execute("SELECT ensure_embedding_width(%s)", (dim,))
 
 
+async def _apply_tenancy(conn: psycopg.AsyncConnection[TupleRow]) -> None:
+    """Put every tenant-scoped table's row-level security in the state `tenancy_enabled` names.
+
+    The policies are created by `131_tenancy.sql` and stay disabled until a deployment asks for
+    them, so this is where "inert until an operator turns it on" lives. A table already in the
+    requested state is not touched, so an unchanged setting costs a catalogue read and no lock.
+    Switching tenancy off is refused by the function while more than one tenant is registered.
+    """
+    cursor = await conn.execute("SELECT chemclaw_apply_tenancy(%s)", (settings.tenancy_enabled,))
+    row = await cursor.fetchone()
+    changed = int(row[0]) if row else 0
+    if changed:
+        log_event(
+            logger,
+            "migrate.tenancy_applied",
+            "row-level security is now %s on %d table(s)",
+            "enabled and forced" if settings.tenancy_enabled else "disabled",
+            changed,
+            tables=changed,
+            tenancy_enabled=settings.tenancy_enabled,
+        )
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -300,6 +323,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
                 duration_ms=round((time.perf_counter() - file_started) * 1000, 1),
             )
         await _ensure_vector_width(conn)
+        await _apply_tenancy(conn)
         await conn.commit()
     log_event(
         logger,

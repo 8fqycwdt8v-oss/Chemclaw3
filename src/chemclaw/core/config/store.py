@@ -4,6 +4,8 @@ One domain section of the composed `Settings`; the package `__init__.py` flatten
 owns the env prefix, `.env` loading and cross-section validators.
 """
 
+import re
+
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
@@ -12,6 +14,11 @@ from chemclaw.core.config.dsn import DatabaseDsn
 # Qdrant's own default URL, which `vector_store_url` ships with; named so the addressability
 # validator can tell "left at default" from "set".
 _QDRANT_DEFAULT_URL = "http://localhost:6333"
+
+# A tenant id: a slug short enough to be a header value, a schedule id suffix and a namespace
+# component without escaping. Declared here, beside the settings that carry one, because
+# `core/tenancy.py` imports the configuration and not the reverse.
+TENANT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 
 # Vector databases with a shipped adapter. Names only (`core` imports no sibling); the mapping lives
 # in `retrieval.vectors.registry`, and `tests/test_vector_store.py` keeps the two in step.
@@ -79,6 +86,14 @@ class StoreSettings(BaseSettings):
     # changed; the guarded statements are idempotent deletes, so a retry is safe. 2 so the retry's
     # own collision is not the answer. 0 disables.
     pg_deadlock_retries: int = Field(default=2, ge=0)
+    # Row-level security on every tenant-scoped table. False is the single-tenant deployment: the
+    # policies exist and are disabled, a borrowed connection writes no tenant, and every table
+    # behaves as before. True makes the migrator enable and force the policies and every borrow
+    # carry the bound tenant, so an unbound one reads and writes nothing. Flip it, then migrate.
+    tenancy_enabled: bool = False
+    # The tenant a process works for when no request or activity bound one: a CLI, or a worker run
+    # for one tenant. Empty, with tenancy enabled, is no fallback, so unbound work sees no rows.
+    tenancy_process_tenant: str = ""
     # Keep a calculation's by-products (Hessians, geometries, ensembles) for reuse; bounded by the
     # cap below.
     artifact_store_enabled: bool = True
@@ -121,6 +136,17 @@ class StoreSettings(BaseSettings):
     # (eligibility must reach the index before its top-k). Exceeding it is refused with the filter
     # named, never truncated.
     vector_store_max_scope_keys: int = Field(default=10_000, gt=0)
+
+    @field_validator("tenancy_process_tenant")
+    @classmethod
+    def _process_tenant_is_a_tenant_id(cls, value: str) -> str:
+        """Empty, or a slug: the value is written into `app.tenant` and into schedule ids."""
+        if value and not TENANT_ID_PATTERN.fullmatch(value):
+            raise ValueError(
+                f"tenancy_process_tenant={value!r} is not a tenant id: lowercase letters, digits, "
+                "'_' and '-', starting with a letter or digit, at most 63 characters"
+            )
+        return value
 
     @field_validator("vector_store_provider")
     @classmethod

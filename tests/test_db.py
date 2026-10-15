@@ -256,6 +256,9 @@ _UNBOUNDED_BY_DESIGN = {
     # holds the advisory lock: a pooled connection would be returned to the pool still locked, and
     # the lock lives with the session. It runs one statement to take and one to release the lock.
     "chemclaw/core/job_lock.py",
+    # `cli/tenants.py` registers a tenant under the owning principal (`migration_dsn`), the way the
+    # migrator does: one statement, no pool, and nothing a request can reach.
+    "chemclaw/cli/tenants.py",
 }
 _DEFINITION_SITE = "chemclaw/core/db.py"
 

@@ -39,6 +39,7 @@ from chemclaw.core.identity_context import get_current_correlation_id, get_curre
 from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tenancy import owns_workflow, scope_workflow_id
 from chemclaw.core.tool_registry import polls_moving_state, tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
@@ -120,7 +121,7 @@ def _report_id(request: ReportRequest) -> str:
         request.requested_by,
         *sorted(request.requested_roles),
     ]
-    return f"report-{stable_hash(payload)}"
+    return scope_workflow_id(f"report-{stable_hash(payload)}")
 
 
 @tool
@@ -262,9 +263,9 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: s
     """
     day = datetime.now(UTC).date().isoformat()
     if not fresh:
-        return f"memory-{kind}-{day}"
+        return scope_workflow_id(f"memory-{kind}-{day}")
     suffix = discriminator or datetime.now(UTC).strftime("%H%M%S")
-    return f"memory-{kind}-{day}-{stable_hash(suffix, chars=10)}"
+    return scope_workflow_id(f"memory-{kind}-{day}-{stable_hash(suffix, chars=10)}")
 
 
 @tool
@@ -333,6 +334,9 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
     turn; the HTTP route passes nothing. A RUNNING run that no worker has started reads `queued`,
     with the reason as its summary.
     """
+    if not owns_workflow(job_id):
+        # Temporal answers by id for anyone: another tenant's run is, to this caller, no run.
+        raise ValueError(f"no durable job with id {job_id!r}")
     client = await connect()
     handle = client.get_workflow_handle(job_id)
     try:
@@ -560,6 +564,8 @@ async def cancel_job(job_id: str) -> bool:
     Cooperative: returns once the request is delivered; poll `job_status` for the outcome. Not an
     agent tool — stopping a person's work is that person's decision.
     """
+    if not owns_workflow(job_id):
+        return False
     client = await connect()
     try:
         await client.get_workflow_handle(job_id).cancel()
@@ -586,7 +592,7 @@ def _tournament_id(request: TournamentRequest) -> str:
         request.requested_by,
         *sorted(request.requested_roles),
     ]
-    return f"hypotheses-{stable_hash(payload)}"
+    return scope_workflow_id(f"hypotheses-{stable_hash(payload)}")
 
 
 @tool

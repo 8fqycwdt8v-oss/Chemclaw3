@@ -54,6 +54,9 @@ _BAD_DATA_TYPES = [
     "ElnFormatError",
     "OrdFormatError",
     "IngestError",
+    # A malformed tenant id, or a principal naming none or two (`core/tenancy.py`); retrying reads
+    # the same header.
+    "TenantError",
     # An activity result over `activity_result_max_bytes` (`durable/interceptor.py`); the result is
     # deterministic in the arguments, so a retry is the same size.
     "ActivityResultTooLarge",

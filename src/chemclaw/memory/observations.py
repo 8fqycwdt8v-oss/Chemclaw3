@@ -49,7 +49,7 @@ _REVIVE = """
 _REPLACE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT observations_pkey DO UPDATE SET
     -- The statement restates what the current evidence shows, so it is refreshed rather than kept:
     -- a row whose evidence says three projects must not still read "two projects".
     statement = EXCLUDED.statement,
@@ -65,7 +65,7 @@ ON CONFLICT (id) DO UPDATE SET
 _ACCUMULATE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT ON CONSTRAINT observations_pkey DO UPDATE SET
     evidence_note_ids = COALESCE((
         SELECT array_agg(DISTINCT e ORDER BY e)
           FROM unnest(observations.evidence_note_ids || EXCLUDED.evidence_note_ids) AS e

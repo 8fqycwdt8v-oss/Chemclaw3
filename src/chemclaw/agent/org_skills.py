@@ -44,6 +44,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tenancy import DEFAULT_TENANT, current_tenant
 from chemclaw.core.turn_signals import record_skill_loaded
 
 if TYPE_CHECKING:
@@ -69,14 +70,25 @@ _ORG_READ_ONLY = routed(
 )
 
 
+def _tenant_component(base: str) -> str:
+    """`base`, or `base@<tenant>` for any tenant but the default.
+
+    One component, because a store search matches a namespace by whole-component prefix: a second
+    component under `org-skills` would be listed by the default tenant's own search.
+    """
+    tenant = current_tenant()
+    return base if tenant == DEFAULT_TENANT else f"{base}@{tenant}"
+
+
 def org_skills_namespace() -> tuple[str, ...]:
     """The store namespace the active bodies live under.
 
     No actor component: the tier is the organisation's, and every session's prefix stays
     byte-identical. A distinct first component from `memories` and `local-skills` keeps the tiers
-    separately countable and erasable.
+    separately countable and erasable. With tenancy on, a tenant other than `default` has a tier of
+    its own: the organisation is the tenant.
     """
-    return ("org-skills",)
+    return (_tenant_component("org-skills"),)
 
 
 def org_versions_namespace(name: str) -> tuple[str, ...]:
@@ -85,7 +97,7 @@ def org_versions_namespace(name: str) -> tuple[str, ...]:
     Per name, so a listing walks one skill's versions and the cap is per skill. Never mounted; a
     route reads it, so its documents may be JSON.
     """
-    return ("org-skills-versions", name)
+    return (_tenant_component("org-skills-versions"), name)
 
 
 @dataclass(frozen=True)
@@ -137,9 +149,8 @@ def org_skills_backend(store: Any, permits: Callable[[str], bool]) -> PermittedS
     """
     from chemclaw.agent.skill_store_backend import PermittedStoreBackend
 
-    namespace = org_skills_namespace()
     return PermittedStoreBackend(
-        namespace=lambda _runtime: namespace,
+        namespace=lambda _runtime: org_skills_namespace(),
         store=store,
         permits=permits,
         refusal=_ORG_READ_ONLY,

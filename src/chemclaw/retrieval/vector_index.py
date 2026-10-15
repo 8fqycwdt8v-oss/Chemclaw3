@@ -260,7 +260,7 @@ class PostgresNoteIndex:
             "updated_at, corpus_commit_count) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
             "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now(), %(corpus)s) "
-            "ON CONFLICT (note_id) DO UPDATE SET "
+            "ON CONFLICT ON CONSTRAINT note_index_pkey DO UPDATE SET "
             f"{column} = EXCLUDED.{column}, lexeme = EXCLUDED.lexeme, "
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
             "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"

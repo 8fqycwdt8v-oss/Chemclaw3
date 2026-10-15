@@ -67,7 +67,7 @@ def _lease_columns(leases: Sequence[Lease]) -> tuple[list[int], list[int]]:
 _ENQUEUE = """
     INSERT INTO result_publications (sink, calc_ref, document, schema_version)
     VALUES (%s, %s, %s, %s)
-    ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING
+    ON CONFLICT ON CONSTRAINT result_publications_identity DO NOTHING
 """
 
 # "Nobody is working on this row": never claimed, released by a mark, or claimed by a drain past
