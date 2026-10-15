@@ -232,7 +232,13 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
     step = settings.embedding_batch_size
     for start in range(0, len(texts), step):
         chunk = texts[start : start + step]
-        response = client.embeddings.create(model=settings.embedding_model, input=chunk)
+        # `dimensions` only when stated: a gateway that does not know the parameter would refuse it.
+        extra = (
+            {"dimensions": settings.embedding_request_dimensions}
+            if settings.embedding_request_dimensions is not None
+            else {}
+        )
+        response = client.embeddings.create(model=settings.embedding_model, input=chunk, **extra)
         # Paired by `index`, never by position: `data` order is not part of the contract and
         # batching servers reorder. A permutation would give every text its neighbour's vector
         # undetectably.
@@ -256,7 +262,8 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
             f"the embedding endpoint answered with {sorted(widths)}-dimensional vectors for model "
             f"{settings.embedding_model!r}, but embedding_dim is {settings.embedding_dim}; set "
             "embedding_dim to the model's width (the migrator builds that column, and "
-            "`make reembed` moves the corpus), or correct the model name"
+            "`make reembed` moves the corpus), request that width from the model with "
+            "embedding_request_dimensions if it accepts the parameter, or correct the model name"
         )
     return vectors
 

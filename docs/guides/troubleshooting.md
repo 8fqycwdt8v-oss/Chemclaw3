@@ -97,7 +97,7 @@ Settings … Value error, <message>` before anything else runs.
 | `service_max_connections (<n>) is below what this process's own caps can occupy` | front door | Raise `CHEMCLAW_SERVICE_MAX_CONNECTIONS`. |
 | `harness_autonomy='plan_only' with harness_enabled=False enforces nothing` | any | Set `CHEMCLAW_HARNESS_ENABLED=true`. |
 | `budget_enabled=true with every cap at 0 (unlimited) guards nothing` | any | Set a `budget_max_*` cap or disable budgets. |
-| `embedding_dim=<n> is wider than the 2000 dimensions pgvector can index` | any | Ask the embedding model for fewer dimensions, or move the vectors out of Postgres with `vector_store_provider`. |
+| `embedding_dim=<n> is wider than the 2000 dimensions pgvector can index` | any | Request fewer dimensions (`CHEMCLAW_EMBEDDING_DIM` and `CHEMCLAW_EMBEDDING_REQUEST_DIMENSIONS` together, for a model that accepts the parameter), or move the vectors out of Postgres with `vector_store_provider`. |
 | `/readyz` 503 `vector width behind config` | any | The database has no vector column for `CHEMCLAW_EMBEDDING_DIM`: run the migration with it (`make db-migrate`, or the chart's pre-upgrade hook), then `make reembed` — runbook (vi-c). |
 | `log_level=<x> is not a level logging accepts` | any | Fix `CHEMCLAW_LOG_LEVEL`. |
 | `temporal_metrics_port=<n> is also worker_metrics_port` | workers | Give the SDK exporter its own port. |

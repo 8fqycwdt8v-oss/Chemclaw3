@@ -1,8 +1,9 @@
-"""One re-embed pass in its own process, for `tests/test_embedding_width.py`.
+"""One re-embed walk in its own process, for `tests/test_embedding_width.py`.
 
-Runs `reembed_claimed` to exhaustion against the database its environment names. Each batch's
-chunk texts are appended to a log file *after* the claim and *before* the write, and the embedding
-call then waits `hold` seconds, so a test can see what a live process holds and kill it holding it.
+Runs `reembed_after` to exhaustion against the database its environment names. Each batch's chunk
+texts are appended to a log file after the rows are read and before they are written, and the
+embedding call then waits `hold` seconds, so a test can act on the table while a walk is mid-call
+and kill it there.
 
     python -m tests.reembed_probe <log> <hold seconds> <batch size> <chunking key>
 """
@@ -34,11 +35,13 @@ def _install_recorder(log: Path, hold: float) -> None:
 
 
 async def _drain(chunking: str, batch: int) -> int:
-    """Re-embed claimed batches until none remains; return how many chunks this process wrote."""
+    """Walk the table batch by batch until it ends; return how many chunks this process embedded."""
     written = 0
+    cursor = None
     while True:
-        report = await sync.reembed_claimed(PostgresDocumentIndex(), {chunking}, batch)
+        report = await sync.reembed_after(PostgresDocumentIndex(), {chunking}, batch, cursor)
         written += report.embedded
+        cursor = report.cursor or cursor
         if not report.has_more:
             return written
 

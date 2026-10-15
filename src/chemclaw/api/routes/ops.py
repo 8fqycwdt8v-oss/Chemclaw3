@@ -27,6 +27,7 @@ from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.migrate import newest_shipped_migration
 from chemclaw.core.vector_schema import TableVectorState, inspect_tables, live_embedding_keys
+from chemclaw.durable.document_sync import share_sources
 from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
 log = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ async def _probe_database(front: FrontDoorState) -> bool:
     """
     try:
 
-        async def _ask() -> tuple[bool, list[TableVectorState]]:
+        async def _ask() -> tuple[bool, list[TableVectorState] | None]:
             async with db.connection(
                 settings.session_store_dsn or settings.postgres_dsn,
                 statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
@@ -151,7 +152,8 @@ async def _probe_database(front: FrontDoorState) -> bool:
         current, vector_tables = await asyncio.wait_for(
             _ask(), timeout=settings.service_readiness_db_timeout_seconds
         )
-        _record_vector_verdict(front, vector_tables)
+        if vector_tables is not None:
+            _record_vector_verdict(front, vector_tables)
         reachable = True
     except (psycopg.Error, ConnectionError, TimeoutError):
         log.warning("readiness: Postgres did not answer", exc_info=True)
@@ -169,22 +171,37 @@ async def _vector_tables(conn: psycopg.AsyncConnection[Any]) -> list[TableVector
     """The vector tables' state for the configured width; empty where pgvector holds no vectors.
 
     Empty too for a width pgvector cannot index: config refuses that where anything writes the note
-    index, and where nothing does there is nothing to be wrong about.
+    index, and where nothing does there is nothing to be wrong about. Scoped to the cuttings the
+    enabled shares use, the set `make reembed` converges, so the two agree on what "mixed" means.
     """
     if settings.vector_store_provider != "pgvector" or settings.embedding_dim > MAX_VECTOR_DIM:
         return []
-    return await inspect_tables(conn, settings.embedding_dim, live_embedding_keys())
+    chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
+    return await inspect_tables(conn, settings.embedding_dim, live_embedding_keys(), chunkings)
 
 
-async def _vector_tables_if_readable(conn: psycopg.AsyncConnection[Any]) -> list[TableVectorState]:
-    """`_vector_tables`, or nothing for a role that may not read them.
+async def _vector_tables_if_readable(
+    conn: psycopg.AsyncConnection[Any],
+) -> list[TableVectorState] | None:
+    """`_vector_tables`, nothing for a role that may not read them, `None` when it cannot be asked.
 
     A split session store may use a role with no access to the vector tables, as it may have none to
     the ledger (`_schema_carries_this_image`); refusing would be an outage over another server's
     grants. The ledger read may have aborted the transaction, so it is cleared first.
+
+    The question reads the tables, so a migration holding a lock on one (`ensure_embedding_width`
+    on a large table) would otherwise stall it past the probe's budget and turn "a table is busy"
+    into `database unreachable` for every new pod. It gets short local bounds of its own and, when
+    they fire, no answer: the caller keeps the last verdict.
     """
     await conn.rollback()
+    budget = settings.service_readiness_db_timeout_seconds
     try:
+        await conn.execute(
+            "SELECT set_config('lock_timeout', %s, true), "
+            "set_config('statement_timeout', %s, true)",
+            (f"{int(budget * 250)}ms", f"{int(budget * 500)}ms"),
+        )
         return await _vector_tables(conn)
     except psycopg.errors.InsufficientPrivilege:
         log.warning(
@@ -193,6 +210,15 @@ async def _vector_tables_if_readable(conn: psycopg.AsyncConnection[Any]) -> list
             exc_info=True,
         )
         return []
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled):
+        log.warning(
+            "readiness: the vector tables are locked or slow to read, so their width and the "
+            "embedding configurations they hold keep their last verdict",
+            exc_info=True,
+        )
+        return None
+    finally:
+        await conn.rollback()
 
 
 def _record_vector_verdict(front: FrontDoorState, tables: list[TableVectorState]) -> None:

@@ -12,7 +12,7 @@ writes, so it is safe on any connection.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -174,14 +174,38 @@ async def _table_exists(conn: psycopg.AsyncConnection[Any], table: str) -> bool:
     return bool(row and row[0])
 
 
+async def _held_under(
+    conn: psycopg.AsyncConnection[Any], table: str, key: str | None, chunkings: Collection[str]
+) -> bool:
+    """Whether any row of `table` cut under one of `chunkings` carries exactly this key.
+
+    Asked per recorded key, through the key's index, so the cost follows the rows of the *other*
+    configurations (the transient case) and not the table.
+    """
+    statement = sql.SQL(
+        "SELECT EXISTS (SELECT 1 FROM {table} WHERE embedding_key "
+        + ("IS NULL" if key is None else "= %(key)s")
+        + " AND chunking_key = ANY(%(chunkings)s))"
+    ).format(table=sql.Identifier(table))
+    cursor = await conn.execute(statement, {"key": key, "chunkings": sorted(chunkings)})
+    row = await cursor.fetchone()
+    return bool(row and row[0])
+
+
 async def inspect_tables(
-    conn: psycopg.AsyncConnection[Any], dim: int, live_keys: Mapping[str, str]
+    conn: psycopg.AsyncConnection[Any],
+    dim: int,
+    live_keys: Mapping[str, str],
+    document_chunkings: Collection[str] | None = None,
 ) -> list[TableVectorState]:
     """Each vector table's live column width and the keys in it other than `live_keys[table]`.
 
     `live_keys` maps a table to the `embedding_key` a write there would stamp now; it is passed in
     because the note index adds its own text-derivation suffix, which this layer cannot know. A
     table this connection cannot see is left out: an unmigrated database is the ledger's to report.
+    `document_chunkings`, when given, limits `document_chunks` to the cuttings the enabled shares
+    use, which is the set a re-embed converges; a disabled share's rows keep their key until it is
+    enabled again and are not "mixed".
     """
     column = embedding_column(dim)
     states = []
@@ -189,13 +213,15 @@ async def inspect_tables(
         if not await _table_exists(conn, table):
             continue
         live = live_keys[table]
-        keys = await recorded_keys(conn, table)
+        keys = [key for key in await recorded_keys(conn, table) if key != live]
+        if table == "document_chunks" and document_chunkings is not None:
+            keys = [key for key in keys if await _held_under(conn, table, key, document_chunkings)]
         states.append(
             TableVectorState(
                 table=table,
                 column=column,
                 column_width=await column_width(conn, table, column),
-                foreign_keys=tuple(key for key in keys if key != live),
+                foreign_keys=tuple(keys),
             )
         )
     return states

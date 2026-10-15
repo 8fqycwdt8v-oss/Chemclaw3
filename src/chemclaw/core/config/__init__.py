@@ -619,9 +619,10 @@ class Settings(
         if writes_note_index and pgvector_notes and self.embedding_dim > MAX_VECTOR_DIM:
             raise ValueError(
                 f"embedding_dim={self.embedding_dim} is wider than the {MAX_VECTOR_DIM} dimensions "
-                "pgvector can index, so the note_index vector column cannot be built. Ask the "
-                "embedding model for fewer dimensions, drop 'vector' from data_sources, or move "
-                "the vectors out of Postgres with vector_store_provider."
+                "pgvector can index, so the note_index vector column cannot be built. Request "
+                "fewer dimensions from the model (embedding_dim and embedding_request_dimensions "
+                "together, for a model that accepts the parameter), drop 'vector' from "
+                "data_sources, or move the vectors out of Postgres with vector_store_provider."
             )
         return self
 

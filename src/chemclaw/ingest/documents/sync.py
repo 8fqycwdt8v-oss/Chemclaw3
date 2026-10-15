@@ -35,10 +35,10 @@ from chemclaw.ingest.documents.binding import DocumentShareBinding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import CrawlResult, FileRef, crawl_share
 from chemclaw.ingest.documents.index import (
+    ChunkCursor,
     ChunkRecord,
     DocumentIndex,
     FileRecord,
-    PostgresDocumentIndex,
     StaleChunk,
 )
 from chemclaw.ingest.documents.isolate import ParseWorkerLost, parse_document_isolated
@@ -112,6 +112,8 @@ class ReembedReport(BaseModel):
     # not retried forever), which makes a total provider outage look like "up to date"; this is the
     # third state.
     stalled: bool = False
+    # A scan only: the last row it read, whether or not it embedded, to resume after.
+    cursor: ChunkCursor | None = None
 
 
 class _Parsed(BaseModel):
@@ -479,8 +481,8 @@ async def reembed_stale(
     Reads stored chunk text, never the share, so it is cheap enough to run at the head of every sync
     and a model change heals itself. Rows cut under a chunking no enabled share uses are skipped,
     since the crawl will re-cut and re-embed them; `chunkings` is passed in because the caller owns
-    which shares are enabled. Takes no claim: two overlapping passes may embed the same chunk, and
-    `reembed_claimed` is the pass that does not.
+    which shares are enabled. Takes no lock: two overlapping passes may embed the same chunk, and
+    the write skips whichever lost.
 
     Args:
         index: The document index to refresh.
@@ -500,24 +502,31 @@ async def reembed_stale(
     return _reembed_report(stale, len(refreshed), failed, limit, key)
 
 
-async def reembed_claimed(
-    index: PostgresDocumentIndex, chunkings: set[str], limit: int = 500
+async def reembed_after(
+    index: DocumentIndex, chunkings: set[str], limit: int, after: ChunkCursor | None
 ) -> ReembedReport:
-    """`reembed_stale`, over rows this pass holds against every other worker.
+    """`reembed_stale` as one step of a walk through the table in primary-key order.
 
-    The batch is locked (`FOR UPDATE SKIP LOCKED`) from the read to the write, so concurrent passes
-    embed disjoint chunks and none is embedded twice; a pass killed before its write changes
-    nothing, which makes the job resumable from wherever it stopped. For an index that cannot hold a
-    row lock (vectors in an external store) the claim degrades to `reembed_stale`'s.
+    The batch starts after `after` and the report carries the last row read, embedded or not, so a
+    chunk that will not embed is passed once and counted rather than met first in every batch. The
+    walk ends when a batch comes back short. No row is locked: a peer pass, the scheduled sync or
+    the crawl may reach the same chunk, and `store_embeddings` skips what is no longer stale, so
+    the cost of the overlap is an occasional embedding paid twice.
     """
     key = embedding_config_key()
-    async with index.claim_stale(key, limit, chunkings) as claim:
-        if not claim.chunks:
-            return ReembedReport()
-        refreshed, failed = await _embed_stale(claim.chunks)
-        if refreshed:
-            await claim.store(_with_vectors(refreshed))
-    return _reembed_report(claim.chunks, len(refreshed), failed, limit, key)
+    stale = await index.stale_chunks(key, limit, chunkings, after)
+    if not stale:
+        return ReembedReport()
+    refreshed, failed = await _embed_stale(stale)
+    if refreshed:
+        await index.store_embeddings(_with_vectors(refreshed), key)
+    last = stale[-1]
+    report = _reembed_report(stale, len(refreshed), failed, limit, key)
+    report.has_more = len(stale) == limit
+    report.cursor = ChunkCursor(
+        doc_id=last.doc_id, chunking_key=last.chunking_key, ordinal=last.ordinal
+    )
+    return report
 
 
 async def _embed_stale(
@@ -525,8 +534,8 @@ async def _embed_stale(
 ) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
     """Embed the batch, falling back to one chunk at a time so one bad chunk costs only itself.
 
-    `stale_chunks` returns the same first batch every time and the drain runs before the crawl, so
-    a batch failure that starved the corpus would starve it for good.
+    A scan that always starts from the first stale row would meet the same failing batch every time,
+    so a batch failure must cost one chunk and not the pass.
     """
     try:
         embeddings = await asyncio.to_thread(

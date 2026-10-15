@@ -13,9 +13,8 @@ deterministically.
 """
 
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -33,7 +32,7 @@ from chemclaw.core.fulltext import (
     reference_terms,
     reference_tokens,
 )
-from chemclaw.core.vector_schema import embedding_column, recorded_keys
+from chemclaw.core.vector_schema import embedding_column
 from chemclaw.ingest.documents.binding import DocumentShareError
 from chemclaw.ingest.documents.chunk import Chunk
 
@@ -97,16 +96,12 @@ class StaleChunk(BaseModel):
     content: str
 
 
-@dataclass(frozen=True)
-class StaleClaim:
-    """Stale chunks one worker holds exclusively, and how it writes their new vectors.
+class ChunkCursor(BaseModel):
+    """Where a scan of the chunk table stopped: the primary key of the last row it read."""
 
-    `store` writes through the transaction that holds the claim, so the rows stay locked until the
-    claim's block commits; a worker that dies mid-batch releases them unchanged.
-    """
-
-    chunks: list[StaleChunk]
-    store: Callable[[list[ChunkRecord]], Awaitable[None]]
+    doc_id: str
+    chunking_key: str
+    ordinal: int
 
 
 class StoredDocument(BaseModel):
@@ -230,17 +225,25 @@ class DocumentIndex(Protocol):
         """
         ...
 
-    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+    async def stale_chunks(
+        self, key: str, limit: int, chunkings: set[str], after: ChunkCursor | None = None
+    ) -> list[StaleChunk]:
         """Up to `limit` chunks cut by one of `chunkings` whose vector was not made by `key`.
 
         NULL counts as stale: unknown must never read as current. `chunkings` is what the enabled
         shares currently use; a row under any other chunking will be re-cut and re-embedded by the
-        crawl, so re-embedding it here would be wasted work.
+        crawl, so re-embedding it here would be wasted work. In primary-key order, and only rows
+        after `after` when given, so a scan can walk past a row that will not embed.
         """
         ...
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
-        """Replace the vector and key of existing chunks, leaving content and coordinate alone."""
+        """Replace the vector and key of existing chunks still not under `key`.
+
+        A chunk that is gone, or that another writer has already brought to `key` (a peer's
+        re-embed, the crawl re-cutting it), is skipped: the read and the write share no lock, so
+        the write is conditional on the state the read saw.
+        """
         ...
 
     async def stored_document(
@@ -316,9 +319,10 @@ def require_schema_vector_width() -> None:
     if settings.embedding_dim > MAX_VECTOR_DIM:
         raise DocumentShareError(
             f"embedding_dim={settings.embedding_dim} is wider than the {MAX_VECTOR_DIM} dimensions "
-            "pgvector can index, so document_chunks cannot hold it. Ask the embedding model for "
-            "fewer dimensions, move the vectors out of Postgres with vector_store_provider, or "
-            "disable the share source."
+            "pgvector can index, so document_chunks cannot hold it. Request fewer "
+            "dimensions from the model (embedding_dim and embedding_request_dimensions together), "
+            "move the vectors out of Postgres with vector_store_provider, or disable the share "
+            "source."
         )
 
 
@@ -446,8 +450,11 @@ class InMemoryDocumentIndex:
             truncated=truncated,
         )
 
-    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+    async def stale_chunks(
+        self, key: str, limit: int, chunkings: set[str], after: ChunkCursor | None = None
+    ) -> list[StaleChunk]:
         """Chunks of a live cutting whose vector was made by a different configuration."""
+        floor = (after.doc_id, after.chunking_key, after.ordinal) if after else None
         stale = [
             StaleChunk(
                 doc_id=chunk.doc_id,
@@ -456,7 +463,9 @@ class InMemoryDocumentIndex:
                 content=chunk.content,
             )
             for row, chunk in sorted(self._chunks.items())
-            if self._keys.get(row) != key and chunk.chunking_key in chunkings
+            if self._keys.get(row) != key
+            and chunk.chunking_key in chunkings
+            and (floor is None or (chunk.doc_id, chunk.chunking_key, chunk.ordinal) > floor)
         ]
         return stale[:limit]
 
@@ -464,7 +473,7 @@ class InMemoryDocumentIndex:
         """Replace the vector and key of chunks already stored, leaving the rest of the row."""
         for chunk in chunks:
             existing = self._chunks.get(self._row(chunk))
-            if existing is None:
+            if existing is None or self._keys.get(self._row(chunk)) == key:
                 continue
             self._chunks[self._row(chunk)] = existing.model_copy(
                 update={"embedding": chunk.embedding}
@@ -689,10 +698,14 @@ class PostgresDocumentIndex:
         # Re-embedding touches only the vector and its key; content and tsvector are unchanged.
         # Addressed by the full primary key so one share's re-embed cannot overwrite another share's
         # row.
+        # Conditional on the row still not being under `key`: the read that chose it held no lock,
+        # so a peer's re-embed or the crawl's re-cut may have got there first, and this write must
+        # not put an older text's vector over theirs.
         self._store_embedding = (
             f"UPDATE document_chunks SET {column} = %(emb)s::vector({width}), "
             "embedding_key = %(key)s "
-            "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
+            "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s "
+            "AND embedding_key IS DISTINCT FROM %(key)s"
         )
         # The whole document in order, gated on the same eligibility a search uses (tag and time
         # filters bound NULL; source and chunking still apply), so a document is readable only from
@@ -713,23 +726,14 @@ class PostgresDocumentIndex:
             ") AS windowed WHERE before < %(cap)s ORDER BY ordinal"
         )
         # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
-        # and `<>` would silently pass over exactly those.
+        # and `<>` would silently pass over exactly those. Primary-key order with a keyset floor, so
+        # a scan costs its batch rather than every row already done before it.
         self._stale = (
             "SELECT doc_id, chunking_key, ordinal, content FROM document_chunks "
-            "WHERE embedding_key IS DISTINCT FROM %(key)s "
+            "WHERE (doc_id, chunking_key, ordinal) > (%(a_doc)s, %(a_chunking)s, %(a_ord)s) "
+            "AND embedding_key IS DISTINCT FROM %(key)s "
             "AND chunking_key = ANY(%(chunkings)s) "
             "ORDER BY doc_id, chunking_key, ordinal LIMIT %(k)s"
-        )
-        # The claim: the rows `_stale` names, locked and skipped-if-locked so concurrent workers
-        # take disjoint batches. Restricted to the keys actually present rather than `IS DISTINCT
-        # FROM`, which no index serves, so the cost follows the batch and not the table. No
-        # `ORDER BY`: which stale rows go first does not matter, and an order would force a walk of
-        # the primary key through every row already done.
-        self._claim = (
-            "SELECT doc_id, chunking_key, ordinal, content FROM document_chunks "
-            "WHERE (embedding_key = ANY(%(keys)s) OR embedding_key IS NULL) "
-            "AND chunking_key = ANY(%(chunkings)s) "
-            "LIMIT %(k)s FOR UPDATE SKIP LOCKED"
         )
         # The `> 0` floor mirrors the in-memory reference: a zero or negatively correlated chunk is
         # not a hit, and pgvector would otherwise return the top k unconditionally.
@@ -880,12 +884,24 @@ class PostgresDocumentIndex:
             await conn.commit()
         await self._forget_vectors([(r[0], r[1], r[2]) for r in superseded])
 
-    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+    async def stale_chunks(
+        self, key: str, limit: int, chunkings: set[str], after: ChunkCursor | None = None
+    ) -> list[StaleChunk]:
         """Up to `limit` chunks of a live cutting whose vector is not the current configuration."""
+        # `('', '', -1)` sorts before every real row: a document id is never empty.
+        floor = after or ChunkCursor(doc_id="", chunking_key="", ordinal=-1)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    self._stale, {"key": key, "k": limit, "chunkings": sorted(chunkings)}
+                    self._stale,
+                    {
+                        "key": key,
+                        "k": limit,
+                        "chunkings": sorted(chunkings),
+                        "a_doc": floor.doc_id,
+                        "a_chunking": floor.chunking_key,
+                        "a_ord": floor.ordinal,
+                    },
                 )
                 rows = await cur.fetchall()
         return [
@@ -893,7 +909,7 @@ class PostgresDocumentIndex:
         ]
 
     async def count_stale(self, key: str, chunkings: set[str]) -> int:
-        """How many chunks of a live cutting are not under `key`: what `claim_stale` has left."""
+        """How many chunks of a live cutting are not under `key`: what a re-embed has left."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -904,37 +920,6 @@ class PostgresDocumentIndex:
                 )
                 row = await cur.fetchone()
         return int(row[0]) if row is not None else 0
-
-    @asynccontextmanager
-    async def claim_stale(
-        self, key: str, limit: int, chunkings: set[str]
-    ) -> AsyncIterator[StaleClaim]:
-        """Hold up to `limit` stale chunks no other worker holds, until the block ends.
-
-        The rows are locked in a transaction that commits when the block exits normally and rolls
-        back when it raises, so a worker killed mid-batch changes nothing and its rows are
-        claimable again at once. The transaction spans the embedding call, bounded by `limit`.
-        """
-        async with self._connection() as conn:
-            present = await recorded_keys(conn, "document_chunks")
-            foreign = [other for other in present if other not in (key, None)]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    self._claim, {"keys": foreign, "chunkings": sorted(chunkings), "k": limit}
-                )
-                rows = await cur.fetchall()
-
-            async def store(chunks: list[ChunkRecord]) -> None:
-                await self._write_embeddings(conn, chunks, key)
-
-            yield StaleClaim(
-                chunks=[
-                    StaleChunk(doc_id=r[0], chunking_key=r[1], ordinal=r[2], content=r[3])
-                    for r in rows
-                ],
-                store=store,
-            )
-            await conn.commit()
 
     async def _write_embeddings(
         self, conn: psycopg.AsyncConnection[TupleRow], chunks: list[ChunkRecord], key: str

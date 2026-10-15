@@ -206,6 +206,64 @@ def test_an_endpoint_answering_in_another_width_than_configured_is_refused(
         provider.embed_texts(["a"])
 
 
+def _capture_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Point the embedder at a fake client that records the keyword arguments of each request."""
+    requests: list[dict[str, Any]] = []
+
+    class _Embeddings:
+        def create(self, **kwargs: Any) -> Any:
+            requests.append(kwargs)
+            data = [
+                type("E", (), {"embedding": [0.5] * 8, "index": i})
+                for i in range(len(kwargs["input"]))
+            ]
+            return type("R", (), {"data": data})
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.embeddings = _Embeddings()
+
+    fake_openai = type(sys)("openai")
+    fake_openai.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    return requests
+
+
+def test_the_width_is_requested_from_the_endpoint_only_when_stated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`embedding_request_dimensions` becomes the `dimensions` parameter; unset sends none.
+
+    A gateway that does not know the parameter would refuse it, so it is never sent by default.
+    """
+    base = {
+        "embedding_provider": "openai_compatible",
+        "embedding_model": "wide-embed",
+        "embedding_dim": 8,
+    }
+    _use_settings(monkeypatch, **base, llm_base_url="https://llm-dims-off.internal/v1")
+    requests = _capture_requests(monkeypatch)
+    assert provider.embed_texts(["a"], cache=False) == [[0.5] * 8]
+    assert "dimensions" not in requests[0]
+
+    _use_settings(
+        monkeypatch,
+        **base,
+        embedding_request_dimensions=8,
+        llm_base_url="https://llm-dims-on.internal/v1",
+    )
+    requests = _capture_requests(monkeypatch)
+    provider.embed_texts(["a"], cache=False)
+    assert requests[0]["dimensions"] == 8 and requests[0]["model"] == "wide-embed"
+
+
+def test_the_requested_width_must_be_the_stored_width() -> None:
+    """Asking the endpoint for one width while storing another is refused when settings build."""
+    with pytest.raises(ValueError, match="embedding_request_dimensions=512 must equal"):
+        Settings(embedding_request_dimensions=512, embedding_dim=768)
+    assert Settings(embedding_request_dimensions=768, embedding_dim=768).embedding_dim == 768
+
+
 def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:
     """A missing endpoint/model fails when Settings is built, before any embed call happens."""
     with pytest.raises(ValueError, match="embedding_model"):

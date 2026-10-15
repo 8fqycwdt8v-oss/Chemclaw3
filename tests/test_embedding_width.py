@@ -9,8 +9,12 @@ and migrated from there. What is proved:
 * a fresh database at a new width stores and ranks vectors;
 * the HNSW index is what answers the dense query at the new width;
 * a row stamped with another configuration is never ranked and is reported as a mixed corpus;
-* the re-embed moves the corpus to the new column, empties the old one, and is idempotent, claimed
-  (two real processes never embed one chunk twice) and resumable (a killed process changes nothing).
+* the re-embed moves the corpus to the new column and is idempotent; it holds no lock while the
+  gateway answers, so the scheduled pass, the crawl's upsert and its prune proceed beside it and its
+  own late write skips whatever moved; a killed process changes nothing; a reclaim is a run apart;
+* a chunk that will not embed is passed once and counted, and a dead endpoint stops the run;
+* the CLI rejoins a running run and reads its verdict; `/readyz` and the job agree on "mixed" and a
+  lock on the vector tables does not turn into `database unreachable`.
 """
 
 import asyncio
@@ -26,10 +30,14 @@ from typing import Any
 
 import psycopg
 import pytest
+from temporalio import activity
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 import chemclaw.core.migrate as migrate_module
+import chemclaw.ingest.documents.sync as sync_module
+from chemclaw.api.routes import ops
+from chemclaw.cli import reembed as cli_reembed
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.embeddings import clear_embedding_cache, embed_texts, embedding_config_key
@@ -44,12 +52,13 @@ from chemclaw.core.vector_schema import (
 from chemclaw.durable import reembed
 from chemclaw.durable.note_index import reindex_notes_activity
 from chemclaw.ingest.documents.index import (
+    ChunkCursor,
     ChunkRecord,
     DocumentFilter,
     FileRecord,
     PostgresDocumentIndex,
 )
-from chemclaw.ingest.documents.sync import reembed_claimed
+from chemclaw.ingest.documents.sync import ReembedReport, reembed_after, reembed_stale
 from chemclaw.retrieval.vector_index import (
     NoteRecord,
     PostgresNoteIndex,
@@ -57,7 +66,7 @@ from chemclaw.retrieval.vector_index import (
     reindex_notes,
 )
 from tests.pg import TEST_SCHEMA, create_test_schema, drop_test_schema, schema_dsn
-from tests.temporal_env import pydantic_client, start_env_or_skip
+from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
 
 _SQL_DIR = Path(settings.sql_migrations_dir)
 _CHUNKING = "2000:200"
@@ -353,6 +362,28 @@ async def test_the_hnsw_index_answers_the_dense_query_at_the_new_width(
         await conn.rollback()
 
 
+async def test_a_migration_that_cannot_get_both_table_locks_creates_nothing_and_retries_clean(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer holding `document_chunks` times the run out on its lock, leaving nothing half-built.
+
+    Both tables are taken in one statement before anything is built, so the wait is one wait, the
+    timeout aborts before an index is started, and a rerun once the writer is gone finishes.
+    """
+    await migrate(scratch.dsn)
+    monkeypatch.setattr(settings, "embedding_dim", 768)
+    monkeypatch.setattr(settings, "pg_migration_lock_timeout_seconds", 0.5)
+    async with await connect(scratch.dsn) as writer:
+        await writer.execute("LOCK TABLE document_chunks IN ROW EXCLUSIVE MODE")
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            await migrate(scratch.dsn)
+        await writer.rollback()
+    for table in ("note_index", "document_chunks"):
+        assert set(await _columns(scratch, table)) == {"embedding"}
+    await migrate(scratch.dsn)
+    assert set(await _columns(scratch, "document_chunks")) == {"embedding", "embedding_768"}
+
+
 # --- a width pgvector cannot index ----------------------------------------------------------------
 
 
@@ -435,12 +466,26 @@ def _use_shares(monkeypatch: pytest.MonkeyPatch) -> None:
     """Name one enabled share cut under `_CHUNKING`, as the job scopes its work to."""
     share = SimpleNamespace(share_binding=lambda: SimpleNamespace(chunking_key=_CHUNKING))
     monkeypatch.setattr(reembed, "share_sources", lambda: {_SOURCE: share})
+    monkeypatch.setattr(cli_reembed, "share_sources", lambda: {_SOURCE: share})
+    monkeypatch.setattr(ops, "share_sources", lambda: {_SOURCE: share})
 
 
-async def test_the_re_embed_moves_a_corpus_to_a_new_width_and_empties_the_old_vectors(
+async def _walk(run: Callable[..., Awaitable[Any]]) -> list[int]:
+    """The job's document phase as the workflow drives it: each batch resumes after the last."""
+    cursor = None
+    embedded = []
+    while True:
+        batch = await run(reembed.reembed_document_batch, cursor)
+        embedded.append(batch.embedded)
+        cursor = batch.cursor or cursor
+        if not batch.has_more:
+            return embedded
+
+
+async def test_the_re_embed_moves_a_corpus_to_a_new_width_and_a_reclaim_empties_the_old_vectors(
     scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 1536 deployment moves to 768: rows end under the new key and column, the old emptied."""
+    """A 1536 deployment moves to 768: rows end under the new key and column; reclaim is apart."""
     await _deployed_before(scratch, tmp_path, monkeypatch)
     await _write_notes(6)
     await _write_chunks(6)
@@ -468,20 +513,15 @@ async def test_the_re_embed_moves_a_corpus_to_a_new_width_and_empties_the_old_ve
 
     plan = await run(reembed.plan_embedding_reembed)
     assert (plan.column, plan.dim) == ("embedding_768", 768)
-    batches = []
-    while True:
-        batch = await run(reembed.reembed_document_batch)
-        batches.append(batch.embedded)
-        if not batch.has_more:
-            break
-    assert batches == [4, 2]
+    assert await _walk(run) == [4, 2]
     assert await reindex_notes(PostgresNoteIndex(), str(notes_dir)) == 6
 
     assert (await run(reembed.count_unembedded)).model_dump() == {"documents": 0, "notes": 0}
     assert await scratch.afetch(
         "SELECT count(*) FROM document_chunks WHERE embedding_768 IS NOT NULL"
     ) == [(6,)]
-    # The original column still holds the old vectors until they are reclaimed, in batches.
+    # The original column still holds the old vectors: the previous image reads them, and only an
+    # explicit reclaim, which is the end of the rollback path, empties them.
     assert await scratch.afetch(
         "SELECT count(*) FROM document_chunks WHERE embedding IS NOT NULL"
     ) == [(6,)]
@@ -497,15 +537,41 @@ async def test_the_re_embed_moves_a_corpus_to_a_new_width_and_empties_the_old_ve
     assert ranked[0].doc_id == "d1"
 
     # Idempotent: a second run finds nothing to do.
-    again = await run(reembed.reembed_document_batch)
-    assert (again.embedded, again.has_more) == (0, False)
+    assert await _walk(run) == [0]
     assert await run(reembed.clear_superseded_vectors, plan) == 0
 
 
-async def test_the_workflow_moves_a_corpus_across_continue_as_new_and_reports_what_is_left(
+async def _run_workflow(
+    client: Any, workflow_id: str, request: reembed.ReembedRequest | None = None
+) -> tuple[reembed.ReembedOutcome, bool]:
+    """Run the real workflow on a worker of this test's own: verdict, and whether it continued."""
+    async with Worker(
+        client,
+        task_queue="test-reembed",
+        workflows=[reembed.EmbeddingReembedWorkflow],
+        activities=[
+            reembed.plan_embedding_reembed,
+            reembed.reembed_document_batch,
+            reindex_notes_activity,
+            reembed.clear_superseded_vectors,
+            reembed.count_unembedded,
+        ],
+    ):
+        started = await client.start_workflow(
+            reembed.EmbeddingReembedWorkflow.run,
+            request,
+            id=workflow_id,
+            task_queue="test-reembed",
+        )
+        outcome: reembed.ReembedOutcome = await started.result()
+        latest = (await client.get_workflow_handle(workflow_id).describe()).run_id
+        return outcome, latest != started.result_run_id
+
+
+async def test_the_workflow_moves_a_corpus_across_continue_as_new_and_leaves_reclaim_apart(
     scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Run as a real workflow with one activity per run, so it continues as new between batches."""
+    """One activity per run forces `continue_as_new`; reclaim is a second request."""
     await _deployed_before(scratch, tmp_path, monkeypatch)
     await _write_chunks(5)
     await _write_notes(3)
@@ -526,34 +592,25 @@ async def test_the_workflow_moves_a_corpus_across_continue_as_new_and_reports_wh
 
     async with await start_env_or_skip() as env:
         client = pydantic_client(env)
-        async with Worker(
-            client,
-            task_queue="test-reembed",
-            workflows=[reembed.EmbeddingReembedWorkflow],
-            activities=[
-                reembed.plan_embedding_reembed,
-                reembed.reembed_document_batch,
-                reindex_notes_activity,
-                reembed.clear_superseded_vectors,
-                reembed.count_unembedded,
-            ],
-        ):
-            started = await client.start_workflow(
-                reembed.EmbeddingReembedWorkflow.run,
-                id="reembed-test",
-                task_queue="test-reembed",
-            )
-            outcome = await started.result()
-            last_run = (await client.get_workflow_handle("reembed-test").describe()).run_id
+        outcome, continued = await _run_workflow(client, "reembed-test")
+        assert continued, "the run never continued as new"
+        assert outcome.complete
+        assert (outcome.documents_embedded, outcome.notes_indexed) == (5, 3)
+        assert not outcome.notes_skipped
+        assert outcome.vectors_cleared == 0, "an ordinary run emptied the vectors a rollback reads"
+        assert outcome.remaining.model_dump() == {"documents": 0, "notes": 0}
+        assert await scratch.afetch(
+            "SELECT count(*) FROM document_chunks WHERE embedding IS NOT NULL"
+        ) == [(5,)]
 
-    assert last_run != started.result_run_id, "the run never continued as new"
-    assert outcome.complete
-    assert (outcome.documents_embedded, outcome.notes_indexed) == (5, 3)
-    assert outcome.vectors_cleared == 8
-    assert outcome.remaining.model_dump() == {"documents": 0, "notes": 0}
-    assert await scratch.afetch(
-        "SELECT count(*) FROM document_chunks WHERE embedding IS NOT NULL"
-    ) == [(0,)]
+        reclaimed, continued = await _run_workflow(
+            client, "reclaim-test", reembed.ReembedRequest(reclaim=True)
+        )
+        assert continued and reclaimed.complete
+        assert (reclaimed.documents_embedded, reclaimed.vectors_cleared) == (0, 8)
+        assert await scratch.afetch(
+            "SELECT count(*) FROM document_chunks WHERE embedding IS NOT NULL"
+        ) == [(0,)]
 
 
 async def test_the_plan_refuses_a_run_whose_column_the_migrator_has_not_built(
@@ -566,6 +623,284 @@ async def test_the_plan_refuses_a_run_whose_column_the_migrator_has_not_built(
         Exception, match="embedding_768 does not exist at width 768.*make db-migrate"
     ):
         await ActivityEnvironment().run(reembed.plan_embedding_reembed)
+
+
+# --- a chunk that will not embed -----------------------------------------------------------------
+
+
+def _refuse_poison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the embedder refuse any text mentioning `POISON`, one at a time as in a batch."""
+    real = embed_texts
+
+    def refusing(texts: list[str], *, cache: bool = True) -> list[list[float]]:
+        if any("POISON" in text for text in texts):
+            raise ValueError("the gateway refused this text")
+        return real(texts, cache=cache)
+
+    monkeypatch.setattr(sync_module, "embed_texts", refusing)
+
+
+async def _write_text_chunks(texts: list[str]) -> None:
+    """Index one single-chunk document per text under the live configuration."""
+    vectors = embed_texts(texts, cache=False)
+    await PostgresDocumentIndex().upsert(
+        [
+            FileRecord(
+                path=f"q{i}.txt",
+                source=_SOURCE,
+                doc_id=f"q{i:03d}",
+                fingerprint="1:1",
+                chunking_key=_CHUNKING,
+            )
+            for i in range(len(texts))
+        ],
+        [
+            ChunkRecord(
+                doc_id=f"q{i:03d}",
+                chunking_key=_CHUNKING,
+                ordinal=0,
+                content=text,
+                embedding=vector,
+            )
+            for i, (text, vector) in enumerate(zip(texts, vectors, strict=True))
+        ],
+        embedding_config_key(),
+    )
+
+
+async def test_poison_chunks_wider_than_a_batch_are_passed_once_and_counted(
+    scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five unembeddable chunks sort first and fill more than two batches; the rest still move.
+
+    A scan that started from the first stale row each time would meet them forever. The walk passes
+    each once, reports them as failed and ends with them still counted as not under the live key.
+    """
+    await migrate(scratch.dsn)
+    await _write_text_chunks([f"POISON {i}" for i in range(5)] + [f"good {i}" for i in range(4)])
+    monkeypatch.setattr(settings, "embedding_dim", 768)
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    (tmp_path / "knowledge").mkdir()
+    monkeypatch.setattr(settings, "document_reembed_batch_size", 2)
+    clear_embedding_cache()
+    await migrate(scratch.dsn)
+    _use_shares(monkeypatch)
+    _refuse_poison(monkeypatch)
+
+    async with await start_env_or_skip() as env:
+        outcome, _ = await _run_workflow(pydantic_client(env), "poison-test")
+
+    assert (outcome.documents_embedded, outcome.documents_failed) == (4, 5)
+    assert not outcome.stalled, "two failed batches of three were read as the endpoint being down"
+    assert outcome.remaining.documents == 5 and not outcome.complete
+    assert "5 chunk(s) would not embed" in cli_reembed.summarise(outcome)
+
+
+async def test_batches_that_all_fail_in_a_row_stop_the_run_as_stalled(
+    scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the endpoint refusing everything the run stops after its failure budget."""
+    await migrate(scratch.dsn)
+    await _write_text_chunks([f"POISON {i}" for i in range(12)])
+    monkeypatch.setattr(settings, "embedding_dim", 768)
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    (tmp_path / "knowledge").mkdir()
+    monkeypatch.setattr(settings, "document_reembed_batch_size", 2)
+    monkeypatch.setattr(settings, "document_reembed_max_failed_batches", 3)
+    clear_embedding_cache()
+    await migrate(scratch.dsn)
+    _use_shares(monkeypatch)
+    _refuse_poison(monkeypatch)
+
+    async with await start_env_or_skip() as env:
+        outcome, _ = await _run_workflow(pydantic_client(env), "stall-test")
+
+    assert outcome.stalled and (outcome.documents_embedded, outcome.documents_failed) == (0, 6)
+    assert outcome.remaining.documents == 12
+    assert "stopped early" in cli_reembed.summarise(outcome)
+
+
+# --- the CLI ---------------------------------------------------------------------------------
+
+
+async def test_the_cli_rejoins_a_running_re_embed_and_reads_its_verdict(
+    scratch: Scratch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A second start finds the first running and waits for it, reading the verdict as a model.
+
+    Without the handle's `result_type` the converter returns a dict and the verdict raises after
+    the CLI has waited the whole run out.
+    """
+    await migrate(scratch.dsn)
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    (tmp_path / "knowledge").mkdir()
+    _use_shares(monkeypatch)
+    gate = asyncio.Event()
+
+    @activity.defn(name="reembed_document_batch")
+    async def held_batch(after: ChunkCursor | None = None) -> ReembedReport:
+        await gate.wait()
+        return ReembedReport(embedded=3)
+
+    async with await start_local_env_or_skip() as env:
+        client = pydantic_client(env)
+
+        async def _connect() -> Any:
+            return client
+
+        monkeypatch.setattr(cli_reembed, "connect", _connect)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[reembed.EmbeddingReembedWorkflow],
+            activities=[
+                reembed.plan_embedding_reembed,
+                held_batch,
+                reindex_notes_activity,
+                reembed.clear_superseded_vectors,
+                reembed.count_unembedded,
+            ],
+        ):
+            first = await client.start_workflow(
+                reembed.EmbeddingReembedWorkflow.run,
+                reembed.ReembedRequest(),
+                id=cli_reembed.WORKFLOW_ID,
+                task_queue=settings.background_task_queue,
+            )
+            second = asyncio.create_task(cli_reembed.run())
+            await asyncio.sleep(1.0)
+            assert not second.done(), "the second start did not wait for the first"
+            gate.set()
+            summary, code = await asyncio.wait_for(second, 60)
+            await first.result()
+
+    assert "rejoining embedding-reembed" in capsys.readouterr().out
+    assert code == 0, summary
+    assert "documents embedded 3" in summary
+
+
+async def test_the_cli_reports_a_refusal_and_a_missing_column_as_exit_two(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan refuses a width with no column; the CLI names the cause and exits 2."""
+    await migrate(scratch.dsn)
+    monkeypatch.setattr(settings, "embedding_dim", 768)
+    _use_shares(monkeypatch)
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+
+        async def _connect() -> Any:
+            return client
+
+        monkeypatch.setattr(cli_reembed, "connect", _connect)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[reembed.EmbeddingReembedWorkflow],
+            activities=[reembed.plan_embedding_reembed],
+        ):
+            summary, code = await cli_reembed.run()
+    assert code == 2 and "make db-migrate" in summary
+
+
+async def test_the_cli_status_names_the_columns_and_the_other_configurations(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--status` needs no Temporal, and inspects nothing where pgvector holds no vectors."""
+    await migrate(scratch.dsn)
+    await _write_notes(2)
+    await scratch.afetch(
+        "UPDATE note_index SET embedding_key = 'openai_compatible:ep-abc:d768:other|ntv3' "
+        "WHERE note_id = 'n0'"
+    )
+    _use_shares(monkeypatch)
+    report = await cli_reembed.status()
+    assert report.splitlines()[0].startswith("configured: hash:")
+    assert (
+        "note_index: embedding vector(1536); other configurations: openai_compatible/other d768"
+        in report
+    )
+    assert "document_chunks: embedding vector(1536); other configurations: none" in report
+
+    monkeypatch.setattr(settings, "vector_store_provider", "qdrant")
+    elsewhere = await cli_reembed.status()
+    assert "not in Postgres" in elsewhere and "note_index" not in elsewhere
+
+
+async def test_mixed_means_the_same_to_readyz_and_the_job(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows of a share nobody enables keep their old key and are not a mixed corpus.
+
+    The job converges only the cuttings the enabled shares use, so the probe must not report the
+    others as pending forever.
+    """
+    await migrate(scratch.dsn)
+    await _write_chunks(3)
+    foreign = "openai_compatible:ep-abc123:d1536:text-embed-v1"
+    await scratch.afetch(
+        "UPDATE document_chunks SET chunking_key = 'disabled:1', embedding_key = %s "
+        "WHERE doc_id = 'd1'",
+        (foreign,),
+    )
+    live = live_embedding_keys()
+    async with await connect(scratch.dsn) as conn:
+        everything = {s.table: s for s in await inspect_tables(conn, 1536, live)}
+        enabled = {s.table: s for s in await inspect_tables(conn, 1536, live, {_CHUNKING})}
+        disabled_too = {
+            s.table: s for s in await inspect_tables(conn, 1536, live, {_CHUNKING, "disabled:1"})
+        }
+    assert everything["document_chunks"].mixed, "the unscoped reading sees the disabled share's row"
+    assert not enabled["document_chunks"].mixed
+    assert disabled_too["document_chunks"].mixed
+
+    _use_shares(monkeypatch)
+    count = await PostgresDocumentIndex().count_stale(embedding_config_key(), {_CHUNKING})
+    assert count == 0, "the job's own count disagrees with the probe"
+
+
+# --- the probe beside a migration's lock ----------------------------------------------------
+
+
+async def test_a_lock_on_the_vector_tables_does_not_make_the_database_unreachable(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `document_chunks` held `ACCESS EXCLUSIVE`, the probe answers ready, verdict kept.
+
+    A migration building an index on a large table holds exactly this lock; a probe that waited on
+    it would time out and drain every new pod as `database unreachable`.
+    """
+    await migrate(scratch.dsn)
+    monkeypatch.setattr(settings, "service_readiness_db_timeout_seconds", 2.0)
+    front: Any = SimpleNamespace(
+        database_reachable=False,
+        schema_current=False,
+        database_probed_at=0.0,
+        vector_width_problem="",
+        embedding_corpus_mixed=True,
+    )
+    async with await connect(scratch.dsn) as holder:
+        await holder.execute("LOCK TABLE document_chunks IN ACCESS EXCLUSIVE MODE")
+        started = time.monotonic()
+        ready = await ops._probe_database(front)
+        elapsed = time.monotonic() - started
+        await holder.rollback()
+
+    assert ready, "a locked vector table made the pod unready"
+    assert front.database_reachable and front.schema_current
+    assert front.embedding_corpus_mixed, (
+        "the last verdict was lost when the question went unanswered"
+    )
+    assert elapsed < 2.0, f"the probe waited {elapsed:.1f}s on a lock"
+
+    ready = await ops._probe_database(front)
+    assert ready and not front.embedding_corpus_mixed, "an answerable probe kept a stale verdict"
 
 
 # --- real processes against one database -----------------------------------------------------
@@ -591,8 +926,8 @@ def _spawn(scratch: Scratch, log: Path, *, hold: float, batch: int) -> subproces
     )
 
 
-def _claimed(log: Path) -> list[list[str]]:
-    """The batches a probe has claimed and begun to embed."""
+def _embedding(log: Path) -> list[list[str]]:
+    """The batches a probe has read and begun to embed."""
     if not log.exists():
         return []
     return [json.loads(line) for line in log.read_text().splitlines() if line]
@@ -617,64 +952,157 @@ async def _wait_for(condition: Callable[[], Awaitable[bool]], seconds: float = 9
     raise AssertionError("timed out waiting")
 
 
-async def test_two_processes_re_embedding_at_once_never_embed_a_chunk_twice(
+async def _no_row_is_locked(scratch: Scratch) -> bool:
+    """Whether a `NOWAIT` lock on every chunk row is granted, i.e. nothing holds one."""
+    try:
+        async with await connect(scratch.dsn) as conn:
+            await conn.execute("SELECT 1 FROM document_chunks FOR UPDATE NOWAIT")
+            await conn.rollback()
+    except psycopg.errors.LockNotAvailable:
+        return False
+    return True
+
+
+async def _live_rows(scratch: Scratch) -> list[tuple[Any, ...]]:
+    return await scratch.afetch(
+        "SELECT doc_id, content FROM document_chunks "
+        "WHERE embedding_768 IS NOT NULL AND embedding_key = %s ORDER BY 1",
+        (embedding_config_key(),),
+    )
+
+
+async def test_the_job_holds_no_lock_while_the_gateway_answers_so_every_other_writer_proceeds(
     scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two real processes against one table take disjoint batches that together cover it."""
-    await _stale_corpus(scratch, 48, monkeypatch)
-    logs = [tmp_path / "a.log", tmp_path / "b.log"]
-    # Two seconds a batch over twelve batches: far longer than the processes' start-up skew, so
-    # both are working together for most of the run.
-    first = _spawn(scratch, logs[0], hold=2.0, batch=4)
-    second = _spawn(scratch, logs[1], hold=2.0, batch=4)
-    outputs = [await asyncio.to_thread(p.communicate, None, 180) for p in (first, second)]
-    assert (first.returncode, second.returncode) == (0, 0), outputs
+    """With a re-embed mid-call, the scheduled pass, the crawl's upsert and its prune all finish.
 
-    embedded = [text for log in logs for batch in _claimed(log) for text in batch]
-    assert len(embedded) == len(set(embedded)) == 48, (
-        "a chunk was embedded twice, or one was missed"
+    The probe process holds a batch in its embedding call for twelve seconds. Meanwhile, here:
+    the scheduled sync's own pass re-embeds other chunks, a re-chunked document is upserted over a
+    chunk the probe read, and another is pruned. None waits; and once the probe's write lands it
+    skips the rows that moved under it, so the upserted text keeps its own vector and the pruned
+    document stays gone.
+    """
+    await _stale_corpus(scratch, 24, monkeypatch)
+    index = PostgresDocumentIndex()
+    log = tmp_path / "job.log"
+    job = _spawn(scratch, log, hold=12.0, batch=8)
+
+    async def _reading() -> bool:
+        return bool(_embedding(log))
+
+    await _wait_for(_reading)
+    read = _embedding(log)[0]
+    assert len(read) == 8
+    assert await _no_row_is_locked(scratch), "the job holds row locks across the embedding call"
+
+    # The scheduled pass: the other chunks, re-embedded without waiting for the job.
+    started = time.monotonic()
+    scheduled = await reembed_stale(index, {_CHUNKING}, 100)
+    assert time.monotonic() - started < 6, "the scheduled pass waited on the job"
+    assert scheduled.embedded == 24, "the scheduled pass takes whatever is stale, as designed"
+
+    # The crawl: d0 is re-cut with new text (under the live key), d3 is pruned.
+    new_text = "crystallisation report REVISED isopropanol"
+    vector = embed_texts([new_text], cache=False)[0]
+    started = time.monotonic()
+    await index.upsert(
+        [
+            FileRecord(
+                path="p0.txt",
+                source=_SOURCE,
+                doc_id="d0",
+                fingerprint="2:2",
+                chunking_key=_CHUNKING,
+            )
+        ],
+        [
+            ChunkRecord(
+                doc_id="d0", chunking_key=_CHUNKING, ordinal=0, content=new_text, embedding=vector
+            )
+        ],
+        embedding_config_key(),
     )
-    assert all(_claimed(log) for log in logs), "one process did all the work, so nothing overlapped"
+    mark = await index.clock()
+    await index.touch(_SOURCE, [f"p{i}.txt" for i in range(24) if i != 3])
+    assert await index.prune_stale(_SOURCE, mark) == 1
+    assert time.monotonic() - started < 6, "the crawl waited on the job"
+
+    # The job's embedding call returns: it writes what it read, and every write finds its row moved.
+    output, _ = await asyncio.to_thread(job.communicate, None, 120)
+    assert job.returncode == 0, output
+
+    rows = dict(await _live_rows(scratch))
+    assert rows["d0"] == new_text
+    literal = "[" + ",".join(repr(x) for x in vector) + "]"
     assert await scratch.afetch(
-        "SELECT count(*) FROM document_chunks "
-        "WHERE embedding_768 IS NOT NULL AND embedding_key = %s",
+        "SELECT embedding_768 = %s::vector(768) FROM document_chunks WHERE doc_id = 'd0'",
+        (literal,),
+    ) == [(True,)], "the old text's vector was written over the re-cut text's"
+    assert "d3" not in rows, "a pruned document came back"
+    assert len(rows) == 23
+    assert await scratch.afetch(
+        "SELECT count(*) FROM document_chunks WHERE embedding_key IS DISTINCT FROM %s",
         (embedding_config_key(),),
-    ) == [(48,)]
+    ) == [(0,)]
+
+
+async def test_a_write_that_lost_the_race_skips_the_row_and_is_not_counted_against_it(
+    scratch: Scratch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`store_embeddings` is conditional on the row still being stale, in the same statement."""
+    await _stale_corpus(scratch, 3, monkeypatch)
+    index = PostgresDocumentIndex()
+    stale = await index.stale_chunks(embedding_config_key(), 10, {_CHUNKING})
+    assert len(stale) == 3
+    winner = embed_texts(["the winner"], cache=False)[0]
+    await index.store_embeddings(
+        [
+            ChunkRecord(
+                doc_id="d1", chunking_key=_CHUNKING, ordinal=0, content="x", embedding=winner
+            )
+        ],
+        embedding_config_key(),
+    )
+    loser = embed_texts(["the loser"], cache=False)[0]
+    await index.store_embeddings(
+        [
+            ChunkRecord(
+                doc_id=c.doc_id,
+                chunking_key=c.chunking_key,
+                ordinal=c.ordinal,
+                content=c.content,
+                embedding=loser,
+            )
+            for c in stale
+        ],
+        embedding_config_key(),
+    )
+    vectors = {
+        row[0]: row[1]
+        for row in await scratch.afetch("SELECT doc_id, embedding_768::text FROM document_chunks")
+    }
+    assert vectors["d0"] == vectors["d2"], "the rows that were still stale did not take the write"
+    assert vectors["d1"] != vectors["d0"], "the loser overwrote the winner's row"
 
 
 async def test_a_process_killed_mid_batch_changes_nothing_and_the_next_one_finishes(
     scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SIGKILL mid-batch: no row moved, no lock left, and the next process finishes the work."""
+    """SIGKILL mid-embed: no row moved, no lock left, and the next process finishes the work."""
     await _stale_corpus(scratch, 12, monkeypatch)
     doomed_log = tmp_path / "doomed.log"
     doomed = _spawn(scratch, doomed_log, hold=600.0, batch=5)
 
-    async def _claim_is_held() -> bool:
-        return bool(_claimed(doomed_log))
+    async def _reading() -> bool:
+        return bool(_embedding(doomed_log))
 
-    await _wait_for(_claim_is_held)
-    held = _claimed(doomed_log)[0]
-    assert len(held) == 5
-
-    # While it holds the claim, a peer skips those five rather than waiting for them.
-    free = await scratch.afetch(
-        "SELECT count(*) FROM (SELECT 1 FROM document_chunks WHERE embedding_key = %s "
-        "FOR UPDATE SKIP LOCKED) AS unlocked",
-        (embedding_config_key().replace("d768", "d1536"),),
-    )
-    assert free == [(12 - 5,)]
+    await _wait_for(_reading)
+    assert len(_embedding(doomed_log)[0]) == 5
+    assert await _no_row_is_locked(scratch), "the process holds row locks while it waits"
 
     doomed.kill()
     doomed.communicate(timeout=30)
-
-    async def _locks_released() -> bool:
-        rows = await scratch.afetch(
-            "SELECT count(*) FROM (SELECT 1 FROM document_chunks FOR UPDATE SKIP LOCKED) AS u"
-        )
-        return rows == [(12,)]
-
-    await _wait_for(_locks_released)
+    assert await _no_row_is_locked(scratch)
     assert await scratch.afetch(
         "SELECT count(*) FROM document_chunks WHERE embedding_768 IS NOT NULL"
     ) == [(0,)]
@@ -683,26 +1111,34 @@ async def test_a_process_killed_mid_batch_changes_nothing_and_the_next_one_finis
     survivor = _spawn(scratch, survivor_log, hold=0.0, batch=5)
     output, _ = await asyncio.to_thread(survivor.communicate, None, 180)
     assert survivor.returncode == 0, output
-    embedded = [text for batch in _claimed(survivor_log) for text in batch]
+    embedded = [text for batch in _embedding(survivor_log) for text in batch]
     assert len(embedded) == len(set(embedded)) == 12, "the survivor did not embed each chunk once"
-    assert await scratch.afetch(
-        "SELECT count(*) FROM document_chunks "
-        "WHERE embedding_768 IS NOT NULL AND embedding_key = %s",
-        (embedding_config_key(),),
-    ) == [(12,)]
+    assert len(await _live_rows(scratch)) == 12
 
 
-async def test_reembed_claimed_in_process_is_idempotent(
+async def test_two_walks_at_once_both_finish_and_the_corpus_is_whole(
+    scratch: Scratch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two processes walking one table may embed a chunk twice; neither blocks, none is lost."""
+    await _stale_corpus(scratch, 36, monkeypatch)
+    first = _spawn(scratch, tmp_path / "a.log", hold=0.5, batch=4)
+    second = _spawn(scratch, tmp_path / "b.log", hold=0.5, batch=4)
+    outputs = [await asyncio.to_thread(p.communicate, None, 180) for p in (first, second)]
+    assert (first.returncode, second.returncode) == (0, 0), outputs
+    assert len(await _live_rows(scratch)) == 36
+    seen = {t for log in ("a.log", "b.log") for batch in _embedding(tmp_path / log) for t in batch}
+    assert len(seen) == 36, "a chunk was never embedded"
+
+
+async def test_reembed_after_in_process_is_idempotent_and_walks_past_what_it_has_read(
     scratch: Scratch, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Run to exhaustion twice: the second pass embeds nothing and says nothing is left."""
+    """Run to exhaustion twice: the second walk embeds nothing and says nothing is left."""
     await _stale_corpus(scratch, 5, monkeypatch)
     index = PostgresDocumentIndex()
-    first = await reembed_claimed(index, {_CHUNKING}, 10)
-    second = await reembed_claimed(index, {_CHUNKING}, 10)
-    assert (first.embedded, first.has_more, second.embedded, second.has_more) == (
-        5,
-        False,
-        0,
-        False,
-    )
+    first = await reembed_after(index, {_CHUNKING}, 3, None)
+    assert (first.embedded, first.has_more) == (3, True) and first.cursor is not None
+    rest = await reembed_after(index, {_CHUNKING}, 3, first.cursor)
+    assert (rest.embedded, rest.has_more) == (2, False)
+    again = await reembed_after(index, {_CHUNKING}, 3, None)
+    assert (again.embedded, again.has_more, again.cursor) == (0, False, None)

@@ -306,8 +306,8 @@ reindex:  ## Incrementally rebuild the derived note index — only notes changed
 reindex-full:  ## Full note-index rebuild, ignoring stored fingerprints (recovery only).
 	uv run python -m chemclaw.retrieval.vector_index --full
 
-reembed:  ## Re-embed every stored vector under the configured model and width (STATUS=1 only reports).
-	uv run python -m chemclaw.cli.reembed $(if $(filter 1,$(STATUS)),--status,)
+reembed:  ## Re-embed every stored vector under the configured model and width (STATUS=1 reports; RECLAIM=1 empties the old width, no way back).
+	uv run python -m chemclaw.cli.reembed $(if $(filter 1,$(STATUS)),--status,)$(if $(filter 1,$(RECLAIM)), --reclaim,)
 
 share-estimate:  ## Cost a mounted document share before indexing it (reads nothing). SHARE=<source>
 	@test -n "$(SHARE)" || { echo "usage: make share-estimate SHARE=<source>"; exit 64; }

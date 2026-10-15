@@ -122,6 +122,11 @@ class LlmSettings(BaseSettings):
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
     embedding_model: str = ""
     embedding_dim: int = Field(default=1536, gt=0)
+    # Ask the endpoint for vectors of this many dimensions (the `dimensions` parameter of
+    # `/embeddings`, which the text-embedding-3 family and compatible gateways accept). Unset sends
+    # none, and the model answers at its own width. When set it must equal `embedding_dim`: the
+    # width the corpus is stored at and the width requested are one decision, not two.
+    embedding_request_dimensions: int | None = Field(default=None, gt=0)
     # In-memory embedding cache entries, keyed by provider+model+dim and text, so a config change
     # never serves stale vectors. 0 disables.
     embedding_cache_size: int = Field(default=2048, ge=0)
@@ -154,5 +159,14 @@ class LlmSettings(BaseSettings):
         if self.embedding_provider == "openai_compatible" and not self.embedding_model:
             raise ValueError(
                 "embedding_provider='openai_compatible' requires embedding_model to be set"
+            )
+        if (
+            self.embedding_request_dimensions is not None
+            and self.embedding_request_dimensions != self.embedding_dim
+        ):
+            raise ValueError(
+                f"embedding_request_dimensions={self.embedding_request_dimensions} must equal "
+                f"embedding_dim={self.embedding_dim}: the width asked of the endpoint is the width "
+                "the corpus is stored at"
             )
         return self

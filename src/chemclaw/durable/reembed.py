@@ -1,15 +1,19 @@
 """Durable re-embedding of the stored corpus after an embedding model or width change.
 
 Started on demand (`python -m chemclaw.cli.reembed`), never scheduled: a model change is a decision,
-not a cadence. One workflow on `background-jobs`, in four phases, each resumable from the database
-alone because the state is the rows' `embedding_key` rather than anything held here:
+not a cadence. One workflow on `background-jobs`, resumable from the database alone because the
+state is the rows' `embedding_key` rather than anything held here:
 
-1. **Documents** — stored chunk text re-embedded in claimed batches (`FOR UPDATE SKIP LOCKED`), so
-   any number of workers, or a killed one, never embed a chunk twice or lose a batch.
+1. **Documents** — a walk through the stored chunks in primary-key order, each batch read, embedded
+   and then written only where the row is still not under the live key. No row is locked across the
+   embedding call, so the crawl, the scheduled sync and a peer pass are never made to wait; the
+   price is that two passes reaching one chunk may both embed it. A chunk that will not embed is
+   passed once and counted, and the walk stops early only when several batches in a row all fail.
 2. **Notes** — the incremental note reindex, which already treats a different key as changed.
-3. **Reclaim** — vectors a superseded width left in its old column are emptied, in batches, once the
-   row is stamped with the live key.
-4. **Verify** — what is still not under the live key, so "done" is a measurement.
+3. **Verify** — what is still not under the live key, so "done" is a measurement.
+
+Emptying the superseded width's vectors is a separate run (`reclaim`), because it ends the rollback
+path: the previous image reads those vectors, and without them it must re-embed.
 
 The live column must already exist (the migrator creates it from `embedding_dim`); the plan refuses
 otherwise rather than failing every batch.
@@ -36,9 +40,17 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.note_index import reindex_notes_activity
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
-    from chemclaw.ingest.documents.index import PostgresDocumentIndex, default_document_index
-    from chemclaw.ingest.documents.sync import ReembedReport, reembed_claimed, reembed_stale
-    from chemclaw.retrieval.vector_index import PostgresNoteIndex, default_note_index
+    from chemclaw.ingest.documents.index import (
+        ChunkCursor,
+        PostgresDocumentIndex,
+        default_document_index,
+    )
+    from chemclaw.ingest.documents.sync import ReembedReport, reembed_after
+    from chemclaw.retrieval.vector_index import (
+        REINDEX_SKIPPED,
+        PostgresNoteIndex,
+        default_note_index,
+    )
 
 from chemclaw.durable.publish import queue_wait_timeout
 from chemclaw.durable.retry import retry_for
@@ -56,6 +68,8 @@ class ReembedPlan(BaseModel):
     # Activities one run may schedule before continuing as new, captured for the reason
     # `durable/document_sync.py::DocumentSyncPlan` gives.
     max_iterations: int
+    # Consecutive wholly failed batches that end the documents phase as stalled.
+    max_failed_batches: int
 
 
 class ReembedProgress(BaseModel):
@@ -63,11 +77,21 @@ class ReembedProgress(BaseModel):
 
     plan: ReembedPlan
     phase: str = "documents"
+    cursor: ChunkCursor | None = None
+    failed_streak: int = 0
     documents_embedded: int = 0
     documents_failed: int = 0
     notes_indexed: int = 0
+    notes_skipped: bool = False
     vectors_cleared: int = 0
     stalled: bool = False
+
+
+class ReembedRequest(BaseModel):
+    """The workflow's input: what to do, and (after `continue_as_new`) where it had got to."""
+
+    reclaim: bool = False
+    progress: ReembedProgress | None = None
 
 
 class ReembedRemaining(BaseModel):
@@ -83,6 +107,8 @@ class ReembedOutcome(BaseModel):
     documents_embedded: int
     documents_failed: int
     notes_indexed: int
+    # Another worker held the note reindex, so this run indexed none: re-run to cover the notes.
+    notes_skipped: bool
     vectors_cleared: int
     stalled: bool
     remaining: ReembedRemaining
@@ -116,34 +142,30 @@ async def plan_embedding_reembed() -> ReembedPlan:
         column=column,
         dim=dim,
         max_iterations=settings.document_sync_max_iterations,
+        max_failed_batches=settings.document_reembed_max_failed_batches,
     )
 
 
 @durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
-async def reembed_document_batch() -> ReembedReport:
-    """Re-embed one claimed batch of stored chunks whose vector is not the live configuration's.
+async def reembed_document_batch(after: ChunkCursor | None = None) -> ReembedReport:
+    """Re-embed the next batch of stored chunks after `after` whose vector is not the live one.
 
     Scoped to the chunkings the enabled shares use. Heartbeats while the embedding endpoint
     answers, since a batch is one opaque round trip.
     """
     activity.heartbeat()
     chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
-    index = _document_index()
-    batch = settings.document_reembed_batch_size
-    work = (
-        reembed_claimed(index, chunkings, batch)
-        if isinstance(index, PostgresDocumentIndex)
-        else reembed_stale(index, chunkings, batch)
-    )
     return await beating(
-        work, "document re-embed", settings.document_sync_heartbeat_timeout_seconds
+        reembed_after(_document_index(), chunkings, settings.document_reembed_batch_size, after),
+        "document re-embed",
+        settings.document_sync_heartbeat_timeout_seconds,
     )
 
 
 # Empties the superseded width's vector on rows already stamped with the live key. The picking
 # select locks rows and skips locked ones, and runs once (`MATERIALIZED`) so a plan cannot repeat
-# it per outer row (`tests/test_claim_statements.py`).
+# it per outer row (`tests/test_claim_statements.py`). Run only by an explicit reclaim.
 _CLEAR_SUPERSEDED = """
     WITH picked AS MATERIALIZED (
         SELECT ctid AS row_id FROM {table}
@@ -161,7 +183,7 @@ async def clear_superseded_vectors(plan: ReembedPlan) -> int:
 
     Returns how many it emptied; zero means nothing is left to reclaim. A row's live vector is in
     the column its key's width names, so a vector beside it in another column is storage only:
-    reads never rank it.
+    reads never rank it. Irreversible: the previous image reads those vectors.
     """
     budget = settings.document_reembed_batch_size
     keys = {"note_index": note_embedding_key(), "document_chunks": plan.key}
@@ -215,8 +237,10 @@ class EmbeddingReembedWorkflow:
     """
 
     @workflow.run
-    async def run(self, progress: ReembedProgress | None = None) -> ReembedOutcome:
-        """Plan once, then drain documents, reindex notes, reclaim old vectors and measure."""
+    async def run(self, request: ReembedRequest | None = None) -> ReembedOutcome:
+        """Plan once, then drain documents, reindex notes and measure; or, on request, reclaim."""
+        request = request or ReembedRequest()
+        progress = request.progress
         timeout = timedelta(seconds=settings.document_sync_timeout_seconds)
         heartbeat = timedelta(seconds=settings.document_sync_heartbeat_timeout_seconds)
         if progress is None:
@@ -226,11 +250,14 @@ class EmbeddingReembedWorkflow:
                 schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=retry_for(plan_embedding_reembed),
             )
-            progress = ReembedProgress(plan=plan)
+            progress = ReembedProgress(
+                plan=plan, phase="reclaim" if request.reclaim else "documents"
+            )
         iterations = 0
         while progress.phase == "documents":
             batch: ReembedReport = await workflow.execute_activity(
                 reembed_document_batch,
+                progress.cursor,
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
@@ -238,14 +265,16 @@ class EmbeddingReembedWorkflow:
             )
             progress.documents_embedded += batch.embedded
             progress.documents_failed += batch.failed
+            progress.cursor = batch.cursor or progress.cursor
+            progress.failed_streak = progress.failed_streak + 1 if batch.stalled else 0
             iterations += 1
-            if batch.stalled:
+            if progress.failed_streak >= progress.plan.max_failed_batches:
                 progress.stalled = True
                 progress.phase = "notes"
             elif not batch.has_more:
                 progress.phase = "notes"
             elif iterations >= progress.plan.max_iterations:
-                workflow.continue_as_new(progress)
+                workflow.continue_as_new(ReembedRequest(progress=progress))
         if progress.phase == "notes":
             indexed: int = await workflow.execute_activity(
                 reindex_notes_activity,
@@ -256,8 +285,11 @@ class EmbeddingReembedWorkflow:
                 ),
                 retry_policy=retry_for(reindex_notes_activity),
             )
-            progress.notes_indexed += max(indexed, 0)
-            progress.phase = "reclaim"
+            if indexed == REINDEX_SKIPPED:
+                progress.notes_skipped = True
+            else:
+                progress.notes_indexed += indexed
+            progress.phase = "verify"
         while progress.phase == "reclaim":
             cleared: int = await workflow.execute_activity(
                 clear_superseded_vectors,
@@ -271,7 +303,7 @@ class EmbeddingReembedWorkflow:
             if not cleared:
                 progress.phase = "verify"
             elif iterations >= progress.plan.max_iterations:
-                workflow.continue_as_new(progress)
+                workflow.continue_as_new(ReembedRequest(reclaim=True, progress=progress))
         remaining: ReembedRemaining = await workflow.execute_activity(
             count_unembedded,
             start_to_close_timeout=timeout,
@@ -282,6 +314,7 @@ class EmbeddingReembedWorkflow:
             documents_embedded=progress.documents_embedded,
             documents_failed=progress.documents_failed,
             notes_indexed=progress.notes_indexed,
+            notes_skipped=progress.notes_skipped,
             vectors_cleared=progress.vectors_cleared,
             stalled=progress.stalled,
             remaining=remaining,
