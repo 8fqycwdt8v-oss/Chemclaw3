@@ -25,9 +25,19 @@ class KgSettings(BaseSettings):
     a note now lands on that branch instead of on `note/<id>` beside it.
     """
 
-    # Where notes are stored. Only `git` (the Markdown tree and the note writer) exists today; the
-    # Postgres store arrives behind this setting so a release can be rolled back by setting it.
-    kg_store: Literal["git"] = "git"
+    # Where notes are stored. `git` is the Markdown tree and its writer. `dual` reads from the tree
+    # and writes it first, then Postgres (a failed Postgres write is logged and counted, never the
+    # chemist's error). `postgres` is refused at startup until the reads flip (the validator below).
+    kg_store: Literal["git", "dual", "postgres"] = "git"
+    # The nightly tree-versus-Postgres comparison under `dual` (`durable/kg_compare.py`). The settle
+    # pause is how long a difference must persist before it is reported, so a note another pod just
+    # wrote (whose clone has not synced yet) is not read as a divergence. A clone lags by up to two
+    # sync intervals (a sleep, then a refresh the writer's lock can skip once) plus the graph cache,
+    # so the default is 2 x the chart's 300 s + 120 s; the chart derives it from its own interval.
+    # The timeout bounds the whole run, pause included, and must be longer than the pause.
+    kg_compare_schedule_minutes: float = Field(default=1440.0, gt=0)
+    kg_compare_settle_seconds: float = Field(default=720.0, ge=0)
+    kg_compare_timeout_seconds: float = Field(default=1200.0, gt=0)
     # Directory of note files the indexer reads; retrieval traverses their [[wikilinks]].
     knowledge_dir: str = "knowledge"
     # Upper bound on `expand_note`'s model-supplied `hops`; larger values are clamped, not rejected.
@@ -65,6 +75,35 @@ class KgSettings(BaseSettings):
         (`Path.__truediv__`).
         """
         return Path(self.note_repo_dir) / self.knowledge_dir
+
+    @model_validator(mode="after")
+    def _postgres_reads_wait_for_the_flip(self) -> Self:
+        """`kg_store="postgres"` is refused: readers still resolve some notes through the tree.
+
+        Several helpers take a notes directory (`conflict_index`, the retrievers' `notes_dir`, the
+        `exists()` guards), so reading from Postgres alone would answer some questions from an
+        empty or stale tree. `dual` is the supported way to fill and compare the store; the pull
+        request that flips the reads removes this check.
+        """
+        if self.kg_store == "postgres":
+            raise ValueError(
+                "kg_store='postgres' is not accepted yet: the reads have not been moved off the "
+                "notes directory, so a Postgres-only deployment would answer some questions from "
+                "an empty tree. Use kg_store='dual' (reads from the tree, writes both, compared "
+                "nightly) until the read flip ships."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_comparison_budget_outlasts_its_pause(self) -> Self:
+        """The comparison's activity budget must be longer than the pause it sleeps through."""
+        if self.kg_compare_timeout_seconds <= self.kg_compare_settle_seconds:
+            raise ValueError(
+                f"kg_compare_timeout_seconds={self.kg_compare_timeout_seconds} does not outlast "
+                f"kg_compare_settle_seconds={self.kg_compare_settle_seconds}: the run would be "
+                "cancelled during its own pause. Raise the timeout or lower the pause."
+            )
+        return self
 
     @model_validator(mode="after")
     def _knowledge_dir_is_relative(self) -> Self:

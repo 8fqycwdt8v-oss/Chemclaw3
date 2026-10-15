@@ -979,3 +979,57 @@ async def test_the_file_write_keeps_the_order_it_had_before_it_was_built_from_a_
         assert [
             (role, f"knowledge/{note_relative_path(n.type, n.id)}") for role, n in unit.ordered()
         ] == expected
+
+
+async def test_a_retirement_copy_keeps_its_sentence_only_on_the_note_it_was_made_from(
+    store: PostgresNoteStore,
+) -> None:
+    """A text compare cannot tell an extension from a note edited shorter; the digest can."""
+    await store.put(NoteUnit(_note("x", "Alpha. Beta secret text.")))
+    read = await store.get("x")
+    assert read is not None
+    stale = changed(
+        read,
+        {
+            "valid_to": date(2026, 4, 30),
+            "relations": [Relation(rel="superseded-by", to="y")],
+            "body": f"{read.body}\n\nSuperseded by y.",
+        },
+    )
+    made_from = {"x": content_sha(read)}
+    # The text after "Alpha." was deleted since the copy was made.
+    await store.put(NoteUnit(_note("x", "Alpha.")))
+    await store.put(NoteUnit(_note("y", "New."), retirements=(stale,), retired_from=made_from))
+    now = await store.get("x")
+    assert now is not None and now.body == "Alpha." and now.valid_to == date(2026, 4, 30)
+    assert await store.related("x", "superseded-by") == ["y"]
+
+    # An empty stored body is not replaced by whatever a stale copy carries.
+    await store.put(NoteUnit(_note("e", "")))
+    empty = await store.get("e")
+    assert empty is not None
+    copy = changed(empty, {"valid_to": date(2026, 4, 30), "body": "Text from a stale read."})
+    await store.put(
+        NoteUnit(_note("z", "New."), retirements=(copy,), retired_from={"e": "sha256:0"})
+    )
+    kept = await store.get("e")
+    assert kept is not None and kept.body == "" and kept.valid_to == date(2026, 4, 30)
+
+    # The note the copy was made from keeps the sentence; a copy naming no origin does not.
+    await store.put(NoteUnit(_note("a", "Original.")))
+    original = await store.get("a")
+    assert original is not None
+    closing = changed(
+        original, {"valid_to": date(2026, 5, 31), "body": "Original.\n\nSuperseded by b."}
+    )
+    await store.put(NoteUnit(_note("b", "New."), retirements=(closing,)))
+    unnamed = await store.get("a")
+    assert unnamed is not None and unnamed.body == "Original."
+    await store.put(NoteUnit(_note("a", "Original.")))
+    await store.put(
+        NoteUnit(
+            _note("b", "New."), retirements=(closing,), retired_from={"a": content_sha(original)}
+        )
+    )
+    named = await store.get("a")
+    assert named is not None and named.body == "Original.\n\nSuperseded by b."

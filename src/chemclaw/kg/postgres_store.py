@@ -15,7 +15,7 @@ import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator, Collection, Hashable, Sequence
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any, NamedTuple
 
 import networkx as nx
@@ -33,6 +33,7 @@ from chemclaw.core.tenancy import TenantError, require_bound_tenant
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.rows import (
     canonical_note,
+    content_sha,
     edge_columns,
     note_columns,
     note_from_columns,
@@ -168,7 +169,7 @@ _INSERT_NOTE = (
     "valid_to, revision, content_sha, search_text, created_at, updated_at) "
     "VALUES (%(tenant)s, %(id)s, %(type)s, %(frontmatter)s, %(body)s, %(created_by)s, "
     "%(valid_from)s, %(valid_to)s, %(revision)s, %(content_sha)s, %(search_text)s, "
-    "clock_timestamp(), clock_timestamp()) "
+    "coalesce(%(created_at)s, clock_timestamp()), clock_timestamp()) "
     "ON CONFLICT (tenant_id, id) DO NOTHING"
 )
 _UPDATE_NOTE = (
@@ -192,6 +193,10 @@ _SELECT_DERIVED = (
     "WHERE n.tenant_id = %s AND n.id = %s"
 )
 _REFRESH_SEARCH_TEXT = "UPDATE kg_notes SET search_text = %s WHERE tenant_id = %s AND id = %s"
+_LINK_NOTE_INDEX = (
+    "UPDATE note_index SET kg_tenant_id = n.tenant_id, kg_note_id = n.id FROM kg_notes n "
+    "WHERE n.tenant_id = %s AND note_index.note_id = n.id AND note_index.kg_note_id IS NULL"
+)
 _INSERT_EDGE = (
     "INSERT INTO kg_edges (tenant_id, src, rel, dst, valid_from, valid_to, confidence) "
     "VALUES (%(tenant)s, %(src)s, %(rel)s, %(dst)s, %(valid_from)s, %(valid_to)s, %(confidence)s)"
@@ -266,11 +271,16 @@ def _admit_subject(unit: NoteUnit, note: Note, current: _Held | None) -> None:
         raise NoteRevisionConflict(note.id, unit.expected_revision, actual)
 
 
-def _closed(current: Note, retirement: Note) -> Note:
+def _closed(current: Note, retirement: Note, read_sha: str | None) -> Note:
     """`current` with the window and the `superseded-by` relations of `retirement` applied.
 
-    Only those: the rest of the copy a retirement carries was read at some earlier revision and
-    may have been edited since. A window that would end before the note starts is refused.
+    The rest of the copy a retirement carries was read at some earlier revision and may have been
+    edited since, so it is not applied, with one exception: the sentence the retirement helper
+    added after the body (`close_refuted_note`, `retire_note`), which the file writer keeps too. It
+    is kept only when `read_sha`, the digest of the note the copy was made from, is the digest of
+    the note stored now, and the copy's body extends it. A text compare alone cannot tell an
+    extension from a stored note edited shorter since, and would put the deleted text back. A
+    window that would end before the note starts is refused.
     """
     known = {(r.rel, r.to) for r in current.outgoing_relations()}
     relations = [*current.relations]
@@ -281,6 +291,12 @@ def _closed(current: Note, retirement: Note) -> Note:
     changes: dict[str, Any] = {"relations": relations}
     if retirement.valid_to is not None:
         changes["valid_to"] = retirement.valid_to
+    if (
+        read_sha is not None
+        and read_sha == content_sha(current)
+        and retirement.body.startswith(current.body)
+    ):
+        changes["body"] = retirement.body
     try:
         return canonical_note(Note(**{**current.model_dump(), **changes}))
     except ValidationError as exc:
@@ -534,6 +550,27 @@ class PostgresNoteStore:
 
     # --- Writing ---------------------------------------------------------------------------
 
+    async def note_revision(self, note_id: str) -> int:
+        """The revision `note_id` is at, or 0 when there is no such note.
+
+        The value `NoteUnit.expected_revision` takes for a write conditional on it.
+        """
+        async with self._read() as conn:
+            cursor = await conn.execute(_SELECT_HELD, (self._tenant, [note_id]))
+            row = await cursor.fetchone()
+        return 0 if row is None else int(row[1])
+
+    async def link_note_index(self) -> int:
+        """Point each unlinked `note_index` row at the note of the same id; return how many.
+
+        Fills the keys the index's foreign key to `kg_notes` uses and changes nothing else about a
+        row, so the index keeps working as it did. Rows already linked, and rows for ids this
+        tenant has no note for, are left alone; running it again finds nothing new.
+        """
+        async with connection(settings.postgres_dsn, operation="kg_notes_write") as conn:
+            cursor = await conn.execute(_LINK_NOTE_INDEX, (self._tenant,))
+            return cursor.rowcount
+
     async def put(self, unit: NoteUnit) -> PutOutcome:
         """Write `unit` in one transaction: dependencies, then the subject, then retirements.
 
@@ -553,6 +590,8 @@ class PostgresNoteStore:
         `NoteRevisionConflict`. `created_by` is taken as given: whoever calls `put` has
         authenticated the author. Either refusal raises before any row changes: the transaction
         rolls back whole.
+
+        `unit.arrived` dates the subject's first appearance (an import); other notes arrive now.
 
         Writers of the same ids queue on a transaction-scoped advisory lock taken in id order, so
         two units that share a note neither interleave nor deadlock. Timestamps are taken after the
@@ -584,26 +623,32 @@ class PostgresNoteStore:
                     continue
                 if role == "subject":
                     _admit_subject(unit, note, current)
+                if role == "retirement" and (
+                    note.created_by == "human" if current is None else current.created_by == "human"
+                ):
+                    # A person's note is not retired in place, whether or not this store holds it
+                    # yet: the file writer leaves the copy alone either way, and a closed copy
+                    # inserted here would be a note the tree does not have.
+                    log_event(
+                        log,
+                        "kg.write.amendment_left_alone",
+                        "left %s alone: it is a human's note, so it is not retired in place "
+                        "— the note recorded alongside it still lands and marks it as "
+                        "contradicted",
+                        note.id,
+                        level=logging.WARNING,
+                        note_id=note.id,
+                    )
+                    continue
                 if role == "retirement" and current is not None:
-                    if current.created_by == "human":
-                        log_event(
-                            log,
-                            "kg.write.amendment_left_alone",
-                            "left %s alone: it is a human's note, so it is not retired in place "
-                            "— the note recorded alongside it still lands and marks it as "
-                            "contradicted",
-                            note.id,
-                            level=logging.WARNING,
-                            note_id=note.id,
-                        )
-                        continue
-                    note = _closed(stored[note.id], note)
+                    note = _closed(stored[note.id], note, unit.retired_from.get(note.id))
                 row = note_columns(note)
                 if current is not None and current.content_sha == row["content_sha"]:
                     await self._repair_derived(conn, note, row)
                     continue
                 revision = 1 if current is None else current.revision + 1
-                await self._write(conn, note, row, current, revision, recorded_by)
+                arrived = unit.arrived if role == "subject" else None
+                await self._write(conn, note, row, current, revision, recorded_by, arrived)
                 revisions[note.id] = revision
                 written.append(note.id)
         return PutOutcome(subject=unit.subject.id, revisions=revisions, written=tuple(written))
@@ -672,14 +717,19 @@ class PostgresNoteStore:
         current: _Held | None,
         revision: int,
         recorded_by: str | None,
+        arrived: date | None,
     ) -> None:
-        """Insert or update the note's row, append its revision, and re-derive its edges."""
+        """Insert or update the note's row, append its revision, and re-derive its edges.
+
+        `arrived` becomes a new row's `created_at` (midnight UTC); an edit keeps the original.
+        """
         values = {
             "tenant": self._tenant,
             **row,
             "frontmatter": json_column(row["frontmatter"]),
             "revision": revision,
             "held": 0 if current is None else current.revision,
+            "created_at": None if arrived is None else datetime.combine(arrived, time.min, UTC),
         }
         cursor = await conn.execute(_UPDATE_NOTE if current else _INSERT_NOTE, values)
         if cursor.rowcount != 1:

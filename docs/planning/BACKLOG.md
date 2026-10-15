@@ -170,7 +170,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a scale not yet reached
 
-- **The programme's sequenced remainder** — W3.12 (parallel gate), W4 stage 2c to W4.11, W6.4, W7.8, W7.9, W7.12, W5.4–W5.13 and W8; order and file lists in `docs/planning/programme-deferred-2026-10.md` §C · *Revisit:* ten clean parallel runs on settled `main` (W3.12), `kg-validate --compare` clean for seven days (W4.9), the five flip criteria in §B5 (W6.4).
+- **The programme's sequenced remainder** — W3.12 (parallel gate), W4.7 to W4.11, W6.4, W7.8, W7.9, W7.12, W5.4–W5.13 and W8; order and file lists in `docs/planning/programme-deferred-2026-10.md` §C · *Revisit:* ten clean parallel runs on settled `main` (W3.12), `kg-validate --compare` clean for seven days (W4.9), the five flip criteria in §B5 (W6.4).
 - **Delete the `propose_report` activity alias** — old executions may still run · *Revisit:* no `DevelopmentReportWorkflow` started before the rename is running.
 - **Drop `note_proposed` from `evals/live.py`** — older UI builds still send it · *Revisit:* every probed deployment sends `note_recorded`.
 - **Watching for a new ELN run, not just a new note** — no one has asked · *Revisit:* a chemist asks for run-level alerting on a real corpus.

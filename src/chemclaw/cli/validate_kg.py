@@ -7,16 +7,33 @@ transcription tier for `[[reaction-*]]` citations, the calculation cache for `ca
 Postgres service.
 
 An unreachable database or an empty corpus fails the gate loudly rather than passing silently.
+
+`--compare` is a different question: whether the notes directory and the Postgres store serve the
+same canonical notes and edges (`kg.compare`). Exit 0 when they do, 1 when any note differs, 2 when
+the comparison could not run (2 also when tenancy is on and no `--tenant` names whose store is
+compared: one tenant at a time). A difference must persist across `--settle-seconds` (default
+`kg_compare_settle_seconds`) to be reported. `--repair` (under `kg_store=dual` only) then copies the
+directory's version of each differing note into Postgres, and refuses (exit 2) unless the directory
+is a checkout at the remote's tip: from one behind it, it would put old notes over newer ones.
 """
 
 import argparse
 import asyncio
+import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from chemclaw.core.config import settings
+from chemclaw.core.db import pooling
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.ingest.eln.records import default_record_store
+from chemclaw.kg.compare import Comparison, Repair, compare_stores, repair_from_tree
+from chemclaw.kg.git_writer import GitNoteWriter
+from chemclaw.kg.postgres_store import PostgresNoteStore
+from chemclaw.kg.store import GitNoteStore
 from chemclaw.kg.validate import (
     calc_citations,
     external_citations,
@@ -25,6 +42,85 @@ from chemclaw.kg.validate import (
     validate_with_notes,
 )
 from chemclaw.science.calc.postgres_store import PostgresStore
+
+_Result = tuple[Comparison, Repair | None, Comparison | None]
+
+
+async def _compare_for_bound_tenant(
+    notes_dir: Path, settle_seconds: float, repair: bool
+) -> _Result:
+    """Compare the directory with the bound tenant's store; if asked, repair and compare again."""
+    tree, store = GitNoteStore(notes_dir), PostgresNoteStore()
+    found = await compare_stores(tree, store, settle_seconds=settle_seconds)
+    if not repair or found.clean:
+        return found, None, None
+    repaired = await repair_from_tree(tree, store, found.differences)
+    return found, repaired, await compare_stores(tree, store)
+
+
+async def _compare(
+    notes_dir: Path, options: argparse.Namespace, settle_seconds: float, repair: bool
+) -> _Result:
+    """The comparison for the one tenant the flags choose (tenancy off: the only one)."""
+    async with pooling():
+        chosen = await for_chosen_tenants(
+            options,
+            lambda _tenant: _compare_for_bound_tenant(notes_dir, settle_seconds, repair),
+        )
+    (result,) = chosen.values()
+    return result
+
+
+def _print_comparison(found: Comparison) -> None:
+    print(f"git: {found.git_notes} note(s); postgres: {found.postgres_notes} note(s)")
+    for difference in found.differences:
+        detail = f" ({', '.join(difference.fields)})" if difference.fields else ""
+        print(f"DIFFERENT {difference.note_id}: {', '.join(difference.kinds)}{detail}")
+
+
+def _compare_main(options: argparse.Namespace, notes_dir: Path) -> int:
+    """`--compare` (and `--repair`): print the report as text or JSON; return the exit code."""
+    settle = (
+        options.settle_seconds
+        if options.settle_seconds is not None
+        else settings.kg_compare_settle_seconds
+    )
+    if options.repair and settings.kg_store != "dual":
+        print(
+            f"--repair is for kg_store=dual, and this is kg_store={settings.kg_store}: with only "
+            "the tree written, a difference is a store that needs `make kg-import`; with only "
+            "Postgres written, the tree is the stale side.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        lagging = asyncio.run(GitNoteWriter(repo_dir=str(notes_dir)).lagging_reason())
+        if lagging is not None and options.repair:
+            print(f"--repair refused: {lagging}", file=sys.stderr)
+            return 2
+        if lagging is not None:
+            print(f"WARNING: {lagging}; differences below may be that lag.", file=sys.stderr)
+        found, repaired, after = asyncio.run(_compare(notes_dir, options, settle, options.repair))
+    except TenantError as exc:
+        return refusal(exc)
+    except Exception as exc:
+        print(f"the comparison could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    final = after if after is not None else found
+    if options.json:
+        report = {"comparison": found.as_json()}
+        if repaired is not None and after is not None:
+            report |= {"repair": repaired.as_json(), "after_repair": after.as_json()}
+        print(json.dumps(report, indent=2))
+    else:
+        _print_comparison(found)
+        if repaired is not None and after is not None:
+            print(f"repaired {len(repaired.repaired)} note(s)")
+            for note_id, reason in repaired.unrepaired:
+                print(f"NOT REPAIRED {note_id}: {reason}")
+            print(f"after repair: {len(after.differences)} difference(s)")
+        print("OK: the stores serve the same notes" if final.clean else "DIFFERENT: see above")
+    return 0 if final.clean else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -44,12 +140,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=f"the notes directory to validate (default: {settings.knowledge_path}).",
     )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="compare the directory with the Postgres store instead of validating it.",
+    )
+    parser.add_argument(
+        "--repair", action="store_true", help="with --compare: put right what differs (dual only)."
+    )
+    parser.add_argument("--json", action="store_true", help="with --compare: print JSON.")
+    add_tenant_flags(parser, all_tenants=False)
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=None,
+        help="with --compare: look again after this pause and report only what persists "
+        "(default: kg_compare_settle_seconds; 0 looks once).",
+    )
     options = parser.parse_args(argv)
+    if (options.repair or options.json) and not options.compare:
+        parser.error("--repair and --json belong to --compare")
     notes_dir = Path(options.notes_dir) if options.notes_dir else settings.knowledge_path
     # `is_dir()`, not `exists()`: a file would walk zero notes and pass.
     if not notes_dir.is_dir():
         print(f"notes directory does not exist, or is not a directory: {notes_dir}")
         return 1
+    if options.compare:
+        return _compare_main(options, notes_dir)
     try:
         # One parse for all the halves: the citation checks read the same corpus `validate` just
         # walked.

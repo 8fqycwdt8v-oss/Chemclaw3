@@ -11,7 +11,7 @@ and the terminal get the same answer.
 | `connectors_dev.py` | every enabled connector in one dev process (`make connectors`) |
 | `schedules.py` | apply the Temporal Schedules (`make schedules-apply`); the logic is `durable/schedules.py` |
 | `tenants.py` | register and list tenants (`make tenant-add TENANT=acme [DEPLOYMENT=<release>]`, `make tenant-assign`, `make tenant-list`); an operator's command, run under the owning principal |
-| `validate_*.py` | the validators `make` runs — one per declaration format; `validate_template_args_live.py` is the argument check `template-validate` cannot make, taken against running servers |
+| `validate_*.py` | the validators `make` runs — one per declaration format; `validate_kg.py --compare` also compares the notes tree with the Postgres store (`make kg-validate-compare`); `validate_template_args_live.py` is the argument check `template-validate` cannot make, taken against running servers |
 | `reembed.py` | bring every stored vector to the configured embedding model and width (`make reembed`); the logic is `durable/reembed.py` |
 | `backfill_corpus.py`, `backfill_publications.py`, `refresh_baseline.py`, `synthesize.py`, `sync_share.py` | one-shot operational jobs: notes from existing documents, queueing results computed before a sink existed, the eval baseline, a memory-synthesis job, crawling a mounted share |
 | `rekey_campaigns.py`, `rekey_compounds.py` | carry recorded rows across an identity-derivation bump (`make rekey-compounds`) |
@@ -22,6 +22,7 @@ and the terminal get the same answer.
 | `live_*.py`, `leak_probe.py`, `retrieval_arms.py`, `hypothesis_recovery.py`, `verifier_margin.py`, `soak_report.py`, `phoenix_publish.py` | the live lane and measurement drivers behind the `make live-*` targets |
 | `restore_drill.py` | the backup-and-restore drill (`make restore-drill`; its SQL is `core/restore_check.py`): a throwaway Postgres and Temporal in Docker, a base backup plus archived WAL replayed to a marked instant, then row counts, ledger, indexes, grants, pgvector, `kg-validate` and Temporal checked against the primary; one JSON report on stdout (`docs/guides/runbook.md` § Backup, restore and PITR) |
 | `model_text_inventory.py`, `model_text_eval.py` | the inventory of every string a model reads (`make model-text`, written to `schema/model-text/`) and the ship-or-not evaluation of a batch of edits to it (`make model-text-eval`; `docs/guides/model-text-evaluation.md`) |
+| `kg_import.py` | load the notes directory into the Postgres note store, idempotently, with arrival dates and a summary that names what it skipped (`make kg-import`; the logic is `kg/importer.py`) |
 | `kg_store_bench.py` | measure the Postgres note store in a scratch schema: notes per second with one and four writers, query latency and resident memory at a corpus size, as JSON (`python -m chemclaw.cli.kg_store_bench`) |
 | `bench_backend_rpc.py` | time `calculation_key` over MCP and over `/rpc` against the configured calc server (`make bench-backend-rpc`) |
 | `architecture_baseline.py` | measure the architecture programme's baseline — import time, build time, prose ratio, sizes — into `docs/planning/architecture-baseline-<date>.json` (`make architecture-baseline`) |
