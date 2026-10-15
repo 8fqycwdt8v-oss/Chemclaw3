@@ -1777,6 +1777,20 @@ answering `200` on `/healthz` and `500` on `/mcp`: `/readyz` said `{"status":"re
 while every tool call to that connector failed. `ChemclawConnectorsDegradingTurns` is the rule for
 that case, and a flat `chemclaw_connectors_unhealthy` is not evidence against it.
 
+#### ChemclawDeploymentUnchecked
+`warning`. A pod's check of its database (release identity, forced policies, the roles it connects
+as, the pooler in front of them) could not read the database, at start and on each repeat. It serves
+anyway, because an outage is `/readyz`'s to report and a crash loop would turn it into a worse one;
+the body says `"deployment": "unchecked"`. Find why the database is not answering
+(`ChemclawDatabaseUnavailable`); the next recheck, `deployment_recheck_seconds` later, clears it.
+
+#### ChemclawDeploymentRefused
+`critical`. The check read the database and found it contradicts the configuration, and the pod is
+unready (`/readyz`: `deployment refused`) so it drains instead of acting on it. The pod's log names
+every reason: a role that is a superuser or has `BYPASSRLS`, a transaction-mode pooler in front of
+tenancy, another release's stamp, policies not enforced, keys not widened. The remedies are in
+§(xv-b).
+
 #### ChemclawConnectorsDegradingTurns
 `warning`. A turn opened this connector and it did not come up, so the turn answered without its
 tools. `chemclaw_connectors_unreachable_total{connector}` is the series, one increment per connector

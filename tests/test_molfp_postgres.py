@@ -584,3 +584,27 @@ async def test_a_table_still_keyed_without_its_definition_refuses_the_write() ->
         async with await db.connect(settings.postgres_dsn) as conn:
             await conn.execute("DROP TABLE IF EXISTS molfp_old_key_probe")
             await conn.commit()
+
+
+async def test_the_approximate_search_applies_the_shared_recall_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HNSW arm runs under the same iterative-scan setting the two dense searches do.
+
+    With row-level security the policy filter is applied after the index returns its candidates,
+    so without iterative scan a small tenant gets fewer rows than it asks for. The arm used to set
+    `hnsw.ef_search` alone.
+    """
+    from chemclaw.core import db as db_module
+
+    store = await _store_or_skip()
+    seen: list[object] = []
+    real = db_module.apply_vector_recall_settings
+
+    async def spy(cur: object) -> None:
+        seen.append(cur)
+        await real(cur)
+
+    monkeypatch.setattr(db_module, "apply_vector_recall_settings", spy)
+    await store._find_similar_approximate("0" * settings.ecfp_bits, 3, 0.5)
+    assert len(seen) == 1

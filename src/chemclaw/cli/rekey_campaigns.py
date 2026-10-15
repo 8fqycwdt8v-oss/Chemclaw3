@@ -109,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         return refusal(exc)
     verb = "moved" if args.apply else "would move"
     for tenant, (examined, moved) in counts.items():
-        logger.info("tenant %s: %d campaign(s) examined, %s %d", tenant, examined, verb, moved)
+        where = f"tenant {tenant}: " if settings.tenancy_enabled else ""
+        logger.info("%s%d campaign(s) examined, %s %d", where, examined, verb, moved)
     return 0
 
 
