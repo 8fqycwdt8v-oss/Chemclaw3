@@ -326,6 +326,11 @@ files and `ARCHITECTURE.md`).
 - **`tests/recorded_workflow_histories.py::_replay_on_a_private_loop`** is still inherently
   timing-sensitive (whether the SDK parks depends on its shutdown race); if it flakes, make `wedged`
   deterministic in the test.
+- **`tests/test_connector_job_workflow.py::test_…[wrapper-headroom-under-a-busy-queue]` hung once.**
+  The wrapper kept retrying `deliver_message_activity`, which that test's late worker does not
+  register, until pytest's 180 s timeout killed the whole session (16 minutes in); a re-run of the
+  same commit passed. Not root-caused: find why the wrapper reaches the delivery activity there (a
+  settings-dependent delivery channel?) and register or stub it in the test.
 - **Disk.** Agent worktrees and virtualenvs of several hundred MB each filled the volume once
   (110 MB free). Remove a worktree when its branch is pushed and its agent is done; keep scratch out of
   the repo.
