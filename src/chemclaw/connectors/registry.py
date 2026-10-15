@@ -37,6 +37,7 @@ from chemclaw.connectors.manifest import (
     JobSpec,
     StdioEndpoint,
 )
+from chemclaw.connectors.session_pool import PooledConnectorSession, active_pool, poolable
 from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
 from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
@@ -477,8 +478,15 @@ async def open_connector_specs(
     Concurrent, so a dark fleet costs one connect timeout rather than their sum; safe because each
     `HeldConnectorSession` confines its cancel scope to its own task. The degradation is logged and
     counted here; callers that reach a human also surface the list themselves.
+
+    Inside `connectors.session_pool.pooling()` an HTTP connector's session is leased from the pool
+    and given back at exit instead of opened and closed per turn.
     """
-    held = [HeldConnectorSession(spec) for spec in specs]
+    pool = active_pool()
+    held: list[HeldConnectorSession | PooledConnectorSession] = [
+        pool.session(spec) if pool is not None and poolable(spec) else HeldConnectorSession(spec)
+        for spec in specs
+    ]
     opened = await asyncio.gather(*(stack.enter_async_context(session) for session in held))
     unreachable = [session.name for session in held if not session.connected]
     if unreachable:

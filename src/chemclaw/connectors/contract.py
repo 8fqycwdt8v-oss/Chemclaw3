@@ -84,6 +84,16 @@ async def served_version(url: str, budget: float) -> str | None:
     return reported if isinstance(reported, str) else None
 
 
+def remembered_version(connector: str) -> str | None:
+    """The `contract_version` this process last heard the connector's server report, if any.
+
+    Memory only, never a probe: a session open has just run `check_contract`, so the answer is as
+    fresh as that check.
+    """
+    remembered = _SERVED.get(connector)
+    return remembered[2] if remembered is not None else None
+
+
 def _once(connector: str, kind: str, value: str) -> bool:
     """Whether `value` is new for this `(connector, kind)` (and mark it seen)."""
     if _LOGGED.get((connector, kind)) == value:

@@ -8,7 +8,9 @@ into an `httpx.Auth` stays in `chemclaw.connectors.identity`.
 A request hook on our own client, not an MCP per-call header callback: over streamable HTTP the
 request is issued by the transport's writer task, which never sees a ContextVar set in
 `call_tool`, while a hook runs in that task. Because transport tasks inherit the context of
-whoever opened the connection, a connection must belong to exactly one turn.
+whoever opened the connection, a connection belongs to exactly one turn, unless its owning task
+pins an `IdentityPin` the hook reads instead: a connection kept across turns is then re-stamped by
+whoever holds it, and nothing of the opening turn's context is read.
 
 The headers are advisory: authorization happens in core before the call leaves, and a server may
 log the actor to correlate records but must never make an access decision on a header. Only the
@@ -16,6 +18,8 @@ minimum that makes the audit trail joinable is sent; the caller's roles are not.
 """
 
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -78,6 +82,39 @@ def turn_headers() -> dict[str, str]:
     return headers
 
 
+@dataclass(slots=True)
+class IdentityPin:
+    """The headers one long-lived connection stamps on every request, replaced whole by its holder.
+
+    Invariant: the holder swaps `headers` only while no other turn can be using the connection
+    (`connectors.session_pool` hands a session to one turn at a time), so a request can never carry
+    two callers' identities.
+    """
+
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+# Set by the task that owns a connection kept across turns, before it opens; every task the
+# transport starts inherits it. Unset on a per-turn connection, whose hook reads the ambient turn.
+_PINNED: ContextVar[IdentityPin | None] = ContextVar(
+    "chemclaw_connection_identity_pin", default=None
+)
+
+
+def pin_connection_identity(pin: IdentityPin) -> None:
+    """Make every connection opened from the current context stamp `pin.headers` instead of a turn.
+
+    Called once, first thing, by the task that owns the connection.
+    """
+    _PINNED.set(pin)
+
+
+def _stamped_headers() -> dict[str, str]:
+    """What the hook stamps now: a kept connection's pinned headers, else the ambient turn's."""
+    pin = _PINNED.get()
+    return dict(pin.headers) if pin is not None else turn_headers()
+
+
 def _strippable_headers() -> frozenset[str]:
     """Every header name `turn_headers()` can produce, for the guard that removes them again.
 
@@ -86,7 +123,7 @@ def _strippable_headers() -> frozenset[str]:
     because a span may have ended before the redirect hop. Not cached: it depends on tracing
     configuration and runs only on the redirect path.
     """
-    names = (*STAMPED_HEADERS, *turn_headers(), *trace_header_names())
+    names = (*STAMPED_HEADERS, *_stamped_headers(), *trace_header_names())
     return frozenset(name.lower() for name in names)
 
 
@@ -112,6 +149,6 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
             for header in _strippable_headers():
                 request.headers.pop(header, None)
             return
-        request.headers.update(turn_headers())
+        request.headers.update(_stamped_headers())
 
     return stamp

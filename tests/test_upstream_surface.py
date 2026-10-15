@@ -1024,6 +1024,21 @@ def test_a_read_bound_timeout_arrives_as_a_408_mcp_error() -> None:
     )
 
 
+def test_a_client_session_still_validates_a_result_against_the_output_schemas_it_listed() -> None:
+    """A client session still validates a result against `_tool_output_schemas`, filled by listing.
+
+    `connectors/session_pool.py` seeds that record from its cached listing; if the SDK moved it,
+    the first call on a session built from the cache would list the tools again (or skip the
+    structured-content check).
+    """
+    from mcp import ClientSession
+
+    assert "_tool_output_schemas" in inspect.getsource(ClientSession.__init__)
+    validating = inspect.getsource(ClientSession._validate_tool_result)
+    assert "_tool_output_schemas" in validating and "list_tools" in validating
+    assert "_tool_output_schemas" in inspect.getsource(ClientSession.list_tools)
+
+
 def test_a_streamed_tool_result_is_still_a_subclass_of_tool_message() -> None:
     """A streamed tool result is still a subclass of `ToolMessage`.
 

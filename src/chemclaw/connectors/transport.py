@@ -23,7 +23,9 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.interceptors import ToolCallInterceptor
 from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp import ClientSession
 from mcp.shared.exceptions import McpError
+from mcp.types import InitializeResult
 
 from chemclaw.connectors.contract import ContractMismatch, check_contract
 from chemclaw.connectors.manifest import QueuedDispatch
@@ -189,7 +191,7 @@ class HeldConnectorSession:
                 settings.connector_breaker_window_seconds,
             )
             return []
-        self._task = asyncio.create_task(self._hold(), name=f"connector:{self._spec.name}")
+        self._task = self._spawn()
         try:
             async with asyncio.timeout(settings.connector_open_timeout_seconds):
                 await self._opened.wait()
@@ -254,6 +256,30 @@ class HeldConnectorSession:
                 # A connector that errors while closing costs its own close, never the turn.
                 pass
 
+    def _spawn(self) -> asyncio.Task[None]:
+        """Start the holder task, which inherits the opening turn's context and so its identity."""
+        return asyncio.create_task(self._hold(), name=f"connector:{self._spec.name}")
+
+    def _connection(self) -> Connection:
+        """The connection to open: the spec's own."""
+        return self._spec.connection
+
+    async def _bind(self, session: ClientSession, handshake: InitializeResult) -> list[BaseTool]:
+        """The tools this open session advertises, allow-listed and stamped.
+
+        A call past `request_timeout` must tell the server to stop, since this session stays open
+        for the turn (`core.mcp_session.cancel_on_timeout`).
+        """
+        cancel_on_timeout(session)
+        return _stamped(
+            _allowed(
+                await load_mcp_tools(session, tool_interceptors=_interceptors(self._spec)),
+                self._spec.allowed_tools,
+            ),
+            connector=self._spec.name,
+            revision=handshake.serverInfo.version,
+        )
+
     async def _hold(self) -> None:
         """Own the session end to end: open it, publish its tools, then wait to be told to stop.
 
@@ -265,19 +291,9 @@ class HeldConnectorSession:
             await check_contract(
                 self._spec.name, self._spec.contract_version, self._spec.health_url
             )
-            async with create_session(self._spec.connection) as session:
+            async with create_session(self._connection()) as session:
                 handshake = await session.initialize()
-                # A call past `request_timeout` must tell the server to stop, since this session
-                # stays open for the turn (`core.mcp_session.cancel_on_timeout`).
-                cancel_on_timeout(session)
-                self._tools = _stamped(
-                    _allowed(
-                        await load_mcp_tools(session, tool_interceptors=_interceptors(self._spec)),
-                        self._spec.allowed_tools,
-                    ),
-                    connector=self._spec.name,
-                    revision=handshake.serverInfo.version,
-                )
+                self._tools = await self._bind(session, handshake)
                 self._opened.set()
                 await self._stop.wait()
         except (Exception, asyncio.CancelledError) as exc:
