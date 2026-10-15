@@ -177,14 +177,15 @@ def _build_write(
     return NoteWrite(files=files, message=f"Add {note.type} note: {note.id}{extra}")
 
 
-def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[str]:
+async def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[str]:
     """`note`'s link targets that no note defines, neither on disk nor in this write.
 
     Uses `kg.graph.dangling_links`, the one definition, over the cached corpus. `landing` is every
     note this write puts on disk, so a subject citing a dependency written beside it resolves.
     External ids resolve in a store and are not dangling.
     """
-    reported = dangling_links([*note_store(notes_dir).notes(), *landing])
+    existing = await note_store(notes_dir).notes()
+    reported = await asyncio.to_thread(dangling_links, [*existing, *landing])
     # Deduplicated: on a re-record the subject is in both the corpus and `landing`.
     return list(dict.fromkeys(target for source, target in reported if source == note.id))
 
@@ -247,10 +248,9 @@ async def record_note(
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
     # Warn about links to ids nothing defines: the note would otherwise land silently and its
     # citation fail later, and `kg-validate` runs only over this repository's corpus. A warning
-    # rather than a refusal, so a typo'd citation does not lose the observation. Offloaded because
-    # it reads the corpus.
-    unresolved = await asyncio.to_thread(
-        _unresolved_links,
+    # rather than a refusal, so a typo'd citation does not lose the observation. The store reads
+    # the corpus off the event loop.
+    unresolved = await _unresolved_links(
         note,
         [note, *(dependencies or ()), *(superseded or ())],
         Path(settings.note_repo_dir) / directory,

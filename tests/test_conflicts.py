@@ -4,6 +4,7 @@ Two contradictory notes returned without a marker read as corroboration. A confl
 never a filter: this layer has no basis for deciding which curated note is right.
 """
 
+import asyncio
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -259,14 +260,14 @@ def test_the_conflict_index_is_computed_once_per_corpus_state(
     _write(tmp_path, "b", smiles="CCO", confidence=0.2)
     today = date.today()
 
-    first = conflicts_module.conflict_index(tmp_path, today)
-    second = conflicts_module.conflict_index(tmp_path, today)
+    first = asyncio.run(conflicts_module.conflict_index(tmp_path, today))
+    second = asyncio.run(conflicts_module.conflict_index(tmp_path, today))
     assert scans["count"] == 1, "a second sweep over an unchanged corpus must reuse the answer"
     assert first == second
     assert {note_id: flags.ids for note_id, flags in first.items()} == {"a": ["b"], "b": ["a"]}
 
     _write(tmp_path, "c", smiles="CCO", confidence=0.9)
-    third = conflicts_module.conflict_index(tmp_path, today)
+    third = asyncio.run(conflicts_module.conflict_index(tmp_path, today))
     assert scans["count"] == 2, "a changed corpus must bust it — a stale flag is worse than none"
     assert sorted(third["b"].ids) == ["a", "c"]
 
@@ -290,8 +291,8 @@ def test_the_conflict_index_is_recomputed_for_a_different_day(
     )
     _write(tmp_path, "b", smiles="CCO", confidence=0.2)
 
-    while_valid = conflicts_module.conflict_index(tmp_path, date(2026, 1, 15))
-    after_expiry = conflicts_module.conflict_index(tmp_path, date(2026, 2, 15))
+    while_valid = asyncio.run(conflicts_module.conflict_index(tmp_path, date(2026, 1, 15)))
+    after_expiry = asyncio.run(conflicts_module.conflict_index(tmp_path, date(2026, 2, 15)))
     assert {note_id: flags.ids for note_id, flags in while_valid.items()} == {
         "a": ["b"],
         "b": ["a"],
@@ -306,12 +307,17 @@ def test_the_conflict_index_is_empty_when_detection_is_off(
     monkeypatch.setattr(settings, "conflict_detection_enabled", False)
     _write(tmp_path, "a", smiles="CCO", confidence=0.95)
     _write(tmp_path, "b", smiles="CCO", confidence=0.2)
-    assert conflicts_module.conflict_index(tmp_path, date.today()) == {}
+    assert asyncio.run(conflicts_module.conflict_index(tmp_path, date.today())) == {}
 
 
 def test_the_conflict_index_of_an_absent_directory_is_empty() -> None:
     """A deployment with no note tree yet asks the same question and gets a usable answer."""
-    assert conflicts_module.conflict_index(Path("/nonexistent-knowledge-dir"), date.today()) == {}
+    assert (
+        asyncio.run(
+            conflicts_module.conflict_index(Path("/nonexistent-knowledge-dir"), date.today())
+        )
+        == {}
+    )
 
 
 def test_the_conflicting_relations_are_all_real_relations() -> None:

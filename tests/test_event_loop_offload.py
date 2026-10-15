@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from chemclaw.agent.subscriptions import Subscription
-from chemclaw.kg.store import GitNoteStore
+from chemclaw.kg import graph as corpus
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -147,9 +147,12 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
     async def _one_subscription() -> list[Any]:
         return [Subscription(id=1, owner="u-1", query="suzuki")]
 
-    monkeypatch.setattr(GitNoteStore, "notes", _slow_load)
+    async def _no_disputes(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(corpus, "load_notes", _slow_load)
     monkeypatch.setattr(digest, "all_subscriptions", _one_subscription)
-    monkeypatch.setattr(digest, "conflict_index", lambda *a, **k: {})
+    monkeypatch.setattr(digest, "conflict_index", _no_disputes)
 
     stall_ms, loop_thread = _worst_loop_stall(digest.collect_digests)
 
@@ -176,11 +179,17 @@ def test_the_memory_note_builders_run_off_the_event_loop(
 ) -> None:
     """The memory note builders run off the event loop.
 
-    Each ends in `load_notes` after CPU-bound clustering over the reaction corpus. Threading at the
-    activity boundary covers both and keeps `memory/jobs.py` a pure sync module.
+    Each ends in a corpus read after CPU-bound clustering over the reaction corpus. The builder
+    puts the clustering in a worker thread, and the store keeps its reads off the loop.
     """
     from chemclaw.durable import memory_jobs
+    from chemclaw.memory import jobs
 
+    clustering = {
+        "build_campaign_notes_activity": "detect_chains",
+        "build_playbook_notes_activity": "find_playbook_candidates",
+        "build_optimization_notes_activity": "find_optimization_campaigns",
+    }[activity_name]
     threads: list[int] = []
 
     def _slow_build(*args: Any, **kwargs: Any) -> list[Any]:
@@ -192,13 +201,11 @@ def test_the_memory_note_builders_run_off_the_event_loop(
         return memory_jobs.CorpusRead(reactions=[], complete=True)
 
     monkeypatch.setattr(memory_jobs, "read_corpus", _no_reactions)
-    monkeypatch.setattr(
-        memory_jobs, activity_name.removesuffix("_activity"), _slow_build, raising=True
-    )
+    monkeypatch.setattr(jobs, clustering, _slow_build, raising=True)
 
     stall_ms, loop_thread = _worst_loop_stall(getattr(memory_jobs, activity_name))
 
-    assert threads, "the builder never ran"
+    assert threads, "the clustering never ran"
     assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
         f"{activity_name} held the worker's loop for {stall_ms:.1f} ms of a "
         f"{_BLOCK_SECONDS * 1000:.0f} ms build"

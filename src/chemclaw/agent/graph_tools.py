@@ -30,7 +30,7 @@ from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outsi
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms
-from chemclaw.kg.store import Edge, NoteStore, note_store
+from chemclaw.kg.store import Edge, NoteStore, SearchResult, note_store
 from chemclaw.memory.failure import close_refuted_note, failure_note
 from chemclaw.science.fingerprints.molfp.search import indexed_structure
 from chemclaw.science.fingerprints.store import default_molecule_store
@@ -190,12 +190,12 @@ class NoteSearch(BaseModel):
         )
 
 
-def _scan_notes(store: NoteStore, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
+async def _scan_notes(store: NoteStore, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
     """Search every current note in `store` for `terms`, ranked and capped.
 
-    Synchronous so the caller can run the whole O(N) scan, ranking and truncation included, in a
-    thread; on the event loop it would stall every other turn on the pod. That buys latency, not
-    throughput (the scan holds the GIL).
+    The O(N) scan, ranking and truncation all run in worker threads (the store's, then
+    `_rank_matches`); on the event loop they would stall every other turn on the pod. That buys
+    latency, not throughput (the scan holds the GIL).
 
     It deliberately does not use the Postgres `note_index`: that index is only maintained where a
     lexical or vector source is enabled, and its stemmed matching differs from the substring rule
@@ -214,7 +214,12 @@ def _scan_notes(store: NoteStore, terms: Sequence[str], today: date, cap: int) -
     """
     # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced as
     # current fact (KM-7). It stays in the store and remains reachable by explicit id.
-    found = store.search(terms, today)
+    found = await store.search(terms, today)
+    return await asyncio.to_thread(_rank_matches, found, terms, cap)
+
+
+def _rank_matches(found: SearchResult, terms: Sequence[str], cap: int) -> NoteSearch:
+    """Rank, cut and describe a search result: the part of `_scan_notes` after the read."""
     # `searched` counts after the currency filter: that is the corpus this search can hit.
     searched = found.searched
     scored = [(coverage, _ref(note)) for coverage, note in found.matches]
@@ -259,11 +264,9 @@ async def find_notes(text: str) -> NoteSearch:
     terms = query_terms(text)
     if not terms:
         return NoteSearch()
-    # Every step of the search runs in the worker thread, including the ranking and the cut: see
+    # Every step of the search runs in a worker thread, including the ranking and the cut: see
     # `_scan_notes` for the measurement that says why a partial offload is not one.
-    return await asyncio.to_thread(
-        _scan_notes, note_store(), terms, date.today(), settings.graph_max_results
-    )
+    return await _scan_notes(note_store(), terms, date.today(), settings.graph_max_results)
 
 
 def _edge_relations(edges: Sequence[Edge], source: str, target: str) -> list[str]:
@@ -304,7 +307,7 @@ def _neighbor_ref(
     )
 
 
-def _current_compound(store: NoteStore, note_id: str, today: date) -> Note | None:
+async def _current_compound(store: NoteStore, note_id: str, today: date) -> Note | None:
     """The current compound note that replaced `note_id`, when `note_id` is a superseded compound.
 
     Compounds only: a compound id is a hash of its structure, so a retired one is the same substance
@@ -312,19 +315,19 @@ def _current_compound(store: NoteStore, note_id: str, today: date) -> Note | Non
 
     `None` when `note_id` names a current note, a non-compound, or nothing a supersede link reaches.
     """
-    note = store.get(note_id)
+    note = await store.get(note_id)
     if note is not None and (note.type != "compound" or note.is_current(today)):
         return None
-    successor = store.current_successor(note_id, today)
+    successor = await store.current_successor(note_id, today)
     return successor if successor is not None and successor.type == "compound" else None
 
 
-def _require_note(store: NoteStore, note_id: str) -> Note:
+async def _require_note(store: NoteStore, note_id: str) -> Note:
     """The note `note_id` names, or a `ChemclawError` saying it could not be found.
 
     One message for both by-id lookups (`expand_note`, `record_failure`).
     """
-    note = store.get(note_id)
+    note = await store.get(note_id)
     if note is None:
         raise ChemclawError(f"no note with id {note_id!r}")
     return note
@@ -335,11 +338,17 @@ def _require_note(store: NoteStore, note_id: str) -> Note:
 _STRUCTURAL_COMPOUND_ID = re.compile(r"compound-[0-9a-f]{12}")
 
 
-def _notes_carrying(store: NoteStore, note_id: str) -> list[Note]:
+async def _notes_carrying(store: NoteStore, note_id: str) -> list[Note]:
     """The current notes whose `compound_smiles` is the structure `note_id` was derived from."""
+    notes = await store.notes()
+    return await asyncio.to_thread(_carrying, notes, note_id)
+
+
+def _carrying(notes: list[Note], note_id: str) -> list[Note]:
+    """The structure match over `notes`: parsing every SMILES is CPU work, so it is its own hop."""
     today = date.today()
     carrying = []
-    for note in store.notes():
+    for note in notes:
         if not note.compound_smiles or not note.is_current(today):
             continue
         try:
@@ -361,10 +370,10 @@ async def _expand_compound(store: NoteStore, note_id: str, hops: int) -> NoteVie
 
     The view says, as system text outside the framed body, that no note was written.
     """
-    carrying = await asyncio.to_thread(_notes_carrying, store, note_id)
+    carrying = await _notes_carrying(store, note_id)
     for note in carrying:
         if note.type == "compound":
-            return await asyncio.to_thread(_expand_in_store, store, note.id, hops)
+            return await _expand_in_store(store, note.id, hops)
     smiles = (
         carrying[0].compound_smiles
         if carrying
@@ -378,7 +387,7 @@ async def _expand_compound(store: NoteStore, note_id: str, hops: int) -> NoteVie
         "What was run with it is in the reaction records — search them by this SMILES "
         f"(similar_reactions, substrate_precedent). {SYSTEM_SPEECH_MARK}"
     )
-    edges = await asyncio.to_thread(store.edges, note_id)
+    edges = await store.edges(note_id)
     return NoteView(
         note=_ref(rendered),
         body=f"{notice}\n\n{frame_untrusted(rendered.body, note_id=note_id)}",
@@ -472,16 +481,16 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # model verbatim. Kept out of the tool docstring, which is resent on every model call.
     store = note_store()
     # Notes first, records second: `reaction-` is a prefix, not a reservation, so a human-authored
-    # note of that name wins. Every store read runs in a worker thread, as it may scan the disk.
-    defined = await asyncio.to_thread(store.get, note_id)
+    # note of that name wins. The store keeps its reads off the event loop.
+    defined = await store.get(note_id)
     if defined is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
     # A compound id a standardization bump superseded resolves to the note that replaced it, and
     # says so as system text outside the framed body — see `_current_compound`.
     today = date.today()
-    successor = await asyncio.to_thread(_current_compound, store, note_id, today)
+    successor = await _current_compound(store, note_id, today)
     if successor is not None:
-        view = await asyncio.to_thread(_expand_in_store, store, successor.id, hops)
+        view = await _expand_in_store(store, successor.id, hops)
         notice = (
             f"{note_id} is a superseded id for this compound: the current standardization files "
             f"the same structure as {successor.id}, shown here. {SYSTEM_SPEECH_MARK}"
@@ -491,12 +500,12 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # hit cites, since an ELN run is a record and not a note. See `_expand_compound`.
     if defined is None and _STRUCTURAL_COMPOUND_ID.fullmatch(note_id):
         return await _expand_compound(store, note_id, hops)
-    return await asyncio.to_thread(_expand_in_store, store, note_id, hops)
+    return await _expand_in_store(store, note_id, hops)
 
 
-def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteView:
+async def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteView:
     """`expand_note` over a note the store holds: its body and its current neighbourhood."""
-    note = _require_note(store, note_id)
+    note = await _require_note(store, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
@@ -504,15 +513,15 @@ def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteView:
     # The anchor is returned even if expired; non-current neighbours are dropped, except a retired
     # compound, which stands for its successor.
     neighbors: dict[str, NeighborRef] = {}
-    edges = store.edges(note_id)
-    reached = sorted(store.neighborhood(note_id, hops=hops))
-    for nid, neighbor in store.get_many(reached).items():
+    edges = await store.edges(note_id)
+    reached = sorted(await store.neighborhood(note_id, hops=hops))
+    for nid, neighbor in (await store.get_many(reached)).items():
         if neighbor is None:
             continue
         if neighbor.is_current(today):
             neighbors.setdefault(nid, _neighbor_ref(edges, note_id, neighbor))
             continue
-        replacement = _current_compound(store, nid, today)
+        replacement = await _current_compound(store, nid, today)
         if replacement is not None and replacement.id != note_id:
             neighbors.setdefault(
                 replacement.id, _neighbor_ref(edges, note_id, replacement, via=nid)
@@ -550,8 +559,8 @@ async def find_knowledge_gaps() -> GraphGaps:
         the served graph.
     """
     store = note_store()
-    graph = await asyncio.to_thread(store.graph)
-    notes = await asyncio.to_thread(store.notes)
+    graph = await store.graph()
+    notes = await store.notes()
     gaps = analyze(graph, notes)
     # Tags and dangling-link targets are free text, so they are defanged; the rest are ids, types
     # and counts.
@@ -684,7 +693,7 @@ async def record_failure(
         ChemclawError: When `refutes` names no note, when `held_until` predates that note's own
             `valid_from`, or when the note has already been retired on some other date.
     """
-    refuted = await asyncio.to_thread(_require_note, note_store(), refutes)
+    refuted = await _require_note(note_store(), refutes)
     # The reporter is the authenticated user, never a model-supplied parameter.
     note = failure_note(
         refutes,

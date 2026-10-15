@@ -5,6 +5,7 @@ this note reach the corpus" from the notes repository's git history: one full `g
 process, then only the commits since the last one it saw.
 """
 
+import asyncio
 import shutil
 import subprocess
 from datetime import UTC, date, datetime
@@ -154,7 +155,7 @@ def test_a_digest_reports_an_undated_note_that_arrived_after_the_watermark(
         last_seen_at=datetime(2026, 9, 5, 9, tzinfo=UTC),
         last_seen_note_ids=[],
     )
-    items = chemclaw.durable.digest._match_corpus([told_before])
+    items = asyncio.run(chemclaw.durable.digest._match_corpus([told_before]))
     assert [item.note_ids for item in items] == [[_UNDATED.stem]], (
         "an undated note committed after the subscriber's watermark was not reported"
     )
