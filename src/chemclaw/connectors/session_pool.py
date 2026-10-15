@@ -1,30 +1,32 @@
-"""Keep a connector's MCP session across turns, used by one caller's one turn at a time.
+"""Keep a connector's MCP session across turns, lent to one caller's one turn at a time.
 
 A turn otherwise pays a dial, `initialize`, `tools/list`, a standalone stream and a `DELETE` per
-connector. The pool holds the session after the turn and hands it to the same actor's next turn,
-and keeps each connector's tool listing so a new session does not re-ask.
+connector. The pool keeps the session after the turn for the same actor's next one, and keeps each
+connector's tool listing so a new session does not re-ask.
 
 Invariants:
-- A session serves one turn at a time (checked out, not shared), so no request carries two callers'
-  identities. It is keyed by actor, connector and endpoint, and its task runs in an empty context
-  that pins the headers it stamps (`core.call_identity.IdentityPin`), replaced at every checkout.
-- A reused session proves itself first: its holder task is alive and it answers a ping. Otherwise
-  it is closed and one fresh session is opened. A session that saw a cancelled or timed-out
-  request, or a notification that the tool list changed, is never returned to the pool.
-- A listing is reused only while the contract version, server build and URL it was taken under
-  are those the new handshake reports, and for at most `connector_session_ttl_seconds`; a
-  `tools/list_changed` notification discards it at once. The tool objects a turn gets are built
-  from it by the adapter's own converter, so they are what a fresh listing returns.
-- Memory is bounded: idle sessions expire after the TTL, at most `connector_session_pool_max` are
-  kept (least recently used idle one closed first), and a turn finding the pool full of busy
-  sessions runs on an unpooled one. `pooling()` closes everything on exit.
+- A session serves one turn at a time, so no request carries two callers' identities. It is keyed
+  by actor, connector and endpoint; its task runs in an empty context and stamps an `IdentityPin`
+  replaced at every checkout. A turn's tools are bound to that checkout's lease: once the lease
+  ends, a tool still held by the turn is refused as a closed session would be.
+- A reused session must be up, unabandoned, no older than `connector_session_ttl_seconds` since
+  its tool listing was taken, built from the connector's current listing, and answer a ping.
+  Otherwise it is closed and one fresh session opened.
+- A listing is reused only under the same URL, contract version and server build, and only while
+  younger than the TTL. A server that reports no build (`unknown`) is listed afresh by every new
+  session; a listing whose fingerprint changed retires the sessions built from the old one.
+- Bounded: at most `connector_session_pool_max` sessions, counting those being checked out; idle
+  ones expire after the TTL, a lease held past twice the turn ceiling is reaped, the least
+  recently used idle one is evicted first, and a turn finding the pool full of busy sessions runs
+  on an unpooled one.
 """
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import logging
 import time
-from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import TracebackType
@@ -32,10 +34,16 @@ from typing import Any, cast
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import Connection
-from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+from langchain_mcp_adapters.tools import MAX_ITERATIONS, convert_mcp_tool_to_langchain_tool
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
-from mcp.types import InitializeResult, ServerNotification, ToolListChangedNotification
+from mcp.types import (
+    CONNECTION_CLOSED,
+    ErrorData,
+    InitializeResult,
+    ServerNotification,
+    ToolListChangedNotification,
+)
 from mcp.types import Tool as McpTool
 
 from chemclaw.connectors.contract import ContractMismatch, check_contract, remembered_version
@@ -59,20 +67,39 @@ logger = logging.getLogger(__name__)
 # manifest declares and where it is checked.
 _Signature = tuple[str, float, str, str | None, str | None]
 _Key = tuple[str, str, _Signature]
+_ListingKey = tuple[str, str | None, str]
 
 # The code `cancel_on_timeout` reads on the SDK's local read timeout (pinned in
 # `tests/test_upstream_surface.py`): a request abandoned while the server may still run it.
 _READ_TIMEOUT_CODE = 408
 
-# Floor on the reaper's sleep, so a tiny TTL cannot spin the loop.
+# Floor on the sweeper's sleep, so a tiny TTL cannot spin the loop.
 _MIN_SWEEP_SECONDS = 0.05
+
+# Idle sessions kept per (actor, connector): a second one lets two overlapping turns of one actor
+# (two tabs, or a turn beside a template step) each find a warm session instead of one of them
+# opening a new one every time. More would be sessions nobody asks for.
+_IDLE_PER_KEY = 2
+
+# A lease is reaped after this many turn ceilings: a turn is bounded by
+# `service_turn_timeout_seconds`, so a lease older than twice that belongs to a turn that never
+# gave it back.
+_LEASE_TURN_CEILINGS = 2
+
+# What `serverInfo.version` says when the server was not told its build (`MCP_SERVER_REVISION`
+# unset): it then cannot tell two builds apart, so a listing keyed on it proves nothing.
+_UNKNOWN_BUILDS = frozenset({"", "unknown"})
+
+
+def _url(spec: ConnectorSpec) -> str:
+    """The endpoint URL of an HTTP spec."""
+    return str(cast(dict[str, Any], spec.connection).get("url", ""))
 
 
 def _signature(spec: ConnectorSpec) -> _Signature:
     """The parts of `spec` that fix what a session to it is: everything but the allow-list."""
     queued = spec.queued.model_dump_json() if spec.queued is not None else ""
-    url = str(cast(dict[str, Any], spec.connection).get("url", ""))
-    return (url, spec.request_timeout, queued, spec.contract_version, spec.health_url)
+    return (_url(spec), spec.request_timeout, queued, spec.contract_version, spec.health_url)
 
 
 def poolable(spec: ConnectorSpec) -> bool:
@@ -81,44 +108,98 @@ def poolable(spec: ConnectorSpec) -> bool:
 
 
 async def _list_all(session: ClientSession) -> list[McpTool]:
-    """Every tool the server advertises, following its pagination cursor."""
+    """Every tool the server advertises, following its pagination cursor.
+
+    Bounded as the adapter's own listing is (`MAX_ITERATIONS`, pinned in
+    `tests/test_upstream_surface.py`), so a server that never stops paginating fails the open.
+    """
     tools: list[McpTool] = []
     cursor: str | None = None
-    while True:
+    for _ in range(MAX_ITERATIONS):
         page = await session.list_tools(cursor=cursor)
         tools.extend(page.tools)
         if not page.nextCursor:
             return tools
         cursor = page.nextCursor
+    raise RuntimeError(f"Reached max of {MAX_ITERATIONS} iterations while listing tools.")
+
+
+def _fingerprint(tools: list[McpTool]) -> str:
+    """A digest of what the model is shown of each tool: name, description and both schemas."""
+    shown = sorted(
+        (tool.name, tool.description, tool.inputSchema, tool.outputSchema) for tool in tools
+    )
+    return hashlib.sha256(json.dumps(shown, sort_keys=True, default=str).encode()).hexdigest()
 
 
 class ToolListings:
     """Each connector's last `tools/list`, valid for one `(url, contract version, server build)`.
 
     One entry per connector, so memory is bounded by the fleet. A hit also requires the listing to
-    be younger than the session TTL, the bound on a change the key cannot see.
+    be younger than the session TTL. Each connector has a generation that moves when a listing's
+    fingerprint differs from the previous one or the listing is forgotten, so sessions built from
+    the old listing can tell they are out of date.
     """
 
     def __init__(self) -> None:
         """Start with nothing listed."""
-        self._held: dict[str, tuple[tuple[str, str | None, str], float, list[McpTool]]] = {}
+        self._held: dict[str, tuple[_ListingKey, float, str, list[McpTool]]] = {}
+        self._generations: dict[str, int] = {}
 
-    def get(self, connector: str, key: tuple[str, str | None, str]) -> list[McpTool] | None:
-        """A private copy of the listing taken under `key`, or `None` when it is absent or stale."""
+    def get(self, connector: str, key: _ListingKey) -> tuple[list[McpTool], float] | None:
+        """A private copy of the listing taken under `key` and when it was taken, or `None`."""
         held = self._held.get(connector)
         if held is None or held[0] != key:
             return None
         if time.monotonic() - held[1] >= settings.connector_session_ttl_seconds:
             return None
-        return [tool.model_copy(deep=True) for tool in held[2]]
+        return [tool.model_copy(deep=True) for tool in held[3]], held[1]
 
-    def put(self, connector: str, key: tuple[str, str | None, str], tools: list[McpTool]) -> None:
-        """Remember a fresh listing, replacing whatever the connector had."""
-        self._held[connector] = (key, time.monotonic(), tools)
+    def put(self, connector: str, key: _ListingKey, tools: list[McpTool]) -> float:
+        """Remember a fresh listing, replacing the previous one; returns when it was taken."""
+        fingerprint = _fingerprint(tools)
+        previous = self._held.get(connector)
+        if previous is not None and previous[2] != fingerprint:
+            self._generations[connector] = self.generation(connector) + 1
+            logger.info("connector %s: its tool listing changed; older sessions retire", connector)
+        taken = time.monotonic()
+        copies = [tool.model_copy(deep=True) for tool in tools]
+        self._held[connector] = (key, taken, fingerprint, copies)
+        return taken
 
     def forget(self, connector: str) -> None:
-        """Drop a connector's listing, so the next session asks the server again."""
+        """Drop a connector's listing and retire the sessions built from it."""
         self._held.pop(connector, None)
+        self._generations[connector] = self.generation(connector) + 1
+
+    def generation(self, connector: str) -> int:
+        """Which listing generation sessions of this connector must have been built from."""
+        return self._generations.get(connector, 0)
+
+
+class _Lease:
+    """The token of one checkout; a session's current lease is the only one its tools may use."""
+
+    __slots__ = ()
+
+
+class _LeaseGate:
+    """What a checkout's tools are bound to in place of the session: `call_tool`, if still leased.
+
+    The tools of a turn are built per checkout. One the turn keeps past its checkin, or a retained
+    copy called while another turn holds the session, would go out on that turn's identity, so it
+    is refused instead, with the error a closed session gives.
+    """
+
+    def __init__(self, owner: "KeptConnectorSession", lease: _Lease) -> None:
+        """Bind the gate to the session and the checkout it serves."""
+        self._owner = owner
+        self._lease = lease
+
+    async def call_tool(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the tool on the session when this gate's lease is the session's current one."""
+        session = self._owner.live_session(self._lease)
+        return await session.call_tool(*args, **kwargs)
 
 
 class KeptConnectorSession(HeldConnectorSession):
@@ -137,19 +218,49 @@ class KeptConnectorSession(HeldConnectorSession):
         self.inflight = 0
         self.list_changed = False
         self.idle_since = 0.0
+        self.lease: _Lease | None = None
         self._listings = listings
         self._pin = IdentityPin()
         self._session: ClientSession | None = None
-        self._advertised: list[BaseTool] = []
+        self._templates: list[BaseTool] = []
+        self._mcp_tools: dict[str, McpTool] = {}
         self._costed: tuple[str, ...] = ()
+        self._listed_at = 0.0
+        self._generation = 0
 
     def stamp(self) -> None:
         """Make this session's requests carry the calling turn's identity from now on."""
         self._pin.headers = turn_headers()
 
+    def live_session(self, lease: _Lease) -> ClientSession:
+        """The session, for the checkout that holds `lease`; anyone else is refused.
+
+        Raises:
+            McpError: `lease` is not the session's current one, as a closed session would say.
+        """
+        if lease is not self.lease or self._session is None:
+            raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        return self._session
+
     def tools_for(self, spec: ConnectorSpec) -> list[BaseTool]:
-        """The advertised tools this turn's allow-list names, their schema cost on the gauge."""
-        tools = _allowed(self._advertised, spec.allowed_tools)
+        """This checkout's tools: the allow-listed ones, bound to the current lease.
+
+        Built here rather than shared between turns, by the adapter's converter, then given the
+        text the stamped templates carry, so the model sees what a fresh listing would show.
+        """
+        if self.lease is None:
+            raise RuntimeError("tools_for needs a session that has been leased")
+        gate = cast(ClientSession, _LeaseGate(self, self.lease))
+        interceptors = _interceptors(self._spec)
+        tools: list[BaseTool] = []
+        for template in _allowed(self._templates, spec.allowed_tools):
+            tool = convert_mcp_tool_to_langchain_tool(
+                gate, self._mcp_tools[template.name], tool_interceptors=interceptors
+            )
+            tool.description = template.description
+            tool.args_schema = template.args_schema
+            tool.metadata = template.metadata
+            tools.append(tool)
         names = tuple(tool.name for tool in tools)
         if names != self._costed:
             _record_schema_cost(spec.name, tools)
@@ -158,7 +269,7 @@ class KeptConnectorSession(HeldConnectorSession):
 
     @property
     def keepable(self) -> bool:
-        """Whether the session may serve another turn: up, and nothing of it left in doubt."""
+        """Whether the session may serve another turn: up, current, and nothing of it in doubt."""
         task = self._task
         return (
             task is not None
@@ -168,13 +279,16 @@ class KeptConnectorSession(HeldConnectorSession):
             and not self.tainted
             and not self.inflight
             and not self.list_changed
+            and self._generation == self._listings.generation(self._spec.name)
+            and time.monotonic() - self._listed_at < settings.connector_session_ttl_seconds
         )
 
     async def answers(self) -> bool:
         """Whether the server still holds this session and speaks for the declared contract.
 
         One ping, bounded by `connector_health_timeout_seconds`. Any failure (a restarted server
-        answers 404, a dead one nothing) is "no": the caller opens a fresh session.
+        answers 404, a dead one nothing) is "no": the caller opens a fresh session. A pod too busy
+        to answer within the bound costs the reuse, not the turn.
         """
         session = self._session
         if not self.keepable or session is None:
@@ -194,6 +308,7 @@ class KeptConnectorSession(HeldConnectorSession):
 
     async def close(self) -> None:
         """End the session and its holder task, bounded; never raises."""
+        self.lease = None
         self._session = None
         await self._shut_down()
 
@@ -226,18 +341,16 @@ class KeptConnectorSession(HeldConnectorSession):
             self._listings.forget(self._spec.name)
 
     async def _bind(self, session: ClientSession, handshake: InitializeResult) -> list[BaseTool]:
-        """Every advertised tool, from the listing cache when the handshake agrees with it."""
+        """Stamp every advertised tool once, from the cached listing when the handshake allows."""
         cancel_on_timeout(session)
         self._track(session)
         self._session = session
+        name = self._spec.name
         revision = handshake.serverInfo.version
-        key = (
-            str(cast(dict[str, Any], self._spec.connection).get("url", "")),
-            remembered_version(self._spec.name) or self._spec.contract_version,
-            revision,
-        )
-        advertised = self._listings.get(self._spec.name, key)
-        if advertised is not None:
+        key = (_url(self._spec), remembered_version(name) or self._spec.contract_version, revision)
+        cached = None if revision in _UNKNOWN_BUILDS else self._listings.get(name, key)
+        if cached is not None:
+            advertised, self._listed_at = cached
             # The SDK validates a result against the output schema `list_tools` recorded and, for a
             # tool it never listed, lists again before the first call. A cached listing seeds that
             # record, so the first call neither pays the listing nor skips the validation.
@@ -245,20 +358,20 @@ class KeptConnectorSession(HeldConnectorSession):
                 session._tool_output_schemas[tool.name] = tool.outputSchema
         else:
             advertised = await _list_all(session)
-            self._listings.put(
-                self._spec.name, key, [tool.model_copy(deep=True) for tool in advertised]
-            )
+            self._listed_at = self._listings.put(name, key, advertised)
+        self._generation = self._listings.generation(name)
+        self._mcp_tools = {tool.name: tool for tool in advertised}
         interceptors = _interceptors(self._spec)
-        self._advertised = _stamped(
+        self._templates = _stamped(
             [
                 convert_mcp_tool_to_langchain_tool(session, tool, tool_interceptors=interceptors)
                 for tool in advertised
             ],
-            connector=self._spec.name,
+            connector=name,
             revision=revision,
         )
-        self._costed = tuple(tool.name for tool in self._advertised)
-        return self._advertised
+        self._costed = tuple(tool.name for tool in self._templates)
+        return self._templates
 
     def _track(self, session: ClientSession) -> None:
         """Count requests in flight, and mark the session tainted when one is abandoned.
@@ -329,12 +442,15 @@ class PooledConnectorSession:
 
 
 class ConnectorSessionPool:
-    """The process's kept connector sessions: idle ones by key, leased ones by identity."""
+    """The process's kept sessions: idle ones by key, leased ones, and ones being checked out."""
 
     def __init__(self) -> None:
         """Start empty; `start()` begins the expiry sweep."""
-        self._idle: OrderedDict[_Key, KeptConnectorSession] = OrderedDict()
-        self._leased: set[KeptConnectorSession] = set()
+        self._idle: dict[_Key, list[KeptConnectorSession]] = {}
+        self._leased: dict[KeptConnectorSession, float] = {}
+        # Sessions taken off the idle list to be pinged, or being opened: counted so concurrent
+        # checkouts cannot together pass the ceiling.
+        self._checking: set[KeptConnectorSession] = set()
         self._listings = ToolListings()
         self._closing: set[asyncio.Task[None]] = set()
         self._sweeper: asyncio.Task[None] | None = None
@@ -342,8 +458,8 @@ class ConnectorSessionPool:
 
     @property
     def size(self) -> int:
-        """Sessions the pool holds, idle and leased."""
-        return len(self._idle) + len(self._leased)
+        """Sessions the pool holds: idle, leased and being checked out."""
+        return sum(map(len, self._idle.values())) + len(self._leased) + len(self._checking)
 
     def start(self) -> None:
         """Begin closing idle sessions that outlive the TTL, so a quiet process holds none."""
@@ -354,29 +470,42 @@ class ConnectorSessionPool:
         return PooledConnectorSession(self, spec)
 
     async def checkout(self, spec: ConnectorSpec) -> KeptConnectorSession:
-        """A session for the current actor and `spec`: the kept one if it answers, else a new one.
+        """A session for the current actor and `spec`: a kept one if it answers, else a new one.
 
         Never raises for an unreachable connector; the returned session is then not `connected`,
         exactly as a per-turn open reports it. A kept session that fails its checks is replaced
         once, in this call.
         """
         key: _Key = (spec.name, get_current_actor() or "", _signature(spec))
-        kept = self._idle.pop(key, None)
+        kept = self._take_idle(key)
         if kept is not None:
-            if await self._still_good(kept):
-                self._leased.add(kept)
-                return kept
+            self._checking.add(kept)
+            try:
+                good = await self._still_good(kept)
+            except BaseException:
+                self._checking.discard(kept)
+                raise
+            if good:
+                return self._lease(kept)
+            self._checking.discard(kept)
             logger.info("connector %s: the kept session is gone; opening a fresh one", spec.name)
         fresh = KeptConnectorSession(spec, key, self._listings)
         fresh.stamp()
-        await fresh.__aenter__()
-        if fresh.connected:
-            fresh.pooled = self._admit(fresh)
-        return fresh
+        fresh.pooled = self._reserve(fresh)
+        try:
+            await fresh.__aenter__()
+        except BaseException:
+            self._checking.discard(fresh)
+            raise
+        if not fresh.connected:
+            self._checking.discard(fresh)
+            return fresh
+        return self._lease(fresh)
 
     async def checkin(self, session: KeptConnectorSession) -> None:
         """Take a session back: idle for the next turn if it is fit, else closed."""
-        self._leased.discard(session)
+        self._leased.pop(session, None)
+        session.lease = None
         if (
             session.pooled
             and not self._closed
@@ -384,25 +513,71 @@ class ConnectorSessionPool:
             and session.keepable
         ):
             session.idle_since = time.monotonic()
-            superseded = self._idle.pop(session.key, None)
-            self._idle[session.key] = session
-            if superseded is not None:
-                self._close_later(superseded)
+            bucket = self._idle.setdefault(session.key, [])
+            bucket.append(session)
+            while len(bucket) > _IDLE_PER_KEY:
+                self._close_later(bucket.pop(0))
             return
         await session.close()
 
     async def aclose(self) -> None:
-        """Close every session, idle or leased, and stop the sweep."""
+        """Close every session, idle, leased or being checked out, and stop the sweep."""
         self._closed = True
         if self._sweeper is not None:
             self._sweeper.cancel()
             await asyncio.gather(self._sweeper, return_exceptions=True)
-        sessions = [*self._idle.values(), *self._leased]
+        sessions = [
+            *(session for bucket in self._idle.values() for session in bucket),
+            *self._leased,
+            *self._checking,
+        ]
         self._idle.clear()
         self._leased.clear()
+        self._checking.clear()
         await asyncio.gather(
             *(session.close() for session in sessions), *self._closing, return_exceptions=True
         )
+
+    def expire(self) -> None:
+        """Close idle sessions past the TTL or no longer fit, and reap leases held far too long."""
+        now = time.monotonic()
+        ttl = settings.connector_session_ttl_seconds
+        for key, bucket in list(self._idle.items()):
+            for session in list(bucket):
+                if now - session.idle_since >= ttl or not session.keepable:
+                    bucket.remove(session)
+                    self._close_later(session)
+            if not bucket:
+                del self._idle[key]
+        deadline = _LEASE_TURN_CEILINGS * settings.service_turn_timeout_seconds
+        for session, since in list(self._leased.items()):
+            if now - since >= deadline:
+                del self._leased[session]
+                logger.warning(
+                    "connector %s: a session lease was held for %.0f s, past twice the turn "
+                    "ceiling; closing it as leaked",
+                    session.key[0],
+                    now - since,
+                )
+                self._close_later(session)
+
+    def _take_idle(self, key: _Key) -> KeptConnectorSession | None:
+        """The most recently used idle session of this key, removed from the idle list."""
+        bucket = self._idle.get(key)
+        if not bucket:
+            return None
+        session = bucket.pop()
+        if not bucket:
+            del self._idle[key]
+        return session
+
+    def _lease(self, session: KeptConnectorSession) -> KeptConnectorSession:
+        """Hand a session to the calling turn under a new lease."""
+        self._checking.discard(session)
+        session.lease = _Lease()
+        if session.pooled:
+            self._leased[session] = time.monotonic()
+        return session
 
     async def _still_good(self, session: KeptConnectorSession) -> bool:
         """Whether an idle session may serve this turn; closes it when not.
@@ -427,17 +602,35 @@ class ConnectorSessionPool:
         await session.close()
         return False
 
-    def _admit(self, session: KeptConnectorSession) -> bool:
-        """Whether the pool keeps this new session, closing the oldest idle one to make room."""
+    def _reserve(self, session: KeptConnectorSession) -> bool:
+        """Whether the pool will keep this new session, closing the oldest idle one to make room.
+
+        The slot is counted from here, before the session is opened.
+        """
         if self._closed:
             return False
         if self.size >= settings.connector_session_pool_max:
-            if not self._idle:
+            oldest = self._take_oldest_idle()
+            if oldest is None:
                 return False
-            _, oldest = self._idle.popitem(last=False)
             self._close_later(oldest)
-        self._leased.add(session)
+        self._checking.add(session)
         return True
+
+    def _take_oldest_idle(self) -> KeptConnectorSession | None:
+        """Remove and return the idle session unused for longest, or `None` when none is idle."""
+        candidates = [
+            (session.idle_since, key, session)
+            for key, bucket in self._idle.items()
+            for session in bucket
+        ]
+        if not candidates:
+            return None
+        _, key, oldest = min(candidates, key=lambda item: item[0])
+        self._idle[key].remove(oldest)
+        if not self._idle[key]:
+            del self._idle[key]
+        return oldest
 
     def _close_later(self, session: KeptConnectorSession) -> None:
         """Close a session off the caller's path, keeping the task referenced until it ends."""
@@ -446,15 +639,10 @@ class ConnectorSessionPool:
         task.add_done_callback(self._closing.discard)
 
     async def _sweep(self) -> None:
-        """Close idle sessions past the TTL, for as long as the pool lives."""
+        """Expire sessions for as long as the pool lives."""
         while True:
-            ttl = settings.connector_session_ttl_seconds
-            await asyncio.sleep(max(ttl / 2, _MIN_SWEEP_SECONDS))
-            now = time.monotonic()
-            for key, session in list(self._idle.items()):
-                if now - session.idle_since >= ttl or not session.keepable:
-                    del self._idle[key]
-                    self._close_later(session)
+            await asyncio.sleep(max(settings.connector_session_ttl_seconds / 2, _MIN_SWEEP_SECONDS))
+            self.expire()
 
 
 _POOLS: dict[asyncio.AbstractEventLoop, ConnectorSessionPool] = {}

@@ -56,24 +56,38 @@ turn at a time, its headers are written only at checkout, and its task reads not
 that opened it. The key includes the actor as a second layer, so a bug in the pin could still never
 cross actors.
 
+- A turn's tools are built at each checkout and bound to that checkout's lease, not to the session:
+  a tool a turn keeps past its checkin, or a copy called while another turn holds the session, is
+  refused with the error a closed session gives (`McpError`, a transport fault) instead of going
+  out under the other turn's identity.
 - Before a kept session serves a turn its holder task must be alive, no request on it may have been
-  abandoned (cancelled or timed out, which may still run at the server), and it must answer a
-  `ping` within `connector_health_timeout_seconds`. Otherwise it is closed and one fresh session is
-  opened in the same call, so a restarted server (404 on the old session id), a revoked bearer or a
-  dead host costs the connector what it cost before. The bearer is read per request, so a rotation
-  needs nothing.
-- A connector's listing is kept for `(url, contract_version, server build)` and for at most
-  `connector_session_ttl_seconds`. The contract version is the one `/healthz` last reported
-  (`contract.remembered_version`), the build is `serverInfo.version` from the handshake, so a
-  restart onto a new build or contract misses without a call of its own. A `tools/list_changed`
-  notification, where a server sends one, discards the listing and the session. Tools are rebuilt
-  from the listing by the adapter's own `convert_mcp_tool_to_langchain_tool`, so what the model sees
-  is what a fresh listing returns, and the listing seeds the SDK's output-schema record so the
-  first call validates exactly as before.
-- Bounded: idle sessions expire after `connector_session_ttl_seconds` (300 s, under the fleet's
-  1800 s reaper), at most `connector_session_pool_max` (256) are held, the least recently used idle
-  one is closed first, and a turn that finds only busy sessions runs on an unpooled one.
-  `connector_session_ttl_seconds: 0` restores a session per turn.
+  abandoned (cancelled or timed out, which may still run at the server), its tool listing must be
+  younger than `connector_session_ttl_seconds` and still the connector's current one, and it must
+  answer a `ping` within `connector_health_timeout_seconds` (2 s: a pod too busy to answer in that
+  time costs the reuse, not the turn). Otherwise it is closed and one fresh session is opened in
+  the same call, so a restarted server (404 on the old session id), a revoked bearer or a dead host
+  costs the connector what it cost before. The bearer is read per request, so a rotation needs
+  nothing.
+- A connector's listing is kept for `(url, contract_version, server build)` and is never older than
+  `connector_session_ttl_seconds` when a session is used: the session is replaced at that age
+  however busy it is. The contract version is the one `/healthz` last reported
+  (`contract.remembered_version`), the build is `serverInfo.version` from the handshake. A server
+  that reports no build (`unknown`, when `MCP_SERVER_REVISION` is unset, as stock FastMCP servers
+  do with the SDK's version) cannot be told apart by that key, so every new session lists afresh;
+  each real listing is fingerprinted (name, description and both schemas of every tool) and a
+  changed fingerprint retires the sessions built from the old one. A `tools/list_changed`
+  notification, where a server sends one, discards the listing and the session. Tools are built by
+  the adapter's own `convert_mcp_tool_to_langchain_tool`, so what the model sees is what a fresh
+  listing returns, and the listing seeds the SDK's output-schema record so the first call
+  validates exactly as before.
+- Bounded: sessions being pinged or opened count with idle and leased ones against
+  `connector_session_pool_max` (512; one session is one (actor, connector), so 8 connectors hold 64
+  actors; measured about 240 kB in this process and 58 kB on a fleet pod per session). Up to two
+  idle sessions are kept per (actor, connector), so two overlapping turns of one actor both find a
+  warm one. Idle sessions expire after `connector_session_ttl_seconds` (300 s, under the fleet's
+  1800 s reaper), a lease held past twice `service_turn_timeout_seconds` is closed and logged as
+  leaked, the least recently used idle session is evicted first, and a turn that finds only busy
+  sessions runs on an unpooled one. `connector_session_ttl_seconds: 0` restores a session per turn.
 - Scope: HTTP connectors, in a process that entered `connector_sessions.pooling()` beside
   `backend_rpc.pooling()` (the front door and the background worker). Stdio connectors, queued
   calls, a process without the scope, and a turn with no connectors behave as before.
@@ -107,5 +121,11 @@ or a fleet pod's session count (`/healthz` `bounds` against `MCP_MAX_SESSIONS`) 
   expiry in the sweep and at checkout; eviction at the ceiling and the all-busy overflow; shutdown
   closes every session and leaves no task; a cancelled call is not handed on; the listing is
   reused, invalidated by a contract version change and by the TTL; a rotated and a revoked bearer;
-  a refusal reads the same pooled and per turn; the pooled tool surface equals a fresh listing's.
-- `tests/test_upstream_surface.py`: the SDK still records output schemas where the pool seeds them.
+  a refusal reads the same pooled and per turn; the pooled tool surface equals a fresh listing's; a
+  retained tool is refused while another turn holds the session; the ping carries the new turn's
+  identity; `tools/list_changed` discards the session; the sweeper closes a session whose holder
+  died; a ping timeout, a hot session past the TTL, an unknown build, concurrent checkouts at the
+  ceiling, two idle sessions per key, a leaked lease, shutdown with leased sessions, and the
+  worker's `serve_worker` entering the scope.
+- `tests/test_upstream_surface.py`: the SDK still records output schemas where the pool seeds them,
+  and the adapter's listing still pages with the bound the pool copies.

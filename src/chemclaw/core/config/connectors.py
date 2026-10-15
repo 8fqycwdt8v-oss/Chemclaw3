@@ -66,16 +66,18 @@ class ConnectorSettings(BaseSettings):
     # Bound on one session's close at turn teardown; past it the holder task is cancelled.
     connector_teardown_timeout_seconds: float = Field(default=5.0, gt=0)
 
-    # How long an idle MCP session to a connector is kept for its caller's next turn, and the
-    # longest a tool listing is trusted without a fresh handshake to confirm it
-    # (`connectors/session_pool.py`). Keep it well under the fleet's own idle reaper
-    # (`MCP_SESSION_IDLE_TIMEOUT_SECONDS`, 1800 s). 0 disables reuse: every turn opens and closes
-    # its own sessions.
+    # How long an idle MCP session to a connector is kept for its caller's next turn, and the oldest
+    # a tool listing may be when a session is used: a session is replaced once its listing is this
+    # old, however busy it is (`connectors/session_pool.py`). Keep it well under the fleet's idle
+    # reaper (`MCP_SESSION_IDLE_TIMEOUT_SECONDS`, 1800 s). 0 disables reuse: every turn opens and
+    # closes its own sessions.
     connector_session_ttl_seconds: float = Field(default=300.0, ge=0)
-    # Ceiling on sessions one process keeps (idle and in use). Past it the least recently used idle
-    # one is closed; with none idle the turn runs on an unpooled session. Each is one server-side
-    # session on a fleet pod, whose own ceiling is 1024 (`MCP_MAX_SESSIONS`).
-    connector_session_pool_max: int = Field(default=256, ge=1)
+    # Ceiling on the MCP sessions one process keeps, idle, in use and being checked out. One session
+    # is one (actor, connector), so with 8 connectors 512 holds 64 actors' sessions. Each costs this
+    # process about 240 kB (measured) and a fleet pod about 58 kB, whose own ceiling is 1024
+    # (`MCP_MAX_SESSIONS`). Past it the least recently used idle one is closed; with none idle the
+    # turn runs on an unpooled session.
+    connector_session_pool_max: int = Field(default=512, ge=1)
 
     # How long an "unreachable" readiness verdict is trusted, so a turn skips the open bound against
     # a host already known to be down. A recovery bound: the readiness sweep readmits a recovered

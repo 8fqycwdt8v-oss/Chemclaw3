@@ -1039,6 +1039,19 @@ def test_a_client_session_still_validates_a_result_against_the_output_schemas_it
     assert "_tool_output_schemas" in inspect.getsource(ClientSession.list_tools)
 
 
+def test_the_adapters_tool_listing_still_pages_until_the_cursor_ends_with_a_bound() -> None:
+    """The adapter's `_list_all_tools` still follows `nextCursor` and still gives up at 1000 pages.
+
+    `connectors/session_pool.py::_list_all` keeps its own copy of that loop (it needs the tools,
+    not their conversion) and imports the bound; a change here should move it too.
+    """
+    from langchain_mcp_adapters import tools as adapter
+
+    assert adapter.MAX_ITERATIONS == 1000
+    source = inspect.getsource(adapter._list_all_tools)
+    assert "nextCursor" in source and "MAX_ITERATIONS" in source
+
+
 def test_a_streamed_tool_result_is_still_a_subclass_of_tool_message() -> None:
     """A streamed tool result is still a subclass of `ToolMessage`.
 

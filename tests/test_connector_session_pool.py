@@ -8,8 +8,9 @@ opened it would be visible here as a tool answering with someone else's name.
 
 import asyncio
 import json
+import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -18,7 +19,9 @@ from typing import Any, Self, cast
 import httpx
 import pytest
 from langchain_core.tools import BaseTool
+from mcp.server import NotificationOptions
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.shared.exceptions import McpError
 from mcp.types import ListToolsRequest
 
 from chemclaw.connectors import contract
@@ -44,10 +47,36 @@ _TOOLS = ("whoami", "slow", "refuse")
 
 
 @pytest.fixture(autouse=True)
-def _fresh_verdicts() -> None:
+def _fresh_verdicts() -> Iterator[None]:
     """One test's dark connector or probed contract must not decide the next one's open."""
     forget_reachability()
     contract.forget_contract_findings()
+    yield
+    forget_reachability()
+    contract.forget_contract_findings()
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    """Leave the logging configuration as found: the front-door lifespan and uvicorn rewrite it."""
+    root = logging.getLogger()
+    saved_root = (root.level, root.handlers[:])
+    saved = {
+        name: (logger.level, logger.handlers[:], logger.propagate, logger.disabled)
+        for name, logger in logging.Logger.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger)
+    }
+    yield
+    root.setLevel(saved_root[0])
+    root.handlers[:] = saved_root[1]
+    for name, logger in list(logging.Logger.manager.loggerDict.items()):
+        if not isinstance(logger, logging.Logger):
+            continue
+        level, handlers, propagate, disabled = saved.get(name, (logging.NOTSET, [], True, False))
+        logger.setLevel(level)
+        logger.handlers[:] = handlers
+        logger.propagate = propagate
+        logger.disabled = disabled
 
 
 class ProbeServer:
@@ -59,12 +88,23 @@ class ProbeServer:
     """
 
     def __init__(
-        self, port: int, *, build: str = "build-1", tools: tuple[str, ...] = _TOOLS
+        self,
+        port: int,
+        *,
+        build: str = "build-1",
+        tools: tuple[str, ...] = _TOOLS,
+        announces_changes: bool = False,
     ) -> None:
-        """Describe a server for `port`; `build` is the revision its handshake reports."""
+        """Describe a server for `port`.
+
+        `build` is the revision its handshake reports; `announces_changes` makes it advertise
+        `tools.listChanged` and serve a `change` tool that sends that notification.
+        """
         self.port = port
         self.build = build
         self.tools = tools
+        self.announces_changes = announces_changes
+        self.post_correlations: list[str | None] = []
         self.inits = 0
         self.deletes = 0
         self.lists = 0
@@ -101,8 +141,21 @@ class ProbeServer:
             """Refuse on purpose, with a domain message."""
             raise ValueError("not a thing this tool does")
 
+        if self.announces_changes:
+
+            @server.tool()
+            async def change(ctx: Context[Any, Any, Any]) -> str:
+                """Tell the client the tool list changed."""
+                await ctx.session.send_tool_list_changed()
+                return "sent"
+
         lowlevel = server._mcp_server
         lowlevel.version = self.build
+        if self.announces_changes:
+            options = lowlevel.create_initialization_options
+            lowlevel.create_initialization_options = lambda *a, **k: options(  # type: ignore[method-assign]
+                notification_options=NotificationOptions(tools_changed=True)
+            )
         listing = lowlevel.request_handlers[ListToolsRequest]
 
         async def counting_list(request: ListToolsRequest) -> Any:
@@ -119,6 +172,8 @@ class ProbeServer:
         @app.middleware("http")
         async def _count(request: Any, call_next: Any) -> Any:
             if request.url.path.endswith("/mcp"):
+                if request.method == "POST":
+                    stats.post_correlations.append(request.headers.get("x-chemclaw-correlation-id"))
                 if request.method == "POST" and "mcp-session-id" not in request.headers:
                     stats.inits += 1
                 if request.method == "DELETE":
@@ -375,7 +430,9 @@ async def test_two_turns_of_one_actor_at_once_use_two_sessions() -> None:
                 [_expect("alice", "two")] * 3,
             ]
             assert server.inits == 2
-            assert pool.size == 1, "only one idle session is kept per actor and connector"
+            assert pool.size == 2, (
+                "both warm sessions are kept for the actor, up to the per-key limit"
+            )
 
 
 async def test_a_kept_connection_stamps_its_pin_and_reads_nothing_from_its_opener() -> None:
@@ -489,7 +546,7 @@ async def test_a_session_past_its_ttl_is_not_reused_even_before_the_sweep_runs(
         async with pooling() as pool:
             assert pool is not None
             await run_turn([spec], actor="alice", correlation="one")
-            (kept,) = pool._idle.values()
+            ((kept,),) = pool._idle.values()
             kept.idle_since -= settings.connector_session_ttl_seconds + 1
             turn = await run_turn([spec], actor="alice", correlation="two")
             assert turn.answers == [_expect("alice", "two")]
@@ -564,10 +621,13 @@ async def test_a_turn_that_is_cancelled_mid_call_does_not_hand_its_session_on() 
         async with pooling() as pool:
             assert pool is not None
 
+            retained: list[BaseTool] = []
+
             async def cancelled_turn() -> None:
                 set_current_identity("alice", frozenset())
                 async with AsyncExitStack() as stack:
                     tools, _ = await open_connector_specs(stack, [spec])
+                    retained.extend(tools)
                     slow = next(tool for tool in tools if tool.name == "slow")
                     await asyncio.wait_for(slow.ainvoke({}), 0.3)
 
@@ -575,8 +635,13 @@ async def test_a_turn_that_is_cancelled_mid_call_does_not_hand_its_session_on() 
                 await asyncio.create_task(cancelled_turn())
             assert pool.size == 0
             turn = await run_turn([spec], actor="alice", correlation="next")
+            # The next turn is on a new session, so nothing the abandoned call may still send
+            # back can reach it, and the old turn's tools can no longer reach any session.
             assert turn.answers == [_expect("alice", "next")]
             assert server.inits == 2
+            whoami = next(tool for tool in retained if tool.name == "whoami")
+            with pytest.raises(McpError):
+                await whoami.ainvoke({})
 
 
 # --- the tool listing ----------------------------------------------------------------------------
@@ -592,7 +657,7 @@ def test_a_listing_is_valid_for_its_key_and_for_the_ttl_only(
     listings = ToolListings()
     key = ("http://x/mcp", "1.0.0", "build-1")
     listings.put("probe", key, [])
-    assert listings.get("probe", key) == []
+    assert listings.get("probe", key) == ([], 1000.0)
     assert listings.get("probe", ("http://x/mcp", "1.1.0", "build-1")) is None
     assert listings.get("probe", ("http://x/mcp", "1.0.0", "build-2")) is None
     assert listings.get("probe", ("http://y/mcp", "1.0.0", "build-1")) is None
@@ -740,11 +805,316 @@ async def test_the_front_door_keeps_sessions_for_its_lifespan_and_closes_them_wi
     assert active_pool() is None
 
 
-def test_a_worker_enters_the_same_scope_as_the_front_door() -> None:
-    """A template step opens every connector for one call, so the worker keeps sessions too."""
-    from pathlib import Path
+def test_a_worker_keeps_sessions_while_it_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template step opens every connector for one call, so the worker keeps sessions too.
 
-    from chemclaw.durable import serve
+    Driven through `serve_worker` with a stand-in worker that notes, while it is polling, whether
+    a pool is open on its loop, and that the pool is gone once the drain ends.
+    """
+    import os
+    import signal
 
-    source = Path(serve.__file__).read_text(encoding="utf-8")
-    assert "connector_sessions.pooling()" in source
+    from chemclaw.durable.serve import serve_worker
+
+    monkeypatch.setattr("chemclaw.core.config.settings.worker_metrics_port", 0)
+    seen: list[bool] = []
+
+    class _Client:
+        async def count_workflows(self, query: str) -> Any:
+            return SimpleNamespace(count=0)
+
+    class _Worker:
+        client = _Client()
+        is_running = False
+
+        def __init__(self) -> None:
+            self._stop = asyncio.Event()
+
+        async def run(self) -> None:
+            seen.append(active_pool() is not None)
+            self.is_running = True
+            await self._stop.wait()
+
+        async def shutdown(self) -> None:
+            self._stop.set()
+
+    worker = _Worker()
+
+    async def exercise() -> None:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(serve_worker(cast(Any, worker), component="test-worker"))
+
+            async def stop_once_polling() -> None:
+                while not worker.is_running:
+                    await asyncio.sleep(0.01)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            group.create_task(stop_once_polling())
+        seen.append(active_pool() is not None)
+
+    asyncio.run(exercise())
+    assert seen == [True, False]
+
+
+# --- a retained tool, the listing, accounting and the sweeper -------------------------------------
+
+
+async def test_a_tool_kept_past_its_turn_is_refused_while_another_turn_holds_the_session() -> None:
+    """A retained tool must not ride on the identity the session now carries for someone else."""
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        release = asyncio.Event()
+
+        async def hold() -> None:
+            await release.wait()
+
+        async with pooling() as pool:
+            retained = await run_turn([spec], actor="alice", correlation="a")
+            stale = next(tool for tool in retained.tools if tool.name == "whoami")
+            holder = asyncio.create_task(
+                run_turn([spec], actor="alice", correlation="b", calls=1, between=hold)
+            )
+            await until(lambda: pool is not None and len(pool._leased) == 1)
+            before = len(server.post_correlations)
+            with pytest.raises(McpError) as raised:
+                await stale.ainvoke({})
+            assert transport_failure(raised.value)
+            assert len(server.post_correlations) == before, "the refused call reached the server"
+            release.set()
+            assert (await holder).answers == [_expect("alice", "b")]
+
+
+async def test_the_ping_that_precedes_a_reused_session_carries_the_new_turns_identity() -> None:
+    """Two requests of turn two (the ping and the call) arrive under it, and none under turn one."""
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        async with pooling():
+            await run_turn([spec], actor="alice", correlation="one")
+            first_turn_posts = len(server.post_correlations)
+            await run_turn([spec], actor="alice", correlation="two")
+            assert server.post_correlations[first_turn_posts:] == ["two", "two"]
+
+
+async def test_a_list_changed_notification_discards_the_session_and_the_listing() -> None:
+    """A server that says its tools changed is not asked to serve another turn on that session."""
+    with ProbeServer(_free_port(), announces_changes=True) as server:
+        spec = _spec(server.port, allowed=(*_TOOLS, "change"))
+        async with pooling() as pool:
+            assert pool is not None
+
+            async def change_turn() -> None:
+                set_current_identity("alice", frozenset())
+                async with AsyncExitStack() as stack:
+                    tools, _ = await open_connector_specs(stack, [spec])
+                    await next(t for t in tools if t.name == "change").ainvoke({})
+                    await until(lambda: any(s.list_changed for s in pool._leased))
+
+            await asyncio.create_task(change_turn())
+            assert pool.size == 0
+            turn = await run_turn([spec], actor="alice", correlation="next")
+            assert turn.answers == [_expect("alice", "next")]
+            assert server.inits == 2 and server.lists == 2
+
+
+async def test_a_session_whose_holder_died_is_closed_by_the_sweeper() -> None:
+    """A transport that crashed while idle is found and closed without waiting for the TTL."""
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        async with pooling() as pool:
+            assert pool is not None
+            await run_turn([spec], actor="alice", correlation="one")
+            ((kept,),) = pool._idle.values()
+            assert kept._task is not None
+            kept._task.cancel()
+            await until(lambda: kept._task is not None and kept._task.done())
+            pool.expire()
+            assert pool.size == 0
+            turn = await run_turn([spec], actor="alice", correlation="two")
+            assert turn.answers == [_expect("alice", "two")]
+            assert server.inits == 2
+
+
+async def test_a_ping_that_is_not_answered_in_time_replaces_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kept session whose ping hangs costs the reuse, bounded by the health timeout."""
+    monkeypatch.setattr(settings, "connector_health_timeout_seconds", 0.3)
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        async with pooling() as pool:
+            assert pool is not None
+            await run_turn([spec], actor="alice", correlation="one")
+            ((kept,),) = pool._idle.values()
+            assert kept._session is not None
+
+            async def hang() -> Any:
+                await asyncio.sleep(60)
+
+            kept._session.send_ping = hang  # type: ignore[method-assign]
+            began = time.monotonic()
+            turn = await run_turn([spec], actor="alice", correlation="two")
+            assert time.monotonic() - began < 5
+            assert turn.answers == [_expect("alice", "two")]
+            assert server.inits == 2
+
+
+async def test_closing_the_pool_closes_sessions_that_are_still_leased() -> None:
+    """Shutdown does not wait for a turn that has not given its session back."""
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        release = asyncio.Event()
+
+        async def hold() -> None:
+            await release.wait()
+
+        async with pooling():
+            busy = asyncio.create_task(
+                run_turn([spec], actor="alice", correlation="a", calls=1, between=hold)
+            )
+            await until(lambda: server.inits == 1)
+            await asyncio.sleep(0.1)
+        assert server.deletes == 1
+        release.set()
+        await asyncio.gather(busy, return_exceptions=True)
+        names = [t.get_name() for t in asyncio.all_tasks()]
+        assert [name for name in names if name.startswith("connector")] == []
+
+
+async def test_a_session_older_than_the_ttl_is_replaced_however_busy_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The age of a session's tool listing is bounded, not only its idleness."""
+    monkeypatch.setattr(settings, "connector_session_ttl_seconds", 1.0)
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        async with pooling():
+            began = time.monotonic()
+            while time.monotonic() - began < 2.6:
+                await run_turn([spec], actor="alice", correlation="hot")
+                await asyncio.sleep(0.2)
+            assert 2 <= server.inits <= 4
+
+
+async def test_a_server_with_no_build_is_listed_afresh_and_a_changed_list_retires_others() -> None:
+    """With no build to key on, a new session asks; a changed answer retires older sessions."""
+    port = _free_port()
+    spec = _spec(port, allowed=_TOOLS)
+    first = ProbeServer(port, build="unknown", tools=("whoami", "slow")).start()
+    try:
+        async with pooling() as pool:
+            assert pool is not None
+            await run_turn([spec], actor="alice", correlation="a")
+            await run_turn([spec], actor="bob", correlation="b")
+            assert first.lists == 2, "an unknown build must not be served from the cache"
+            first.stop()
+            with ProbeServer(port, build="unknown", tools=_TOOLS) as second:
+                carol = await run_turn([spec], actor="carol", correlation="c")
+                assert {tool.name for tool in carol.tools} == set(_TOOLS)
+                older = [s for bucket in pool._idle.values() for s in bucket if s.key[1] != "carol"]
+                assert older and not any(s.keepable for s in older)
+                alice = await run_turn([spec], actor="alice", correlation="a2")
+                assert {tool.name for tool in alice.tools} == set(_TOOLS)
+                assert second.inits == 2
+    finally:
+        first.stop()
+
+
+async def test_concurrent_checkouts_never_pass_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sessions being opened or pinged count against the ceiling, so a burst cannot exceed it."""
+    monkeypatch.setattr(settings, "connector_session_pool_max", 3)
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        peak = 0
+        release = asyncio.Event()
+
+        async with pooling() as pool:
+            assert pool is not None
+
+            async def hold() -> None:
+                nonlocal peak
+                peak = max(peak, pool.size)
+                await release.wait()
+
+            turns = [
+                asyncio.create_task(
+                    run_turn([spec], actor=f"actor-{n}", correlation=str(n), calls=1, between=hold)
+                )
+                for n in range(8)
+            ]
+            await until(lambda: server.inits == 8)
+            peak = max(peak, pool.size)
+            release.set()
+            await asyncio.gather(*turns)
+            assert peak <= 3
+            assert pool.size <= 3
+
+
+async def test_two_idle_sessions_are_kept_per_actor_and_connector() -> None:
+    """Two overlapping turns of one actor find warm sessions again the next time."""
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        arrived = 0
+        both = asyncio.Event()
+
+        async def rendezvous() -> None:
+            nonlocal arrived
+            arrived += 1
+            if arrived % 2 == 0:
+                both.set()
+            await both.wait()
+
+        async with pooling():
+            for _ in range(3):
+                both.clear()
+                await asyncio.gather(
+                    run_turn([spec], actor="alice", correlation="x", calls=1, between=rendezvous),
+                    run_turn([spec], actor="alice", correlation="y", calls=1, between=rendezvous),
+                )
+            assert server.inits == 2
+
+
+async def test_a_lease_held_past_twice_the_turn_ceiling_is_reaped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn that never gave its session back does not hold a slot for ever."""
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
+    with ProbeServer(_free_port()) as server:
+        spec = _spec(server.port)
+        release = asyncio.Event()
+
+        async def hold() -> None:
+            await release.wait()
+
+        async with pooling() as pool:
+            assert pool is not None
+            busy = asyncio.create_task(
+                run_turn([spec], actor="alice", correlation="a", calls=1, between=hold)
+            )
+            await until(lambda: server.inits == 1 and pool.size == 1)
+            await asyncio.sleep(0.15)
+            with caplog.at_level("WARNING", logger="chemclaw.connectors.session_pool"):
+                pool.expire()
+            assert pool.size == 0
+            assert "leaked" in caplog.text
+            await until(lambda: server.deletes == 1)
+            release.set()
+            await asyncio.gather(busy, return_exceptions=True)
+
+
+async def test_a_listing_that_never_stops_paginating_fails_instead_of_spinning() -> None:
+    """The adapter's iteration bound is kept, so a hostile server cannot hold the holder task."""
+    from mcp.types import ListToolsResult
+
+    from chemclaw.connectors.session_pool import _list_all
+
+    pages = 0
+
+    class _Endless:
+        async def list_tools(self, cursor: str | None = None) -> ListToolsResult:
+            nonlocal pages
+            pages += 1
+            return ListToolsResult(tools=[], nextCursor="more")
+
+    with pytest.raises(RuntimeError, match="max of 1000 iterations"):
+        await _list_all(cast(Any, _Endless()))
+    assert pages == 1000
