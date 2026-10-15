@@ -14,6 +14,7 @@ import asyncio
 import heapq
 import logging
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Hashable
 from datetime import date
@@ -331,7 +332,9 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # `graph._COMPUTE_LOCKS`.
 _LOCKS_GUARD = threading.Lock()
 _INDEX_LOCKS: dict[str, threading.Lock] = {}
-_INDEX_CACHE: dict[str, tuple[Hashable, date | None, dict[str, NoteConflicts]]] = {}
+# Each entry also carries the monotonic time its snapshot was requested, so a slower, older
+# snapshot that reaches the lock later cannot overwrite a newer one.
+_INDEX_CACHE: dict[str, tuple[Hashable, date | None, dict[str, NoteConflicts], float]] = {}
 
 # Warn once per process that with `graph_cache_enabled=false` every retrieval pays the full scan.
 _WARNED_UNCACHED = False
@@ -356,14 +359,23 @@ async def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteC
         return {}
     # Snapshot before taking this module's lock; the store's read has its own lock, and nesting them
     # would couple both critical sections for a whole cold parse.
+    requested = time.monotonic()
     fingerprint, notes = await note_store(notes_dir).snapshot()
-    return await asyncio.to_thread(_index_for, notes_dir, fingerprint, notes, as_of)
+    return await asyncio.to_thread(_index_for, notes_dir, fingerprint, notes, as_of, requested)
 
 
 def _index_for(
-    notes_dir: Path, fingerprint: Hashable | None, notes: list[Note], as_of: date | None
+    notes_dir: Path,
+    fingerprint: Hashable | None,
+    notes: list[Note],
+    as_of: date | None,
+    requested: float,
 ) -> dict[str, NoteConflicts]:
-    """`conflict_index` over a snapshot already taken: the cache lookup, or the scan."""
+    """`conflict_index` over a snapshot already taken: the cache lookup, or the scan.
+
+    `requested` is when the snapshot was asked for; the result is cached unless a snapshot asked for
+    later is already there.
+    """
     key = str(notes_dir)
     if fingerprint is None:
         global _WARNED_UNCACHED
@@ -390,5 +402,6 @@ def _index_for(
             note_id: _strongest(note_id, conflicts)
             for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
         }
-        _INDEX_CACHE[key] = (fingerprint, as_of, index)
+        if cached is None or requested >= cached[3]:
+            _INDEX_CACHE[key] = (fingerprint, as_of, index, requested)
     return index
