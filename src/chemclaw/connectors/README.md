@@ -89,6 +89,7 @@ chart↔entrypoint correspondence in both directions, which is what would have c
 | `manifest.py` | the `connector.yaml` model — one validated contract for everything a bundle contributes |
 | `registry.py` | discover bundles, validate them, and build what the agent advertises |
 | `transport.py` | how a connector is reached, so an unreachable one degrades instead of failing the turn |
+| `session_pool.py` | keeps a connector's MCP session across turns, lent to one actor's one turn at a time, and the tool listing with it — [D-2026-10-15-a-connector-session-is-kept-for-an-actor-and-lent-to-one-turn](../../../docs/decisions/D-2026-10-15-a-connector-session-is-kept-for-an-actor-and-lent-to-one-turn.md) |
 | `contract.py` | the version handshake at session open: the manifest's `contract_version` against the server's `/healthz`, refusing a different major by name |
 | `health.py`, `reachability.py` | the startup probe behind `/readyz` and `/metrics`, and what this process last learned about each connector |
 | `jobs.py` | one generated agent tool per declared job |

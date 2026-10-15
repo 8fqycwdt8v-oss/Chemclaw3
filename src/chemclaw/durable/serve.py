@@ -16,6 +16,7 @@ from functools import partial
 
 from temporalio.worker import Interceptor, Worker
 
+from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.core import backend_rpc, db
 from chemclaw.core.config import settings
 from chemclaw.core.executor import install_default_executor
@@ -125,6 +126,7 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
         async with (
             db.pooling(),
             backend_rpc.pooling(),
+            connector_sessions.pooling(),
             worker_http(component=component, ready=partial(worker_ready, worker)),
         ):
             running = asyncio.create_task(worker.run())
