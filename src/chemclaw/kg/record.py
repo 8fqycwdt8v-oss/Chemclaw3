@@ -5,6 +5,11 @@ Knowledge is written directly and corrected rather than pre-approved
 its citations, and can be contradicted or superseded. `settings.knowledge_path` is the directory
 the note store reads and the writer commits into, so a note is in the graph once its bytes land;
 the commit provides durability and history.
+
+`settings.kg_store` picks where a note goes. `git` writes the tree only. `dual` writes the tree
+first and then Postgres: the tree stays the authority, so its failure is the caller's, while a
+Postgres failure is logged, counted and left for the comparison to find, and Postgres can never be
+ahead of the tree. `postgres` writes the database only.
 """
 
 import asyncio
@@ -17,12 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
-from chemclaw.core.logging import redact_secrets
+from chemclaw.core.logging import log_event, redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.graph import dangling_links
 from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.render import render_note
-from chemclaw.kg.store import NoteUnit, note_store
+from chemclaw.kg.store import NoteUnit, PutOutcome, note_store, postgres_note_store
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +147,11 @@ def _note_file(
     )
 
 
+def _unit(note: Note, dependencies: list[Note] | None, superseded: list[Note] | None) -> NoteUnit:
+    """The notes of one record in write order: dependencies, then the subject, then retirements."""
+    return NoteUnit(note, tuple(dependencies or ()), tuple(superseded or ()))
+
+
 def _build_write(
     note: Note,
     directory: str,
@@ -156,7 +166,7 @@ def _build_write(
     notes are current; retiring first would instead leave a dangling link and a moment with no
     current note. Files are deduplicated by note id.
     """
-    unit = NoteUnit(note, tuple(dependencies or ()), tuple(superseded or ()))
+    unit = _unit(note, dependencies, superseded)
     # Retirements overwrite: each is the note's own content with `valid_to` closed and the successor
     # named. They alone are marked `amendment`, so a retirement the writer may not make does not
     # take the subject down with it.
@@ -187,7 +197,7 @@ async def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) ->
     return list(dict.fromkeys(target for source, target in reported if source == note.id))
 
 
-def count_notes_recorded(outcome: WriteOutcome) -> None:
+def count_notes_recorded(outcome: WriteOutcome | PutOutcome) -> None:
     """Book what `outcome` put in the graph on `chemclaw_notes_recorded_total`.
 
     Counted after the writer returns, so the number means "reached the graph", not "attempted". Also
@@ -195,6 +205,38 @@ def count_notes_recorded(outcome: WriteOutcome) -> None:
     """
     if outcome.notes:
         record_metric(lambda m: m.increment("chemclaw_notes_recorded_total", outcome.notes))
+
+
+async def _put_in_postgres(unit: NoteUnit) -> PutOutcome:
+    """Write `unit` to the Postgres store in one transaction."""
+    return await postgres_note_store().put(unit)
+
+
+async def _mirror_in_postgres(unit: NoteUnit) -> None:
+    """Write `unit` to Postgres after the tree has it; a failure is loud and never the caller's.
+
+    The chemist's note is already in the authoritative tree, so failing their call would report a
+    loss that did not happen. The failure is logged with the note id, counted on
+    `chemclaw_kg_dual_write_failed_total`, and found again by the nightly comparison, which
+    `--repair` fixes; recording the same note again repairs it too, since a `put` is idempotent.
+    Cancellation is not caught: the comparison finds that case as well.
+    """
+    try:
+        await _put_in_postgres(unit)
+    except Exception as exc:
+        log_event(
+            log,
+            "kg.dual_write.failed",
+            "note %s is in the tree but its Postgres copy could not be written (%s: %s); the "
+            "stores differ until `kg-validate --compare --repair` or a repeat of the write",
+            unit.subject.id,
+            type(exc).__name__,
+            exc,
+            level=logging.ERROR,
+            exc_info=True,
+            note_id=unit.subject.id,
+        )
+        record_metric(lambda m: m.increment("chemclaw_kg_dual_write_failed_total"))
 
 
 async def record_note(
@@ -224,8 +266,9 @@ async def record_note(
             still lands.
 
     Returns:
-        The writer's reference for what landed: a commit, or the unchanged tree. A note whose
-        `[[wikilinks]]` name ids nothing defines still lands, and logs a WARNING naming them.
+        The writer's reference for what landed: a commit, or the unchanged tree (under
+        `kg_store=postgres`, `kg_notes:<id>@<revision>`). A note whose `[[wikilinks]]` name ids
+        nothing defines still lands, and logs a WARNING naming them.
     """
     if not note.authorship.by_agent:
         raise ValueError(
@@ -260,6 +303,12 @@ async def record_note(
             len(unresolved),
             ", ".join(unresolved),
         )
+    if settings.kg_store == "postgres":
+        stored = await _put_in_postgres(_unit(note, dependencies, superseded))
+        count_notes_recorded(stored)
+        return f"kg_notes:{note.id}@{stored.revisions[note.id]}"
     outcome = await writer.write(_build_write(note, directory, dependencies, superseded))
+    if settings.kg_store == "dual":
+        await _mirror_in_postgres(_unit(note, dependencies, superseded))
     count_notes_recorded(outcome)
     return outcome.reference

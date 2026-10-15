@@ -1085,6 +1085,30 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 26,
+      "type": "graph",
+      "title": "Knowledge stores: dual-write failures and differing notes",
+      "description": "Only meaningful under `kg_store=dual`, where a note is written to the notes tree and then to Postgres. `dual-write failures` counts notes that reached the tree but not Postgres: the chemist's write succeeded and the stores now differ until a repeat of the write or `make kg-validate-compare ARGS=--repair`. The other series is the last nightly comparison's count of differing notes by kind (`missing_in_postgres`, `missing_in_git`, `canonical`, `validity`, `edges`); it is absent until a comparison has run, and every kind at zero for seven days is what the read flip waits for.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 92
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_kg_dual_write_failed_total[1h]))",
+          "legendFormat": "dual-write failures (1h)",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (kind) (chemclaw_kg_compare_differences)",
+          "legendFormat": "differing notes: {{kind}}",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

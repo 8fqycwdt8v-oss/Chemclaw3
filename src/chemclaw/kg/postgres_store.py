@@ -15,7 +15,7 @@ import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator, Collection, Hashable, Sequence
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any, NamedTuple
 
 import networkx as nx
@@ -168,7 +168,7 @@ _INSERT_NOTE = (
     "valid_to, revision, content_sha, search_text, created_at, updated_at) "
     "VALUES (%(tenant)s, %(id)s, %(type)s, %(frontmatter)s, %(body)s, %(created_by)s, "
     "%(valid_from)s, %(valid_to)s, %(revision)s, %(content_sha)s, %(search_text)s, "
-    "clock_timestamp(), clock_timestamp()) "
+    "coalesce(%(created_at)s, clock_timestamp()), clock_timestamp()) "
     "ON CONFLICT (tenant_id, id) DO NOTHING"
 )
 _UPDATE_NOTE = (
@@ -192,6 +192,10 @@ _SELECT_DERIVED = (
     "WHERE n.tenant_id = %s AND n.id = %s"
 )
 _REFRESH_SEARCH_TEXT = "UPDATE kg_notes SET search_text = %s WHERE tenant_id = %s AND id = %s"
+_LINK_NOTE_INDEX = (
+    "UPDATE note_index SET kg_tenant_id = n.tenant_id, kg_note_id = n.id FROM kg_notes n "
+    "WHERE n.tenant_id = %s AND note_index.note_id = n.id AND note_index.kg_note_id IS NULL"
+)
 _INSERT_EDGE = (
     "INSERT INTO kg_edges (tenant_id, src, rel, dst, valid_from, valid_to, confidence) "
     "VALUES (%(tenant)s, %(src)s, %(rel)s, %(dst)s, %(valid_from)s, %(valid_to)s, %(confidence)s)"
@@ -269,8 +273,12 @@ def _admit_subject(unit: NoteUnit, note: Note, current: _Held | None) -> None:
 def _closed(current: Note, retirement: Note) -> Note:
     """`current` with the window and the `superseded-by` relations of `retirement` applied.
 
-    Only those: the rest of the copy a retirement carries was read at some earlier revision and
-    may have been edited since. A window that would end before the note starts is refused.
+    The rest of the copy a retirement carries was read at some earlier revision and may have been
+    edited since, so it is not applied, with one exception: a body that is the stored body with
+    text added after it is the retirement helper's own sentence (`close_refuted_note`,
+    `retire_note`) and is kept, which is what the file writer does with the same copy. A body that
+    does not extend the stored one was written from a stale read and is left out. A window that
+    would end before the note starts is refused.
     """
     known = {(r.rel, r.to) for r in current.outgoing_relations()}
     relations = [*current.relations]
@@ -281,6 +289,8 @@ def _closed(current: Note, retirement: Note) -> Note:
     changes: dict[str, Any] = {"relations": relations}
     if retirement.valid_to is not None:
         changes["valid_to"] = retirement.valid_to
+    if retirement.body != current.body and retirement.body.startswith(current.body):
+        changes["body"] = retirement.body
     try:
         return canonical_note(Note(**{**current.model_dump(), **changes}))
     except ValidationError as exc:
@@ -513,6 +523,17 @@ class PostgresNoteStore:
 
     # --- Writing ---------------------------------------------------------------------------
 
+    async def link_note_index(self) -> int:
+        """Point each unlinked `note_index` row at the note of the same id; return how many.
+
+        Fills the keys the index's foreign key to `kg_notes` uses and changes nothing else about a
+        row, so the index keeps working as it did. Rows already linked, and rows for ids this
+        tenant has no note for, are left alone; running it again finds nothing new.
+        """
+        async with connection(settings.postgres_dsn, operation="kg_notes_write") as conn:
+            cursor = await conn.execute(_LINK_NOTE_INDEX, (self._tenant,))
+            return cursor.rowcount
+
     async def put(self, unit: NoteUnit) -> PutOutcome:
         """Write `unit` in one transaction: dependencies, then the subject, then retirements.
 
@@ -532,6 +553,8 @@ class PostgresNoteStore:
         `NoteRevisionConflict`. `created_by` is taken as given: whoever calls `put` has
         authenticated the author. Either refusal raises before any row changes: the transaction
         rolls back whole.
+
+        `unit.arrived` dates the subject's first appearance (an import); other notes arrive now.
 
         Writers of the same ids queue on a transaction-scoped advisory lock taken in id order, so
         two units that share a note neither interleave nor deadlock. Timestamps are taken after the
@@ -582,7 +605,8 @@ class PostgresNoteStore:
                     await self._repair_derived(conn, note, row)
                     continue
                 revision = 1 if current is None else current.revision + 1
-                await self._write(conn, note, row, current, revision, recorded_by)
+                arrived = unit.arrived if role == "subject" else None
+                await self._write(conn, note, row, current, revision, recorded_by, arrived)
                 revisions[note.id] = revision
                 written.append(note.id)
         return PutOutcome(subject=unit.subject.id, revisions=revisions, written=tuple(written))
@@ -651,14 +675,19 @@ class PostgresNoteStore:
         current: _Held | None,
         revision: int,
         recorded_by: str | None,
+        arrived: date | None,
     ) -> None:
-        """Insert or update the note's row, append its revision, and re-derive its edges."""
+        """Insert or update the note's row, append its revision, and re-derive its edges.
+
+        `arrived` becomes a new row's `created_at` (midnight UTC); an edit keeps the original.
+        """
         values = {
             "tenant": self._tenant,
             **row,
             "frontmatter": json_column(row["frontmatter"]),
             "revision": revision,
             "held": 0 if current is None else current.revision,
+            "created_at": None if arrived is None else datetime.combine(arrived, time.min, UTC),
         }
         cursor = await conn.execute(_UPDATE_NOTE if current else _INSERT_NOTE, values)
         if cursor.rowcount != 1:

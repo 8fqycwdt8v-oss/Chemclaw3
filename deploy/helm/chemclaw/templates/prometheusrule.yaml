@@ -233,6 +233,36 @@ spec:
               count and its log before assuming the corpus is merely quiet.
 {{- end }}
 
+        {{- /* Under `kg_store=dual` the chemist's write succeeds whatever Postgres does, so this
+               counter is the only server-side sign that the two stores have started to differ. It
+               is not data loss (the note is in the tree), which is why it is a warning; the two
+               rules together are what the seven clean days before the read flip are counted on.
+               Both series are absent where `kg_store` is `git`, so neither fires there. */}}
+        - alert: ChemclawKnowledgeDualWriteFailing
+          expr: increase(chemclaw_kg_dual_write_failed_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgedualwritefailing
+            summary: Notes are reaching the notes tree but not Postgres
+            description: >-
+              A note was written to the tree and its Postgres copy failed. The chemist's write
+              succeeded and nothing is lost, but the stores now differ and the clean-comparison
+              window the read flip waits for restarts.
+        - alert: ChemclawKnowledgeStoresDiffer
+          expr: max(chemclaw_kg_compare_differences) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgestoresdiffer
+            summary: The notes tree and Postgres serve different notes
+            description: >-
+              The last nightly comparison found notes that differ between the tree and Postgres.
+              The `kind` label says how: missing from one side, different content, a different
+              validity window, or different edges.
+
     - name: chemclaw.correctness
       rules:
         {{- /* The turn lease is what makes "one turn per session" true across pods (D-121). If

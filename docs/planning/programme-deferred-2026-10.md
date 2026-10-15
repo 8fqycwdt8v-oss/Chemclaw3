@@ -189,22 +189,23 @@ from a session (the proxy rejects tag pushes).
 - Order-dependent failures seen on a clean `main` run in CI order (they pass in isolation):
   `test_db_pool` ×6 after `test_api_observability`; fix at the root before flipping.
 
-### C2. W4 stage 2c and the rest of W4
-Order: (1) add `async def put(self, unit: NoteUnit) -> PutOutcome` to the `NoteStore` protocol (or a
-`WritableNoteStore`), a `kg_store` literal and an arm in `note_store()`'s `assert_never` match, and a
-Postgres arm in `kg/record.py::record_note` building `NoteUnit(note, deps, superseded)` and booking
-`PutOutcome.notes` via `count_notes_recorded`; (2) `cli/kg_import`: `put` per note in id order, an
-optional `arrived: date` so `created_at` comes from `note_arrivals` (human notes import as
-subjects); (3) `kg_store=dual` (writes to both, reads from git) and a nightly `kg-validate
---compare` that compares **canonical notes** (`rows.canonical_note`) and edges, never fingerprints
-(`content_sha` digests the canonical render, which differs from file text whenever reading the file
-back changes the note); `_same_answers` in `tests/test_postgres_note_store.py` is the compare logic to
-promote; (4) fill `note_index.kg_tenant_id`/`kg_note_id` from `fingerprints()`; (5) flip reads
-(W4.7), then `PUT /knowledge/notes/{id}` and `cli/kg_export` (W4.8, privileged role for others'
-notes; the API authenticates before calling `put`, which trusts `note.created_by`); (6) `kg-validate`
-on the Postgres store (W4.10; the restore drill's `kg_checks` still reads a notes directory until
-then: `core/restore_check.py::load_knowledge_rows`); (7) confirm the UI reads notes only through the
-API (W4.11).
+### C2. The rest of W4 (stage 2c is in: `put`, `kg_store=dual`, `kg-import`, `kg-validate --compare`)
+Done: `WritableNoteStore.put`, the `kg_store` literal and `dual` mode, the Postgres arm of
+`record_note`, `kg-import` (with the `note_index` key link), `kg-validate --compare [--repair]` and
+the nightly `kg-compare` Schedule
+(`D-2026-10-15-dual-write-keeps-the-tree-the-authority-and-postgres-reads-wait`). Left, in order:
+(1) switch a deployment to `kg_store=dual` after `make kg-import`, and count seven days with neither
+`ChemclawKnowledgeDualWriteFailing` nor `ChemclawKnowledgeStoresDiffer` firing; (2) after #606 merges,
+default `kg-import --tenant` and the stores' tenant from `tenancy_process_tenant`; (3) flip reads
+(W4.7: move the readers that still take a notes directory, then remove the validator in
+`core/config/kg.py` that refuses `postgres`), then `PUT /knowledge/notes/{id}` and `cli/kg_export`
+(W4.8, privileged role for others' notes; the API authenticates before calling `put`, which trusts
+`note.created_by`); (4) migrate release of `note_index`: read `kg_tenant_id`/`kg_note_id` in place of
+the fingerprint and commit-count columns (the keys are filled by `kg-import`; a note recorded after
+the last import is linked by running it again); (5) `kg-validate` on the Postgres store (W4.10; the
+restore drill's `kg_checks` still reads a notes directory until then:
+`core/restore_check.py::load_knowledge_rows`); (6) confirm the UI reads notes only through the API
+(W4.11).
 
 ### C3. W6.4 — remove MCP from the backends
 After B5. Core: `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `_ask_server_to_cancel`,
@@ -255,8 +256,7 @@ files and `ARCHITECTURE.md`).
   job ceilings against the new IO/REMOTE windows.
 - **Postgres note store (`kg/postgres_store.py`).** `neighborhood` always walks to `hops` (cost
   hops × edges; callers clamp to `graph_max_hops`); `search` with a common term adds ~60 MB RSS at
-  20 k notes — push the cap into SQL; retirement helpers' appended prose is dropped under the
-  Postgres store; `current_successors` is level-wise (one statement per level); a single-snapshot
+  20 k notes — push the cap into SQL; `current_successors` is level-wise (one statement per level); a single-snapshot
   `view` method for `expand_note` (the note view is read in several steps today); the trigram index
   is proven usable but not shown to beat a seq scan at 20 k small notes; a pooled
   first-borrow-then-`SET TRANSACTION` hazard in `protocols/store.py::page`.

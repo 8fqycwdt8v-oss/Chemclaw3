@@ -19,9 +19,35 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
 from chemclaw.kg.git_writer import BatchingNoteWriter, default_writer
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import count_notes_recorded, record_note
+from chemclaw.kg.record import (
+    NoteWrite,
+    NoteWriter,
+    WriteOutcome,
+    count_notes_recorded,
+    record_note,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class _Unbatched:
+    """The git writer with nothing to flush: each note is committed, then mirrored, on its own.
+
+    Under `kg_store=dual` a batch would commit after `record_note` had already written Postgres,
+    leaving Postgres ahead of the tree if the commit failed.
+    """
+
+    def __init__(self, inner: NoteWriter) -> None:
+        """Wrap `inner`."""
+        self._inner = inner
+
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Commit this note now."""
+        return await self._inner.write(write)
+
+    async def flush(self) -> WriteOutcome:
+        """Nothing is held, so nothing is committed."""
+        return WriteOutcome(reference="", notes=0)
 
 
 def note_for_document(path: Path, raw: bytes, tags: list[str]) -> Note:
@@ -51,7 +77,11 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     # A backfill batches commits; the conversational path does not, because there a queued note is
     # one a chemist cannot read yet. An operator command over existing documents has nobody waiting
     # mid-turn, and per-note commits are several times slower.
-    submitter = BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
+    submitter: BatchingNoteWriter | _Unbatched = (
+        BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
+        if settings.kg_store == "git"
+        else _Unbatched(default_writer())
+    )
     # Up to `batch_size - 1` notes are held in memory, so the trailing flush runs on both exits.
     # When the loop finished, the flush's failure is the run's failure and propagates. When the loop
     # is already unwinding, the flush is best-effort and logged, so it cannot replace the original

@@ -46,7 +46,7 @@ SHELL := bash
 .DEFAULT_GOAL := help
 
 .PHONY: help install lint type test cov check ci deps-audit upstream-check architecture-baseline \
-  mutants mutant-results mutant-stats kg-validate eval eval-strict eval-baseline-check \
+  mutants mutant-results mutant-stats kg-validate kg-validate-compare kg-import eval eval-strict eval-baseline-check \
   eval-baseline eln-validate skill-validate connector-validate datasource-validate sink-validate \
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
@@ -131,6 +131,12 @@ mutant-stats:  ## Write the last run's per-category counts to mutants/mutmut-cic
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
 	uv run python -m chemclaw.cli.validate_kg
+
+kg-validate-compare:  ## Compare the notes directory with the Postgres note store, canonical notes and edges (ARGS="--repair --json --settle-seconds 330").
+	uv run python -m chemclaw.cli.validate_kg --compare $(ARGS)
+
+kg-import:  ## Load the notes directory into the Postgres note store, idempotently (ARGS="--dry-run --tenant T --json").
+	uv run python -m chemclaw.cli.kg_import $(ARGS)
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness
