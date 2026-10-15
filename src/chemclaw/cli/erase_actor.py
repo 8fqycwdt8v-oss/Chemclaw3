@@ -7,6 +7,9 @@
 `--finish` deletes by id the orphaned sessions an interrupted actor run printed (exit `2`), refusing
 any that still has an ownership row. A shim over `chemclaw.agent.leaver`: delete the conversation,
 keep the record. Dry run by default.
+
+With tenancy enabled a person's rows are a tenant's, so the run names it: `--tenant <id>`, or
+`--all-tenants` to erase a person who works in several (an actor run only). With neither it refuses.
 """
 
 import argparse
@@ -22,7 +25,10 @@ from chemclaw.agent.leaver import (
     retention_reasons,
     unreachable_tables,
 )
+from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 
 
 def _wrapped(why: str, *, width: int = 88, indent: str = " " * 11) -> list[str]:
@@ -32,7 +38,7 @@ def _wrapped(why: str, *, width: int = 88, indent: str = " " * 11) -> list[str]:
     return textwrap.wrap(why, width=width, initial_indent=indent, subsequent_indent=indent)
 
 
-def _render(report: ErasureReport) -> str:
+def _render(report: ErasureReport, tenant: str = "") -> str:
     """The operator-facing report: both tiers, counts per table, and why the second one stays."""
     lines = [
         f"actor: {report.actor}",
@@ -81,6 +87,7 @@ def _render(report: ErasureReport) -> str:
             "",
             "  python -m chemclaw.cli.erase_actor --finish "
             + " ".join(report.residue_sessions)
+            + (f" --tenant {tenant}" if tenant else "")
             + " --apply",
         ]
 
@@ -157,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Commit the deletion. Without it, the counts are real and nothing is written.",
     )
+    add_tenant_flags(parser, all_tenants=True)
     args = parser.parse_args(argv)
     # "Exactly one of them", which argparse's mutually-exclusive group cannot express once `actor`
     # is optional.
@@ -166,22 +174,36 @@ def main(argv: list[str] | None = None) -> int:
     # `ValueError` covers `ErasureError`, into which the seam translates a refused statement (e.g. a
     # missing `DELETE ON session_owners` grant), so it prints rather than raises.
     if args.finish:
+        if args.all_tenants:
+            parser.error("--finish names sessions, which belong to one tenant: use --tenant")
         try:
-            finished = asyncio.run(finish_erasure(args.finish, apply=args.apply))
+            done = asyncio.run(
+                for_chosen_tenants(args, lambda _t: finish_erasure(args.finish, apply=args.apply))
+            )
+        except TenantError as exc:
+            return refusal(exc, status=1)
         except (ValueError, ConnectionError) as exc:
             print(f"erasure failed: {exc}", file=sys.stderr)
             return 1
+        (finished,) = done.values()
         print(_render_finish(finished))
         # A run that wrote and did not finish must not read as success; a dry run wrote nothing.
         return 2 if args.apply and not finished.finished else 0
     try:
-        report = asyncio.run(erase_actor(args.actor, apply=args.apply))
+        reports = asyncio.run(
+            for_chosen_tenants(args, lambda _t: erase_actor(args.actor, apply=args.apply))
+        )
+    except TenantError as exc:
+        return refusal(exc, status=1)
     except (ValueError, ConnectionError) as exc:
         print(f"erasure failed: {exc}", file=sys.stderr)
         return 1
-    print(_render(report))
+    for tenant, report in reports.items():
+        if len(reports) > 1:
+            print(f"== tenant {tenant} ==")
+        print(_render(report, tenant if settings.tenancy_enabled else ""))
     # Non-zero on a residue: it ran, wrote, and did not finish.
-    return 2 if report.residue else 0
+    return 2 if any(report.residue for report in reports.values()) else 0
 
 
 if __name__ == "__main__":

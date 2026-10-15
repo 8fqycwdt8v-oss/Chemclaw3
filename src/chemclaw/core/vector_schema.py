@@ -20,8 +20,10 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from chemclaw.core.config import LEGACY_VECTOR_DIM
+from chemclaw.core.config import LEGACY_VECTOR_DIM, settings
 from chemclaw.core.embeddings import embedding_config_key, note_embedding_key
+from chemclaw.core.tenancy import TENANT_SETTING
+from chemclaw.core.tenant_registry import TenantSweepError, registered_tenants
 
 #: The tables whose rows carry a dense vector in Postgres.
 VECTOR_TABLES = ("note_index", "document_chunks")
@@ -226,3 +228,42 @@ async def inspect_tables(
             )
         )
     return states
+
+
+async def inspect_every_tenant(
+    conn: psycopg.AsyncConnection[Any],
+    dim: int,
+    live_keys: Mapping[str, str],
+    document_chunkings: Collection[str] | None = None,
+) -> list[TableVectorState]:
+    """`inspect_tables`, over every tenant's rows when tenancy hides them from a tenantless reader.
+
+    With tenancy on, a connection that binds no tenant reads no row, so the embedding keys a
+    corpus holds (the "mixed corpus" signal) can only be read tenant by tenant: this walks the
+    registered tenants on `conn`, bounded by `tenancy_sweep_max_tenants`, and merges what each
+    holds. Off, it is `inspect_tables`.
+
+    Raises:
+        TenantSweepError: more tenants are registered than the sweep may walk.
+    """
+    if not settings.tenancy_enabled:
+        return await inspect_tables(conn, dim, live_keys, document_chunkings)
+    names = await registered_tenants()
+    if len(names) > settings.tenancy_sweep_max_tenants:
+        raise TenantSweepError(
+            f"{len(names)} tenants are registered and a sweep over them is capped at "
+            f"{settings.tenancy_sweep_max_tenants} (CHEMCLAW_TENANCY_SWEEP_MAX_TENANTS)"
+        )
+    merged: dict[str, TableVectorState] = {}
+    for name in names:
+        await conn.execute("SELECT set_config(%s, %s, false)", (TENANT_SETTING, name))
+        for state in await inspect_tables(conn, dim, live_keys, document_chunkings):
+            seen = merged.get(state.table)
+            keys = {*state.foreign_keys, *(seen.foreign_keys if seen else ())}
+            merged[state.table] = TableVectorState(
+                table=state.table,
+                column=state.column,
+                column_width=state.column_width,
+                foreign_keys=tuple(sorted(keys, key=lambda key: (key is None, key or ""))),
+            )
+    return list(merged.values())

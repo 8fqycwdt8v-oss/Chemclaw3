@@ -19,7 +19,13 @@ from typing import TypeVar
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.core.tenancy import DEFAULT_TENANT, TenantError, bound_tenant
+from chemclaw.core.tenancy import (
+    DEFAULT_TENANT,
+    TenantError,
+    bound_tenant,
+    require_bound_tenant,
+    require_tenant_id,
+)
 
 _T = TypeVar("_T")
 
@@ -82,6 +88,37 @@ async def for_each_tenant(work: Callable[[str], Awaitable[_T]]) -> dict[str, _T]
         with bound_tenant(tenant):
             results[tenant] = await work(tenant)
     return results
+
+
+async def choose_tenants(tenant: str | None, *, all_tenants: bool = False) -> list[str]:
+    """The tenants an operator command is to act for, or a refusal naming how to say which.
+
+    With tenancy off the only tenant is `default`, and naming another is refused. With it on, one
+    registered tenant (`--tenant`), every registered tenant (`--all-tenants`), or the process's own
+    (`tenancy_process_tenant`) when nothing is said; none of those is an error, not a quiet no-op.
+
+    Raises:
+        TenantError: no tenant is named under tenancy, a name is not registered for this release,
+            the tenancy is off and another tenant is named, or `all_tenants` would pass the sweep
+            cap.
+    """
+    if not settings.tenancy_enabled:
+        if tenant not in (None, "", DEFAULT_TENANT):
+            raise TenantError(f"tenancy is off, so there is one tenant (default), not {tenant!r}")
+        return [DEFAULT_TENANT]
+    if all_tenants:
+        names = await registered_tenants()
+        if len(names) > settings.tenancy_sweep_max_tenants:
+            raise TenantSweepError(
+                f"{len(names)} tenants are registered and a sweep over them is capped at "
+                f"{settings.tenancy_sweep_max_tenants} (CHEMCLAW_TENANCY_SWEEP_MAX_TENANTS)"
+            )
+        return names
+    chosen = tenant or require_bound_tenant("this command")
+    require_tenant_id(chosen)
+    if not await is_registered(chosen):
+        raise TenantError(f"{chosen!r} is not a tenant registered for this release")
+    return [chosen]
 
 
 def forget_registered_tenants() -> None:

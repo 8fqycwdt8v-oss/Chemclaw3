@@ -26,7 +26,12 @@ from chemclaw.core.config import MAX_VECTOR_DIM, settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.migrate import newest_shipped_migration
-from chemclaw.core.vector_schema import TableVectorState, inspect_tables, live_embedding_keys
+from chemclaw.core.tenant_registry import TenantSweepError
+from chemclaw.core.vector_schema import (
+    TableVectorState,
+    inspect_every_tenant,
+    live_embedding_keys,
+)
 from chemclaw.durable.document_sync import share_sources
 from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
@@ -177,7 +182,9 @@ async def _vector_tables(conn: psycopg.AsyncConnection[Any]) -> list[TableVector
     if settings.vector_store_provider != "pgvector" or settings.embedding_dim > MAX_VECTOR_DIM:
         return []
     chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
-    return await inspect_tables(conn, settings.embedding_dim, live_embedding_keys(), chunkings)
+    return await inspect_every_tenant(
+        conn, settings.embedding_dim, live_embedding_keys(), chunkings
+    )
 
 
 async def _vector_tables_if_readable(
@@ -214,6 +221,14 @@ async def _vector_tables_if_readable(
         log.warning(
             "readiness: the vector tables are locked or slow to read, so their width and the "
             "embedding configurations they hold keep their last verdict",
+            exc_info=True,
+        )
+        return None
+    except TenantSweepError:
+        log.warning(
+            "readiness: more tenants are registered than the embedding check may walk "
+            "(CHEMCLAW_TENANCY_SWEEP_MAX_TENANTS), so the embedding configurations they hold keep "
+            "their last verdict",
             exc_info=True,
         )
         return None

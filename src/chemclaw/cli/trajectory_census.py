@@ -26,6 +26,8 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from chemclaw.agent.distiller import MIN_INDEPENDENT_SESSIONS
+from chemclaw.core.tenancy import TenantError
+from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 
 
 @dataclass(frozen=True)
@@ -254,8 +256,13 @@ def main() -> None:
     """Run the census over the configured database and print the ADR's numbers."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the machine-readable form")
+    add_tenant_flags(parser, all_tenants=False)
     args = parser.parse_args()
-    report = census(*asyncio.run(_stored()))
+    try:
+        ((_, stored),) = asyncio.run(for_chosen_tenants(args, lambda _t: _stored())).items()
+    except TenantError as exc:
+        raise SystemExit(refusal(exc)) from exc
+    report = census(*stored)
     if args.json:
         print(json.dumps(report, indent=2))
         return

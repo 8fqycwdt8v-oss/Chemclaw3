@@ -103,6 +103,26 @@ def current_tenant() -> str:
     return _current_tenant.get() or settings.tenancy_process_tenant
 
 
+def require_bound_tenant(action: str) -> str:
+    """The tenant `action` acts for, or a refusal when tenancy is on and none is named.
+
+    A command that reads or rewrites every row it can see would, with no tenant bound, see none and
+    report success over nothing. An operator tool or a background loop asks this first, so that
+    state is an error with the remedy in it.
+
+    Raises:
+        TenantError: tenancy is on and neither the work nor the process names a tenant.
+    """
+    tenant = current_tenant()
+    if not tenant:
+        raise TenantError(
+            f"{action} acts for one tenant and none is named: tenancy is enabled, so with none it "
+            "would read and write nothing and report success. Name one (--tenant <id>), or "
+            "where the tool allows it every registered tenant (--all-tenants)"
+        )
+    return tenant
+
+
 def tenant_from_roles(roles: Iterable[str]) -> str:
     """The one tenant a token's roles name.
 
