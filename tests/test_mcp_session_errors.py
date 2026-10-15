@@ -14,9 +14,11 @@ from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any, ClassVar
 
+import anyio
 import pytest
 from chemclaw_contracts.calc import EmbedStructureRequest
 from chemclaw_contracts.rxnlabel import LabellerVersionRequest
+from mcp import ClientSession
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from temporalio import activity, workflow
@@ -504,6 +506,101 @@ def test_temporal_sees_the_bare_class_and_retries_only_what_it_should(
     assert _CALLS.count == attempts
 
 
+# --- cancellation, timeouts and failures of the SDK's own tasks -----------------------------------
+
+
+def _teardown_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the real `ClientSession` fail on the way out, after it has shut itself down."""
+    original = ClientSession.__aexit__
+
+    async def failing_exit(self: ClientSession, *exc: Any) -> bool | None:
+        try:
+            await original(self, *exc)
+        finally:
+            raise OSError("the transport failed while closing")
+
+    monkeypatch.setattr(ClientSession, "__aexit__", failing_exit)
+
+
+def test_a_failure_while_closing_after_a_good_block_arrives_bare(
+    served: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one teardown failure is unwrapped from the SDK's group, since nothing else competes."""
+    _teardown_raises(monkeypatch)
+
+    async def go() -> None:
+        async with _open(served):
+            pass
+
+    with pytest.raises(OSError, match="while closing") as caught:
+        asyncio.run(go())
+    assert type(caught.value) is OSError
+
+
+def test_an_outer_asyncio_timeout_still_reports_a_timeout(served: str) -> None:
+    """`asyncio.timeout` around the session ends in `TimeoutError`, not a group or a cancel."""
+
+    async def go() -> None:
+        async with asyncio.timeout(0.5), _open(served):
+            await asyncio.sleep(30)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(go())
+
+
+def test_an_outer_anyio_deadline_still_reports_a_timeout(served: str) -> None:
+    """`anyio.fail_after` around the session ends in `TimeoutError`."""
+
+    async def go() -> None:
+        with anyio.fail_after(0.5):
+            async with _open(served):
+                await asyncio.sleep(30)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(go())
+
+
+def test_an_outer_timeout_wins_over_a_failure_while_closing(
+    served: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelled from outside while the transport also fails: the timeout is what is reported."""
+    _teardown_raises(monkeypatch)
+
+    async def go() -> None:
+        async with asyncio.timeout(0.5), _open(served):
+            await asyncio.sleep(30)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(go())
+
+
+def test_a_transport_task_crashing_surfaces_the_crash_not_a_cancellation(
+    served: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash in one of the SDK's tasks cancels the block; the caller is told the crash."""
+    in_block = asyncio.Event()
+    original = ClientSession._receive_loop
+
+    async def crashing_loop(self: ClientSession) -> None:
+        reading = asyncio.ensure_future(original(self))
+        try:
+            await in_block.wait()
+            raise OSError("the receive loop died")
+        finally:
+            reading.cancel()
+
+    monkeypatch.setattr(ClientSession, "_receive_loop", crashing_loop)
+
+    async def go() -> None:
+        async with _open(served):
+            in_block.set()
+            await asyncio.sleep(30)
+
+    with pytest.raises(OSError, match="receive loop died") as caught:
+        asyncio.run(go())
+    assert type(caught.value) is OSError
+
+
 # --- the unwrapping rule on its own --------------------------------------------------------------
 
 
@@ -547,3 +644,42 @@ def test_a_cancellation_raised_by_the_block_is_returned_as_that_cancellation() -
     group = BaseExceptionGroup("mixed", [own, OSError("teardown")])
 
     assert mcp_session._surfaced(group, own) is own
+
+
+def test_an_interpreter_exit_beside_the_blocks_error_keeps_the_group() -> None:
+    """A `KeyboardInterrupt` from another task is not buried under the block's own error."""
+    own = ValueError("raised by the caller")
+    group = BaseExceptionGroup("g", [own, KeyboardInterrupt()])
+
+    assert mcp_session._surfaced(group, own) is group
+
+
+def test_a_pending_outside_cancellation_is_kept_over_a_lone_teardown_error() -> None:
+    """Only a cancellation requested from outside outranks the teardown error; a crash does not."""
+    leaf = OSError("teardown")
+    group = ExceptionGroup("outer", [leaf])
+    cancelled = asyncio.CancelledError()
+
+    async def judged(cancel_first: bool) -> BaseException:
+        started = asyncio.Event()
+
+        async def inner() -> BaseException:
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return mcp_session._surfaced(group, cancelled)
+            raise AssertionError("not cancelled")  # pragma: no cover
+
+        task = asyncio.ensure_future(inner())
+        await started.wait()
+        if cancel_first:
+            task.cancel()
+        else:
+            # What anyio's own scope leaves behind: the block saw a cancel, nobody outside asked.
+            task.cancel()
+            task.uncancel()
+        return await task
+
+    assert asyncio.run(judged(True)) is cancelled
+    assert asyncio.run(judged(False)) is leaf

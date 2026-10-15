@@ -21,6 +21,7 @@ specific service. This module raises its own exceptions and knows nothing about 
 retryable split is the caller's contract with Temporal.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -379,19 +380,35 @@ def _holds(exc: BaseException, target: BaseException) -> bool:
     return False
 
 
+def _host_is_cancelling() -> bool:
+    """Whether a cancellation requested of the current task by someone outside it is pending.
+
+    The SDK's own task-group scopes have exited by the time this is asked, and `anyio` restores
+    the count they raised, so a positive count is an outer `asyncio.timeout`, `anyio` scope or
+    `Task.cancel()` rather than a transport crash.
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 def _surfaced(escaped: BaseException, body_error: BaseException | None) -> BaseException:
     """The exception a caller of an established session should see, given what escaped the SDK.
 
     The SDK's task groups wrap whatever the caller's block raised in an `ExceptionGroup`, which
     matches none of the caller's `except` clauses. The exception the block raised is returned as
-    itself, whatever else the teardown added beside it; with no such exception, a group holding a
-    single `Exception` leaf yields that leaf. Anything else (several teardown failures, or
-    cancellation and interpreter exits met only inside a group) is returned as it came, since
-    nothing says which one the caller meant.
+    itself, whatever else the teardown added beside it, unless a sibling is an interpreter exit
+    or a cancellation, when the group is returned as it came. A block cancelled from outside
+    keeps its cancellation (so `asyncio.timeout` still reports `TimeoutError`) over what
+    teardown raised; a block cancelled by a transport crash surfaces the crash. With no block
+    error, a group holding a single `Exception` leaf yields that leaf; several leaves, or
+    cancellation and exits met only inside a group, are returned as they came.
     """
+    leaves = _leaves(escaped)
     if body_error is not None and _holds(escaped, body_error):
         own = _leaves(body_error)
-        siblings = [leaf for leaf in _leaves(escaped) if not any(leaf is o for o in own)]
+        siblings = [leaf for leaf in leaves if not any(leaf is o for o in own)]
+        if any(not isinstance(leaf, Exception) for leaf in siblings):
+            return escaped
         if siblings:
             logger.warning(
                 "MCP session teardown raised %d further error(s) beside the caller's own",
@@ -399,7 +416,13 @@ def _surfaced(escaped: BaseException, body_error: BaseException | None) -> BaseE
                 exc_info=escaped,
             )
         return body_error
-    leaves = _leaves(escaped)
+    if isinstance(body_error, asyncio.CancelledError) and _host_is_cancelling():
+        logger.warning(
+            "MCP session teardown raised while the caller was being cancelled; the cancellation "
+            "is kept",
+            exc_info=escaped,
+        )
+        return body_error
     if len(leaves) == 1 and isinstance(leaves[0], Exception):
         return leaves[0]
     return escaped
