@@ -85,6 +85,11 @@ _BAD_DATA_TYPES = [
     "SkillsReadOnlyRefusal",
     "ConnectorJobError",
     "GitWriteError",
+    # A write the note store refuses for what it would do to the notes (a human's note, a stale
+    # revision); the same notes are found on every attempt.
+    "NoteWriteError",
+    "HumanNoteProtected",
+    "NoteRevisionConflict",
     "CalculationDomainError",
     # A waiter on another pod's calculation, told that the holder was refused (`science/calc/
     # flight.py`); the holder's own retry class, carried across.

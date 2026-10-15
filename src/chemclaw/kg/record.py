@@ -22,7 +22,7 @@ from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.graph import dangling_links
 from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.render import render_note
-from chemclaw.kg.store import note_store
+from chemclaw.kg.store import NoteUnit, note_store
 
 log = logging.getLogger(__name__)
 
@@ -156,22 +156,19 @@ def _build_write(
     notes are current; retiring first would instead leave a dangling link and a moment with no
     current note. Files are deduplicated by note id.
     """
-    seen = {note.id}
-    files: list[NoteFile] = []
-    for dependency in dependencies or ():
-        if dependency.id in seen:
-            continue
-        seen.add(dependency.id)
-        files.append(_note_file(dependency, directory, overwrite=False))
-    files.append(_note_file(note, directory))
+    unit = NoteUnit(note, tuple(dependencies or ()), tuple(superseded or ()))
     # Retirements overwrite: each is the note's own content with `valid_to` closed and the successor
     # named. They alone are marked `amendment`, so a retirement the writer may not make does not
     # take the subject down with it.
-    for retired in superseded or ():
-        if retired.id in seen:
-            continue
-        seen.add(retired.id)
-        files.append(_note_file(retired, directory, amendment=True))
+    files = [
+        _note_file(
+            member,
+            directory,
+            overwrite=role != "dependency",
+            amendment=role == "retirement",
+        )
+        for role, member in unit.ordered()
+    ]
 
     extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
     return NoteWrite(files=files, message=f"Add {note.type} note: {note.id}{extra}")

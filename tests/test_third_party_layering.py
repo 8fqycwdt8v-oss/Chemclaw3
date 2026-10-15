@@ -208,6 +208,7 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
     ("chemclaw.memory", "postgres"): "the memory layers are tables",
+    ("chemclaw.kg", "postgres"): "the notes are rows: `kg/postgres_store.py` is the note store",
     ("chemclaw.deliver", "httpx"): (
         "the webhook channel POSTs a message to one URL. The only outbound HTTP in this "
         "seam, and the reason the channel is opt-in and owes the chart an egress rule; "

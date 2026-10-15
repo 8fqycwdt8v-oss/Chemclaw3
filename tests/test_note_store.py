@@ -1,154 +1,39 @@
 """Every `NoteStore` answers the same questions the same way.
 
-One suite, parametrised over the stores that exist (`_STORES`). Today that is the git store, so this
-is a characterisation of the git adapter that the Postgres store joins by adding a harness entry and
-is then held to the same assertions. A harness builds its corpus with the store's own real write
-(for git, the git writer on a real repository), and the assertions read only through `NoteStore`.
-What only the git store has (a checkout, a history, stat caches) is tested after the suite and says
-so.
+One suite, parametrised over the stores that exist (`STORES` in `tests/note_store_harness.py`): the
+git store and the Postgres store. A harness builds its corpus with the store's own real write, and
+the assertions read only through `NoteStore`. What only one store has (a checkout, a history, stat
+caches; a transaction) is tested after the suite and says so; the Postgres store's own are in
+`tests/test_postgres_note_store.py`.
 """
 
 import threading
-from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg import graph as corpus
-from chemclaw.kg.git_writer import GitNoteWriter
-from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note, Relation, note_relative_path
-from chemclaw.kg.record import NoteFile, NoteWrite
 from chemclaw.kg.render import render_note
 from chemclaw.kg.store import GitNoteStore, NoteStore, note_store
-from tests.kg_repo import notes_repo, write_notes
+from tests.kg_repo import write_notes
+from tests.note_store_harness import AUTUMN, SPRING, STORES, Harness
+from tests.note_store_harness import corpus as _corpus
 
-_SPRING = date(2026, 3, 1)
-_AUTUMN = date(2026, 8, 1)
-
-
-def _corpus() -> list[Note]:
-    """Nine notes covering links both ways, a dangling target, windows and a supersede chain.
-
-    `old` was replaced by `mid` in January; `mid` was replaced by `new` in July. `future` is not
-    current yet and `alpha` points at it with an edge that holds only until March.
-    """
-    return [
-        Note(
-            id="alpha",
-            type="playbook",
-            created_by="agent",
-            tags=["suzuki"],
-            body="Suzuki coupling solvent screen. See [[beta]], [[precursor-of:old]], "
-            "[[missing-note]] and [[reaction-eln.123]].",
-            relations=[
-                Relation(rel="uses", to="future", valid_from=_SPRING.replace(month=1, day=1)),
-                Relation(rel="uses", to="beta", valid_to=date(2026, 3, 31)),
-            ],
-        ),
-        Note(id="beta", type="reaction", created_by="agent", body="Base screen for a Suzuki run."),
-        Note(
-            id="old",
-            type="compound",
-            created_by="agent",
-            valid_to=date(2026, 1, 31),
-            relations=[Relation(rel="superseded-by", to="mid")],
-            body="The first entry.",
-        ),
-        Note(
-            id="mid",
-            type="compound",
-            created_by="agent",
-            valid_from=date(2026, 2, 1),
-            valid_to=date(2026, 6, 30),
-            relations=[
-                Relation(rel="supersedes", to="old"),
-                Relation(rel="superseded-by", to="new"),
-            ],
-            body="The second entry.",
-        ),
-        Note(
-            id="new",
-            type="compound",
-            created_by="agent",
-            valid_from=date(2026, 7, 1),
-            relations=[Relation(rel="supersedes", to="mid")],
-            body="The third entry.",
-        ),
-        Note(
-            id="future",
-            type="failure-mode",
-            created_by="agent",
-            valid_from=date(2027, 1, 1),
-            body="A solvent problem not yet found.",
-        ),
-        Note(id="loner", type="interaction", created_by="agent", body="Nobody links here."),
-        Note(
-            id="cyclic-a",
-            type="playbook",
-            created_by="agent",
-            relations=[Relation(rel="superseded-by", to="cyclic-b")],
-            body="Replaced by b.",
-        ),
-        Note(
-            id="cyclic-b",
-            type="playbook",
-            created_by="agent",
-            relations=[Relation(rel="superseded-by", to="cyclic-a")],
-            body="Replaced by a, which makes a cycle.",
-        ),
-    ]
+_SPRING = SPRING
+_AUTUMN = AUTUMN
 
 
-class Harness(Protocol):
-    """A store under test and the one way the suite puts notes into it."""
-
-    @property
-    def store(self) -> NoteStore:
-        """The store the assertions read from."""
-        ...
-
-    async def add(self, *notes: Note) -> None:
-        """Write `notes` through the store's own write path, in one write."""
-        ...
-
-
-class _GitHarness:
-    """A real bare remote and clone, written by the real git writer, read by `GitNoteStore`."""
-
-    def __init__(self, root: Path) -> None:
-        self.clone = notes_repo(root)
-        self._writer = GitNoteWriter(repo_dir=str(self.clone), base_branch="main", remote="origin")
-        self.store = GitNoteStore(self.clone / "knowledge")
-
-    async def add(self, *notes: Note) -> None:
-        files = [
-            NoteFile(path=f"knowledge/{note_relative_path(n.type, n.id)}", content=render_note(n))
-            for n in notes
-        ]
-        await self._writer.write(NoteWrite(files=files, message=f"Add {len(notes)} note(s)"))
-
-
-def _git(root: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
-    harness = _GitHarness(root)
-    monkeypatch.setattr(settings, "note_repo_dir", str(harness.clone))
-    invalidate_cache()
-    return harness
-
-
-#: The stores under test. Adding the Postgres store is one entry here.
-_STORES: dict[str, Callable[[Path, pytest.MonkeyPatch], Harness]] = {"git": _git}
-
-
-@pytest.fixture(params=sorted(_STORES))
-def harness(
+@pytest.fixture(params=sorted(STORES))
+async def harness(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Harness:
     """An empty store of each kind."""
-    return _STORES[request.param](tmp_path, monkeypatch)
+    return await STORES[request.param](tmp_path, monkeypatch)
 
 
 async def _loaded(harness: Harness) -> NoteStore:
@@ -315,6 +200,98 @@ async def test_search_matches_current_notes_by_substring_and_counts_what_it_sear
     assert (await store.search(["zzzz"], _SPRING)).matches == []
 
 
+async def test_search_matches_pattern_characters_as_text_and_refuses_nothing_it_cannot_store(
+    harness: Harness,
+) -> None:
+    """Pattern characters in a term are text, a term is not lowered, and a NUL matches nothing."""
+    await harness.add(
+        Note(id="literal", type="reaction", created_by="agent", body="50% yield at pH_7, C:\\tmp."),
+        Note(id="plain", type="reaction", created_by="agent", body="500 yields at pHx7 in C:/tmp."),
+    )
+
+    async def hits(*terms: str) -> list[tuple[int, str]]:
+        found = await harness.store.search(list(terms), _SPRING)
+        return [(coverage, note.id) for coverage, note in found.matches]
+
+    assert await hits("50%") == [(1, "literal")]
+    assert await hits("ph_7") == [(1, "literal")]
+    assert await hits("\\tmp") == [(1, "literal")]
+    assert await hits("%") == [(1, "literal")]
+    assert await hits("50%", "yield") == [(2, "literal"), (1, "plain")]
+    assert await hits("PH_7") == [], "a term is matched as given, against a lowercased note"
+    assert await hits("\x00") == []
+    assert await hits("a\x00b", "ph_7") == [(1, "literal")]
+    assert await hits("") == [(1, "literal"), (1, "plain")]
+
+
+async def test_neighborhood_stops_at_the_hop_limit_on_a_ring_a_chain_and_a_self_link(
+    harness: Harness,
+) -> None:
+    """A cycle does not run on, a chain reaches exactly `hops` far, and a self-link adds nothing."""
+    ring = [
+        Note(id=f"ring-{i}", type="playbook", created_by="agent", body=f"[[ring-{(i + 1) % 6}]]")
+        for i in range(6)
+    ]
+    chain = [
+        Note(
+            id=f"chain-{i}",
+            type="playbook",
+            created_by="agent",
+            body=f"[[chain-{i + 1}]]" if i < 9 else "end",
+        )
+        for i in range(10)
+    ]
+    loop = Note(id="loop", type="playbook", created_by="agent", body="[[loop]] and [[ring-0]]")
+    await harness.add(*ring, *chain, loop)
+    store = harness.store
+    around_ring_0 = {
+        0: set(),
+        1: {"ring-1", "ring-5", "loop"},
+        2: {"ring-1", "ring-5", "ring-2", "ring-4", "loop"},
+        3: {f"ring-{i}" for i in range(1, 6)} | {"loop"},
+        9: {f"ring-{i}" for i in range(1, 6)} | {"loop"},
+    }
+    for hops, expected in around_ring_0.items():
+        assert await store.neighborhood("ring-0", hops) == expected, hops
+    assert await store.neighborhood("loop", 1) == {"ring-0"}
+    for hops in range(12):
+        assert await store.neighborhood("chain-0", hops) == {
+            f"chain-{i}" for i in range(1, min(hops, 9) + 1)
+        }
+    assert await store.neighborhood("chain-5", 2) == {f"chain-{i}" for i in (3, 4, 6, 7)}
+    assert await store.neighborhood("chain-0", -1) == set()
+
+
+async def test_an_agent_write_does_not_replace_a_humans_note(harness: Harness) -> None:
+    """The curated note stays whatever the agent wrote; the refusal is a domain error."""
+    human = Note(id="curated", type="playbook", created_by="human", body="Curated by a person.")
+    await harness.add(human)
+    with pytest.raises(ChemclawError):
+        await harness.add(
+            Note(id="curated", type="playbook", created_by="agent", body="An agent's rewrite.")
+        )
+    kept = await harness.store.get("curated")
+    assert kept is not None and kept.created_by == "human" and kept.body == human.body
+
+
+async def test_a_note_comes_back_as_its_file_text_reads_including_the_whitespace_it_drops(
+    harness: Harness,
+) -> None:
+    """Both stores serve a note as the canonical file reads back, so a body is stripped in both."""
+    written = Note(
+        id="padded",
+        type="reaction",
+        created_by="agent",
+        confidence=0.25,
+        compound_smiles="CCO",
+        tags=["a", "b"],
+        body="\n\nBody with edges.  \n\n",
+    )
+    await harness.add(written)
+    read = await harness.store.get("padded")
+    assert read == written.model_copy(update={"body": "Body with edges."})
+
+
 async def test_graph_has_a_node_per_note_and_one_per_dangling_target(harness: Harness) -> None:
     store = await _loaded(harness)
     graph = await store.graph()
@@ -374,11 +351,15 @@ async def test_the_bookkeeping_a_cache_asks_for_has_the_types_it_promises(harnes
 # --- What only the git store has ----------------------------------------------------------------
 
 
+async def _git(root: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
+    return await STORES["git"](root, monkeypatch)
+
+
 async def test_the_git_store_dates_a_note_by_the_commit_that_added_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`arrivals` is the commit date in UTC, and `revision` the commit count behind the checkout."""
-    harness = _git(tmp_path, monkeypatch)
+    harness = await _git(tmp_path, monkeypatch)
     await harness.add(*_corpus())
     today = datetime.now(UTC).date()
     arrivals = await harness.store.arrivals()
@@ -391,7 +372,7 @@ async def test_the_git_store_does_not_see_an_outside_edit_until_it_is_refreshed(
 ) -> None:
     """Inside the scan window a changed file is invisible; `refresh` ends the window at once."""
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 3600.0)
-    harness = _git(tmp_path, monkeypatch)
+    harness = await _git(tmp_path, monkeypatch)
     await harness.add(*_corpus())
     store = harness.store
     assert len(await store.notes()) == len(_corpus())
@@ -408,7 +389,7 @@ async def test_the_git_store_names_a_broken_note_file_and_not_a_file_that_was_ne
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A malformed note is skipped by the readers and reported here; a plain README is no note."""
-    harness = _git(tmp_path, monkeypatch)
+    harness = await _git(tmp_path, monkeypatch)
     await harness.add(*_corpus())
     knowledge = tmp_path / "clone" / "knowledge"
     (knowledge / "reaction" / "broken.md").write_text("---\nid: [unterminated\n---\nbody", "utf-8")
