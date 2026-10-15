@@ -4,10 +4,13 @@ Reading: independent narrowings (`EnabledSkills`, `ProfileScopedSkills`, `ToolSc
 `RoleScopedSkills`, and `UnreservedNames` for the stored tiers), each only removing skills, so their
 order does not change the answer; `skill_permits` returns one predicate per kind of tier. Role
 scoping has a security posture: a typo'd key in `settings.skill_role_gates` is an ungated skill,
-which is why `make skill-validate` checks the keys. Writing: `may_write` is the blast-radius rule
-(CLAUDE.md) in one function. The reviewed tree changes by a reviewed commit and never at run time,
-the organisation's tier through `POST /skills/org` by the privileged role, a chemist's own through
-`POST /skills/mine` by its owner, and no model turn ever writes any of them.
+which is why `make skill-validate` checks the keys. Writing: `may_write` states the blast-radius
+rule (CLAUDE.md) once: the reviewed tree changes by a reviewed commit and never at run time, the
+organisation's tier through `POST /skills/org` by the privileged role, a chemist's own through
+`POST /skills/mine` by its owner, and no model turn writes any of them. It is asked by
+`SkillStore`'s write methods, by the org routes' 403 check and by the backends' refusal; the other
+barriers (no tool module imports `store.py`; no module outside `skills/` imports its raw writers)
+are held by tests.
 """
 
 from __future__ import annotations
@@ -35,7 +38,8 @@ class Writer:
 
     A person at a route is `Writer(actor=<oid>, reviewer=<holds the privileged role>)`. A model
     turn is `Writer(by_model=True)` however it was authenticated: the chemist a turn runs for has
-    not decided anything by the turn's inference.
+    not decided anything by the turn's inference. The backends, the one door a model reaches a tier
+    through, are what build that writer.
     """
 
     actor: str = ""
@@ -52,7 +56,7 @@ class SkillWriteRefused(AuthorizationError):
 
 
 def may_write(tier: Tier, writer: Writer, *, owner: str = "") -> bool:
-    """Whether `writer` may change `tier` — the answer every door and every backend defers to.
+    """Whether `writer` may change `tier`.
 
     Args:
         tier: The tier being changed.

@@ -629,8 +629,14 @@ source_paths = [
     # is a hole in the *selection*"). `total` counts it either way, which is how the score reached
     # 44.3% against a floor of 72.0: 1,009 `no_tests`, against 988 that genuinely survived. Measured
     # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-    # `skills/backends.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
+    # the former `agent/skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
     "src/chemclaw/agent/plan_gate.py",
+    # **The population changed here and the floor was not re-recorded.** `skills/backends.py` took
+    # the place of `agent/skill_backend.py`, and also holds `PermittedStoreBackend` and the
+    # reloading middleware, so it is about 1.5 times the code the "51% -> 90%" above was measured
+    # on. Nothing in this edit could run `make mutants` (about 80 minutes): the recorded floor and
+    # no-tests ceiling in `.github/workflows/mutants.yml` stand over a population they were not
+    # measured on, and the first completed run after this change must re-record both.
     "src/chemclaw/skills/backends.py",
     "src/chemclaw/agent/loop_cap.py",
     "src/chemclaw/api/budget.py",
@@ -780,9 +786,9 @@ pytest_add_cli_args_test_selection = [
     # measurements of different things, reported as the before-and-after of one — the same
     # instrument error this repository keeps finding, one directory over.
     "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
-    "tests/test_skill_backend.py",  # skills/backends.py, reviewed tree   51% ->  90%
+    "tests/test_skill_backend.py",  # the former agent/skill_backend.py     51% ->  90%
     # The stored-tier half of `skills/backends.py` (`PermittedStoreBackend`), which the file holds
-    # beside the reviewed tree's. Not yet measured: re-run `make mutants` and record both rates.
+    # beside the reviewed tree's. Not measured: `make mutants` must re-record both rates.
     "tests/test_local_skills.py",
     "tests/test_org_skills.py",
     "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% -> 100%

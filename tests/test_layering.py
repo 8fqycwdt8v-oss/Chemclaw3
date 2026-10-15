@@ -218,9 +218,11 @@ _CYCLE_EDGES: dict[Edge, str] = {
         "scratchpad, distiller and erasure sweep reach the stored tiers' keys"
     ),
     ("chemclaw.skills", "chemclaw.agent"): (
-        "a refused skill write is an `AuthorizationError` carrying the shared refusal footer, a "
-        "stored tier's writer lock borrows the session store's connection, and the backends bound "
-        "model-authored paths with `audit.bounded_repr`"
+        "a refused skill write is an `AuthorizationError` carrying the shared refusal footer "
+        "(`authz`, `refusal_route`), a stored tier's writer lock borrows the session store's "
+        "connection, the backends bound model-authored paths with `audit.bounded_repr`, and "
+        "`backends.py` imports `langgraph_agent.NO_SKILLS` (the text of an empty listing) at "
+        "module level, which is safe only because `langgraph_agent` imports it lazily"
     ),
     ("chemclaw.connectors", "chemclaw.ingest"): (
         "a bundle serving structural hits asks the transcription store two questions no "

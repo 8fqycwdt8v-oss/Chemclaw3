@@ -30,7 +30,7 @@ from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.turn_signals import record_skill_loaded
-from chemclaw.skills.access import SkillWriteRefused
+from chemclaw.skills.access import SkillWriteRefused, Tier, Writer, may_write
 from chemclaw.skills.store import local_skills_namespace, org_skills_namespace
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,21 @@ class SkillsReadOnlyRefusal(SkillWriteRefused):
     it behind `Refused:` (an access-control decision, not a fault to retry) and the audit row
     records a refusal.
     """
+
+
+#: The writer every backend verb stands for: a model, reaching a tier through a filesystem tool.
+_MODEL = Writer(by_model=True)
+
+
+def _refusal(tier: Tier, text: str) -> SkillsReadOnlyRefusal:
+    """The refusal a write verb raises, derived from `access.may_write`.
+
+    The text is the tier's own and unchanged. `may_write` answers no for a model on every tier; if
+    it ever answered yes, this refuses all the same, loudly, rather than letting a model write.
+    """
+    if may_write(tier, _MODEL):
+        raise RuntimeError(f"access.may_write admits a model turn to the {tier.value} tier")
+    return SkillsReadOnlyRefusal(text)
 
 
 def skill_of(path: str) -> str:
@@ -228,22 +243,22 @@ class NarrowedSkillsBackend(FilesystemBackend):
 
     def write(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse: a skill is reviewed judgment, never something a turn may rewrite."""
-        raise SkillsReadOnlyRefusal(_READ_ONLY)
+        raise _refusal(Tier.REPO, _READ_ONLY)
 
     def edit(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(_READ_ONLY)
+        raise _refusal(Tier.REPO, _READ_ONLY)
 
     def delete(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives.
 
         A turn that can remove a `SKILL.md` decides what judgment the next turn can load.
         """
-        raise SkillsReadOnlyRefusal(_READ_ONLY)
+        raise _refusal(Tier.REPO, _READ_ONLY)
 
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(_READ_ONLY)
+        raise _refusal(Tier.REPO, _READ_ONLY)
 
 
 class PermittedStoreBackend(StoreBackend):
@@ -258,6 +273,7 @@ class PermittedStoreBackend(StoreBackend):
     Args:
         namespace: The store namespace factory this tier lives under, per upstream's signature.
         store: The store, passed explicitly because these backends are built outside a graph run.
+        tier: Which stored tier this is, so a refused write is derived from `access.may_write`.
         permits: Whether a skill *name* is reachable on this turn, called per reach because the role
         gate reads the turn's ambient identity.
         refusal: What a refused write says, worded for the tier (the personal one names its owner's
@@ -274,12 +290,14 @@ class PermittedStoreBackend(StoreBackend):
         *,
         namespace: Any,
         store: Any,
+        tier: Tier,
         permits: Callable[[str], bool],
         refusal: str,
         on_load: Callable[[str], None],
     ) -> None:
-        """Hold the namespace, the predicate, the refusal text and the counting hook."""
+        """Hold the namespace, the tier, the predicate, the refusal text and the counting hook."""
         super().__init__(namespace=namespace, store=store)
+        self._tier = tier
         self._permits = permits
         self._refusal = refusal
         self._on_load = on_load
@@ -379,11 +397,11 @@ class PermittedStoreBackend(StoreBackend):
 
     def write(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse: a skill is judgment somebody approved, never something a turn may rewrite."""
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     def edit(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     def delete(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives.
@@ -391,11 +409,11 @@ class PermittedStoreBackend(StoreBackend):
         A turn that could delete would be one bad inference away from removing judgment somebody
         relies on.
         """
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     async def awrite(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse.
@@ -403,15 +421,15 @@ class PermittedStoreBackend(StoreBackend):
         Overridden because `StoreBackend.awrite` is native rather than a thread wrapper, and it is
         the path an async agent takes.
         """
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     async def aedit(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `awrite` gives."""
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     async def adelete(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `awrite` gives."""
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
     async def aupload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse.
@@ -419,7 +437,7 @@ class PermittedStoreBackend(StoreBackend):
         Stated explicitly rather than relying on the base class falling through to `upload_files`,
         since which async verbs are wrappers is not something to depend on.
         """
-        raise SkillsReadOnlyRefusal(self._refusal)
+        raise _refusal(self._tier, self._refusal)
 
 
 #: A glob or grep result, narrowed in place so its other fields survive — see `_replaced`.
@@ -505,6 +523,7 @@ def local_skills_backend(
     return PermittedStoreBackend(
         namespace=lambda _runtime: namespace,
         store=store,
+        tier=Tier.MINE,
         permits=permits,
         refusal=_LOCAL_READ_ONLY,
         on_load=_count_a_local_load,
@@ -523,6 +542,7 @@ def org_skills_backend(store: Any, permits: Callable[[str], bool]) -> PermittedS
     return PermittedStoreBackend(
         namespace=lambda _runtime: org_skills_namespace(),
         store=store,
+        tier=Tier.ORG,
         permits=permits,
         refusal=_ORG_READ_ONLY,
         on_load=_count_an_org_load,

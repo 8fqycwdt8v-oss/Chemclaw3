@@ -2,13 +2,13 @@
 
 The reviewed tree (`Tier.REPO`) is files, changed by a commit. The organisation's tier (`Tier.ORG`)
 and a chemist's own (`Tier.MINE`) are rows in the Postgres store under one key shape
-(`/<name>/SKILL.md`), because pod filesystems are ephemeral and replicated. `SkillStore` is the one
-way routes and the turn's mounts reach them; every write asks `access.may_write` first, and no
-agent path holds a `SkillStore` writer. Namespaces are the erasure and tenancy key: a chemist's is
-per actor (`agent/leaver.py` sweeps it by prefix), the organisation's is the tenant's, and the
-version history of an organisation skill sits beside it so a revert names bytes already held.
-`backends.py` is the read half a turn mounts; it is not imported here, so the front door stays free
-of `deepagents`.
+(`/<name>/SKILL.md`). `SkillStore` is the one way routes and the turn's mounts reach them, and its
+write methods ask `access.may_write` first. The module-level `save_*`, `delete_*`, `retire_*`,
+`activate_*` and `store_writer` are the ungated primitives those methods wrap: no module outside
+`skills/` may import them (`tests/test_skill_store.py`). Erasing a leaver's namespace
+(`agent/leaver.py`, by the prefix kept here) is deliberately outside `may_write`: it is a deletion
+on request, not a change to what a tier says. `backends.py` is not imported here, so the front door
+stays free of `deepagents`.
 """
 
 from __future__ import annotations

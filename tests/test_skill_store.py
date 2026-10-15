@@ -168,3 +168,115 @@ def test_the_stored_tiers_mount_as_narrowed_backends_and_the_reviewed_tree_does_
         assert isinstance(alice.mount(tier, lambda _name: True), PermittedStoreBackend)
     with pytest.raises(ValueError, match="mounted per bundle"):
         alice.mount(Tier.REPO, lambda _name: True)
+
+
+#: The ungated primitives `SkillStore`'s write methods wrap. Naming one outside `skills/` is a
+#: second door into a tier that does not ask `may_write`.
+_RAW_WRITERS = frozenset(
+    {
+        "save_local_skill",
+        "delete_local_skill",
+        "save_org_skill",
+        "retire_org_skill",
+        "activate_org_version",
+        "store_writer",
+    }
+)
+
+
+def _raw_writers_named(source: str) -> set[str]:
+    """Every raw writer a module's source imports, accesses or calls by name."""
+    import ast
+
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            found |= {alias.name.rsplit(".", 1)[-1] for alias in node.names}
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.arg):
+            found.add(node.arg)
+    return found & _RAW_WRITERS
+
+
+def test_no_module_outside_the_skills_package_names_a_raw_writer() -> None:
+    """Routes, tools, the graph and the CLI reach the tiers through `SkillStore`, nothing else."""
+    root = Path("src/chemclaw")
+    offenders = {
+        str(path): sorted(named)
+        for path in sorted(root.rglob("*.py"))
+        if path.relative_to(root).parts[0] != "skills"
+        if (named := _raw_writers_named(path.read_text(encoding="utf-8")))
+    }
+    assert not offenders, f"ungated skill writers named outside skills/: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from chemclaw.skills.store import save_local_skill",
+        "from chemclaw.skills import store\nstore.retire_org_skill(1, 'x', retired_by='y')",
+        "import chemclaw.skills.store as s\ns.store_writer(None, ())",
+        "def f(save_org_skill):\n    return save_org_skill",
+    ],
+)
+def test_the_raw_writer_scan_sees_each_way_of_naming_one(source: str) -> None:
+    """Negative controls: the scan above is not blind to an alias, an attribute or a parameter."""
+    assert _raw_writers_named(source)
+
+
+@pytest.mark.parametrize("tier", [Tier.ORG, Tier.MINE])
+def test_the_backends_refusal_is_derived_from_may_write(
+    tier: Tier, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If `may_write` ever admitted a model, the backends still refuse, and loudly."""
+    from chemclaw.skills import backends
+
+    backend = SkillStore(InMemoryStore(), actor="u-alice").mount(tier, lambda _name: True)
+    with pytest.raises(SkillsReadOnlyRefusal):
+        backend.write("/x/SKILL.md", "b")
+
+    monkeypatch.setattr(backends, "may_write", lambda *_a, **_k: True)
+    with pytest.raises(RuntimeError, match="admits a model turn"):
+        backend.write("/x/SKILL.md", "b")
+
+
+def test_a_refused_writer_that_reaches_a_route_is_a_403_not_a_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`SkillWriteRefused` has an HTTP mapping on both skill-writing route modules."""
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.api.routes import org_skills as org_routes
+    from chemclaw.api.routes import skills as mine_routes
+
+    backing = InMemoryStore()
+    said = "the skills tier cannot be changed by this writer"
+
+    async def _store() -> InMemoryStore:
+        return backing
+
+    async def _refuse(*_a: object, **_k: object) -> None:
+        raise SkillWriteRefused(said)
+
+    monkeypatch.setattr(mine_routes, "turn_store", _store)
+    monkeypatch.setattr(org_routes, "turn_store", _store)
+    monkeypatch.setattr(SkillStore, "save", _refuse)
+
+    def _no_connectors(profile: str | None = None) -> list[object]:
+        return []
+
+    def _admin() -> Principal:
+        return Principal(oid="u-admin", upn="admin@example.com", roles=frozenset())
+
+    app = create_app(connector_factory=_no_connectors, graph_factory=lambda *a, **k: None)
+    app.dependency_overrides[require_principal] = _admin
+
+    for path in ("/skills/mine", "/skills/org"):
+        response = TestClient(app).post(path, json={"body": _body("x")})
+        assert response.status_code == 403, (path, response.text)
+        assert response.json() == {"detail": said}

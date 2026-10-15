@@ -514,3 +514,28 @@ def test_the_caps_are_refused_not_evicted_and_a_held_skill_may_still_be_correcte
     assert post(_ADMIN, "org", "first", "v2") == 200
     versions = _as_principal(app, _ADMIN).get("/skills/org/first/versions").json()["versions"]
     assert len(versions) == 2, "the replaced body is held as a revert target"
+
+
+def test_a_chemist_writing_a_name_another_holds_changes_only_their_own_tier(app: FastAPI) -> None:
+    """Nobody writes into a tier that is not theirs, whatever the name or the role.
+
+    The owner rule seen from outside: the same name posted by another chemist, and by the
+    privileged role, lands in the poster's own tier and leaves the owner's body as it was.
+    """
+    mine = _skill("notes", note="Alice's version.")
+
+    def post(caller: Principal, body: str) -> int:
+        client = _as_principal(app, caller)
+        return client.post("/skills/mine", json={"body": body}).status_code
+
+    def body_of(caller: Principal) -> str | None:
+        response = _as_principal(app, caller).get("/skills/mine/notes")
+        return response.json()["body"] if response.status_code == 200 else None
+
+    assert post(_ALICE, mine) == 200
+    assert post(_BOB, _skill("notes", note="Bob's version.")) == 200
+    assert post(_ADMIN, _skill("notes", note="The administrator's version.")) == 200
+
+    assert body_of(_ALICE) == mine, "another caller's write reached alice's tier"
+    assert body_of(_BOB) == _skill("notes", note="Bob's version.")
+    assert body_of(_ADMIN) == _skill("notes", note="The administrator's version.")

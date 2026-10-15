@@ -94,7 +94,9 @@ def store_prefixes(actors: Sequence[str]) -> list[str]:
     """Every `store.prefix` a departing person's rows live under, across both tiers.
 
     Memories and personal skills share the `store` table under different namespaces. Built from the
-    writers' own prefix functions, one per spelling of the id.
+    writers' own prefix functions, one per spelling of the id. Deleting a leaver's skills is
+    deliberately outside `skills.access.may_write`: it is erasure of a person's data on request, not
+    a change to what a tier says, and only this module's SQL does it.
 
     Args:
         actors: Every spelling of the departing person's id.

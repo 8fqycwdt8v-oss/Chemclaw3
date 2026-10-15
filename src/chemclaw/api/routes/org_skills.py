@@ -12,7 +12,11 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from chemclaw.api.deps import ORG_SKILL, CurrentUser, _is_reviewer, record_refusal
-from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
+from chemclaw.api.routes.skill_http import (
+    handle_write_refusals,
+    skill_refusal_http,
+    store_or_503,
+)
 from chemclaw.api.runner import turn_store
 from chemclaw.skills.access import Tier, Writer, may_write
 from chemclaw.skills.manifest import SkillRefused, validated_skill
@@ -201,6 +205,7 @@ def register(app: FastAPI) -> None:
 
     App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
+    handle_write_refusals(app)
     app.get("/skills/org", response_model=OrgSkillsOut)(list_skills)
     app.post("/skills/org", response_model=OrgSkillOut)(publish_skill)
     app.get("/skills/org/{name}", response_model=OrgSkillOut)(read_skill)

@@ -13,8 +13,21 @@ changes only by blast radius lives here once.
 | `org` | rows in the Postgres store, versioned | `POST /skills/org`, the privileged role | every turn, and every authenticated caller over HTTP |
 | `mine` | rows in the Postgres store, per actor | `POST /skills/mine` (or accepting a proposal), its owner | that owner's turns |
 
-No model turn writes any tier: every backend refuses every write verb, and no tool module may
-import `store.py` (`tests/test_proposal_tools.py`).
+## Where each rule is enforced
+
+`access.may_write(tier, writer, owner)` states who may change which tier. It is asked at:
+
+- `SkillStore.save/remove/revert`, the door `api/routes/skills.py`, `api/routes/org_skills.py` and
+  the proposals route (accepting a proposal) write through;
+- the organisation routes' 403 check, which runs before any validation so a name's existence leaks
+  nothing;
+- the backends' write verbs, which stand for a model (`Writer(by_model=True)`) and always refuse,
+  each in its tier's own words.
+
+Held by tests rather than by that function: no tool-defining module can reach `store.py` or the
+skill and proposal routes, directly or one import away (`tests/test_proposal_tools.py`), and no module
+outside `skills/` names a raw writer (`tests/test_skill_store.py`). Deleting a leaver's namespace
+(`agent/leaver.py`) is outside `may_write` on purpose: it is erasure on request.
 
 ## The modules
 

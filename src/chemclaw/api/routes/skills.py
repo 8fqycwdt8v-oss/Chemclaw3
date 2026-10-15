@@ -10,7 +10,11 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from chemclaw.api.deps import CurrentUser
-from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
+from chemclaw.api.routes.skill_http import (
+    handle_write_refusals,
+    skill_refusal_http,
+    store_or_503,
+)
 from chemclaw.api.runner import turn_store
 from chemclaw.skills.access import Tier, Writer
 from chemclaw.skills.manifest import SkillRefused, validated_skill
@@ -109,6 +113,7 @@ def register(app: FastAPI) -> None:
 
     Registered on the app rather than via the lazy `include_router`.
     """
+    handle_write_refusals(app)
     app.get("/skills/mine", response_model=LocalSkillsOut)(list_skills)
     app.post("/skills/mine", response_model=LocalSkillOut)(save_skill)
     app.get("/skills/mine/{name}", response_model=LocalSkillOut)(read_skill)
