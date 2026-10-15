@@ -35,6 +35,7 @@ from chemclaw.ingest.documents.binding import DocumentShareBinding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import CrawlResult, FileRef, crawl_share
 from chemclaw.ingest.documents.index import (
+    ChunkCursor,
     ChunkRecord,
     DocumentIndex,
     FileRecord,
@@ -111,6 +112,8 @@ class ReembedReport(BaseModel):
     # not retried forever), which makes a total provider outage look like "up to date"; this is the
     # third state.
     stalled: bool = False
+    # A scan only: the last row it read, whether or not it embedded, to resume after.
+    cursor: ChunkCursor | None = None
 
 
 class _Parsed(BaseModel):
@@ -478,7 +481,8 @@ async def reembed_stale(
     Reads stored chunk text, never the share, so it is cheap enough to run at the head of every sync
     and a model change heals itself. Rows cut under a chunking no enabled share uses are skipped,
     since the crawl will re-cut and re-embed them; `chunkings` is passed in because the caller owns
-    which shares are enabled.
+    which shares are enabled. Takes no lock: two overlapping passes may embed the same chunk, and
+    the write skips whichever lost.
 
     Args:
         index: The document index to refresh.
@@ -492,41 +496,86 @@ async def reembed_stale(
     stale = await index.stale_chunks(key, limit, chunkings)
     if not stale:
         return ReembedReport()
+    refreshed, failed = await _embed_stale(stale)
+    if refreshed:
+        await index.store_embeddings(_with_vectors(refreshed), key)
+    return _reembed_report(stale, len(refreshed), failed, limit, key)
+
+
+async def reembed_after(
+    index: DocumentIndex, chunkings: set[str], limit: int, after: ChunkCursor | None
+) -> ReembedReport:
+    """`reembed_stale` as one step of a walk through the table in primary-key order.
+
+    The batch starts after `after` and the report carries the last row read, embedded or not, so a
+    chunk that will not embed is passed once and counted rather than met first in every batch. The
+    walk ends when a batch comes back short. No row is locked: a peer pass, the scheduled sync or
+    the crawl may reach the same chunk, and `store_embeddings` skips what is no longer stale, so
+    the cost of the overlap is an occasional embedding paid twice.
+    """
+    key = embedding_config_key()
+    stale = await index.stale_chunks(key, limit, chunkings, after)
+    if not stale:
+        return ReembedReport()
+    refreshed, failed = await _embed_stale(stale)
+    if refreshed:
+        await index.store_embeddings(_with_vectors(refreshed), key)
+    last = stale[-1]
+    report = _reembed_report(stale, len(refreshed), failed, limit, key)
+    report.has_more = len(stale) == limit
+    report.cursor = ChunkCursor(
+        doc_id=last.doc_id, chunking_key=last.chunking_key, ordinal=last.ordinal
+    )
+    return report
+
+
+async def _embed_stale(
+    stale: list[StaleChunk],
+) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
+    """Embed the batch, falling back to one chunk at a time so one bad chunk costs only itself.
+
+    A scan that always starts from the first stale row would meet the same failing batch every time,
+    so a batch failure must cost one chunk and not the pass.
+    """
     try:
         embeddings = await asyncio.to_thread(
             lambda: embed_texts([chunk.content for chunk in stale], cache=False)
         )
-        refreshed = list(zip(stale, embeddings, strict=True))
-        failed = 0
     except Exception:
-        # One chunk must not starve the corpus: `stale_chunks` returns the same first batch every
-        # time and this drain runs before the crawl, so a batch failure is retried per chunk and
-        # only the unembeddable ones are left behind.
         logger.warning("batch re-embed failed; retrying %d chunk(s) individually", len(stale))
-        refreshed, failed = await _reembed_individually(stale)
-    if refreshed:
-        await index.store_embeddings(
-            [
-                ChunkRecord(
-                    doc_id=chunk.doc_id,
-                    chunking_key=chunk.chunking_key,
-                    ordinal=chunk.ordinal,
-                    content=chunk.content,
-                    embedding=embedding,
-                )
-                for chunk, embedding in refreshed
-            ],
-            key,
+        return await _reembed_individually(stale)
+    return list(zip(stale, embeddings, strict=True)), 0
+
+
+def _with_vectors(refreshed: list[tuple[StaleChunk, list[float]]]) -> list[ChunkRecord]:
+    """The chunk rows to write back: the text it already had, and the new vector."""
+    return [
+        ChunkRecord(
+            doc_id=chunk.doc_id,
+            chunking_key=chunk.chunking_key,
+            ordinal=chunk.ordinal,
+            content=chunk.content,
+            embedding=embedding,
         )
-    logger.info("re-embedded %d chunk(s) under %s", len(refreshed), key)
+        for chunk, embedding in refreshed
+    ]
+
+
+def _reembed_report(
+    stale: list[StaleChunk], refreshed: int, failed: int, limit: int, key: str
+) -> ReembedReport:
+    """Log one pass and summarise it. `stalled` is "stale rows remain and nothing moved".
+
+    More may remain only if the pass made progress; otherwise the same failing batch would repeat
+    forever.
+    """
+    logger.info("re-embedded %d chunk(s) under %s", refreshed, key)
     if failed:
         logger.error(
             "%d chunk(s) could not be re-embedded and keep a superseded vector; they are compared "
             "against queries embedded by the current model until this is fixed",
             failed,
         )
-    # More may remain only if this pass made progress; otherwise the same failing batch would repeat
-    # forever. `stalled` reports that stale rows remain.
     stalled = bool(stale) and not refreshed
     if stalled:
         logger.error(
@@ -536,7 +585,7 @@ async def reembed_stale(
             len(stale),
         )
     return ReembedReport(
-        embedded=len(refreshed),
+        embedded=refreshed,
         failed=failed,
         has_more=len(stale) == limit and bool(refreshed),
         stalled=stalled,

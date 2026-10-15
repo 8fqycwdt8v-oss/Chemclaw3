@@ -8,6 +8,7 @@ The chem tools' equivalents live with the `chem` server in `Chemclaw3-mcp`.
 
 import asyncio
 import contextlib
+import gc
 import threading
 import time
 from datetime import UTC, datetime
@@ -16,7 +17,8 @@ from typing import Any
 import pytest
 
 from chemclaw.agent.subscriptions import Subscription
-from chemclaw.kg.store import GitNoteStore
+from chemclaw.kg import graph as corpus
+from chemclaw.kg.note import Note, Relation
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -96,6 +98,12 @@ def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
 
     The sampler wakes every 5 ms; actual wait minus requested wait is time the loop was held. That
     distinguishes a slow activity (fine) from one that stops the others sharing its loop.
+
+    The garbage collector is frozen and off for the run. A full collection holds the interpreter
+    lock for its whole pass, whichever thread triggers it: on the suite's heap of a few million
+    objects (more under coverage) that is 1.5 s, and it falls in whichever test happens to cross
+    the collector's threshold. That stalls every loop in the process whatever the code under test
+    does, so it would turn this measurement into a measurement of the rest of the suite.
     """
     stalls: list[float] = []
 
@@ -115,7 +123,15 @@ def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
         await sampler
         return [threading.get_ident()]
 
-    loop_thread = asyncio.run(_run())
+    was_enabled = gc.isenabled()
+    gc.freeze()
+    gc.disable()
+    try:
+        loop_thread = asyncio.run(_run())
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.unfreeze()
     return max(stalls, default=0.0), loop_thread
 
 
@@ -131,29 +147,39 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
     """`collect_digests` reads and matches the corpus off the event loop.
 
     `load_notes` and the O(subscriptions x notes) match are blocking, on a loop shared with other
-    activities' heartbeats, including long searches that are costly to redeliver.
+    activities' heartbeats, including long searches that are costly to redeliver. The corpus holds
+    a note the subscription matches, so the matching is observable: `_matches` records its thread.
     """
     from chemclaw.durable import digest
 
     threads: list[int] = []
+    matched_on: list[int] = []
 
     def _slow_load(*args: Any, **kwargs: Any) -> list[Any]:
         threads.append(threading.get_ident())
         time.sleep(_BLOCK_SECONDS)
-        return []
+        return [Note(id="suzuki-run", type="reaction", created_by="agent", body="A Suzuki run.")]
 
     # One subscription, not zero: with none, `_match_corpus` returns before touching the corpus, so
     # a zero-subscription fixture would assert the offload of work the activity does not do.
     async def _one_subscription() -> list[Any]:
         return [Subscription(id=1, owner="u-1", query="suzuki")]
 
-    monkeypatch.setattr(GitNoteStore, "notes", _slow_load)
+    async def _no_disputes(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(corpus, "load_notes", _slow_load)
     monkeypatch.setattr(digest, "all_subscriptions", _one_subscription)
-    monkeypatch.setattr(digest, "conflict_index", lambda *a, **k: {})
+    monkeypatch.setattr(digest, "conflict_index", _no_disputes)
+    monkeypatch.setattr(digest, "_matches", _thread_recording(digest._matches, matched_on))
 
     stall_ms, loop_thread = _worst_loop_stall(digest.collect_digests)
 
     assert threads, "the corpus read never happened"
+    assert matched_on, "the subscription matched nothing, so the matching hop is not exercised"
+    assert all(thread not in loop_thread for thread in matched_on), (
+        "collect_digests matched subscriptions against notes on the event loop"
+    )
     assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
         f"the digest held the worker's loop for {stall_ms:.1f} ms of a "
         f"{_BLOCK_SECONDS * 1000:.0f} ms corpus read"
@@ -176,36 +202,54 @@ def test_the_memory_note_builders_run_off_the_event_loop(
 ) -> None:
     """The memory note builders run off the event loop.
 
-    Each ends in `load_notes` after CPU-bound clustering over the reaction corpus. Threading at the
-    activity boundary covers both and keeps `memory/jobs.py` a pure sync module.
+    Each ends in a corpus read after CPU-bound clustering over the reaction corpus. The builder
+    puts the clustering and the retirement pairing in worker threads, and the store keeps its read
+    off the loop. The clustering yields a note, so the read and the pairing both happen, and each
+    blocks for `_BLOCK_SECONDS` on its recorded thread.
     """
     from chemclaw.durable import memory_jobs
+    from chemclaw.memory import jobs
 
+    clustering = {
+        "build_campaign_notes_activity": "_campaign_notes",
+        "build_playbook_notes_activity": "_playbook_notes",
+        "build_optimization_notes_activity": "_optimization_notes",
+    }[activity_name]
     threads: list[int] = []
+    reads: list[int] = []
+    pairings: list[int] = []
 
-    def _slow_build(*args: Any, **kwargs: Any) -> list[Any]:
-        threads.append(threading.get_ident())
-        time.sleep(_BLOCK_SECONDS)
-        return []
+    def _blocking(seen: list[int], result: Any) -> Any:
+        def _slow(*args: Any, **kwargs: Any) -> Any:
+            seen.append(threading.get_ident())
+            time.sleep(_BLOCK_SECONDS)
+            return result
+
+        return _slow
+
+    built = Note(id="memory-note", type="campaign", created_by="agent", body="A built note.")
 
     async def _no_reactions() -> memory_jobs.CorpusRead:
         return memory_jobs.CorpusRead(reactions=[], complete=True)
 
     monkeypatch.setattr(memory_jobs, "read_corpus", _no_reactions)
-    monkeypatch.setattr(
-        memory_jobs, activity_name.removesuffix("_activity"), _slow_build, raising=True
-    )
+    monkeypatch.setattr(jobs, clustering, _blocking(threads, [built]), raising=True)
+    monkeypatch.setattr(corpus, "load_notes", _blocking(reads, []))
+    monkeypatch.setattr(jobs, "supersede_updates", _blocking(pairings, []))
 
     stall_ms, loop_thread = _worst_loop_stall(getattr(memory_jobs, activity_name))
 
-    assert threads, "the builder never ran"
+    assert threads, "the clustering never ran"
+    assert reads, "the corpus was never read, so the retirement pass was not exercised"
+    assert pairings, "the retirement pairing never ran"
     assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
         f"{activity_name} held the worker's loop for {stall_ms:.1f} ms of a "
         f"{_BLOCK_SECONDS * 1000:.0f} ms build"
     )
-    assert all(thread not in loop_thread for thread in threads), (
-        f"{activity_name} built its notes on the event loop"
-    )
+    for stage, seen in (("clustering", threads), ("corpus read", reads), ("pairing", pairings)):
+        assert all(thread not in loop_thread for thread in seen), (
+            f"{activity_name} ran its {stage} on the event loop"
+        )
 
 
 def _drop_directory(root: Any, files: int, payload: dict[str, Any]) -> Any:
@@ -387,3 +431,112 @@ def test_the_bo_activities_fit_their_surrogate_off_the_event_loop(
     assert all(thread not in loop_thread for thread in threads), (
         "the campaign fitted its surrogate on the event loop"
     )
+
+
+# A hub note: a few thousand neighbours, a tenth of them compounds that were retired and replaced.
+_HUB_NEIGHBOURS = 3000
+# Generous against the assembly's linear cost (a few ms on the loop's thread at worst, from sharing
+# the interpreter with a worker), and far under what a pass quadratic in the neighbours costs on a
+# loop (~700 ms at this size).
+_HUB_STALL_BOUND_MS = 200.0
+
+
+def test_expanding_a_hub_note_assembles_its_neighbours_off_the_event_loop(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`expand_note` on a hub does its assembly in a worker thread and keeps the loop responsive.
+
+    Measured by a ticker on the loop while the tool runs over a warm corpus, so what is timed is
+    the work done after the reads: indexing the links, building each neighbour's reference, and
+    resolving the retired compounds to their successors.
+    """
+    from datetime import date
+
+    from chemclaw.agent import graph_tools
+    from chemclaw.core.config import settings
+    from chemclaw.kg.store import note_store
+    from tests.kg_repo import write_notes
+
+    retired_every = 10
+
+    def _is_retired(i: int) -> bool:
+        return i % retired_every == 0
+
+    # Retired compounds are `x<i>`, which sort after every current `n<i>`: the assembly visits ids
+    # in order, so the current ones are one unbroken run with no await to hand the loop back.
+    neighbour_ids = [f"x{i}" if _is_retired(i) else f"n{i}" for i in range(_HUB_NEIGHBOURS)]
+    notes = [
+        Note(
+            id="hub",
+            type="campaign",
+            created_by="agent",
+            relations=[Relation(rel="uses", to=target) for target in neighbour_ids],
+            body="The hub.",
+        )
+    ]
+    for i, neighbour in enumerate(neighbour_ids):
+        if _is_retired(i):
+            notes.append(
+                Note(
+                    id=neighbour,
+                    type="compound",
+                    created_by="agent",
+                    valid_to=date(2020, 1, 1),
+                    relations=[Relation(rel="superseded-by", to=f"s{i}")],
+                    body="Retired.",
+                )
+            )
+            notes.append(
+                Note(
+                    id=f"s{i}",
+                    type="compound",
+                    created_by="agent",
+                    relations=[Relation(rel="supersedes", to=neighbour)],
+                    body="Its replacement.",
+                )
+            )
+        else:
+            notes.append(Note(id=neighbour, type="reaction", created_by="agent", body="A run."))
+    write_notes(tmp_path, *notes)
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", ".")
+    monkeypatch.setattr(settings, "graph_max_hops", 1)
+    asyncio.run(note_store().graph())  # warm: the parse is not what is being timed
+
+    assembled_on: list[int] = []
+    monkeypatch.setattr(
+        graph_tools, "_neighbor_ref", _thread_recording(graph_tools._neighbor_ref, assembled_on)
+    )
+    views: list[Any] = []
+
+    async def _expand() -> None:
+        views.append(await graph_tools.expand_note("hub", 1))
+
+    stall_ms, loop_thread = _worst_loop_stall(_expand)
+
+    (view,) = views
+    assert len(view.neighbors) == _HUB_NEIGHBOURS, "a retired compound stands for its successor"
+    assert {ref.id for ref in view.neighbors if ref.id.startswith("s")} == {
+        f"s{i}" for i in range(0, _HUB_NEIGHBOURS, retired_every)
+    }
+    assert assembled_on, "no neighbour reference was built"
+    assert all(thread not in loop_thread for thread in assembled_on), (
+        "expand_note built its neighbours on the event loop"
+    )
+    assert stall_ms < _HUB_STALL_BOUND_MS, (
+        f"expand_note held the loop for {stall_ms:.0f} ms expanding a hub of {_HUB_NEIGHBOURS}"
+    )
+
+
+def test_the_stall_measurement_runs_with_the_collector_off_and_leaves_it_as_it_found_it() -> None:
+    """No collection falls inside a measured run, and none is lost for later tests."""
+    states: list[bool] = []
+
+    async def _probe() -> None:
+        states.append(gc.isenabled())
+
+    assert gc.isenabled(), "a test left the collector off"
+    _worst_loop_stall(_probe)
+    assert states == [False]
+    assert gc.isenabled()
+    assert gc.get_freeze_count() == 0

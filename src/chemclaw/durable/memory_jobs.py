@@ -6,7 +6,6 @@ playbook notes in the graph. Started on demand, never on a Schedule, so knowledg
 arrive on a timer.
 """
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -169,8 +168,9 @@ async def read_corpus() -> CorpusRead:
             reactions=reactions, complete=not skipped and not unfinished and not capped
         )
 
-    # The builders (DRFP fingerprinting, O(n²) Tanimoto, NetworkX, a full corpus parse) run in a
-    # worker thread so they do not stall every other activity and heartbeat on the shared loop.
+    # The builders (DRFP fingerprinting, O(n²) Tanimoto, NetworkX, a full corpus parse) run their
+    # work in worker threads so they do not stall every other activity and heartbeat on the shared
+    # loop.
     # `corpus_complete` travels into the builder because retirements land with the write and nothing
     # reviews them; `memory.jobs._units` says how it is used.
 
@@ -180,9 +180,7 @@ async def read_corpus() -> CorpusRead:
 async def build_campaign_notes_activity() -> list[SynthesisUnit]:
     """Detect reaction chains across the corpus and build (not publish) one campaign unit each."""
     corpus = await read_corpus()
-    return await asyncio.to_thread(
-        build_campaign_notes, corpus.reactions, corpus_complete=corpus.complete
-    )
+    return await build_campaign_notes(corpus.reactions, corpus_complete=corpus.complete)
 
 
 @durable_activity("background", ActivityClass.COMPUTE)
@@ -190,9 +188,7 @@ async def build_campaign_notes_activity() -> list[SynthesisUnit]:
 async def build_playbook_notes_activity() -> list[SynthesisUnit]:
     """Distil cross-project candidates across the corpus, one playbook unit per candidate."""
     corpus = await read_corpus()
-    return await asyncio.to_thread(
-        build_playbook_notes, corpus.reactions, corpus_complete=corpus.complete
-    )
+    return await build_playbook_notes(corpus.reactions, corpus_complete=corpus.complete)
 
 
 @durable_activity("background", ActivityClass.COMPUTE)
@@ -200,9 +196,7 @@ async def build_playbook_notes_activity() -> list[SynthesisUnit]:
 async def build_optimization_notes_activity() -> list[SynthesisUnit]:
     """Group same-transformation runs across the corpus, one optimization unit per group."""
     corpus = await read_corpus()
-    return await asyncio.to_thread(
-        build_optimization_notes, corpus.reactions, corpus_complete=corpus.complete
-    )
+    return await build_optimization_notes(corpus.reactions, corpus_complete=corpus.complete)
 
 
 @durable_activity("background", ActivityClass.NOTE_WRITE)

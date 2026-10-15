@@ -93,9 +93,9 @@ def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
     """A cheap content signature of the corpus: (note-file count, newest mtime_ns).
 
     Cheap and over the same note set the retriever reads (`NoteStore.signature`), so any add, edit
-    or delete invalidates the memo.
+    or delete invalidates the memo. Run through `_run_sync`, as the metric's interface is sync.
     """
-    return note_store(Path(corpus_dir)).signature()
+    return _run_sync(note_store(Path(corpus_dir)).signature())
 
 
 # The retrieval path this module can actually score. Anything else is a *different* retriever, and

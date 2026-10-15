@@ -27,10 +27,13 @@
        there until the next successful deploy. With it, the target revision's own Job — its image,
        its `infra/sql`, its grant file — re-applies the matrix that image was written against.
        `pre-` rather than `post-`, so the restored pods find their ACL already in place; the release
-       that loses verbs in the meantime is the one being abandoned. Its `migrate` half is a no-op
-       there by construction: `chemclaw.core.migrate` iterates the files *in the image* and skips
-       every one the ledger already records, and a newer release's extra ledger rows name no file it
-       has. */ -}}
+       that loses verbs in the meantime is the one being abandoned. Its `migrate` half applies
+       no file: `chemclaw.core.migrate` iterates the files *in the image* and skips every one the
+       ledger already records, and a newer release's extra ledger rows name no file it has. It does
+       still run `ensure_embedding_width` for the target revision's `embedding_dim`, which finds
+       its columns already there (they are never dropped) and takes no lock; only a revision
+       configured for a width the database has never had would build one, under the lock
+       `infra/sql/130_embedding_width_columns.sql` describes. */ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:

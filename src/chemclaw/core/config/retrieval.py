@@ -138,10 +138,14 @@ class RetrievalSettings(BaseSettings):
     note_embed_batch_size: int = Field(default=64, ge=1)
 
 
-# The `vector(N)` width every embedding column was migrated with (`note_index.embedding`,
-# `document_chunks.embedding`); the assertion against the migrations. One constant because every
-# vector column is written from `embedding_dim` by one provider.
-SCHEMA_VECTOR_DIM = 1536
+# The width of the original embedding columns (`note_index.embedding`, `document_chunks.embedding`,
+# `vector(1536)`), which keep their name; any other width lives in `embedding_<N>`
+# (`core/vector_schema.py`, `infra/sql/130_embedding_width_columns.sql`).
+LEGACY_VECTOR_DIM = 1536
+
+# The widest `vector` pgvector will build an HNSW index on. A wider model needs a smaller output
+# (`dimensions`) or a vector store outside Postgres.
+MAX_VECTOR_DIM = 2000
 
 # Retrieve sources backed by `note_index`; both reach the `vector(N)` column because `reindex_notes`
 # writes full rows. Used by the startup width check and `chemclaw.evals.retrieval`.

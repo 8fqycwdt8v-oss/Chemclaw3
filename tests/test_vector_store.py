@@ -462,9 +462,9 @@ def test_the_pgvector_width_check_is_inert_for_an_external_store(
     """
     from chemclaw.ingest.documents.index import require_schema_vector_width
 
-    monkeypatch.setattr(settings, "embedding_dim", 768)
+    monkeypatch.setattr(settings, "embedding_dim", 3072)
     monkeypatch.setattr(settings, "vector_store_provider", "pgvector")
-    with pytest.raises(Exception, match="768"):
+    with pytest.raises(Exception, match="3072"):
         require_schema_vector_width()
     monkeypatch.setattr(settings, "vector_store_provider", "qdrant")
     require_schema_vector_width()

@@ -6,7 +6,6 @@ and retirement write rows the graph never sees and run on a Schedule: mining fir
 re-observed ages out. Promotion writes a note into the graph, so it is started on demand.
 """
 
-import asyncio
 import logging
 from datetime import date, timedelta
 
@@ -68,8 +67,8 @@ async def mine_observations_activity() -> MiningReport:
     through `retire_stale`.
     """
     corpus = await read_corpus()
-    # Off the loop: reading the corpus is a synchronous full parse.
-    notes = await asyncio.to_thread(note_store().notes)
+    # The store reads the corpus off the loop: it is a full parse.
+    notes = await note_store().notes()
     found = [
         *mine_corpus(corpus.reactions),
         *mine_interactions(notes, corpus.reactions),
@@ -113,7 +112,7 @@ async def promote_observations_activity() -> list[str]:
     # Read from the store, so earlier promotions are visible and a retry sees the same view.
     earlier = [(row.id, frozenset(row.evidence_note_ids)) for row in await promoted_observations()]
     promoted: list[frozenset[str]] = [evidence for _, evidence in earlier]
-    merged = {note.id: note for note in await asyncio.to_thread(note_store().notes)}
+    merged = {note.id: note for note in await note_store().notes()}
     # **Best-supported first, so a superset is seen before the subset it supersedes.**
     # `promotable()` orders by id, which is a hash and therefore arbitrary here.
     for observation in sorted(await promotable(), key=lambda o: o.support, reverse=True):

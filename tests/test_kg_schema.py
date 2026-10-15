@@ -246,7 +246,7 @@ async def test_an_edge_keeps_its_window_and_confidence_and_answers_as_of_as_rela
                 "ORDER BY dst",
                 (note.id, as_of),
             )
-            assert [row[0] for row in await cursor.fetchall()] == store.related(
+            assert [row[0] for row in await cursor.fetchall()] == await store.related(
                 note.id, "uses", as_of=as_of
             ), as_of
         await conn.rollback()
@@ -577,7 +577,8 @@ async def test_a_note_the_writer_recorded_has_the_digest_of_the_file_it_wrote(
     await record_note(note, writer)
     written = (clone / "knowledge" / "playbook" / "writer-made.md").read_text(encoding="utf-8")
     assert "hunter2secret" not in written
-    fingerprint = GitNoteStore(clone / "knowledge").fingerprints()["writer-made"]
+    fingerprints = await GitNoteStore(clone / "knowledge").fingerprints()
+    fingerprint = fingerprints["writer-made"]
     assert fingerprint == content_sha(note)
     unredacted = hashlib.sha256(render_note(note).encode("utf-8")).hexdigest()
     assert fingerprint != f"sha256:{unredacted}"

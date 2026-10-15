@@ -12,7 +12,7 @@ from pathlib import Path
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
-from chemclaw.retrieval.retrievers import GraphRetriever, _eligible_sync
+from chemclaw.retrieval.retrievers import GraphRetriever, _eligible
 
 _WINDOW = {"since": date(2024, 6, 1), "until": date(2025, 1, 1)}
 
@@ -76,7 +76,7 @@ def test_the_window_is_the_only_date_rule_a_windowed_sweep_applies(tmp_path: Pat
         ),
     )
 
-    eligible = _eligible_sync(Path(root), _WINDOW, date.today())
+    eligible = asyncio.run(_eligible(Path(root), _WINDOW, date.today()))
 
     assert set(eligible) == {"playbook-degassing-2024"}
 
@@ -102,7 +102,7 @@ def test_a_note_the_window_admits_was_current_somewhere_inside_it(tmp_path: Path
     ]
     root = _corpus(tmp_path, *notes)
 
-    eligible = _eligible_sync(Path(root), _WINDOW, date.today())
+    eligible = asyncio.run(_eligible(Path(root), _WINDOW, date.today()))
 
     assert len(eligible) == len(notes)
     for note in eligible.values():

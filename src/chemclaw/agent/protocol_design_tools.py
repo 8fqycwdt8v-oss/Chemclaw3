@@ -287,8 +287,9 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     if not cited and not structures:
         return []
     try:
+        corpus = await note_store().notes()
         notes = await asyncio.to_thread(
-            lambda: failures_against(note_store().notes(), cited=cited, structures=structures)
+            lambda: failures_against(corpus, cited=cited, structures=structures)
         )
     except Exception as exc:
         degraded(

@@ -482,8 +482,10 @@ def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
 
     subject = notes[0]
     term = subject.id.split("-")[0]
-    items = chemclaw.durable.digest._match_corpus(
-        [Subscription(id=1, owner="o", query=term, note_type=None, last_seen_at=None)]
+    items = asyncio.run(
+        chemclaw.durable.digest._match_corpus(
+            [Subscription(id=1, owner="o", query=term, note_type=None, last_seen_at=None)]
+        )
     )
     assert items, f"no subscription match for {term!r}; the fixture cannot show a headline"
     item = items[0]

@@ -398,6 +398,10 @@ def create_app(
     app.state.database_reachable = True
     # Whether the schema has this image's newest migration; `True` unless a mismatch is proven.
     app.state.schema_current = True
+    # The vector columns' verdicts, from the same probe: no width problem and one embedding
+    # configuration in the corpus until the probe proves otherwise.
+    app.state.vector_width_problem = ""
+    app.state.embedding_corpus_mixed = False
     app.state.database_probed_at = float("-inf")
     # In-flight readiness probe tasks by name, for single-flight (`routes.ops._shared_probe`).
     app.state.readiness_probes = {}

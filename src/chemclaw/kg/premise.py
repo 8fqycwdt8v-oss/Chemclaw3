@@ -10,7 +10,6 @@ Only retirement and absence count, not suspected conflicts, which are heuristics
 authority to refuse an approval. A decisive refutation already closes the note's `valid_to`.
 """
 
-import asyncio
 from datetime import date
 from functools import partial
 
@@ -51,14 +50,14 @@ class BrokenPremise(BaseModel):
         return self.reason != "absent"
 
 
-def _breaks(note_ids: list[str], as_of: date) -> list[BrokenPremise]:
-    """The synchronous scan: one read of the corpus, then a by-id lookup per premise note.
+async def _breaks(note_ids: list[str], as_of: date) -> list[BrokenPremise]:
+    """The scan: one read of the corpus, then a by-id lookup per premise note.
 
     A cited-but-undefined id is absent, not a node. External citations
     (`[[reaction-...]]`) name store rows, not notes, so they are skipped rather than reported
     `absent`; judging them would mean asking the record store, a different question.
     """
-    found = note_store().get_many(note_ids)
+    found = await note_store().get_many(note_ids)
     broken: list[BrokenPremise] = []
     for note_id in note_ids:
         if resolves_outside_graph(note_id):
@@ -78,12 +77,12 @@ def _breaks(note_ids: list[str], as_of: date) -> list[BrokenPremise]:
 async def premise_breaks(note_ids: list[str], as_of: date | None = None) -> list[BrokenPremise]:
     """Which of these notes no longer hold; empty when the premise is whole (or when there is none).
 
-    Offloaded to a thread because the store's reads are synchronous and this runs on an HTTP answer
-    path. An empty `note_ids` returns without touching the corpus.
+    Runs on an HTTP answer path, so the store reads off the event loop. An empty `note_ids` returns
+    without touching the corpus.
     """
     if not note_ids:
         return []
-    return await asyncio.to_thread(_breaks, note_ids, as_of or date.today())
+    return await _breaks(note_ids, as_of or date.today())
 
 
 def _increment(metrics: Metrics, *, end: str, reason: str) -> None:

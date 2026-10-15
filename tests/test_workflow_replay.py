@@ -39,6 +39,9 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         # first change to its command sequence, as `OrphanedWaitsWorkflow` does.
         "ExhibitPushPruneWorkflow",
         "ConnectorJobWorkflow",
+        # New in `D-2026-10-15-an-embedding-width-is-a-column-not-a-rewrite`; started by hand and
+        # never scheduled. It earns a fixture at the first change to its command sequence.
+        "EmbeddingReembedWorkflow",
         "DevelopmentReportWorkflow",
         "DigestWorkflow",
         "DocumentShareSyncWorkflow",

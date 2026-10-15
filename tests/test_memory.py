@@ -293,7 +293,7 @@ def test_synthesis_publishes_supersedes_alongside_new_notes(
     (knowledge / f"{stale_id}.md").write_text(render_note(stale), encoding="utf-8")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path / "knowledge"))
 
-    units = build_campaign_notes([a, b])
+    units = asyncio.run(build_campaign_notes([a, b]))
 
     merged_id = stable_id("campaign", ["a", "b"])
     by_id = {unit.note.id: unit for unit in units}
@@ -330,8 +330,8 @@ def test_a_note_from_an_incomplete_read_says_so_in_the_body_a_chemist_reads() ->
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
 
-    partial = build_playbook_notes([ester_x, ester_y], corpus_complete=False)
-    whole = build_playbook_notes([ester_x, ester_y])
+    partial = asyncio.run(build_playbook_notes([ester_x, ester_y], corpus_complete=False))
+    whole = asyncio.run(build_playbook_notes([ester_x, ester_y]))
 
     assert partial, "the fixture distilled nothing; this test proves nothing"
     assert all(PARTIAL_READ_CAVEAT in unit.note.body for unit in partial)
@@ -428,7 +428,7 @@ def test_campaign_synthesis_proposes_notes_via_pr_gate() -> None:
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
     sub = FakeWriter()
-    refs = asyncio.run(_build_and_propose(build_campaign_notes([a, b]), sub))
+    refs = asyncio.run(_build_and_propose(asyncio.run(build_campaign_notes([a, b])), sub))
     assert len(refs) == 1
     assert sub.writes[0].files[0].path.startswith("knowledge/campaign/campaign-")
 
@@ -438,7 +438,9 @@ def test_playbook_distillation_proposes_evidence_backed_notes() -> None:
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
     sub = FakeWriter()
-    refs = asyncio.run(_build_and_propose(build_playbook_notes([ester_x, ester_y]), sub))
+    refs = asyncio.run(
+        _build_and_propose(asyncio.run(build_playbook_notes([ester_x, ester_y])), sub)
+    )
     assert len(refs) == 1
     assert sub.writes[0].files[0].path.startswith("knowledge/playbook/playbook-")
     assert "proj-x" in sub.writes[0].files[0].content and "proj-y" in sub.writes[0].files[0].content
@@ -452,7 +454,7 @@ def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
     """
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
-    units = build_campaign_notes([a, b])
+    units = asyncio.run(build_campaign_notes([a, b]))
     sub = FakeWriter()
     asyncio.run(_build_and_propose(units, sub))
     assert len(units) == len(sub.writes)
@@ -666,9 +668,9 @@ def test_every_miner_dates_the_note_it_mints() -> None:
     ]
 
     built = {
-        "campaign": (build_campaign_notes(chain), chain),
-        "playbook": (build_playbook_notes(playbook), playbook),
-        "optimization": (build_optimization_notes(optimization), optimization),
+        "campaign": (asyncio.run(build_campaign_notes(chain)), chain),
+        "playbook": (asyncio.run(build_playbook_notes(playbook)), playbook),
+        "optimization": (asyncio.run(build_optimization_notes(optimization)), optimization),
     }
 
     for kind, (units, corpus) in built.items():
@@ -731,11 +733,13 @@ def test_a_mined_playbook_states_a_finding_and_asks_the_reader_for_nothing() -> 
     durable path performs a to-do. Asserted as the absence of an instruction, not against the
     wording.
     """
-    units = build_playbook_notes(
-        [
-            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
-            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
-        ]
+    units = asyncio.run(
+        build_playbook_notes(
+            [
+                _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+                _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+            ]
+        )
     )
     assert units, "the fixture mined no playbook, so this test asserts nothing"
     body = units[0].note.body.lower()
@@ -757,11 +761,13 @@ def test_a_mined_playbook_is_findable_as_undistilled_and_a_promoted_one_is_not()
     from chemclaw.kg.note import UNDISTILLED_TAG
     from chemclaw.memory.playbook import playbook_note
 
-    units = build_playbook_notes(
-        [
-            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
-            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
-        ]
+    units = asyncio.run(
+        build_playbook_notes(
+            [
+                _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+                _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+            ]
+        )
     )
     assert units
     assert UNDISTILLED_TAG in units[0].note.tags, (

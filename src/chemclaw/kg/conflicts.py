@@ -10,9 +10,11 @@ from prose (a false conflict is as damaging as a missed one); two signals are us
 A conflict is a flag on the evidence, never a filter: this layer has no basis to pick a side.
 """
 
+import asyncio
 import heapq
 import logging
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Hashable
 from datetime import date
@@ -330,13 +332,15 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # `graph._COMPUTE_LOCKS`.
 _LOCKS_GUARD = threading.Lock()
 _INDEX_LOCKS: dict[str, threading.Lock] = {}
-_INDEX_CACHE: dict[str, tuple[Hashable, date | None, dict[str, NoteConflicts]]] = {}
+# Each entry also carries the monotonic time its snapshot was requested, so a slower, older
+# snapshot that reaches the lock later cannot overwrite a newer one.
+_INDEX_CACHE: dict[str, tuple[Hashable, date | None, dict[str, NoteConflicts], float]] = {}
 
 # Warn once per process that with `graph_cache_enabled=false` every retrieval pays the full scan.
 _WARNED_UNCACHED = False
 
 
-def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflicts]:
+async def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflicts]:
     """Map each note id to what it disagrees with, cached behind the notes fingerprint and `as_of`.
 
     `as_of` follows `find_conflicts`: a date scans only notes current on it, `None` the whole
@@ -346,17 +350,33 @@ def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflic
     Returns bare ids (the strongest few) and a count, so chunks can carry `conflicts_with` without
     the full `Conflict` models. Computed over the whole current corpus, so a chunk is flagged even
     when its counterpart was not retrieved. Cached because every retrieval source and report section
-    would otherwise recompute it. Synchronous: callers offload it to a thread. The map is shared,
-    not copied; treat it as read-only.
+    would otherwise recompute it. The directory check, the scan and the cache lookup run in worker
+    threads. The map is shared, not copied; treat it as read-only.
 
     Returns an empty map when conflict detection is off or the directory is absent.
     """
-    if not settings.conflict_detection_enabled or not notes_dir.exists():
+    if not settings.conflict_detection_enabled or not await asyncio.to_thread(notes_dir.exists):
         return {}
-    key = str(notes_dir)
     # Snapshot before taking this module's lock; the store's read has its own lock, and nesting them
     # would couple both critical sections for a whole cold parse.
-    fingerprint, notes = note_store(notes_dir).snapshot()
+    requested = time.monotonic()
+    fingerprint, notes = await note_store(notes_dir).snapshot()
+    return await asyncio.to_thread(_index_for, notes_dir, fingerprint, notes, as_of, requested)
+
+
+def _index_for(
+    notes_dir: Path,
+    fingerprint: Hashable | None,
+    notes: list[Note],
+    as_of: date | None,
+    requested: float,
+) -> dict[str, NoteConflicts]:
+    """`conflict_index` over a snapshot already taken: the cache lookup, or the scan.
+
+    `requested` is when the snapshot was asked for; the result is cached unless a snapshot asked for
+    later is already there.
+    """
+    key = str(notes_dir)
     if fingerprint is None:
         global _WARNED_UNCACHED
         if not _WARNED_UNCACHED:
@@ -382,5 +402,6 @@ def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflic
             note_id: _strongest(note_id, conflicts)
             for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
         }
-        _INDEX_CACHE[key] = (fingerprint, as_of, index)
+        if cached is None or requested >= cached[3]:
+            _INDEX_CACHE[key] = (fingerprint, as_of, index, requested)
     return index
