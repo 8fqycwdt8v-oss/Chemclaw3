@@ -197,7 +197,10 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    "--set temporalDatabases.enabled=true --set temporalDatabases.passwordSecret=temporal-db --set tls.serverCASecret=pg-ca --set tls.serverTLSSecret=pg-tls --set backup.credentialsSecret=backup-keys --set backup.encryption=AES256" \
 	    "--set import.enabled=true --set import.source.host=old-pg.example --set import.source.user=chemclaw --set import.source.passwordSecret.name=old-pg" \
 	    "--set name=chemclaw-pg-r1 --set recovery.enabled=true --set recovery.sourceClusterName=chemclaw-pg --set recovery.targetTime=2026-01-01T00:00:00Z" \
-	    "--set name=pg-rehearsal --set recovery.enabled=true --set recovery.rehearsal=true --set recovery.sourceClusterName=chemclaw-pg --set instances=1"; do \
+	    "--set name=pg-rehearsal --set recovery.enabled=true --set recovery.rehearsal=true --set recovery.sourceClusterName=chemclaw-pg --set instances=1" \
+	    "--set import.enabled=true --set import.type=monolith --set import.databases={chemclaw,temporal,temporal_visibility} --set import.roles={temporal} --set import.source.host=old-pg.example --set import.source.user=chemclaw --set import.source.passwordSecret.name=old-pg" \
+	    "--set name=chemclaw-pg-r1 --set recovery.enabled=true --set recovery.sourceClusterName=chemclaw-pg --set temporalDatabases.enabled=true --set temporalDatabases.passwordSecret=temporal-db --set credentialsSecret=pg-owner" \
+	    "--set tls.serverCASecret=pg-ca --set imagePullSecrets={registry-login}"; do \
 	    helm template chemclaw-pg deploy/helm/chemclaw-postgres $$base $$flags \
 	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \

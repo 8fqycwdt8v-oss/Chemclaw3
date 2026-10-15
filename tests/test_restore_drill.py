@@ -309,12 +309,34 @@ def test_a_failed_cleanup_is_reported_without_replacing_the_runs_own_error(
     assert drill.run_drill().error == "the primary died"
 
 
-def test_a_signal_while_cleaning_up_does_not_abandon_the_cleanup() -> None:
-    before = signal.getsignal(signal.SIGTERM)
-    with drill.uninterruptible():
-        signal.raise_signal(signal.SIGTERM)
-        signal.raise_signal(signal.SIGINT)
-    assert signal.getsignal(signal.SIGTERM) == before
+def test_a_first_signal_stops_the_drill_at_a_boundary_and_a_second_does_not_skip_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(drill, "_stop_signal", None)
+    drill._on_signal(signal.SIGTERM, None)
+    with pytest.raises(drill.DrillError, match="stopped by signal"):
+        drill.check_stopped()
+    with pytest.raises(drill.DrillError, match="stopped by signal"):
+        with drill.phase(drill.Report("t", {}), "next"):
+            raise AssertionError("a phase must not start after a stop")
+    # The operator insists: the second signal interrupts at once ...
+    with pytest.raises(KeyboardInterrupt):
+        drill._on_signal(signal.SIGINT, None)
+
+    # ... and a signal that lands during cleanup repeats the idempotent pass, then is re-raised.
+    calls: list[int] = []
+
+    def remove(_id: str) -> list[str]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt("signal 15")
+        return []
+
+    monkeypatch.setattr(drill, "remove_run", remove)
+    report = drill.Report("t", {})
+    with pytest.raises(KeyboardInterrupt):
+        drill._clean_up("abc", report)
+    assert len(calls) == 2 and report.checks == []
 
 
 def test_an_image_that_cannot_be_pulled_is_named_before_anything_starts(

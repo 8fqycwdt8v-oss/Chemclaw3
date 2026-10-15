@@ -21,6 +21,9 @@ instances: 3
 # A PostgreSQL 16 image that carries pgvector 0.7 or later. The operator's stock images do not, and
 # the migrations run `CREATE EXTENSION vector`.
 imageName: ""
+# Pull secrets for that image (names of existing kubernetes.io/dockerconfigjson Secrets), for a
+# registry that needs a login. A rehearsal namespace needs its own copy.
+imagePullSecrets: []
 
 # The application database and its owner (the migrate Job's principal).
 database: chemclaw
@@ -50,9 +53,14 @@ connections:
 # refused here: it is `archiveTimeoutSeconds`, so the RPO check can read it.
 parameters: {}
 
-# Bring your own server CA and certificate instead of the operator's per-cluster `<name>-ca`, and a
-# restored cluster presents the same CA as the original, so the application's `verify-full` needs no
-# new trust bundle. Empty = the operator's CA, which a restore replaces.
+# Bring your own server CA instead of the operator's per-cluster `<name>-ca`. `serverCASecret` is a
+# Secret with `ca.crt` AND `ca.key`: the operator signs each cluster's server certificate with it, for
+# that cluster's own hostnames, so a restored cluster presents certificates from the same CA and the
+# application's `verify-full` trust bundle never changes. That is the setting that lets a restore cut
+# over without an application upgrade (runbook § "Restore for real"). Empty = the operator's own CA,
+# which a restore replaces. `serverTLSSecret` is a certificate you issue yourself and needs
+# `serverCASecret` beside it; it must name the cluster's `-rw` host, so a restore under a new name
+# would not match it: leave it empty if you intend to restore.
 tls:
   serverCASecret: ""
   serverTLSSecret: ""
@@ -76,7 +84,7 @@ targets:
   rpoSeconds: 0
   rtoSeconds: 0
 # A WAL segment is shipped at least this often, so it bounds the data lost when the database is
-# quiet. Smaller = more small objects.
+# quiet. A whole number of seconds, at least 1. Smaller = more small objects.
 archiveTimeoutSeconds: 300
 
 backup:
@@ -112,7 +120,10 @@ backup:
 # from the Postgres the application runs on today. The import is a copy of the source at the moment it
 # runs, so stop the application's writers first and keep them stopped until the application is
 # repointed; whatever the source takes after that is not here. `microservice` imports the one
-# database `database`; `monolith` imports `databases` (name Temporal's too) and `roles`. The import
+# database `source.database` into `database`; `monolith` imports `databases` (name Temporal's too)
+# and `roles`. The operator's admission webhook refuses `roles` with microservice, more than one
+# database with microservice, and `postImportApplicationSQL` with monolith; this chart refuses the
+# first two itself and never emits the third. The import
 # carries the schema ledger, so the migrate hook finds nothing to re-run.
 import:
   enabled: false
@@ -123,7 +134,8 @@ import:
     host: ""
     port: 5432
     user: ""
-    # The source database, for a microservice import. Default: `database`.
+    # The source database. A microservice import copies it into `database` under that name; a
+    # monolith import connects to `postgres` and takes `databases`. Default: `database`.
     database: ""
     sslmode: verify-full
     # Secret key holding the source user's password, and optionally the CA that signs the source.

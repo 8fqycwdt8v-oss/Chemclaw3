@@ -191,6 +191,29 @@ def test_a_monolith_import_names_every_database_and_role_to_carry() -> None:
     assert imported["type"] == "monolith"
     assert imported["databases"] == ["chemclaw", "temporal", "temporal_visibility"]
     assert imported["roles"] == ["temporal"]
+    # The operator's admission webhook refuses `postImportApplicationSQL` for a monolith import
+    # (pg_restore creates the extension), and a monolith connects through the `postgres` database.
+    assert "postImportApplicationSQL" not in imported
+    source = documents[("Cluster", "chemclaw-pg")]["spec"]["externalClusters"][0]
+    assert source["connectionParameters"]["dbname"] == "postgres"
+
+
+@_HELM
+def test_a_microservice_import_names_the_source_database_it_copies() -> None:
+    """`import.source.database` is the database copied (the destination keeps `database`'s name)."""
+    documents = _documents(*_IMPORT, "import.source.database=legacy_chemclaw")
+    cluster = documents[("Cluster", "chemclaw-pg")]["spec"]
+    imported = cluster["bootstrap"]["initdb"]["import"]
+    assert imported["databases"] == ["legacy_chemclaw"]
+    assert cluster["bootstrap"]["initdb"]["database"] == _VALUES["database"]
+    assert cluster["externalClusters"][0]["connectionParameters"]["dbname"] == "legacy_chemclaw"
+    assert imported["postImportApplicationSQL"] == ["CREATE EXTENSION IF NOT EXISTS vector"]
+
+
+@_HELM
+def test_a_pull_secret_reaches_the_cluster() -> None:
+    cluster = _documents("imagePullSecrets={registry-login}")[("Cluster", "chemclaw-pg")]["spec"]
+    assert cluster["imagePullSecrets"] == [{"name": "registry-login"}]
 
 
 @_HELM
@@ -267,6 +290,24 @@ def test_a_rehearsal_restores_and_writes_nothing_into_the_bucket() -> None:
             [*_IMPORT, "import.type=monolith"],
             "needs import.databases",
         ),
+        (
+            "roles with a microservice import",
+            [*_IMPORT, "import.roles={temporal}"],
+            "import.roles is refused",
+        ),
+        (
+            "two databases in a microservice import",
+            [*_IMPORT, "import.databases={chemclaw,temporal}"],
+            "more than one database",
+        ),
+        (
+            "a server certificate without its CA",
+            ["tls.serverTLSSecret=cert"],
+            "needs tls.serverCASecret",
+        ),
+        ("a zero archive interval", ["archiveTimeoutSeconds=0"], "at least 1"),
+        ("a negative archive interval", ["archiveTimeoutSeconds=-5"], "at least 1"),
+        ("a non-numeric archive interval", ["archiveTimeoutSeconds=abc"], "at least 1"),
         ("recovery without a source", ["recovery.enabled=true"], "recovery.sourceClusterName"),
         ("rehearsal without recovery", ["recovery.rehearsal=true"], "does not archive"),
         (

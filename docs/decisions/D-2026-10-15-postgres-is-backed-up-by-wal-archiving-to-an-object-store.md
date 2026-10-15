@@ -104,7 +104,21 @@ stopped, before the system serves traffic.
 - Held by `tests/test_restore_drill.py` (the drill end to end where Docker exists, with a named,
   counted skip where it does not or an image cannot be pulled; a skipped `kg_tables` check is a
   failure where the migrations define the tables) and `tests/test_postgres_cluster_chart.py`;
-  `make helm-validate` checks every shape of the chart against the CRD catalogue, strictly.
+  `make helm-validate` renders the chart in the shapes it names (empty, Temporal's databases, own
+  CA and pull secret, import as microservice and as monolith, restore, rehearsal) and checks them
+  strictly against the CRD schemas. Schema validation cannot see the operator's admission rules, so
+  the chart refuses the ones that bite itself (roles or several databases with a microservice
+  import, a server certificate without its CA, an archive interval below 1 s, a restore under the
+  source's own name, an RPO below the interval) and never emits `postImportApplicationSQL` for a
+  monolith; what is not refused is untested against a real operator (BACKLOG).
+- Nothing deploys the chart: the GitHub `chart` job and `check` render and test it; the Jenkins
+  pipelines install and render only `deploy/helm/chemclaw`. Installing the database is manual by
+  design, once per environment.
+- A cutover needs no application upgrade only with a CA the operator does not replace
+  (`tls.serverCASecret`) and a password the operator does not regenerate (`credentialsSecret`);
+  the runbook says so and gives the one-upgrade path for a release that used neither. An application
+  `helm upgrade` leaves a Deployment scaled to zero at zero, so writers are held and restored by
+  explicit scaling.
 
 Revisit when: `make restore-drill`'s checks are run against a real CloudNativePG cluster restored to
 a scratch namespace and a result differs from the container drill's (then the container drill stops

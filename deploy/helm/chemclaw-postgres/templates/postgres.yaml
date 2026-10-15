@@ -65,6 +65,12 @@ spec:
   description: "Postgres for the Chemclaw release that uses {{ $name }}-rw{{ if .Values.temporalDatabases.enabled }}; holds Temporal's databases too{{ end }}"
   instances: {{ int .Values.instances }}
   imageName: {{ .Values.imageName | quote }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- range . }}
+    - name: {{ . | quote }}
+    {{- end }}
+  {{- end }}
   {{- /* A label of this chart's own, constant across restores, so the application's NetworkPolicy peer
          does not name a cluster that is about to be replaced. */}}
   inheritedMetadata:
@@ -114,7 +120,7 @@ spec:
       import:
         type: {{ .Values.import.type | quote }}
         databases:
-          {{- range (.Values.import.databases | default (list .Values.database)) }}
+          {{- range (.Values.import.databases | default (list (.Values.import.source.database | default .Values.database))) }}
           - {{ . | quote }}
           {{- end }}
         {{- with .Values.import.roles }}
@@ -125,8 +131,10 @@ spec:
         {{- end }}
         source:
           externalCluster: source-database
+        {{- if eq .Values.import.type "microservice" }}
         postImportApplicationSQL:
           - CREATE EXTENSION IF NOT EXISTS vector
+        {{- end }}
       {{- else }}
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector
@@ -139,7 +147,7 @@ spec:
         host: {{ .Values.import.source.host | quote }}
         port: {{ .Values.import.source.port | quote }}
         user: {{ .Values.import.source.user | quote }}
-        dbname: {{ .Values.import.source.database | default .Values.database | quote }}
+        dbname: {{ ternary "postgres" (.Values.import.source.database | default .Values.database) (eq .Values.import.type "monolith") | quote }}
         sslmode: {{ .Values.import.source.sslmode | quote }}
       password:
         name: {{ .Values.import.source.passwordSecret.name | quote }}

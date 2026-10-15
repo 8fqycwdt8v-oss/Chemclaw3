@@ -2720,20 +2720,37 @@ not, and the migrations run `CREATE EXTENSION vector`.
      --set imageName=<registry>/postgres-pgvector:16 \
      --set backup.destinationPath=s3://<bucket>/<prefix> \
      --set backup.credentialsSecret=chemclaw-backup-keys \
-     --set targets.rpoSeconds=900 --set targets.rtoSeconds=14400   # examples, not advice
+     --set targets.rpoSeconds=900 --set targets.rtoSeconds=14400 \
+     --set tls.serverCASecret=pg-ca --set credentialsSecret=pg-owner
+   # the two targets are examples, not advice; create the pg-ca and pg-owner Secrets first (step 2)
    oc get cluster,backup -n <ns> -w        # until the Cluster is healthy and a Backup is "completed"
    ```
 
    Nothing is recoverable before that first `Backup` completes, and a failed install here costs
    nothing: no application exists yet.
-2. **Write the DSNs** into the application's Secret. The primary Service is `<cluster>-rw` (the
-   release name, `chemclaw-pg-rw`), port 5432, TLS on. `CHEMCLAW_POSTGRES_DSN` names it with
-   `sslmode=verify-full`, the owner's password from `<cluster>-app` (or `credentialsSecret`), and the
-   cluster CA (`<cluster>-ca`, key `ca.crt`) mounted through `trustedCA`; bring your own CA with
-   `tls.serverCASecret` and a restore later needs no new trust bundle. With a split principal, create
-   `chemclaw_app` (`kubectl cnpg psql <cluster> -- -c "CREATE ROLE chemclaw_app LOGIN PASSWORD ..."`)
-   and keep the owner's DSN in `CHEMCLAW_POSTGRES_MIGRATION_DSN`. The PgBouncer Poolers of
-   `deploy/README.md` are not templated; point their upstream at `-rw`.
+2. **Decide two things now, because the restore depends on them and cannot change them later:**
+   - **A CA you own.** Create a Secret with `ca.crt` and `ca.key` (a private CA of your own) and set
+     `tls.serverCASecret` to it; the operator signs each cluster's server certificate with it, for
+     that cluster's own hostnames. Mount the same CA's `ca.crt` for the application through
+     `trustedCA` (`trustedCA.secret` or `configMap`, which you create and own). Then a restored
+     cluster presents certificates from the CA the application already trusts, and **a cutover
+     never needs an application upgrade**. Leave `tls.serverTLSSecret` empty: a certificate you issue
+     yourself names one host, and a restored cluster has another. With the operator's own CA the
+     restored cluster gets a new one (`<cluster>-ca`, which lives and dies with that cluster), and
+     the trust bundle must change at the cutover, which is an application upgrade (see *Restore for
+     real*, "if you did not").
+   - **A password you own.** Create a `kubernetes.io/basic-auth` Secret for the owner and set
+     `credentialsSecret`. Left empty, every cluster generates its own `<cluster>-app` Secret, so a
+     restored cluster has a **new password** and both `CHEMCLAW_POSTGRES_DSN` and
+     `CHEMCLAW_POSTGRES_MIGRATION_DSN` must change at the cutover.
+
+   Then **write the DSNs** into the application's Secret. The primary Service is `<cluster>-rw` (the
+   release name, `chemclaw-pg-rw`), port 5432, TLS on; `sslmode=verify-full`, with the CA at the
+   `trustedCA` mount. With a split principal, create `chemclaw_app` (`kubectl cnpg psql <cluster> --
+   -c "CREATE ROLE chemclaw_app LOGIN PASSWORD ..."`) and keep the owner's DSN in
+   `CHEMCLAW_POSTGRES_MIGRATION_DSN`. The PgBouncer Poolers of `deploy/README.md` are not templated;
+   point their upstream at `-rw`. If the image is in a registry that needs a login, set
+   `imagePullSecrets` at install.
 3. **Let the application reach it:** add a peer `podSelector: {matchLabels: {chemclaw/postgres: "true"}}`
    to `networkPolicy.egressDestinations`. That label is on every cluster this chart renders, so a
    later restore does not change the policy.
@@ -2754,9 +2771,17 @@ downtime, bounded by the size of the database and the time to rebuild its indexe
 copy first), and **whatever the old database takes after the writers stop is not in the new one**:
 
 1. Take a backup of the old database by whatever means it already has. It is your way back.
-2. Stop the writers: scale the front door, the background and connector workers and the interactive
-   workers to zero (an HPA does nothing at zero replicas; pause KEDA with the annotation
-   `autoscaling.keda.sh/paused-replicas: "0"`). Note the time.
+2. Stop the writers, and **record what you stopped** (the counts below are what you restore):
+
+   ```bash
+   sel="-n <ns> -l app.kubernetes.io/instance=<application release>"
+   oc get deploy $sel -o jsonpath='{range .items[*]}{.metadata.name}={.spec.replicas}{"\n"}{end}' | tee replicas.txt
+   oc annotate scaledobject $sel autoscaling.keda.sh/paused-replicas=0 --overwrite   # when keda.enabled
+   oc scale deploy $sel --replicas=0     # the front door, background and connector workers, interactive
+                                         # workers and, when enabled, chemclaw-mcp-face
+   ```
+
+   An HPA does nothing at zero replicas. Note the time.
 3. Install the Postgres chart with the import source — and `import.type=monolith`,
    `import.databases` and `import.roles` when Temporal's databases are in the old Postgres too:
 
@@ -2772,7 +2797,17 @@ copy first), and **whatever the old database takes after the writers stop is not
    and let the migrate hook re-grant.
 5. Repoint: DSN Secrets (and CA) to the new `-rw`, the network peer of (a) 3, then `helm upgrade
    chemclaw ...`. The imported ledger means the migrate hook finds nothing to apply and re-runs the
-   grants. Scale back up (the upgrade restores the replica counts in the values).
+   grants. **The upgrade does not bring the writers back**: Helm re-asserts only the fields that
+   changed in the manifest, so every Deployment you scaled to zero stays at zero (the front door has
+   no `replicas` field at all; its HPA is inert at zero). Bring them back explicitly:
+
+   ```bash
+   while IFS== read -r name n; do oc scale deploy/$name -n <ns> --replicas=$n; done < replicas.txt
+   oc annotate scaledobject $sel autoscaling.keda.sh/paused-replicas-      # when keda.enabled
+   ```
+
+   For the front door `n` is a hint: its HPA owns the count from here, so a recorded `0` there
+   means scale to the HPA's `minReplicas` (`oc get hpa`).
 6. Keep the old database, untouched, until the new one has taken a scheduled base backup and you
    have rehearsed a restore (below); then decommission it. Going back is repointing the DSN, and
    loses what was written to the new one.
@@ -2786,6 +2821,20 @@ encryption at rest with a key you control; the ability to restore to a **new** i
 timestamp; the `vector` extension at 0.7 or later in the restore target; and Temporal's databases
 inside the same recovery window. The checks the drill makes (below) are the acceptance test: do
 them by hand against a restored scratch instance.
+
+### What renders and what deploys this chart
+
+`make helm-validate` renders the Postgres chart in every shape it has (empty, Temporal's databases,
+own CA and pull secret, import as microservice and as monolith, restore, rehearsal) and
+checks each strictly against the CloudNativePG and Barman Cloud CRD schemas; the GitHub `chart` job
+runs that target, and `tests/test_postgres_cluster_chart.py` runs in `check`. Schema validation
+cannot see the operator's admission rules, so the chart refuses the ones that bite itself:
+`import.roles` or more than one database with a microservice import, a server certificate without
+its CA, an archive interval below 1 s, and a recovery under the source's own name; it never emits
+`postImportApplicationSQL` for a monolith. **Nothing deploys it**: the Jenkins pipelines
+(`Jenkinsfile`, `deploy/jenkins/Jenkinsfile.release`, `deploy/jenkins/targets/openshift.sh`) install and render only
+`deploy/helm/chemclaw`, and the Postgres chart is installed by hand, once per environment, by design:
+a database is not a thing a release pipeline should replace.
 
 ### Take a backup on demand
 
@@ -2808,8 +2857,12 @@ namespace, reading the archive and writing nothing to it:
 oc create namespace pg-rehearsal
 # an ObjectStore needs the bucket's read-only credentials in this namespace
 oc create secret generic backup-readonly -n pg-rehearsal --from-literal=ACCESS_KEY_ID=... --from-literal=ACCESS_SECRET_KEY=...
+# and whatever the real install needed in its namespace: the image pull secret (the pgvector image is
+# probably in a registry that needs a login), the store's CA (backup.endpointCA), the owner's and the
+# CA Secrets if you set credentialsSecret / tls.serverCASecret
+oc create secret docker-registry registry-login -n pg-rehearsal --docker-server=... --docker-username=... --docker-password=...
 helm install pg-rehearsal deploy/helm/chemclaw-postgres -n pg-rehearsal <the same image, bucket, targets> \
-  --set backup.credentialsSecret=backup-readonly --set instances=1 \
+  --set backup.credentialsSecret=backup-readonly --set instances=1 --set 'imagePullSecrets={registry-login}' \
   --set name=pg-rehearsal --set recovery.enabled=true --set recovery.rehearsal=true \
   --set recovery.sourceClusterName=<the cluster that wrote the archive> \
   --set 'recovery.targetTime=2026-10-14 09:41:00+00'
@@ -2834,11 +2887,15 @@ renders on uninstall, so the Cluster and its volumes go with the namespace, not 
 ### Restore for real
 
 After losing the cluster or corrupting it. The order matters: the application must not write to
-either database until the erasures are re-applied, and **no step needs a `helm upgrade` of the
-application**, because the DSN lives in the operator-managed Secret and an upgrade would reset the
-replica counts to the values and let the application serve early.
+either database until the erasures are re-applied. With a CA of your own (*Turn it on* (a) 2) **no
+step needs an application `helm upgrade`**: the DSN lives in the operator-managed Secret. The one
+path that needs an upgrade (the operator's CA) is safe for the writers, because an upgrade leaves a
+Deployment scaled to zero at zero; they come back only in step 7.
 
-1. **Stop the writers** as in (b) 2 and note the time. They stay at zero until step 7.
+1. **Stop the writers** as in (b) 2, recording the counts, and note the time. They stay at zero
+   until step 7, and nothing before step 7 may start them: an application `helm upgrade` does not
+   bring them back (see (b) 5), so an upgrade in the middle is safe for the writers but is not
+   needed.
 2. **Choose the target:** the last instant before the damage, from the audit trail and the logs.
    Writing it down is part of the restore (§(xiii) step 3 — the restore discards everything after).
 3. **Install a new Postgres release** with the same image, bucket, credentials, targets and
@@ -2858,19 +2915,30 @@ replica counts to the values and let the application serve early.
    keeps them; `oc delete cluster` does not).
 4. **Verify** as in the rehearsal, against the new cluster.
 5. **Cut over, still with the writers at zero:**
-   - point `CHEMCLAW_POSTGRES_DSN` (and the migration and session-store DSNs, if split) at
-     `chemclaw-pg-r1-rw`;
-   - **trust:** with the operator's CA the new cluster has its own (`chemclaw-pg-r1-ca`), so replace
-     the CA in the `trustedCA` bundle before anything connects, or `verify-full` refuses it; with
-     `tls.serverCASecret` the CA is the one already trusted;
+   - point `CHEMCLAW_POSTGRES_DSN` **and** `CHEMCLAW_POSTGRES_MIGRATION_DSN` (and the session-store
+     DSN, if split) at `chemclaw-pg-r1-rw`. If you set `credentialsSecret` the owner's password is
+     unchanged; if not, the restored cluster generated a new one in `chemclaw-pg-r1-app`, and both
+     DSNs need it;
+   - **trust:** if you installed with `tls.serverCASecret` (and the same value for the restore), the
+     server certificates come from the CA the application already trusts and nothing changes. If you
+     did not, the new cluster has its own CA, `chemclaw-pg-r1-ca`, and `verify-full` refuses it until
+     the application's trust bundle carries it. That bundle is a mounted, non-optional Secret or
+     ConfigMap of the application release, so this needs **one `helm upgrade` of the application**
+     (with `trustedCA` repointed), during which the application's pods start only if their counts
+     are above zero: the Deployments you scaled to zero stay at zero through the upgrade, the HPA is
+     inert at zero, and a paused KEDA stays paused. Check `oc get deploy` after it and scale
+     nothing up until step 7. Do not delay this by editing the old cluster's Secret: it goes with
+     the old cluster;
    - the NetworkPolicy peer is unchanged (it selects `chemclaw/postgres: "true"`, on both);
    - Temporal's persistence, if its databases were in the cluster, at the new `-rw` and role Secret.
 6. **Re-apply the erasures** recorded since the backup (next section), from a host that has the
    image and the new DSN, with the writers still at zero:
    `CHEMCLAW_POSTGRES_DSN=<new> python -m chemclaw.cli.erase_actor <entra-oid> --apply`.
-7. **Scale back up** (`oc scale`, undo the KEDA pause; restart so pods read the new Secret). Check
-   `/readyz`, a turn, and a durable job. The next `helm upgrade chemclaw` is an ordinary release:
-   its migrate hook runs against the new database with unchanged values.
+7. **Scale back up explicitly**, per Deployment from the recorded counts (the loop in (b) 5), the
+   front door to its HPA's `minReplicas`, and remove the KEDA pause. Pods read the DSN Secret at
+   start, so there is nothing to restart. Check `/readyz`, a turn, and a durable job. The next
+   `helm upgrade chemclaw` is an ordinary release: its migrate hook runs against the new database
+   with unchanged values.
 
 Work that finished outside Postgres after the target and is gone from it — an external delivery
 whose `result_publications` row was lost, a message sent — can happen again. Deliveries are keyed on

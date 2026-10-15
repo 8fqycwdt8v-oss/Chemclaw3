@@ -334,25 +334,34 @@ def remove_run(run_id: str | None) -> list[str]:
     return problems
 
 
-@contextmanager
-def uninterruptible() -> Iterator[None]:
-    """Ignore SIGINT and SIGTERM for the duration: a second signal must not abandon the cleanup."""
-    saved: dict[signal.Signals, Any] = {}
-    try:
-        for number in (signal.SIGINT, signal.SIGTERM):
-            saved[number] = signal.signal(number, signal.SIG_IGN)
-    except ValueError:  # not the main thread: there is no handler of ours to protect
-        pass
-    try:
-        yield
-    finally:
-        for number, handler in saved.items():
-            signal.signal(number, handler)
+#: Set by the first SIGINT or SIGTERM. The drill stops at its next step boundary or wait, as an
+#: ordinary failure, so its cleanup runs on the normal path and no exception lands at an arbitrary
+#: line; only a second signal interrupts at once.
+_stop_signal: int | None = None
+
+
+def _on_signal(signum: int, _frame: object) -> None:
+    """First signal: ask the drill to stop. Second: the operator insists, so raise now."""
+    global _stop_signal
+    if _stop_signal is not None:
+        raise KeyboardInterrupt(f"signal {signum}")
+    _stop_signal = signum
+
+
+def check_stopped() -> None:
+    """Raise `DrillError` once a stop was requested.
+
+    Raises:
+        DrillError: Naming the signal.
+    """
+    if _stop_signal is not None:
+        raise DrillError(f"stopped by signal {_stop_signal}")
 
 
 @contextmanager
 def phase(report: Report, name: str) -> Iterator[None]:
     """Time a named phase into the report."""
+    check_stopped()
     _say(f"== {name}")
     started = time.monotonic()
     try:
@@ -371,6 +380,7 @@ def wait_for(
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
+        check_stopped()
         try:
             if probe():
                 return
@@ -669,14 +679,31 @@ def run_drill(
         if keep:
             _say(f"--keep: run {run_id} left in place; remove it with `--prune`")
         else:
-            with uninterruptible():
-                try:
-                    leftovers = remove_run(run_id)
-                except Exception as exc:  # cleanup must never replace the run's own result
-                    leftovers = [f"{type(exc).__name__}: {exc}"]
-            if leftovers:
-                report.add(failed("cleanup", f"could not remove: {'; '.join(leftovers)[:400]}"))
+            _clean_up(run_id, report)
     return report
+
+
+def _clean_up(run_id: str, report: Report) -> None:
+    """Remove the run's resources and name what stayed; finish even if a signal lands mid-way.
+
+    `remove_run` is idempotent, so a pass cut short by a second signal is repeated, and the signal
+    is re-raised once the resources are gone.
+    """
+    interrupted: KeyboardInterrupt | None = None
+    leftovers: list[str] = []
+    while True:
+        try:
+            leftovers = remove_run(run_id)
+            break
+        except KeyboardInterrupt as exc:
+            interrupted = exc
+        except Exception as exc:  # cleanup must never replace the run's own result
+            leftovers = [f"{type(exc).__name__}: {exc}"]
+            break
+    if leftovers:
+        report.add(failed("cleanup", f"could not remove: {'; '.join(leftovers)[:400]}"))
+    if interrupted is not None:
+        raise interrupted
 
 
 def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float | None) -> None:
@@ -769,11 +796,6 @@ def _restore_time_check(seconds: float, rto_seconds: float, report: Report) -> C
     return passed("restore_time", f"{seconds} s within {rto_seconds:g} s ({where})")
 
 
-def _on_signal(signum: int, _frame: object) -> None:
-    """Turn SIGTERM/SIGINT into an exception so every `finally` (and the cleanup) runs."""
-    raise KeyboardInterrupt(f"signal {signum}")
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the drill (or `--prune`); print the JSON report; return the exit code."""
     parser = argparse.ArgumentParser(
@@ -817,6 +839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _say(problem)
         return 1 if problems else 0
     signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
     report = run_drill(
         options.pg_image,
         options.temporal_image,
@@ -828,6 +851,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(text)
     if options.report:
         options.report.write_text(text + "\n", encoding="utf-8")
+    if _stop_signal is not None:
+        _say(f"restore drill stopped by signal {_stop_signal}; its resources were removed")
+        return 128 + _stop_signal
     if report.error:
         _say(f"restore drill could not complete: {report.error}")
         return 2

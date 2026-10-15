@@ -32,6 +32,9 @@ helm.sh/resource-policy: keep
 {{- if hasKey (.Values.parameters | default dict) "archive_timeout" }}
 {{- fail "parameters.archive_timeout is refused: set archiveTimeoutSeconds, which the RPO check reads. A second place to say the same thing is a way for the target to be met on paper." }}
 {{- end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.archiveTimeoutSeconds)) }}
+{{- fail (printf "archiveTimeoutSeconds %v must be a whole number of seconds, at least 1: it renders archive_timeout, and 0 means WAL is never switched on a timer, so the RPO check below would be met on paper." .Values.archiveTimeoutSeconds) }}
+{{- end }}
 {{- if lt (int .Values.targets.rpoSeconds) (int .Values.archiveTimeoutSeconds) }}
 {{- fail (printf "targets.rpoSeconds (%v) is below archiveTimeoutSeconds (%v): WAL reaches the object store at most that often when the database is quiet, so a smaller target cannot be met. Raise the target or lower archiveTimeoutSeconds." .Values.targets.rpoSeconds .Values.archiveTimeoutSeconds) }}
 {{- end }}
@@ -47,6 +50,9 @@ helm.sh/resource-policy: keep
 {{- if and .Values.temporalDatabases.enabled (not .Values.temporalDatabases.passwordSecret) }}
 {{- fail "temporalDatabases.enabled is true but passwordSecret is empty: the Temporal role's login comes from a kubernetes.io/basic-auth Secret (username and password) the operator creates." }}
 {{- end }}
+{{- if and .Values.tls.serverTLSSecret (not .Values.tls.serverCASecret) }}
+{{- fail "tls.serverTLSSecret needs tls.serverCASecret beside it: the operator's admission webhook refuses a server certificate without the CA that signs it." }}
+{{- end }}
 {{- if and .Values.import.enabled .Values.recovery.enabled }}
 {{- fail "import.enabled and recovery.enabled are both true: a cluster is bootstrapped from a live database or from a backup, not both." }}
 {{- end }}
@@ -56,6 +62,12 @@ helm.sh/resource-policy: keep
 {{- end }}
 {{- if not (has .Values.import.type (list "microservice" "monolith")) }}
 {{- fail (printf "import.type %q must be microservice (one database) or monolith (several, and roles)." .Values.import.type) }}
+{{- end }}
+{{- if and (eq .Values.import.type "microservice") .Values.import.roles }}
+{{- fail "import.roles is refused with import.type microservice (the operator's admission webhook rejects it): use import.type monolith to carry roles over, or create the roles in the new cluster." }}
+{{- end }}
+{{- if and (eq .Values.import.type "microservice") (gt (len (.Values.import.databases | default (list))) 1) }}
+{{- fail "import.databases names more than one database with import.type microservice (the operator's admission webhook rejects it): a microservice import copies exactly one. Use import.type monolith for several." }}
 {{- end }}
 {{- if and (eq .Values.import.type "monolith") (not .Values.import.databases) }}
 {{- fail "import.type monolith needs import.databases: name every database to carry over (the application's, and Temporal's if they live there)." }}

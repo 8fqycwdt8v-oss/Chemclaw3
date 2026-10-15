@@ -412,8 +412,8 @@ def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
 def _report_docker_skips(terminalreporter: TerminalReporter) -> None:
     """Say plainly that the restore drill did not run, and what that leaves unchecked.
 
-    The drill (`make restore-drill`) needs a Docker daemon to start its own Postgres and Temporal;
-    without one its test skips and the run still prints green. Matched on
+    The drill (`make restore-drill`) needs a Docker daemon and the Postgres and Temporal images;
+    without either its test skips and the run still prints green. Matched on
     `tests.test_restore_drill.DOCKER_SKIP`.
     """
     from tests.test_restore_drill import DOCKER_SKIP
@@ -427,10 +427,11 @@ def _report_docker_skips(terminalreporter: TerminalReporter) -> None:
         return
     terminalreporter.write_sep("=", "Restore drill did not run", yellow=True)
     terminalreporter.write_line(
-        f"{len(skipped)} tests were skipped because no Docker daemon answered, so this run is not "
-        "evidence that a base backup plus archived WAL restores to a chosen instant with the "
-        "schema, indexes, grants and Temporal's databases intact. Start Docker "
-        "(`sudo -n dockerd &`) and run `make restore-drill`."
+        f"{len(skipped)} tests were skipped because Docker, or an image the drill needs, was not "
+        "available (each skip line says which: no daemon answered, or an image was neither local "
+        "nor pullable), so this run is not evidence that a base backup plus archived WAL restores "
+        "to a chosen instant with the schema, indexes, grants and Temporal's databases intact. "
+        "Start Docker (`sudo -n dockerd &`), pull the images, and run `make restore-drill`."
     )
 
 
