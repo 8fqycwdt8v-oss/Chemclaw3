@@ -90,3 +90,33 @@ async def test_the_outbox_backlog_gauge_counts_every_tenants_rows(
         with bound_tenant("globex"):
             await outbox.refresh_backlog()
         assert outbox._PENDING_GAUGE["s"] == 3.0
+
+
+async def test_the_mixed_corpus_signal_sees_rows_a_tenantless_reader_cannot(
+    tenancy_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One tenant's notes under an old model are visible only by walking the tenants."""
+    from chemclaw.core import db
+    from chemclaw.core.vector_schema import (
+        inspect_every_tenant,
+        inspect_tables,
+        live_embedding_keys,
+    )
+
+    async with tenancy_database() as database:
+        await enable_tenancy(database, "acme", "globex")
+        async with await connect(database.owner_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO note_index (note_id, embedding_key, tenant_id) "
+                "VALUES ('n1', 'old:model:d3:m', 'globex')"
+            )
+            await conn.commit()
+        monkeypatch.setattr(settings, "postgres_dsn", database.app_dsn)
+        live = live_embedding_keys()
+        async with db.connection(database.app_dsn) as conn:
+            blind = await inspect_tables(conn, settings.embedding_dim, live)
+        assert not any(state.mixed for state in blind), "a tenantless reader sees no rows at all"
+        async with db.connection(database.app_dsn) as conn:
+            seen = await inspect_every_tenant(conn, settings.embedding_dim, live)
+        mixed = {state.table: state.foreign_keys for state in seen if state.mixed}
+        assert mixed == {"note_index": ("old:model:d3:m",)}
