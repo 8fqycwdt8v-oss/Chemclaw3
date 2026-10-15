@@ -1,0 +1,157 @@
+# The Postgres under a Chemclaw release: a CloudNativePG Cluster, the Barman Cloud ObjectStore it
+# archives WAL to, and a ScheduledBackup. docs/guides/runbook.md § "Backup, restore and PITR" is the
+# procedure; D-2026-10-15-postgres-is-backed-up-by-wal-archiving-to-an-object-store the reason.
+#
+# **A release of its own**, installed before `deploy/helm/chemclaw`. The application's migrate hook
+# runs before the rest of that release is created, so a Cluster inside it would not exist when the
+# hook dials it; and a restore is a second release of this chart (`recovery`), cut over to by
+# repointing the application's DSN, not a rewind of the first. Every object here carries
+# `helm.sh/resource-policy: keep`: uninstalling or rolling back never deletes a database.
+#
+# Needs the CloudNativePG operator and the Barman Cloud plugin (which needs cert-manager) installed
+# in the cluster. Four values have no default and the render refuses until they are stated:
+# `imageName`, `backup.destinationPath`, `targets.rpoSeconds` and `targets.rtoSeconds`.
+
+# The Cluster's name, which is also the prefix of its Services (`<name>-rw` is the primary) and the
+# server name its WAL is archived under. Default: the release name. A restored cluster must have a
+# name of its own, or it would archive into the path it was restored from.
+name: ""
+instances: 3
+
+# A PostgreSQL 16 image that carries pgvector 0.7 or later. The operator's stock images do not, and
+# the migrations run `CREATE EXTENSION vector`.
+imageName: ""
+# Pull secrets for that image (names of existing kubernetes.io/dockerconfigjson Secrets), for a
+# registry that needs a login. A rehearsal namespace needs its own copy.
+imagePullSecrets: []
+
+# The application database and its owner (the migrate Job's principal).
+database: chemclaw
+owner: chemclaw
+# An existing kubernetes.io/basic-auth Secret for `owner`; empty = the operator generates
+# `<name>-app`.
+credentialsSecret: ""
+
+storage:
+  size: 50Gi
+  storageClass: ""
+# WAL on its own volume: while the object store is unreachable the archive backlog lands here, and on
+# the data volume it would stop the database. Size it for the longest outage you accept.
+walStorage:
+  size: 20Gi
+  storageClass: ""
+resources: {}
+
+# max_connections = fleet + headroom. `fleet` is the application release's `postgres.maxConnections`
+# (a test holds the two defaults equal); `headroom` is for Temporal's databases when they live here,
+# backups, `psql` and the operator. A restored cluster takes the same two numbers as the original: a
+# server restored with fewer connections than its backup was taken with does not start.
+connections:
+  fleet: 256
+  headroom: 64
+# Extra postgresql.conf parameters, taking precedence over `max_connections`. `archive_timeout` is
+# refused here: it is `archiveTimeoutSeconds`, so the RPO check can read it.
+parameters: {}
+
+# Bring your own server CA instead of the operator's per-cluster `<name>-ca`. `serverCASecret` is a
+# Secret with `ca.crt` AND `ca.key`: the operator signs each cluster's server certificate with it, for
+# that cluster's own hostnames, so a restored cluster presents certificates from the same CA and the
+# application's `verify-full` trust bundle never changes. That is the setting that lets a restore cut
+# over without an application upgrade (runbook § "Restore for real"). Empty = the operator's own CA,
+# which a restore replaces. `serverTLSSecret` is a certificate you issue yourself and needs
+# `serverCASecret` beside it; it must name the cluster's `-rw` host, so a restore under a new name
+# would not match it: leave it empty if you intend to restore.
+tls:
+  serverCASecret: ""
+  serverTLSSecret: ""
+
+# Temporal's persistence in the same cluster: separate databases `temporal` and
+# `temporal_visibility`, one WAL stream, one restore instant for the application and Temporal alike.
+# Leave off when a platform Temporal keeps its own Postgres; that Postgres owes the same backup
+# contract and the same restore instant.
+temporalDatabases:
+  enabled: false
+  role: temporal
+  # kubernetes.io/basic-auth Secret (username = role, password) for the role.
+  passwordSecret: ""
+
+# What this site accepts for the loss of the whole cluster, in seconds. No default: the render refuses
+# until both are stated, because a default is a guarantee nobody agreed to. `rpoSeconds` must be at
+# least `archiveTimeoutSeconds`. `rtoSeconds` is recorded on the Cluster and is checked by the human
+# restore into a scratch namespace the runbook describes, timed at the real data volume; the drill
+# (`make restore-drill ARGS=--rto-seconds=N`) measures only a fixture.
+targets:
+  rpoSeconds: 0
+  rtoSeconds: 0
+# A WAL segment is shipped at least this often, so it bounds the data lost when the database is
+# quiet. A whole number of seconds, at least 1. Smaller = more small objects.
+archiveTimeoutSeconds: 300
+
+backup:
+  # s3://bucket/prefix of an S3 or S3-compatible store. One prefix per environment; each Cluster
+  # archives under its own name inside it.
+  destinationPath: ""
+  # For a store that is not AWS (RustFS, MinIO, Ceph, ...).
+  endpointURL: ""
+  endpointCA:
+    name: ""
+    key: ca.crt
+  # A Secret holding the access key pair. Empty = the pod's cloud identity (IRSA and its kin):
+  # annotate the Cluster's ServiceAccount with `serviceAccountAnnotations`.
+  credentialsSecret: ""
+  accessKeyIdKey: ACCESS_KEY_ID
+  secretAccessKeyKey: ACCESS_SECRET_KEY
+  serviceAccountAnnotations: {}
+  # Backups and WAL older than this, beyond the newest base backup that needs them, are removed.
+  # Everything a backup holds is kept that long, including rows this system later erased (runbook
+  # § "Retention, erasure and backups"). A count and d, w or m.
+  retentionPolicy: 30d
+  # Six fields, seconds first (the operator's cron, not Kubernetes').
+  schedule: "0 0 2 * * *"
+  # prefer-standby takes the backup from a replica when there is one.
+  target: prefer-standby
+  walCompression: gzip
+  walMaxParallel: 2
+  dataCompression: gzip
+  # Server-side encryption of what is stored: "", AES256 or aws:kms.
+  encryption: ""
+
+# Carry an EXISTING database over: bootstrap this cluster by a logical import (pg_dump | pg_restore)
+# from the Postgres the application runs on today. The import is a copy of the source at the moment it
+# runs, so stop the application's writers first and keep them stopped until the application is
+# repointed; whatever the source takes after that is not here. `microservice` imports the one
+# database `source.database` into `database`; `monolith` imports `databases` (name Temporal's too)
+# and `roles`. The operator's admission webhook refuses `roles` with microservice, more than one
+# database with microservice, and `postImportApplicationSQL` with monolith; this chart refuses the
+# first two itself and never emits the third. The import
+# carries the schema ledger, so the migrate hook finds nothing to re-run.
+import:
+  enabled: false
+  type: microservice
+  databases: []
+  roles: []
+  source:
+    host: ""
+    port: 5432
+    user: ""
+    # The source database. A microservice import copies it into `database` under that name; a
+    # monolith import connects to `postgres` and takes `databases`. Default: `database`.
+    database: ""
+    sslmode: verify-full
+    # Secret key holding the source user's password, and optionally the CA that signs the source.
+    passwordSecret: {name: "", key: password}
+    sslRootCertSecret: {name: "", key: ca.crt}
+
+# Bootstrap this cluster from another cluster's backup, to a point in time: a restore. Install it as
+# a NEW release with a NEW `name`; the source is read from the same ObjectStore path under its own
+# server name. Writes nothing to the source's archive.
+recovery:
+  enabled: false
+  # The `name` of the cluster that wrote the archive.
+  sourceClusterName: ""
+  # The instant to stop at, e.g. "2026-10-14 09:41:00+00". Empty = replay all archived WAL.
+  targetTime: ""
+  # A rehearsal in a scratch namespace: restore, then neither archive WAL nor take base backups, so
+  # the scratch cluster writes nothing into a bucket someone may restore from. Give it read-only
+  # credentials. Not a cluster to cut over to.
+  rehearsal: false

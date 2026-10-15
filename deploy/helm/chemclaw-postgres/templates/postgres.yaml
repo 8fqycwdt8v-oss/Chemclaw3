@@ -1,0 +1,241 @@
+{{- /* The release's Postgres: an ObjectStore (where WAL and base backups go), the Cluster that archives
+       to it, and the ScheduledBackup that takes the base backups; Temporal's databases when asked.
+       Backups go through the Barman Cloud plugin because the operator's built-in object-store backup
+       is deprecated upstream. Every object is kept on uninstall (see the helper). */ -}}
+{{- include "chemclaw-postgres.validate" . -}}
+{{- $name := include "chemclaw-postgres.name" . }}
+{{- $b := .Values.backup }}
+{{- $params := dict "archive_timeout" (printf "%ds" (int .Values.archiveTimeoutSeconds)) }}
+{{- $_ := set $params "max_connections" (toString (add (int .Values.connections.fleet) (int .Values.connections.headroom))) }}
+{{- $params = merge (deepCopy (.Values.parameters | default dict)) $params }}
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "chemclaw-postgres.labels" . | nindent 4 }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" . | nindent 4 }}
+spec:
+  retentionPolicy: {{ $b.retentionPolicy | quote }}
+  configuration:
+    destinationPath: {{ $b.destinationPath | quote }}
+    {{- with $b.endpointURL }}
+    endpointURL: {{ . | quote }}
+    {{- end }}
+    {{- if $b.endpointCA.name }}
+    endpointCA:
+      name: {{ $b.endpointCA.name | quote }}
+      key: {{ $b.endpointCA.key | quote }}
+    {{- end }}
+    s3Credentials:
+      {{- if $b.credentialsSecret }}
+      accessKeyId:
+        name: {{ $b.credentialsSecret | quote }}
+        key: {{ $b.accessKeyIdKey | quote }}
+      secretAccessKey:
+        name: {{ $b.credentialsSecret | quote }}
+        key: {{ $b.secretAccessKeyKey | quote }}
+      {{- else }}
+      inheritFromIAMRole: true
+      {{- end }}
+    wal:
+      compression: {{ $b.walCompression | quote }}
+      maxParallel: {{ int $b.walMaxParallel }}
+      {{- with $b.encryption }}
+      encryption: {{ . | quote }}
+      {{- end }}
+    data:
+      compression: {{ $b.dataCompression | quote }}
+      {{- with $b.encryption }}
+      encryption: {{ . | quote }}
+      {{- end }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "chemclaw-postgres.labels" . | nindent 4 }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" . | nindent 4 }}
+    chemclaw/rpo-seconds: {{ int .Values.targets.rpoSeconds | quote }}
+    chemclaw/rto-seconds: {{ int .Values.targets.rtoSeconds | quote }}
+spec:
+  description: "Postgres for the Chemclaw release that uses {{ $name }}-rw{{ if .Values.temporalDatabases.enabled }}; holds Temporal's databases too{{ end }}"
+  instances: {{ int .Values.instances }}
+  imageName: {{ .Values.imageName | quote }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- range . }}
+    - name: {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  {{- /* A label of this chart's own, constant across restores, so the application's NetworkPolicy peer
+         does not name a cluster that is about to be replaced. */}}
+  inheritedMetadata:
+    labels:
+      chemclaw/postgres: "true"
+  {{- with .Values.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  postgresql:
+    parameters:
+      {{- range $key, $value := $params }}
+      {{ $key }}: {{ toString $value | quote }}
+      {{- end }}
+  {{- if or .Values.tls.serverCASecret .Values.tls.serverTLSSecret }}
+  certificates:
+    {{- with .Values.tls.serverCASecret }}
+    serverCASecret: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tls.serverTLSSecret }}
+    serverTLSSecret: {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  bootstrap:
+    {{- if .Values.recovery.enabled }}
+    recovery:
+      source: origin
+      database: {{ .Values.database | quote }}
+      owner: {{ .Values.owner | quote }}
+      {{- with .Values.credentialsSecret }}
+      secret:
+        name: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.recovery.targetTime }}
+      recoveryTarget:
+        targetTime: {{ . | quote }}
+      {{- end }}
+    {{- else }}
+    initdb:
+      database: {{ .Values.database | quote }}
+      owner: {{ .Values.owner | quote }}
+      {{- with .Values.credentialsSecret }}
+      secret:
+        name: {{ . | quote }}
+      {{- end }}
+      {{- if .Values.import.enabled }}
+      import:
+        type: {{ .Values.import.type | quote }}
+        databases:
+          {{- range (.Values.import.databases | default (list (.Values.import.source.database | default .Values.database))) }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- with .Values.import.roles }}
+        roles:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+        source:
+          externalCluster: source-database
+        {{- if eq .Values.import.type "microservice" }}
+        postImportApplicationSQL:
+          - CREATE EXTENSION IF NOT EXISTS vector
+        {{- end }}
+      {{- else }}
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+      {{- end }}
+    {{- end }}
+  {{- if .Values.import.enabled }}
+  externalClusters:
+    - name: source-database
+      connectionParameters:
+        host: {{ .Values.import.source.host | quote }}
+        port: {{ .Values.import.source.port | quote }}
+        user: {{ .Values.import.source.user | quote }}
+        dbname: {{ ternary "postgres" (.Values.import.source.database | default .Values.database) (eq .Values.import.type "monolith") | quote }}
+        sslmode: {{ .Values.import.source.sslmode | quote }}
+      password:
+        name: {{ .Values.import.source.passwordSecret.name | quote }}
+        key: {{ .Values.import.source.passwordSecret.key | quote }}
+      {{- if .Values.import.source.sslRootCertSecret.name }}
+      sslRootCert:
+        name: {{ .Values.import.source.sslRootCertSecret.name | quote }}
+        key: {{ .Values.import.source.sslRootCertSecret.key | quote }}
+      {{- end }}
+  {{- else if .Values.recovery.enabled }}
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: {{ $name }}-backup
+          serverName: {{ .Values.recovery.sourceClusterName | quote }}
+  {{- end }}
+  storage:
+    size: {{ .Values.storage.size | quote }}
+    {{- with .Values.storage.storageClass }}
+    storageClass: {{ . | quote }}
+    {{- end }}
+  walStorage:
+    size: {{ .Values.walStorage.size | quote }}
+    {{- with .Values.walStorage.storageClass }}
+    storageClass: {{ . | quote }}
+    {{- end }}
+  {{- if not .Values.recovery.rehearsal }}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ $name }}-backup
+  {{- end }}
+  {{- with $b.serviceAccountAnnotations }}
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
+  {{- if .Values.temporalDatabases.enabled }}
+  managed:
+    roles:
+      - name: {{ .Values.temporalDatabases.role | quote }}
+        ensure: present
+        login: true
+        passwordSecret:
+          name: {{ .Values.temporalDatabases.passwordSecret | quote }}
+  {{- end }}
+{{- if not .Values.recovery.rehearsal }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ $name }}-base
+  labels:
+    {{- include "chemclaw-postgres.labels" . | nindent 4 }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" . | nindent 4 }}
+spec:
+  schedule: {{ $b.schedule | quote }}
+  immediate: true
+  backupOwnerReference: self
+  method: plugin
+  target: {{ $b.target | quote }}
+  cluster:
+    name: {{ $name }}
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+{{- end }}
+{{- if .Values.temporalDatabases.enabled }}
+{{- range $database := list "temporal" "temporal_visibility" }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ $name }}-{{ $database | replace "_" "-" }}
+  labels:
+    {{- include "chemclaw-postgres.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" $ | nindent 4 }}
+spec:
+  cluster:
+    name: {{ $name }}
+  name: {{ $database }}
+  owner: {{ $.Values.temporalDatabases.role | quote }}
+  ensure: present
+  databaseReclaimPolicy: retain
+{{- end }}
+{{- end }}
