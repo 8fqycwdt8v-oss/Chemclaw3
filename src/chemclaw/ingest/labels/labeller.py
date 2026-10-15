@@ -15,6 +15,7 @@ record SMILES; answers are then positional against the list we sent.
 """
 
 import logging
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
 from chemclaw_contracts.rxnlabel import (
@@ -26,11 +27,13 @@ from chemclaw_contracts.rxnlabel import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.backend_rpc import BackendSession, RpcSession, RpcUnsupported, rpc_session
 from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.mcp_session import (
+    McpAtCapacity,
     McpConnectFailed,
     McpCredentialRefused,
     McpRequestRefused,
@@ -180,10 +183,11 @@ class Labeller(Protocol):
 
 
 class RxnLabelServer:
-    """One drain's worth of calls to the labelling server, each in its own MCP session.
+    """One drain's worth of calls to the labelling server, on the transport `calc_transport` names.
 
-    A session per call because the MCP transport's tasks inherit the opener's context, so a shared
-    session would misattribute concurrent callers. The connect cost is small against a batch.
+    Over MCP, a session per call because the transport's tasks inherit the opener's context, so a
+    shared session would misattribute concurrent callers. Over `rpc`, a request on the process's
+    pooled client, which stamps the calling task's identity itself.
     """
 
     async def version(self) -> str:
@@ -269,20 +273,17 @@ class RxnLabelServer:
     async def _call(self, request: WireRequest) -> dict[str, Any]:
         """Open a session, send `request`, and translate the failure into this service's vocabulary.
 
-        Transport, timeouts and credential handling are `core.mcp_session`'s; this decides only
-        which failures a durable activity should retry.
+        Transport, timeouts and credential handling are `core.mcp_session`'s or, for
+        `calc_transport="rpc"`, `core.backend_rpc`'s, which raise the same exceptions; this decides
+        only which failures a durable activity should retry.
         """
         tool = request.tool_name
         try:
-            async with open_session(
-                settings.rxnlabel_server_url,
-                token_env=settings.rxnlabel_server_token_env,
-                timeout_seconds=settings.rxnlabel_server_timeout_seconds,
-                # Stamp the caller's identity and trace context on the call. The hook is bound to
-                # this server's origin and strips on a cross-origin redirect.
-                request_hook=turn_identity_hook(settings.rxnlabel_server_url),
-            ) as session:
-                payload = await invoke(session, tool, request.wire())
+            async with _open_transport() as session:
+                if isinstance(session, RpcSession):
+                    payload = await session.invoke(tool, request.wire())
+                else:
+                    payload = await invoke(session, tool, request.wire())
         except McpCredentialRefused as exc:
             raise LabelToolError(
                 f"the labelling server refused this client's credential (HTTP {exc.status} from "
@@ -295,6 +296,20 @@ class RxnLabelServer:
                 "the labelling server is not answering, so no reaction was labelled. The index is "
                 "unchanged and the drain will pick these rows up again once it is back."
             ) from exc
+        except RpcUnsupported as exc:
+            # Retryable: during a rollout the next batch may reach a pod that serves `/rpc`.
+            raise LabelServerError(
+                f"the labelling server at {settings.rxnlabel_server_url} {exc.problem}, so no "
+                "reaction was labelled. Fix or upgrade the server, or set "
+                "CHEMCLAW_CALC_TRANSPORT=mcp."
+            ) from exc
+        except McpAtCapacity as exc:
+            # Before `McpRequestRefused`, its base class: a full pod ran nothing and the same
+            # batch succeeds later, so the drain retries it instead of failing the run.
+            raise LabelServerError(
+                f"the labelling server is full, so {tool} was turned away before any reaction was "
+                "labelled. Nothing is wrong with the batch; the drain will ask again."
+            ) from exc
         except McpRequestRefused as exc:
             raise LabelToolError(str(exc)) from exc
         except McpServerFault as exc:
@@ -305,6 +320,24 @@ class RxnLabelServer:
         if not isinstance(payload, dict):
             raise LabelToolError(f"{tool} answered {type(payload).__name__}, expected an object")
         return payload
+
+
+def _open_transport() -> AbstractAsyncContextManager[BackendSession]:
+    """The session the configured transport opens to the labelling server."""
+    if settings.calc_transport == "rpc":
+        return rpc_session(
+            settings.rxnlabel_server_url,
+            token_env=settings.rxnlabel_server_token_env,
+            timeout_seconds=settings.rxnlabel_server_timeout_seconds,
+        )
+    return open_session(
+        settings.rxnlabel_server_url,
+        token_env=settings.rxnlabel_server_token_env,
+        timeout_seconds=settings.rxnlabel_server_timeout_seconds,
+        # Stamp the caller's identity and trace context on the call. The hook is bound to this
+        # server's origin and strips on a cross-origin redirect.
+        request_hook=turn_identity_hook(settings.rxnlabel_server_url),
+    )
 
 
 def _results(payload: dict[str, Any]) -> list[Any]:

@@ -86,6 +86,7 @@ class composed — and the cross-section startup rules enforced — in its `__in
 | `bookkeeping` | the writes a turn owes the record once it has acted: tracked in one registry, awaited once and bounded, never fatal |
 | `bounded` | the one bounded LRU map for every cache keyed by an unbounded identity |
 | `call_identity`, `mcp_session` | the turn's identity as outbound headers for one origin; the one outbound MCP client session |
+| `backend_rpc` | the pooled typed HTTP/JSON client for the fleet's `calc` and `rxnlabel` backends (`calc_transport=rpc`), raising `mcp_session`'s exceptions |
 | `temporal_client` | the one place a Temporal client is opened |
 | `checkout` | whether a path is the git checkout this process runs from |
 | `egress`, `netguard`, `netguard_preload` (+ `netguard_preload.c`) | the LangSmith content-egress decision, and the in-process and compiled egress guards |

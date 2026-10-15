@@ -135,7 +135,11 @@ ReadWriteMany or ReadOnlyMany with more than one background worker) for an SMB/C
 Most scientific capability is served by `Chemclaw3-mcp`, which this chart **does not deploy**. The
 shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as externally hosted
 (`url:` set, so this chart renders no pod for them), and `config` points the two backends at
-`CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_RXNLABEL_SERVER_URL`. For each fleet server you rely on:
+`CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_RXNLABEL_SERVER_URL`. Those two backends also serve typed
+HTTP/JSON on the same port at `/rpc/<tool>`; `CHEMCLAW_CALC_TRANSPORT=rpc` (default `mcp`) moves
+both clients onto it, over pooled connections, once `/healthz` reports `contract_version` 1.1.0 or
+later (an older server is refused with an error, never answered over MCP), and `mcp` is the
+rollback. No Service, port or NetworkPolicy changes. For each fleet server you rely on:
 
 1. Deploy it from `Chemclaw3-mcp`'s `deploy/helm/chemclaw-fleet` chart (or, before that chart,
    its `servers/<name>/deploy/` files) **into this release's namespace** — its

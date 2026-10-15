@@ -20,6 +20,7 @@ and the terminal get the same answer.
 | `distill.py`, `trajectory_census.py`, `propose_profile.py` | mine stored conversations: recurring trajectories, proposals, profile candidates (`make distill`, `make trajectory-census`, `make propose-profile`) |
 | `live_*.py`, `leak_probe.py`, `retrieval_arms.py`, `hypothesis_recovery.py`, `verifier_margin.py`, `soak_report.py`, `phoenix_publish.py` | the live lane and measurement drivers behind the `make live-*` targets |
 | `model_text_inventory.py`, `model_text_eval.py` | the inventory of every string a model reads (`make model-text`, written to `schema/model-text/`) and the ship-or-not evaluation of a batch of edits to it (`make model-text-eval`; `docs/guides/model-text-evaluation.md`) |
+| `bench_backend_rpc.py` | time `calculation_key` over MCP and over `/rpc` against the configured calc server (`make bench-backend-rpc`) |
 | `architecture_baseline.py` | measure the architecture programme's baseline — import time, build time, prose ratio, sizes — into `docs/planning/architecture-baseline-<date>.json` (`make architecture-baseline`) |
 | `mock_llm.py`, `storm_behaviours.py`, `delegation_behaviours.py`, `e2e_behaviours.py` | the OpenAI-compatible loopback mock and the scripted behaviour catalogues it plays |
 | `kind_stale_images.py` | which kind Deployments run a superseded image under an unchanged tag (`deploy/kind/up.sh`, run as a file on the host's `python3`, standard library only) |
