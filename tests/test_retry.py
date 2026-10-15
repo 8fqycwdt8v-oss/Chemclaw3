@@ -857,6 +857,8 @@ _PINNED_MEMBERS = {
         "mirror_commitments_activity",
         "plan_label_sync",
         "read_check_result",
+        # Embeds stored chunks through the embedding endpoint, as `reembed_stale_documents` does.
+        "reembed_document_batch",
         "reembed_stale_documents",
         "retrieve_section",
         "run_tool_step",

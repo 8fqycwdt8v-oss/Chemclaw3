@@ -455,6 +455,7 @@ The render refuses (`helm template` fails) when:
 | with windows set: exactly one of `retention.artifactStore` or `retention.artifactGrowthAccepted: true` | `templates/config.yaml` |
 | with windows set: exactly one of `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` or `retention.exhibitsGrowthAccepted: true` | `templates/config.yaml` |
 | a retention key that is not one of the `CHEMCLAW_RETENTION_*` settings | `templates/config.yaml` (the refusal lists the valid names) |
+| `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` or `allowNonSemanticEmbeddings: true` | `templates/config.yaml` |
 | `temporal.namespace` | `templates/config.yaml` |
 | `config.CHEMCLAW_SESSION_STORE` other than `postgres` | `templates/config.yaml` |
 | no connector with `enabled: true` | `templates/_helpers.tpl` (`chemclaw.connectorsEnabled`) |

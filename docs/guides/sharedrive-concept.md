@@ -127,7 +127,7 @@ For anything real:
 ```
 CHEMCLAW_EMBEDDING_PROVIDER=openai_compatible
 CHEMCLAW_EMBEDDING_MODEL=<your model>
-CHEMCLAW_EMBEDDING_DIM=1536      # must equal the vector(N) column (infra/sql/037_document_index.sql)
+CHEMCLAW_EMBEDDING_DIM=1536      # the migrator builds the column for this width (runbook (vi-c))
 ```
 
 It reuses the LLM base URL, credential and private-CA transport — there is no second endpoint to

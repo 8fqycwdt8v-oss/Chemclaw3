@@ -38,6 +38,7 @@ from chemclaw.ingest.documents.index import (
     ChunkRecord,
     DocumentIndex,
     FileRecord,
+    PostgresDocumentIndex,
     StaleChunk,
 )
 from chemclaw.ingest.documents.isolate import ParseWorkerLost, parse_document_isolated
@@ -478,7 +479,8 @@ async def reembed_stale(
     Reads stored chunk text, never the share, so it is cheap enough to run at the head of every sync
     and a model change heals itself. Rows cut under a chunking no enabled share uses are skipped,
     since the crawl will re-cut and re-embed them; `chunkings` is passed in because the caller owns
-    which shares are enabled.
+    which shares are enabled. Takes no claim: two overlapping passes may embed the same chunk, and
+    `reembed_claimed` is the pass that does not.
 
     Args:
         index: The document index to refresh.
@@ -492,41 +494,79 @@ async def reembed_stale(
     stale = await index.stale_chunks(key, limit, chunkings)
     if not stale:
         return ReembedReport()
+    refreshed, failed = await _embed_stale(stale)
+    if refreshed:
+        await index.store_embeddings(_with_vectors(refreshed), key)
+    return _reembed_report(stale, len(refreshed), failed, limit, key)
+
+
+async def reembed_claimed(
+    index: PostgresDocumentIndex, chunkings: set[str], limit: int = 500
+) -> ReembedReport:
+    """`reembed_stale`, over rows this pass holds against every other worker.
+
+    The batch is locked (`FOR UPDATE SKIP LOCKED`) from the read to the write, so concurrent passes
+    embed disjoint chunks and none is embedded twice; a pass killed before its write changes
+    nothing, which makes the job resumable from wherever it stopped. For an index that cannot hold a
+    row lock (vectors in an external store) the claim degrades to `reembed_stale`'s.
+    """
+    key = embedding_config_key()
+    async with index.claim_stale(key, limit, chunkings) as claim:
+        if not claim.chunks:
+            return ReembedReport()
+        refreshed, failed = await _embed_stale(claim.chunks)
+        if refreshed:
+            await claim.store(_with_vectors(refreshed))
+    return _reembed_report(claim.chunks, len(refreshed), failed, limit, key)
+
+
+async def _embed_stale(
+    stale: list[StaleChunk],
+) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
+    """Embed the batch, falling back to one chunk at a time so one bad chunk costs only itself.
+
+    `stale_chunks` returns the same first batch every time and the drain runs before the crawl, so
+    a batch failure that starved the corpus would starve it for good.
+    """
     try:
         embeddings = await asyncio.to_thread(
             lambda: embed_texts([chunk.content for chunk in stale], cache=False)
         )
-        refreshed = list(zip(stale, embeddings, strict=True))
-        failed = 0
     except Exception:
-        # One chunk must not starve the corpus: `stale_chunks` returns the same first batch every
-        # time and this drain runs before the crawl, so a batch failure is retried per chunk and
-        # only the unembeddable ones are left behind.
         logger.warning("batch re-embed failed; retrying %d chunk(s) individually", len(stale))
-        refreshed, failed = await _reembed_individually(stale)
-    if refreshed:
-        await index.store_embeddings(
-            [
-                ChunkRecord(
-                    doc_id=chunk.doc_id,
-                    chunking_key=chunk.chunking_key,
-                    ordinal=chunk.ordinal,
-                    content=chunk.content,
-                    embedding=embedding,
-                )
-                for chunk, embedding in refreshed
-            ],
-            key,
+        return await _reembed_individually(stale)
+    return list(zip(stale, embeddings, strict=True)), 0
+
+
+def _with_vectors(refreshed: list[tuple[StaleChunk, list[float]]]) -> list[ChunkRecord]:
+    """The chunk rows to write back: the text it already had, and the new vector."""
+    return [
+        ChunkRecord(
+            doc_id=chunk.doc_id,
+            chunking_key=chunk.chunking_key,
+            ordinal=chunk.ordinal,
+            content=chunk.content,
+            embedding=embedding,
         )
-    logger.info("re-embedded %d chunk(s) under %s", len(refreshed), key)
+        for chunk, embedding in refreshed
+    ]
+
+
+def _reembed_report(
+    stale: list[StaleChunk], refreshed: int, failed: int, limit: int, key: str
+) -> ReembedReport:
+    """Log one pass and summarise it. `stalled` is "stale rows remain and nothing moved".
+
+    More may remain only if the pass made progress; otherwise the same failing batch would repeat
+    forever.
+    """
+    logger.info("re-embedded %d chunk(s) under %s", refreshed, key)
     if failed:
         logger.error(
             "%d chunk(s) could not be re-embedded and keep a superseded vector; they are compared "
             "against queries embedded by the current model until this is fixed",
             failed,
         )
-    # More may remain only if this pass made progress; otherwise the same failing batch would repeat
-    # forever. `stalled` reports that stale rows remain.
     stalled = bool(stale) and not refreshed
     if stalled:
         logger.error(
@@ -536,7 +576,7 @@ async def reembed_stale(
             len(stale),
         )
     return ReembedReport(
-        embedded=len(refreshed),
+        embedded=refreshed,
         failed=failed,
         has_more=len(stale) == limit and bool(refreshed),
         stalled=stalled,

@@ -2,10 +2,12 @@
 # becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
 # config source in-cluster (no second config system). Secrets are referenced, never inlined.
 #
-# Three values have no usable default and the chart refuses to render until a release states them:
+# Four values have no usable default and the chart refuses to render until a release states them:
 # `networkPolicy.egressDestinations` (or `allowAnyDestination: true`), `retention.windows` (or
-# `unboundedGrowthAccepted: true`) and `temporal.namespace`. `deploy/README.md` § "Install, step by
-# step" lists every render-time guard, the Secrets the chart expects and the order to set them up in.
+# `unboundedGrowthAccepted: true`), `temporal.namespace` and the embedding provider
+# (`config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible`, or `allowNonSemanticEmbeddings: true`).
+# `deploy/README.md` § "Install, step by step" lists every render-time guard, the Secrets the chart
+# expects and the order to set them up in.
 
 # How many extra pods of one Deployment a rolling update may run beside the old generation.
 #
@@ -991,6 +993,14 @@ resources:
     # approach costs nothing.
     requests: { cpu: "100m", memory: "256Mi" }
     limits: { cpu: "2", memory: "512Mi" }
+
+# Whether this release accepts the offline `hash` embedder, which is what `config.
+# CHEMCLAW_EMBEDDING_PROVIDER` means when it is not stated. `hash` ranks by shared tokens and is not
+# semantic, so a release that did not choose it must not get it by silence: the render refuses
+# unless `config.CHEMCLAW_EMBEDDING_PROVIDER` is `openai_compatible` (with
+# `CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_EMBEDDING_DIM` below) or this is `true`. A boolean, never a
+# string.
+allowNonSemanticEmbeddings: false
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror `chemclaw.core.config.Settings` exactly.
 config:

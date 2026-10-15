@@ -68,6 +68,7 @@ def test_openai_compatible_path_calls_the_endpoint(monkeypatch: pytest.MonkeyPat
         monkeypatch,
         embedding_provider="openai_compatible",
         embedding_model="internal-embed",
+        embedding_dim=1,  # the fake endpoint answers one-component vectors
         llm_base_url="https://llm.internal/v1",
     )
     captured: dict[str, Any] = {}
@@ -108,6 +109,7 @@ def test_a_reordered_batch_is_paired_by_index_and_not_by_position(
         monkeypatch,
         embedding_provider="openai_compatible",
         embedding_model="internal-embed",
+        embedding_dim=1,  # the fake endpoint answers one-component vectors
         # A distinct endpoint per test on purpose: `_openai_client` is an `lru_cache` keyed on the
         # transport config, so two tests sharing a `base_url` would share one client — and
         # therefore each other's fake.
@@ -144,6 +146,7 @@ def test_a_batch_whose_indices_are_not_its_own_positions_is_refused(
         monkeypatch,
         embedding_provider="openai_compatible",
         embedding_model="internal-embed",
+        embedding_dim=1,  # the fake endpoint answers one-component vectors
         llm_base_url="https://llm-flat-index.internal/v1",
     )
 
@@ -164,6 +167,43 @@ def test_a_batch_whose_indices_are_not_its_own_positions_is_refused(
 
     with pytest.raises(ValueError, match="index"):
         provider.embed_texts(["a", "b"])
+
+
+def test_an_endpoint_answering_in_another_width_than_configured_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vector of another width than `embedding_dim` is refused where it is made.
+
+    Otherwise it would be stored under a key that says `d<embedding_dim>`, or rejected by the column
+    at the first write, far from the model name that explains it.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="renamed-embed",
+        embedding_dim=768,
+        llm_base_url="https://llm-wide.internal/v1",
+    )
+
+    class _WideEmbeddings:
+        def create(self, *, model: str, input: list[str]) -> Any:
+            data = [
+                type("E", (), {"embedding": [0.0] * 1024, "index": i}) for i in range(len(input))
+            ]
+            return type("R", (), {"data": data})
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.embeddings = _WideEmbeddings()
+
+    fake_openai = type(sys)("openai")
+    fake_openai.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    with pytest.raises(
+        ValueError, match=r"\[1024\]-dimensional.*renamed-embed.*embedding_dim is 768"
+    ):
+        provider.embed_texts(["a"])
 
 
 def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:

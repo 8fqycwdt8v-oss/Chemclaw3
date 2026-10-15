@@ -168,7 +168,7 @@ def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.embedding_provider == "hash"
     assert settings.retrieval_mode == "graph"  # flat union, not hybrid fusion, by default
-    assert settings.embedding_dim == 1536  # matches note_index.embedding vector(1536)
+    assert settings.embedding_dim == 1536  # the original columns' width: nothing to migrate
     assert "vector" not in settings.data_source_list  # new retrievers off until opted in
 
 
@@ -589,21 +589,21 @@ def _clear_prefixed_env() -> Iterator[None]:
             "guards nothing; set at least one budget_max",
         ),
         (
-            "embedding_dim must match the note_index vector column when vector search is on",
-            {"embedding_dim": 768, "data_sources": "graph,vector"},
-            "disagrees with the note_index vector column",
+            "embedding_dim must be a width pgvector can index when vector search is on",
+            {"embedding_dim": 3072, "data_sources": "graph,vector"},
+            "wider than the 2000 dimensions pgvector can index",
         ),
         # DARK-8: `reindex_notes` writes the embedding column for every note-index-backed source, so
         # the dimension check applies whenever any such source is on, not only the vector one.
         (
             "a lexical-only deployment reaches the same vector column",
-            {"embedding_dim": 768, "data_sources": "graph,lexical"},
-            "disagrees with the note_index vector column",
+            {"embedding_dim": 3072, "data_sources": "graph,lexical"},
+            "wider than the 2000 dimensions pgvector can index",
         ),
         (
             "the scheduled reindex writes it with no retrieve source at all",
-            {"embedding_dim": 768, "data_sources": "graph", "note_reindex_enabled": True},
-            "disagrees with the note_index vector column",
+            {"embedding_dim": 3072, "data_sources": "graph", "note_reindex_enabled": True},
+            "wider than the 2000 dimensions pgvector can index",
         ),
     ],
 )
@@ -903,9 +903,29 @@ def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() 
     deployment without pgvector may choose any width.
     """
     settings = Settings(  # type: ignore[call-arg]
-        _env_file=None, embedding_dim=768, data_sources="graph", note_reindex_enabled=False
+        _env_file=None, embedding_dim=3072, data_sources="graph", note_reindex_enabled=False
+    )
+    assert settings.embedding_dim == 3072
+
+
+def test_a_width_other_than_the_original_is_configuration_not_an_error() -> None:
+    """768 with vector search on is valid: the migrator builds the column for it."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, embedding_dim=768, data_sources="graph,vector"
     )
     assert settings.embedding_dim == 768
+
+
+def test_an_external_vector_store_may_run_any_width() -> None:
+    """The ceiling is pgvector's; a store outside Postgres is not bound by it."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        embedding_dim=3072,
+        data_sources="graph,vector",
+        vector_store_provider="qdrant",
+        vector_store_url="http://localhost:6333",
+    )
+    assert settings.embedding_dim == 3072
 
 
 def test_no_calculator_setting_is_declared_without_a_reader() -> None:

@@ -498,16 +498,16 @@ def test_a_failed_root_prunes_nothing(share: dict[str, Any], tmp_path: Path) -> 
     )
 
 
-def test_a_dimension_the_column_cannot_hold_is_refused_at_construction(
+def test_a_dimension_pgvector_cannot_index_is_refused_at_construction(
     share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dimension the column cannot hold is refused at construction.
+    """A dimension pgvector cannot index is refused at construction.
 
     A share's name is deployment-chosen, so the config validator cannot enumerate it; the guard sits
-    on the constructors, or pgvector would reject every chunk write hours later in a worker.
+    on the constructors, or the migrator would fail to build the column hours later in a worker.
     """
     monkeypatch.setattr(settings, "embedding_dim", 3072)
-    with pytest.raises(DocumentShareError, match="3072.*document_chunks.*1536"):
+    with pytest.raises(DocumentShareError, match="3072.*2000.*document_chunks"):
         ShareDocumentRetriever(binding=share, name=SOURCE, index=InMemoryDocumentIndex())
 
 

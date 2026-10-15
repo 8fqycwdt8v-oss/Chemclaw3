@@ -43,8 +43,9 @@ from chemclaw.core.config.observability import ObservabilitySettings
 from chemclaw.core.config.publish import PublishSettings
 from chemclaw.core.config.reports import ReportSettings
 from chemclaw.core.config.retrieval import (
+    LEGACY_VECTOR_DIM,
+    MAX_VECTOR_DIM,
     NOTE_INDEX_SOURCES,
-    SCHEMA_VECTOR_DIM,
     RetrievalSettings,
 )
 from chemclaw.core.config.service import ServiceSettings
@@ -57,8 +58,9 @@ from chemclaw.core.netguard_preload import publish_state as publish_preload_stat
 
 # Explicit, because `mypy --strict` disables implicit re-export of imported names.
 __all__ = [
+    "LEGACY_VECTOR_DIM",
+    "MAX_VECTOR_DIM",
     "NOTE_INDEX_SOURCES",
-    "SCHEMA_VECTOR_DIM",
     "AgentSettings",
     "BoSettings",
     "CalculatorSettings",
@@ -357,8 +359,8 @@ class Settings(
           only; `chemclaw_calc_requests_in_flight` covers the tool path).
         - **A mid-turn resume wait longer than the turn deadline.**
         - **Budgets enabled with every cap at zero** (zero means unlimited).
-        - **`embedding_dim` disagreeing with the `vector(N)` column** while anything writes the note
-          index, which pgvector would otherwise reject at reindex time.
+        - **An `embedding_dim` pgvector cannot index** (wider than `MAX_VECTOR_DIM`) while anything
+          writes the note index, which would otherwise fail at the first migration or reindex.
 
         Fleet checks are inert until the operator declares the corresponding ceiling. Every rule
         here raises; guards that must only warn live in their own validators.
@@ -614,12 +616,12 @@ class Settings(
         )
         # Inert where note vectors do not live in that column: an external store may run any width.
         pgvector_notes = self.vector_store_provider == "pgvector"
-        if writes_note_index and pgvector_notes and self.embedding_dim != SCHEMA_VECTOR_DIM:
+        if writes_note_index and pgvector_notes and self.embedding_dim > MAX_VECTOR_DIM:
             raise ValueError(
-                f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
-                f"({SCHEMA_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
-                "every write. Change both together, drop 'vector' from data_sources, or move the "
-                "vectors out of Postgres with vector_store_provider."
+                f"embedding_dim={self.embedding_dim} is wider than the {MAX_VECTOR_DIM} dimensions "
+                "pgvector can index, so the note_index vector column cannot be built. Ask the "
+                "embedding model for fewer dimensions, drop 'vector' from data_sources, or move "
+                "the vectors out of Postgres with vector_store_provider."
             )
         return self
 

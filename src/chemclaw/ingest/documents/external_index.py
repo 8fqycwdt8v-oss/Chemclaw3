@@ -12,10 +12,13 @@ whose vectors never arrive, invisible forever.
 
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.vector_schema import LEGACY_COLUMN
 from chemclaw.ingest.documents.index import (
     CITATION_SQL,
     CLAIMED_SQL,
@@ -25,6 +28,7 @@ from chemclaw.ingest.documents.index import (
     FileRecord,
     PostgresDocumentIndex,
     StaleChunk,
+    StaleClaim,
 )
 from chemclaw.retrieval.vectors.base import (
     VectorMatch,
@@ -156,6 +160,26 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         migrated for.
         """
 
+    def _vector_column(self) -> str:
+        """The original column, which every deployment has: this index only writes `NULL` to it."""
+        return LEGACY_COLUMN
+
+    @asynccontextmanager
+    async def claim_stale(
+        self, key: str, limit: int, chunkings: set[str]
+    ) -> AsyncIterator[StaleClaim]:
+        """Stale chunks to re-embed, **not** held against other workers.
+
+        The vectors go to the store through another connection, which a row lock held here would
+        block. Two workers may embed the same chunk; the write is by point id, so the second
+        overwrites the first with the same vector.
+        """
+
+        async def store(chunks: list[ChunkRecord]) -> None:
+            await self.store_embeddings(chunks, key)
+
+        yield StaleClaim(chunks=await self.stale_chunks(key, limit, chunkings), store=store)
+
     def _chunk_vector(self, chunk: ChunkRecord) -> str | None:
         """`None` — the embedding goes to the store, and the column stays NULL."""
         return None
@@ -197,6 +221,10 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Chunks whose vector was made by another configuration *or* left in another store."""
         return await super().stale_chunks(self._stored_key(key), limit, chunkings)
+
+    async def count_stale(self, key: str, chunkings: set[str]) -> int:
+        """Chunks whose vector was made by another configuration or left in another store."""
+        return await super().count_stale(self._stored_key(key), chunkings)
 
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Send the vectors, then commit the catalogue — in that order, always.

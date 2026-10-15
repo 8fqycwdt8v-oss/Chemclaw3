@@ -169,6 +169,7 @@ chart with Helm 3.16:
 | `retention.windows` **or** `retention.unboundedGrowthAccepted: true` (exactly one) | `windows` is a map of `CHEMCLAW_RETENTION_*` day windows, e.g. `{CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365", CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30", CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"}` | every window defaults to disabled, so the durable tables grow forever unless a policy is stated. Each key must be one of the retention settings the template lists (a typo is refused); `CHEMCLAW_RETENTION_ENABLED` is derived and refused if written |
 | on the `windows` arm only: `retention.artifactStore` **or** `retention.artifactGrowthAccepted: true` | `artifactStore: {CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"}` and/or `CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS` | the calculation artifact store is swept by its own job and no retention window reaches it |
 | on the `windows` arm only: `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` **or** `retention.exhibitsGrowthAccepted: true` | e.g. `"365"`; keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least as long if bound artefact values must stay readable | artefacts are bounded by nothing else, and a session holding one is never forgotten |
+| `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` **or** `allowNonSemanticEmbeddings: true` | the semantic provider is `openai_compatible` through the gateway, with `config.CHEMCLAW_EMBEDDING_MODEL` and `config.CHEMCLAW_EMBEDDING_DIM` for the model (a width other than 1536 is built by the migrator and moved to by `make reembed`) | the code default is the offline `hash` embedder, which ranks by shared tokens and is not semantic: dense retrieval over it looks as if it works and returns the wrong neighbours. A release that did not choose it must not get it by silence; a dev or air-gapped install without an embedding model says so with the boolean |
 | `temporal.namespace` | this release's registered Temporal namespace (step 3) | the broker is cluster-shared; a shared namespace means shared queues and Schedules, and one release's upgrade rewrites and deletes the other's. `config.CHEMCLAW_TEMPORAL_NAMESPACE` is derived from it and refused if written |
 
 And these, which the shipped `values.yaml` already satisfies — they fail only if an override
@@ -639,6 +640,7 @@ must live in different namespaces.
   $ helm template chemclaw deploy/helm/chemclaw \
       --set networkPolicy.allowAnyDestination=true \
       --set retention.unboundedGrowthAccepted=true \
+      --set allowNonSemanticEmbeddings=true \
       --set temporal.namespace=chemclaw
   ```
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route

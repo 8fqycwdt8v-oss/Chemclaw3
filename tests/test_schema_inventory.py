@@ -79,10 +79,13 @@ _TOUCHES = (
 )
 # Statements that legitimately name no table.
 #
-# `DROP INDEX` names an index, never its table, so there is nothing to credit.
+# `DROP INDEX` names an index, never its table, so there is nothing to credit. A function defines
+# behaviour without touching a table at migration time; `130`'s adds columns only when called, with
+# a width the migrator passes, so the tables it may alter are described in their README rows.
 _TABLE_FREE = (
     re.compile(r"^CREATE EXTENSION", re.I),
     re.compile(r"^DROP INDEX", re.I),
+    re.compile(r"^CREATE OR REPLACE FUNCTION", re.I),
 )
 
 

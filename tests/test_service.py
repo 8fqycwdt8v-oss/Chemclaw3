@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
 from chemclaw.core.config import settings
+from chemclaw.core.db import connect
 from chemclaw.core.metrics import METRICS
 from tests.fakes import asgi_client
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -258,6 +259,60 @@ def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
     )
 
 
+def test_readyz_refuses_a_pod_configured_for_a_width_the_database_has_no_column_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/readyz` refuses a pod whose `embedding_dim` has no vector column, naming that cause.
+
+    The migration ran, but for another width (`core/vector_schema.py`): a different outage from an
+    unmigrated schema, with a different fix, so a different status.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr(settings, "embedding_dim", 768)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 503
+    assert res.json()["status"] == "vector width behind config", res.text
+
+
+def test_readyz_is_degraded_not_unready_while_the_corpus_holds_two_embedding_configurations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row stamped by another model leaves the pod ready and says so, until it is re-embedded.
+
+    Dense retrieval ranks only rows under the live key, and lexical and graph retrieval are
+    unaffected, so draining the pod would make the outage worse; the body names it instead.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+
+    async def _stamp(key: str | None) -> None:
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM note_index WHERE note_id = 'readyz-mixed'")
+            if key is not None:
+                await conn.execute(
+                    "INSERT INTO note_index (note_id, embedding_key) VALUES ('readyz-mixed', %s)",
+                    (key,),
+                )
+            await conn.commit()
+
+    try:
+        asyncio.run(_stamp("openai_compatible:ep-abc:d768:other-model|ntv3"))
+        with _client(_FakeAgent()) as client:
+            res = client.get("/readyz")
+        assert res.status_code == 200, res.text
+        assert res.json()["embedding_corpus"] == "mixed"
+    finally:
+        asyncio.run(_stamp(None))
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 200
+    assert "embedding_corpus" not in res.json()
+
+
 def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -395,6 +450,12 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
 
         yield _Conn()
 
+    async def _no_vector_tables(_conn: Any) -> list[Any]:
+        # The vector-column questions have their own tests against a real database; this double
+        # answers only the two statements the caching claim is about.
+        return []
+
+    monkeypatch.setattr("chemclaw.api.routes.ops._vector_tables_if_readable", _no_vector_tables)
     monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
     with _client(_FakeAgent()) as client:
         for _ in range(5):
@@ -514,6 +575,10 @@ async def test_concurrent_readiness_probes_cost_one_database_checkout(
 
         yield _Conn()
 
+    async def _no_vector_tables(_conn: Any) -> list[Any]:
+        return []  # asked of a real database elsewhere; the double answers two statements
+
+    monkeypatch.setattr("chemclaw.api.routes.ops._vector_tables_if_readable", _no_vector_tables)
     monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
 
     app = _app()

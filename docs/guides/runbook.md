@@ -1064,6 +1064,43 @@ ERROR for the ones it cannot fix. To finish faster, raise the batch size or run
 `make share-sync SHARE=<name>` (`python -m chemclaw.cli.sync_share <name>`), which drains that
 share's re-embed to completion before it crawls.
 
+## (vi-c) Changing the embedding model or its vector width
+
+A vector is read only under the model that made it, so a new model leaves old rows unranked until
+they are re-embedded; a new *width* additionally needs a column of that width. Both are one release
+plus one command (D-2026-10-15-an-embedding-width-is-a-column-not-a-rewrite).
+
+1. **State the new model on the release**: `config.CHEMCLAW_EMBEDDING_PROVIDER`,
+   `CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_EMBEDDING_DIM`. The width is the model's output size; a
+   width over 2000 is refused by config (pgvector cannot index it), so ask the model for fewer
+   dimensions or move the vectors out of Postgres (`vector_store_provider`).
+2. **Upgrade.** The pre-upgrade migrate hook adds `embedding_<DIM>` and its HNSW index to
+   `note_index` and `document_chunks` (`ensure_embedding_width`, called by `core/migrate.py` on every
+   run). The column is empty, so this takes a lock for milliseconds and rewrites nothing; an
+   unchanged width does nothing at all. A pod configured for a width with no column answers
+   `/readyz` 503 `vector width behind config`, which is the signal that the hook did not run.
+3. **Re-embed**: `make reembed` (in a pod: `python -m chemclaw.cli.reembed`). It starts
+   `EmbeddingReembedWorkflow` on `background-jobs`, or rejoins the running one, and prints what was
+   embedded and what is left; exit 0 means every row is under the configured key. It is idempotent
+   and claims in batches (`FOR UPDATE SKIP LOCKED`), so a second start, a second worker or a killed
+   one cannot embed a chunk twice or lose a batch. `make reembed STATUS=1` shows which
+   configurations the tables hold without touching Temporal.
+4. **While it runs** `/readyz` stays 200 and carries `"embedding_corpus": "mixed"`, and
+   `chemclaw_degraded_total{subsystem="embedding_corpus_mixed"}` counts the change. Dense retrieval
+   ranks only the rows already moved; lexical and graph retrieval are unaffected. For a large corpus
+   run it off-peak: the claim holds each batch's row locks (`document_reembed_batch_size`, 500) for
+   the length of one embedding call.
+5. **Afterwards** the superseded width's vectors have been emptied (the last phase), but the old
+   column and its index remain: a migration never drops them. Dropping them is a deliberate
+   operation by the schema owner, worth doing only once no previous image will be rolled back to.
+
+**Rolling back.** Deploy the previous image with its previous `CHEMCLAW_EMBEDDING_*`. It reads
+`embedding` (1536) or its own width's column and treats every row stamped with the other key as
+stale, which its own `reindex_notes` and `reembed_stale` heal on their next run; nothing is lost
+because the text lives beside the vector (`document_chunks.content`) or in the notes. The sibling
+column stays, unread. To go back faster than that heals, run `make reembed` against the previous
+configuration.
+
 ## (vii) Read eval-drift alerts
 
 The scheduled `EvalDriftWorkflow` re-scores the committed eval case-set and raises one alert per
@@ -2684,11 +2721,13 @@ docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoD
 #    The three --set lines after the digest are refusals the chart makes until a release states them:
 #    allowAnyDestination=true (or list networkPolicy.egressDestinations instead),
 #    unboundedGrowthAccepted=true (or state retention.windows instead),
+#    allowNonSemanticEmbeddings=true (or state config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible),
 #    and temporal.namespace, which has no default: one Temporal namespace per release.
 helm upgrade --install chemclaw deploy/helm/chemclaw -n <ns> \
   --set image.digest="sha256:<the digest from step 2>" \
   --set networkPolicy.allowAnyDestination=true \
   --set retention.unboundedGrowthAccepted=true \
+  --set allowNonSemanticEmbeddings=true \
   --set temporal.namespace=chemclaw-prod
 ```
 

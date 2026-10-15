@@ -66,6 +66,17 @@ def embedding_config_key() -> str:
     return f"{settings.embedding_provider}:{endpoint}:d{settings.embedding_dim}:{model}"
 
 
+# Version of the note-text derivation, folded into the note-side key. Bump it whenever the text a
+# fresh index would store differs from an existing row's (`kg.search.search_text` or `upsert`'s
+# normalisation); the next reindex then rewrites every row.
+_NOTE_TEXT_VERSION = "ntv3"
+
+
+def note_embedding_key() -> str:
+    """The embedding identity of a stored note vector: model configuration plus text derivation."""
+    return f"{embedding_config_key()}|{_NOTE_TEXT_VERSION}"
+
+
 @lru_cache(maxsize=8)
 def _endpoint_slot(base_url: str) -> str:
     """This endpoint's slot in the key, logged once per URL so an operator can map a digest back.
@@ -236,6 +247,17 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
                 "be attributed to the wrong text"
             )
         vectors.extend(item.embedding for item in ordered)
+    widths = {len(vector) for vector in vectors}
+    if widths != {settings.embedding_dim}:
+        # Stored under a key that says `d<embedding_dim>`, a vector of another width would be
+        # refused by the column at the first write or poison a cache entry before it; the endpoint
+        # answering for a different model than configured is the likelier cause, so say that.
+        raise ValueError(
+            f"the embedding endpoint answered with {sorted(widths)}-dimensional vectors for model "
+            f"{settings.embedding_model!r}, but embedding_dim is {settings.embedding_dim}; set "
+            "embedding_dim to the model's width (the migrator builds that column, and "
+            "`make reembed` moves the corpus), or correct the model name"
+        )
     return vectors
 
 

@@ -117,8 +117,8 @@ class LlmSettings(BaseSettings):
     answer_shape_gate_enabled: bool = True
     # `hash` is an offline feature-hash for dev/CI (token overlap, not semantic);
     # `openai_compatible` calls the gateway's `/embeddings` with `embedding_model`. `embedding_dim`
-    # must match the model and the `note_index.embedding` column (`vector(N)`); changing it is a new
-    # migration.
+    # must match the model. The migrator builds the vector column for it (`core/vector_schema.py`),
+    # and changing the model or the width re-embeds the stored corpus (`make reembed`).
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
     embedding_model: str = ""
     embedding_dim: int = Field(default=1536, gt=0)

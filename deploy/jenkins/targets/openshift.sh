@@ -113,6 +113,37 @@ retention_flags() {
     "the release states no retention posture: put retention.windows in the values file (the CHEMCLAW_RETENTION_* day windows this deployment keeps history for), or set ACCEPT_UNBOUNDED_GROWTH=true to say the durable tables may grow forever. The chart will not render without one."
 }
 
+# The embedding provider, asked the way the postures above are: the chart refuses a release that would
+# embed with the offline `hash` embedder (what an unstated `CHEMCLAW_EMBEDDING_PROVIDER` means) unless
+# it says so. Stated by the values file naming the semantic provider, or accepting `hash` outright;
+# otherwise `ACCEPT_NON_SEMANTIC_EMBEDDINGS=true` says the stand-in is what this release wants. A
+# provider written as `hash` is not a statement, so it falls through to the opt-in, like
+# `unboundedGrowthAccepted: false`.
+states_semantic_embeddings() {
+  local values_file="$1" verdict
+  [ -n "${values_file}" ] && [ -r "${values_file}" ] || return 1
+  verdict="$(awk '
+    { sub(/[[:space:]]+#.*$/, "") }
+    /^[[:space:]]*(#|$)/ { next }
+    /^[[:space:]]*CHEMCLAW_EMBEDDING_PROVIDER:[[:space:]]*["\047]?openai_compatible["\047]?[[:space:]]*$/ { print "yes"; exit }
+  ' "${values_file}")"
+  [ "${verdict}" = "yes" ]
+}
+
+embedding_flags() {
+  local values_file="$1"
+  if states_semantic_embeddings "${values_file}" \
+     || states_posture "${values_file}" allowNonSemanticEmbeddings no_list_key_applies; then
+    return 0
+  fi
+  if [ "${ACCEPT_NON_SEMANTIC_EMBEDDINGS:-false}" = "true" ]; then
+    printf -- '--set allowNonSemanticEmbeddings=true'
+    return 0
+  fi
+  echo "the release states no embedding provider: put config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible (with CHEMCLAW_EMBEDDING_MODEL and CHEMCLAW_EMBEDDING_DIM) in the values file, or set ACCEPT_NON_SEMANTIC_EMBEDDINGS=true to say the offline hash embedder is what you want. The chart will not render without one." >&2
+  return 1
+}
+
 # The third thing the chart refuses to render without, and **not** a posture: there is no permissive
 # default to accept, so `posture_flags` is the wrong shape for it and it gets its own body. The chart
 # used to ship the constant `chemclaw` against a `CHEMCLAW_TEMPORAL_ADDRESS` naming a *cluster-shared*
@@ -218,11 +249,12 @@ apply_helm() {
   # assignment propagates the substitution's status under `set -e`. And *two* substitutions in one
   # assignment would take only the last one's status, so a refused egress posture beside an accepted
   # retention posture would pass — which is the same silent-fallthrough one line up.
-  local egress retention temporal
+  local egress retention embedding temporal
   egress="$(egress_flags "${values}")"
   retention="$(retention_flags "${values}")"
+  embedding="$(embedding_flags "${values}")"
   temporal="$(temporal_flags "${values}")"
-  read -r -a extra <<<"${egress} ${retention} ${temporal}"
+  read -r -a extra <<<"${egress} ${retention} ${embedding} ${temporal}"
 
   adopt_leftover_hook_objects "${release}"
 

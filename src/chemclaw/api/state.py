@@ -673,6 +673,32 @@ class FrontDoorState:
         self._app.state.schema_current = current
 
     @property
+    def vector_width_problem(self) -> str:
+        """Why the vector columns cannot serve `embedding_dim` (`""` when they can, or unasked).
+
+        Separate from `schema_current` because the fix is different: the migration ran, but for
+        another width. Written by the readiness probe, in the same round trip as the other two.
+        """
+        problem: str = self._app.state.vector_width_problem
+        return problem
+
+    @vector_width_problem.setter
+    def vector_width_problem(self, problem: str) -> None:
+        """Store the vector-width verdict from the readiness probe."""
+        self._app.state.vector_width_problem = problem
+
+    @property
+    def embedding_corpus_mixed(self) -> bool:
+        """Whether stored vectors from more than one embedding configuration were last seen."""
+        mixed: bool = self._app.state.embedding_corpus_mixed
+        return mixed
+
+    @embedding_corpus_mixed.setter
+    def embedding_corpus_mixed(self, mixed: bool) -> None:
+        """Store the mixed-corpus verdict from the readiness probe."""
+        self._app.state.embedding_corpus_mixed = mixed
+
+    @property
     def database_probed_at(self) -> float:
         """When the database was last probed (`time.monotonic`); -inf means "never"."""
         return float(self._app.state.database_probed_at)

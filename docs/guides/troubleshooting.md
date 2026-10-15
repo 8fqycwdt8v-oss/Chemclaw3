@@ -97,7 +97,8 @@ Settings … Value error, <message>` before anything else runs.
 | `service_max_connections (<n>) is below what this process's own caps can occupy` | front door | Raise `CHEMCLAW_SERVICE_MAX_CONNECTIONS`. |
 | `harness_autonomy='plan_only' with harness_enabled=False enforces nothing` | any | Set `CHEMCLAW_HARNESS_ENABLED=true`. |
 | `budget_enabled=true with every cap at 0 (unlimited) guards nothing` | any | Set a `budget_max_*` cap or disable budgets. |
-| `embedding_dim=<n> disagrees with the note_index vector column` | any | Revert `CHEMCLAW_EMBEDDING_DIM` or change schema and setting together. |
+| `embedding_dim=<n> is wider than the 2000 dimensions pgvector can index` | any | Ask the embedding model for fewer dimensions, or move the vectors out of Postgres with `vector_store_provider`. |
+| `/readyz` 503 `vector width behind config` | any | The database has no vector column for `CHEMCLAW_EMBEDDING_DIM`: run the migration with it (`make db-migrate`, or the chart's pre-upgrade hook), then `make reembed` — runbook (vi-c). |
 | `log_level=<x> is not a level logging accepts` | any | Fix `CHEMCLAW_LOG_LEVEL`. |
 | `temporal_metrics_port=<n> is also worker_metrics_port` | workers | Give the SDK exporter its own port. |
 | `… does not cover the job it bounds` / `… does not fit the ceiling that kills the run` / `… does not fit inside the budget it reports within` | any | A timeout was raised without the ceiling above it; the message names both settings. |
@@ -126,6 +127,8 @@ dotenv file).
 | `networkPolicy: set exactly one of egressDestinations … or allowAnyDestination: true` | State the egress posture. |
 | `networkPolicy.allowAnyDestination must be a boolean, not the string …` | Unquote the boolean. |
 | `retention: set exactly one of retention.windows … or retention.unboundedGrowthAccepted: true` | State the retention posture. |
+| `embeddings: this release would embed with the hash provider …` | State `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` (with the model and its dimension), or `allowNonSemanticEmbeddings: true` if the offline stand-in is intended. |
+| `allowNonSemanticEmbeddings must be a boolean, not the string …` | Unquote the boolean. |
 | `retention.windows: <key> is not a retention setting` | Use a `CHEMCLAW_RETENTION_*_DAYS` key. |
 | `retention.windows: CHEMCLAW_RETENTION_ENABLED is derived from this block` | Remove it from the map. |
 | `retention: this release states retention windows, which bound the conversation and trace tables and not artifact_blobs` | Add `retention.artifactStore` or `retention.artifactGrowthAccepted: true`. |

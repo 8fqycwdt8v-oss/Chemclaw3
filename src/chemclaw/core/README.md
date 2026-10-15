@@ -89,6 +89,7 @@ class composed — and the cross-section startup rules enforced — in its `__in
 | `temporal_client` | the one place a Temporal client is opened |
 | `checkout` | whether a path is the git checkout this process runs from |
 | `egress`, `netguard`, `netguard_preload` (+ `netguard_preload.c`) | the LangSmith content-egress decision, and the in-process and compiled egress guards |
+| `vector_schema` | which pgvector column holds an embedding of a given width, the decoded per-row `embedding_key`, and whether a table's rows agree with the configured model (`/readyz`, `make reembed --status`) |
 | `migrate`, `grants` | apply `infra/sql/` migrations (`make db-migrate`) and reconcile the runtime principal's privileges (`make db-grants`) |
 | `job_lock` | the cluster-wide, never-awaited advisory lock a single-instance job holds for its pass, so several workers do one effective run |
 | `jsonb`, `manifest_io` | the one `jsonb` write wrapper; the one manifest reader and its rule for fields that execute |

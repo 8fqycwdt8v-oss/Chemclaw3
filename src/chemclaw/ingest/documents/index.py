@@ -13,8 +13,9 @@ deterministically.
 """
 
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -23,7 +24,7 @@ from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
 from chemclaw.core import db
-from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
+from chemclaw.core.config import MAX_VECTOR_DIM, settings
 from chemclaw.core.embeddings import embedding_config_key
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.fulltext import (
@@ -32,6 +33,7 @@ from chemclaw.core.fulltext import (
     reference_terms,
     reference_tokens,
 )
+from chemclaw.core.vector_schema import embedding_column, recorded_keys
 from chemclaw.ingest.documents.binding import DocumentShareError
 from chemclaw.ingest.documents.chunk import Chunk
 
@@ -93,6 +95,18 @@ class StaleChunk(BaseModel):
     chunking_key: str
     ordinal: int
     content: str
+
+
+@dataclass(frozen=True)
+class StaleClaim:
+    """Stale chunks one worker holds exclusively, and how it writes their new vectors.
+
+    `store` writes through the transaction that holds the claim, so the rows stay locked until the
+    claim's block commits; a worker that dies mid-batch releases them unchanged.
+    """
+
+    chunks: list[StaleChunk]
+    store: Callable[[list[ChunkRecord]], Awaitable[None]]
 
 
 class StoredDocument(BaseModel):
@@ -285,24 +299,26 @@ class DocumentIndex(Protocol):
 
 
 def require_schema_vector_width() -> None:
-    """Refuse a deployment whose `embedding_dim` cannot fit the column it would write.
+    """Refuse a deployment whose `embedding_dim` is wider than pgvector can index.
 
     Not in the config validator: a share's name is the deployment's choice, so config cannot tell
     whether one is enabled, and `chemclaw.core` may not import this package. The guard sits on the
     constructors instead, covering the first query, the first crawl and `validate_datasources
-    --construct`; it fires at first use rather than at startup.
+    --construct`; it fires at first use rather than at startup. Whether the migrator has built the
+    column for a width is the database's to say (`/readyz`, `core/vector_schema.py`).
 
     Raises:
-        DocumentShareError: `embedding_dim` disagrees with the migrated column width.
+        DocumentShareError: `embedding_dim` is wider than pgvector can index.
     """
     # Inert wherever the vectors do not live in that column: an external store may run any width.
     if settings.vector_store_provider != "pgvector":
         return
-    if settings.embedding_dim != SCHEMA_VECTOR_DIM:
+    if settings.embedding_dim > MAX_VECTOR_DIM:
         raise DocumentShareError(
-            f"embedding_dim={settings.embedding_dim} disagrees with the document_chunks vector "
-            f"column ({SCHEMA_VECTOR_DIM}, infra/sql/037_document_index.sql); pgvector would "
-            "reject every write. Change both together, or disable the share source."
+            f"embedding_dim={settings.embedding_dim} is wider than the {MAX_VECTOR_DIM} dimensions "
+            "pgvector can index, so document_chunks cannot hold it. Ask the embedding model for "
+            "fewer dimensions, move the vectors out of Postgres with vector_store_provider, or "
+            "disable the share source."
         )
 
 
@@ -633,8 +649,8 @@ class PostgresDocumentIndex:
     """Durable `DocumentIndex` over `document_files` + `document_chunks` (`infra/sql/037`).
 
     Dense search is cosine distance (`<=>`) over the HNSW index; lexical search is `ts_rank` over
-    the GIN-indexed `tsvector`. `settings.embedding_dim` must equal the `vector(N)` column;
-    `require_schema_vector_width` refuses a mismatch up front.
+    the GIN-indexed `tsvector`. Vectors live in the column for `settings.embedding_dim`
+    (`core/vector_schema.py`); `require_schema_vector_width` refuses a width pgvector cannot index.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -642,6 +658,7 @@ class PostgresDocumentIndex:
         self._require_vector_column()
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
+        column = self._vector_column()
         self._upsert_file = (
             "INSERT INTO document_files "
             "(path, source, doc_id, fingerprint, tags, modified_at, indexed_at, chunking_key) "
@@ -654,13 +671,13 @@ class PostgresDocumentIndex:
         )
         self._upsert_chunk = (
             "INSERT INTO document_chunks "
-            "(doc_id, ordinal, content, coordinate, embedding, lexeme, embedding_key, "
+            f"(doc_id, ordinal, content, coordinate, {column}, lexeme, embedding_key, "
             "chunking_key) "
             f"VALUES (%(doc)s, %(ord)s, %(content)s, %(coord)s, %(emb)s::vector({width}), "
             "to_tsvector('english', %(search)s), %(key)s, %(chunking)s) "
             "ON CONFLICT (doc_id, chunking_key, ordinal) DO UPDATE SET "
             "content = EXCLUDED.content, coordinate = EXCLUDED.coordinate, "
-            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
+            f"{column} = EXCLUDED.{column}, lexeme = EXCLUDED.lexeme, "
             "embedding_key = EXCLUDED.embedding_key"
         )
         # The previous cutting of a document this write re-chunked, deleted at the end of the same
@@ -673,7 +690,7 @@ class PostgresDocumentIndex:
         # Addressed by the full primary key so one share's re-embed cannot overwrite another share's
         # row.
         self._store_embedding = (
-            f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
+            f"UPDATE document_chunks SET {column} = %(emb)s::vector({width}), "
             "embedding_key = %(key)s "
             "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
         )
@@ -703,6 +720,17 @@ class PostgresDocumentIndex:
             "AND chunking_key = ANY(%(chunkings)s) "
             "ORDER BY doc_id, chunking_key, ordinal LIMIT %(k)s"
         )
+        # The claim: the rows `_stale` names, locked and skipped-if-locked so concurrent workers
+        # take disjoint batches. Restricted to the keys actually present rather than `IS DISTINCT
+        # FROM`, which no index serves, so the cost follows the batch and not the table. No
+        # `ORDER BY`: which stale rows go first does not matter, and an order would force a walk of
+        # the primary key through every row already done.
+        self._claim = (
+            "SELECT doc_id, chunking_key, ordinal, content FROM document_chunks "
+            "WHERE (embedding_key = ANY(%(keys)s) OR embedding_key IS NULL) "
+            "AND chunking_key = ANY(%(chunkings)s) "
+            "LIMIT %(k)s FOR UPDATE SKIP LOCKED"
+        )
         # The `> 0` floor mirrors the in-memory reference: a zero or negatively correlated chunk is
         # not a hit, and pgvector would otherwise return the top k unconditionally.
         # The `(doc_id, ordinal)` tie-break sorts the k returned rows in an outer query; put in the
@@ -713,11 +741,11 @@ class PostgresDocumentIndex:
         self._dense = (
             "SELECT doc_id, ordinal, content, coordinate, score, path FROM ("
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
-            f"1 - (c.embedding <=> %(q)s::vector({width})) AS score, {CITATION_SQL}"
+            f"1 - (c.{column} <=> %(q)s::vector({width})) AS score, {CITATION_SQL}"
             "FROM document_chunks c "
-            "WHERE c.embedding IS NOT NULL AND c.embedding_key = %(key)s "
-            f"AND 1 - (c.embedding <=> %(q)s::vector({width})) > 0 AND {_ELIGIBLE}"
-            f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
+            f"WHERE c.{column} IS NOT NULL AND c.embedding_key = %(key)s "
+            f"AND 1 - (c.{column} <=> %(q)s::vector({width})) > 0 AND {_ELIGIBLE}"
+            f"ORDER BY c.{column} <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, doc_id, ordinal"
         )
         # The boolean rule the note index runs: `chemclaw.core.fulltext.TSQUERY_TERMS` builds both
@@ -737,6 +765,13 @@ class PostgresDocumentIndex:
         A hook because the external-store subclass never writes that column.
         """
         require_schema_vector_width()
+
+    def _vector_column(self) -> str:
+        """The `document_chunks` column this index reads and writes: the live width's.
+
+        A hook because the external-store subclass writes no vector here.
+        """
+        return embedding_column(settings.embedding_dim)
 
     async def _forget_vectors(self, keys: list[tuple[str, str, int]]) -> None:
         """Told which chunk rows a re-chunk just superseded, so a subclass can drop their vectors.
@@ -857,22 +892,72 @@ class PostgresDocumentIndex:
             StaleChunk(doc_id=r[0], chunking_key=r[1], ordinal=r[2], content=r[3]) for r in rows
         ]
 
+    async def count_stale(self, key: str, chunkings: set[str]) -> int:
+        """How many chunks of a live cutting are not under `key`: what `claim_stale` has left."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM document_chunks "
+                    "WHERE embedding_key IS DISTINCT FROM %(key)s "
+                    "AND chunking_key = ANY(%(chunkings)s)",
+                    {"key": key, "chunkings": sorted(chunkings)},
+                )
+                row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
+
+    @asynccontextmanager
+    async def claim_stale(
+        self, key: str, limit: int, chunkings: set[str]
+    ) -> AsyncIterator[StaleClaim]:
+        """Hold up to `limit` stale chunks no other worker holds, until the block ends.
+
+        The rows are locked in a transaction that commits when the block exits normally and rolls
+        back when it raises, so a worker killed mid-batch changes nothing and its rows are
+        claimable again at once. The transaction spans the embedding call, bounded by `limit`.
+        """
+        async with self._connection() as conn:
+            present = await recorded_keys(conn, "document_chunks")
+            foreign = [other for other in present if other not in (key, None)]
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    self._claim, {"keys": foreign, "chunkings": sorted(chunkings), "k": limit}
+                )
+                rows = await cur.fetchall()
+
+            async def store(chunks: list[ChunkRecord]) -> None:
+                await self._write_embeddings(conn, chunks, key)
+
+            yield StaleClaim(
+                chunks=[
+                    StaleChunk(doc_id=r[0], chunking_key=r[1], ordinal=r[2], content=r[3])
+                    for r in rows
+                ],
+                store=store,
+            )
+            await conn.commit()
+
+    async def _write_embeddings(
+        self, conn: psycopg.AsyncConnection[TupleRow], chunks: list[ChunkRecord], key: str
+    ) -> None:
+        """Set each chunk's vector and key on `conn`; the caller commits."""
+        for chunk in chunks:
+            await conn.execute(
+                self._store_embedding,
+                {
+                    "emb": _vector_literal(chunk.embedding),
+                    "key": key,
+                    "doc": chunk.doc_id,
+                    "chunking": chunk.chunking_key,
+                    "ord": chunk.ordinal,
+                },
+            )
+
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace each chunk's vector and key in one transaction."""
         if not chunks:
             return
         async with self._connection() as conn:
-            for chunk in chunks:
-                await conn.execute(
-                    self._store_embedding,
-                    {
-                        "emb": _vector_literal(chunk.embedding),
-                        "key": key,
-                        "doc": chunk.doc_id,
-                        "chunking": chunk.chunking_key,
-                        "ord": chunk.ordinal,
-                    },
-                )
+            await self._write_embeddings(conn, chunks, key)
             await conn.commit()
 
     async def touch(self, source: str, paths: list[str]) -> None:
