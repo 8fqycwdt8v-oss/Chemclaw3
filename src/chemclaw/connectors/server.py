@@ -30,7 +30,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from chemclaw.connectors.caller import bind_caller, reset_caller
-from chemclaw.core import db
+from chemclaw.core import backend_rpc, db
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.call_identity import (
     HEADER_ACTOR,
@@ -429,7 +429,7 @@ def connector_app(
         the pool but is not awaited, so an unreachable database cannot delay readiness; the task is
         kept referenced and cancelled on shutdown.
         """
-        async with db.pooling(), server.session_manager.run():
+        async with db.pooling(), backend_rpc.pooling(), server.session_manager.run():
             report: asyncio.Task[None] | None = (
                 asyncio.create_task(on_start()) if on_start is not None else None
             )

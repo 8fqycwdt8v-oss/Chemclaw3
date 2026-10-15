@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp import ClientSession
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -232,6 +233,8 @@ def test_the_turn_identity_reaches_the_calculation_backend(
 
     async def _call() -> None:
         async with calc_session() as session:
+            # The default transport is MCP; this test is about that path's identity plumbing.
+            assert isinstance(session, ClientSession)
             await invoke(session, "echo", {})
 
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
