@@ -29,6 +29,7 @@ from psycopg.rows import TupleRow
 
 from chemclaw.core.config import MAX_VECTOR_DIM, settings
 from chemclaw.core.db import connect
+from chemclaw.core.deployment import read_facts, release_problem
 from chemclaw.core.logging import configure_logging, log_event
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,28 @@ async def _apply_tenancy(conn: psycopg.AsyncConnection[TupleRow]) -> None:
         )
 
 
+async def _stamp_release(conn: psycopg.AsyncConnection[TupleRow]) -> None:
+    """Record which release owns this database, or refuse a release that is not the owner.
+
+    The first release to migrate stamps its identity (`settings.deployment_id`); a later one finds
+    it. A different identity is refused here, in the hook that runs before any pod rolls, unless
+    tenancy is on and enforced and the release owns a tenant of its own. Nothing is stamped where no
+    identity is configured. A refusal rolls the whole run back, the stamp included.
+    """
+    own = settings.deployment_id
+    if not own:
+        return
+    await conn.execute(
+        "INSERT INTO deployment_id (deployment_id) VALUES (%s) ON CONFLICT (singleton) DO NOTHING",
+        (own,),
+    )
+    facts = await read_facts(conn)
+    enforced = facts.scoped_tables > 0 and facts.enforced_tables == facts.scoped_tables
+    problem = release_problem(facts, own=own, enabled=settings.tenancy_enabled, enforced=enforced)
+    if problem is not None:
+        raise MigrationError(problem)
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -324,6 +347,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
             )
         await _ensure_vector_width(conn)
         await _apply_tenancy(conn)
+        await _stamp_release(conn)
         await conn.commit()
     log_event(
         logger,

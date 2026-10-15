@@ -242,7 +242,7 @@ def test_the_verbs_the_grant_withholds_are_refused_by_the_database(
 ) -> None:
     """The verbs the grant withholds are refused by the database, attempted as the role.
 
-    `audit_events` is append-only, `schema_migrations` is the migrator's record, and
+    `audit_events` is append-only, `schema_migrations` and `deployment_id` are the migrator's, and
     `calculation_results` may not be pruned. Each statement would change nothing even if permitted,
     and the assertion is on `42501` specifically, so an unrelated error does not read as a refusal.
     """
@@ -256,6 +256,8 @@ def test_the_verbs_the_grant_withholds_are_refused_by_the_database(
         "UPDATE schema_migrations": (
             "UPDATE schema_migrations SET checksum = checksum WHERE false"
         ),
+        "INSERT deployment_id": "INSERT INTO deployment_id (deployment_id) VALUES ('probe')",
+        "UPDATE deployment_id": "UPDATE deployment_id SET deployment_id = deployment_id",
         "DELETE calculation_results": "DELETE FROM calculation_results WHERE false",
     }
     connection.autocommit = False

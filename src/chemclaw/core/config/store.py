@@ -94,6 +94,11 @@ class StoreSettings(BaseSettings):
     # The tenant a process works for when no request or activity bound one: a CLI, or a worker run
     # for one tenant. Empty, with tenancy enabled, is no fallback, so unbound work sees no rows.
     tenancy_process_tenant: str = ""
+    # This release's identity on a shared database: the chart derives it from the Helm release's
+    # namespace and name. The first release to migrate stamps it into the database, and every start
+    # compares (`core/deployment.py`); a different one is refused unless tenancy lets two releases
+    # share. Empty (a laptop, CI) stamps and checks nothing.
+    deployment_id: str = ""
     # Keep a calculation's by-products (Hessians, geometries, ensembles) for reuse; bounded by the
     # cap below.
     artifact_store_enabled: bool = True

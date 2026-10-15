@@ -21,6 +21,7 @@ from tests.tenancy_db import TenancyDatabase, enable_tenancy, tenancy_database
 _GLOBAL: dict[str, str] = {
     "schema_migrations": "the migration ledger: it describes the schema, which has no tenant",
     "tenants": "the registry that defines the tenancy",
+    "deployment_id": "the release that owns the database: a fact about the database, not a row",
     "session_turns": "the fleet's concurrent-turn ceiling counts leases across tenants",
     "session_turn_remotes": "the relay between replicas polls requests across tenants: leases",
     "session_turn_frames": "output in transit between replicas, keyed by a relay id",
@@ -66,8 +67,11 @@ async def _rows(dsn: str, sql: str) -> list[tuple[object, ...]]:
         return [tuple(row) for row in await cursor.fetchall()]
 
 
+# LangGraph's own tables are not created by a migration and are global (a thread id is reached only
+# after the session has been resolved through a scoped table); `tenancy_database` makes them so the
+# routes that delete a session have something to sweep.
 _TABLES = (
-    "SELECT c.relname FROM pg_class c WHERE c.relkind = 'r' "
+    "SELECT c.relname FROM pg_class c WHERE c.relkind = 'r' AND c.relname NOT LIKE 'checkpoint%' "
     "AND c.relnamespace = current_schema()::regnamespace ORDER BY 1"
 )
 
@@ -95,7 +99,8 @@ async def test_every_table_is_scoped_with_a_policy_or_global_for_a_stated_reason
                 database.owner_dsn,
                 "SELECT c.relname, pg_get_expr(p.polqual, p.polrelid), "
                 "pg_get_expr(p.polwithcheck, p.polrelid) FROM pg_policy p "
-                "JOIN pg_class c ON c.oid = p.polrelid WHERE p.polname = 'tenant_isolation'",
+                "JOIN pg_class c ON c.oid = p.polrelid WHERE p.polname = 'tenant_isolation' "
+                "AND c.relnamespace = current_schema()::regnamespace",
             )
         }
     assert len(tables) > 50, "the schema was not migrated; every assertion below would be vacuous"
@@ -214,7 +219,10 @@ async def test_switching_is_idempotent_and_off_is_refused_with_two_tenants() -> 
 async def test_the_migrator_applies_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     """`migrate()` enables and forces the policies when `tenancy_enabled`, else leaves them off."""
     async with tenancy_database() as database:
-        flags = "SELECT count(*) FROM pg_class WHERE relkind = 'r' AND relforcerowsecurity"
+        flags = (
+            "SELECT count(*) FROM pg_class WHERE relkind = 'r' AND relforcerowsecurity "
+            "AND relnamespace = current_schema()::regnamespace"
+        )
         assert await _rows(database.owner_dsn, flags) == [(0,)]
         monkeypatch.setattr(settings, "tenancy_enabled", True)
         await migrate(database.owner_dsn)

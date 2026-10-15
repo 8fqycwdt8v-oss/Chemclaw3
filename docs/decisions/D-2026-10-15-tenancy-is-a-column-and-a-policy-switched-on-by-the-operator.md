@@ -153,9 +153,13 @@ tenant is registered.
 release's identity (`deployment_id`, from the chart's release namespace and name). The migrate hook
 and every API and worker start compare it with their own. A different id is refused with both ids
 and the remedy, unless `tenancy_enabled` is set, the database has the policies enforced, and the
-release owns at least one tenant (`tenants.deployment_id`); a tenant has one owning release, and a
-request for a tenant another release owns is a 403. That is the check `deploy/README.md` said no
-chart guard could make, made where the database can answer it.
+release owns at least one tenant (`tenants.deployment_id`). A tenant has one owning release, and a
+request for a tenant another release owns is a 403; a tenant owned by none is served by every
+release, so sharing demands that none is left (the `default` tenant every database starts with is
+given to the release that has been serving it). A refused run in the migrate hook rolls the whole
+run back, the stamp included. Nothing is compared where no identity is configured, and a database
+that cannot be reached is readiness's to report, not a refusal. That is the check `deploy/README.md`
+said no chart guard could make, made where the database can answer it.
 
 **What it does not cover, and the guard says so.** A second tenant is refused at start while
 knowledge is deployment-wide: `kg_store=git` is one repository for everyone, so the guard demands

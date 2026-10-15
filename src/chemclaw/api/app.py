@@ -91,6 +91,7 @@ from chemclaw.connectors.health import check_connectors_at_startup, probe_connec
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import backend_rpc, bookkeeping, db
 from chemclaw.core.config import settings
+from chemclaw.core.deployment import verify_deployment
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
 from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
@@ -183,7 +184,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     get a connection disarms silently.
 
     The connector probe only informs readiness and a gauge, unless `connectors_required`, which
-    fails startup: refusing to start is the only way to keep a degraded pod out of a rollout.
+    fails startup: refusing to start is the only way to keep a degraded pod out of a rollout. So
+    does a database this release may not serve (`core/deployment.py`).
 
     On shutdown, running turns are drained first (they outlive their requests on pump tasks nobody
     else tracks), bounded by `service_turn_timeout_seconds`, which the chart's
@@ -222,6 +224,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # every verified answer. A no-op unless `verifier_enabled`.
     await require_verifier_capability()
     async with db.pooling(), backend_rpc.pooling(), connector_sessions.pooling():
+        # Before serving: a release that shares a database it does not own, or runs tenancy in a
+        # state the database contradicts, must not take traffic.
+        await verify_deployment()
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
         await warming

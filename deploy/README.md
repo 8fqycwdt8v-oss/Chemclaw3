@@ -44,7 +44,12 @@ The Jenkins pipelines in `deploy/jenkins/` do this build-push-render-apply cycle
 
 1. Create a database for this release alone. **Two releases need two databases**: dozens of tables
    carry no deployment discriminator, and one release's retention sweep would prune another's live
-   threads. No chart guard can check this.
+   threads. The database refuses the second release itself: the migrate hook stamps it with this
+   release's `CHEMCLAW_DEPLOYMENT_ID` (the chart derives `<namespace>/<release name>`, or
+   `deploymentId`), and a release with another identity is refused there, naming both and the
+   remedy, as is every later start of a front door or worker. To share one database on purpose,
+   turn tenancy on and give each release tenants of its own
+   ([runbook § Run more than one tenant](../docs/guides/runbook.md)).
 2. Create the migrator principal (it owns the schema and must be able to `CREATE EXTENSION
    vector` — the migrations issue it). That DSN is `CHEMCLAW_POSTGRES_DSN` in a single-principal
    setup.

@@ -187,7 +187,7 @@ temporal_flags() {
     printf -- '--set temporal.namespace=%s' "${TEMPORAL_NAMESPACE}"
     return 0
   fi
-  echo "the release names no Temporal namespace: put temporal.namespace in the values file, or set TEMPORAL_NAMESPACE. It has no default because it must be unique to this release - two releases sharing one namespace rewrite and delete each other's Schedules, and they need separate databases too, which no chart guard can check. The chart will not render without one." >&2
+  echo "the release names no Temporal namespace: put temporal.namespace in the values file, or set TEMPORAL_NAMESPACE. It has no default because it must be unique to this release - two releases sharing one namespace rewrite and delete each other's Schedules, and they need separate databases too, which the migrate hook enforces with a release stamp (deploymentId). The chart will not render without one." >&2
   return 1
 }
 

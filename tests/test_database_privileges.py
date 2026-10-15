@@ -51,10 +51,11 @@ _DYNAMIC: dict[str, set[str]] = {
     **{table: {"DELETE"} for table in _PRUNABLE},
 }
 
-# Written by the migrator alone: the ledger of its own work. A runtime credential that could write
-# it could mark a migration applied that never ran, so `migrate.py`'s INSERT is deliberately not
-# part of the application's matrix.
-_MIGRATOR_ONLY = {"schema_migrations"}
+# Written by the migrator alone: the ledger of its own work, and the stamp of the release that owns
+# the database. A runtime credential that could write the first could mark a migration applied that
+# never ran, and one that could write the second could make a second release look like the first;
+# `migrate.py`'s INSERT is deliberately not part of the application's matrix.
+_MIGRATOR_ONLY = {"schema_migrations", "deployment_id"}
 
 # Modules whose statements belong to an **operator**, not to the running application, and so are
 # outside the runtime role's matrix. Named by path because the scan cannot see who runs SQL.
@@ -400,10 +401,13 @@ def test_an_operator_module_exists_and_its_fingerprint_disposal_is_never_the_run
 def test_the_migration_ledger_is_never_granted_a_write_verb() -> None:
     """A role that can write the ledger can mark a migration applied that never ran.
 
-    This checks write verbs only: the blanket `GRANT SELECT` does reach the ledger, intentionally
-    (`app_privileges.sql` says so). `tests/test_runtime_ddl_privilege.py` checks the live ACL.
+    The same holds for the release stamp. This checks write verbs only: the blanket `GRANT SELECT`
+    does reach both, intentionally (`app_privileges.sql` says so).
+    `tests/test_runtime_ddl_privilege.py` checks the live ACL.
     """
-    assert "schema_migrations" not in verbs_the_grant_allows()
+    allowed = verbs_the_grant_allows()
+    for table in sorted(_MIGRATOR_ONLY):
+        assert table not in allowed, f"the runtime role is granted a write on {table}"
 
 
 def test_the_grants_are_not_numbered_migrations() -> None:

@@ -5,6 +5,10 @@ token named it: a `tenant:<id>` role for an id nobody registered is refused at t
 table is global and read-only for the runtime role; registering is an operator's act under the
 owning principal.
 
+A tenant registered for a release (`--deployment`) is served by that release alone, so two releases
+that share a database cannot answer for each other's tenants. One registered for none is served by
+any.
+
 Invariant: tenants are never removed (their rows would be orphaned), so a positive answer is cached
 for the life of the process and only an unknown id costs a query.
 """
@@ -20,7 +24,10 @@ async def is_registered(tenant: str) -> bool:
     if tenant in _KNOWN:
         return True
     async with db.connection(settings.postgres_dsn, operation="tenant_registry") as conn:
-        cursor = await conn.execute("SELECT 1 FROM tenants WHERE id = %s", (tenant,))
+        cursor = await conn.execute(
+            "SELECT 1 FROM tenants WHERE id = %s AND (deployment_id IS NULL OR deployment_id = %s)",
+            (tenant, settings.deployment_id),
+        )
         found = await cursor.fetchone() is not None
     if found:
         _KNOWN.add(tenant)
@@ -28,9 +35,12 @@ async def is_registered(tenant: str) -> bool:
 
 
 async def registered_tenants() -> list[str]:
-    """Every registered tenant, in id order: what a sweep that acts for each of them walks."""
+    """This release's registered tenants, in id order: what a sweep that acts for each walks."""
     async with db.connection(settings.postgres_dsn, operation="tenant_registry") as conn:
-        cursor = await conn.execute("SELECT id FROM tenants ORDER BY id")
+        cursor = await conn.execute(
+            "SELECT id FROM tenants WHERE deployment_id IS NULL OR deployment_id = %s ORDER BY id",
+            (settings.deployment_id,),
+        )
         return [str(row[0]) for row in await cursor.fetchall()]
 
 

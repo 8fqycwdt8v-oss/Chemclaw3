@@ -3691,6 +3691,34 @@ def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render()
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_release_identity_the_database_checks_is_derived_not_written() -> None:
+    """The database refuses a release that is not its owner, comparing `CHEMCLAW_DEPLOYMENT_ID`.
+
+    The chart derives it from the Helm release's namespace and name (unique by construction where
+    each release has a namespace of its own), lets `deploymentId` state it where one does not, and
+    refuses the key written by hand, which would render twice with the last one read.
+    """
+    derived = _render("--namespace", "site-a")
+    assert derived.returncode == 0, derived.stderr
+    assert 'CHEMCLAW_DEPLOYMENT_ID: "site-a/chemclaw"' in derived.stdout, (
+        "the release's namespace and name no longer reach the ConfigMap the pods and the migrate "
+        "hook read, so the database stamp compares nothing"
+    )
+
+    stated = _render("--set", "deploymentId=renamed/release")
+    assert stated.returncode == 0, stated.stderr
+    assert 'CHEMCLAW_DEPLOYMENT_ID: "renamed/release"' in stated.stdout
+
+    values = _values()
+    assert values["deploymentId"] == "", "the chart ships a constant identity every release shares"
+    assert "CHEMCLAW_DEPLOYMENT_ID" not in values["config"]
+
+    by_hand = _render("--set", "config.CHEMCLAW_DEPLOYMENT_ID=written-by-hand")
+    assert by_hand.returncode != 0, by_hand.stdout[:2000]
+    assert "CHEMCLAW_DEPLOYMENT_ID" in by_hand.stderr, by_hand.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
     """A quoted retention escape hatch refuses to render.
 

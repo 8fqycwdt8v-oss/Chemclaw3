@@ -19,6 +19,7 @@ from temporalio.worker import Interceptor, Worker
 from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.core import backend_rpc, db
 from chemclaw.core.config import settings
+from chemclaw.core.deployment import verify_deployment
 from chemclaw.core.executor import install_default_executor
 from chemclaw.core.logging import log_event
 from chemclaw.core.worker_http import worker_http
@@ -129,6 +130,9 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
             connector_sessions.pooling(),
             worker_http(component=component, ready=partial(worker_ready, worker)),
         ):
+            # Before the first poll: a worker on a database it does not own would run another
+            # release's workflows' activities against it.
+            await verify_deployment()
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
             # Refreshes the open-jobs gauge from the broker (`durable/job_metrics.py`). Kept alive
