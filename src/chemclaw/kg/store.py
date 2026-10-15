@@ -3,7 +3,8 @@
 `NoteStore` is the read interface to notes. Readers (`agent`, `retrieval`, `durable`, `memory`,
 `evals`) call `note_store()` rather than `kg.graph`, so the backing store is a setting
 (`kg_store`), not a property of the call site. `GitNoteStore` answers from the Markdown tree by
-delegation only. Writes are not here: `kg.record.record_note` is the one write path.
+delegation only. `kg.record.record_note` is the one write path; `NoteUnit` is the value a store
+that can write in one transaction (`kg.postgres_store`) takes, in the order `record` writes files.
 
 Reads are coroutines, so a database store can use the process's one async pool. `GitNoteStore` does
 its file and graph work in a worker thread and never blocks the event loop. `CorpusState` is the
@@ -13,14 +14,16 @@ is; a note is never read through it.
 
 import asyncio
 from collections.abc import Collection, Hashable, Sequence
+from dataclasses import dataclass
 from datetime import date
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple, Protocol, assert_never
+from typing import Literal, NamedTuple, Protocol, assert_never
 
 import networkx as nx
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg import graph as corpus
 from chemclaw.kg.note import Note, NoteError, Relation, read_note
 from chemclaw.kg.search import term_coverage
@@ -48,6 +51,89 @@ class Edge(NamedTuple):
     src: str
     dst: str
     relations: tuple[Relation, ...]
+
+
+class NoteWriteError(ChemclawError):
+    """A write the store refuses because of what it would do to the notes, not because it broke."""
+
+
+class HumanNoteProtected(NoteWriteError):
+    """An agent-authored note would replace a note a human wrote.
+
+    Record a new note that contradicts or supersedes it instead.
+    """
+
+
+class NoteRevisionConflict(NoteWriteError):
+    """The note changed since the revision the writer read: re-read it and decide again.
+
+    `expected` is the revision the writer named (0 for "must not exist yet") and `actual` the one
+    the store holds (0 when the note is absent).
+    """
+
+    def __init__(self, note_id: str, expected: int, actual: int) -> None:
+        """Name the note and the two revisions."""
+        super().__init__(
+            f"note {note_id!r} is at revision {actual}, not the {expected} this write was based "
+            "on; it was changed by someone else. Re-read it and apply the change again"
+        )
+        self.note_id = note_id
+        self.expected = expected
+        self.actual = actual
+
+
+#: Which part of a unit a note is: written before the subject so its links resolve, the subject,
+#: or a note closed because the subject replaces it.
+Role = Literal["dependency", "subject", "retirement"]
+
+
+@dataclass(frozen=True)
+class NoteUnit:
+    """One note and everything that must land with it, in the order it lands.
+
+    The order is dependencies, then the subject, then retirements, each citing the one before
+    (`kg.record`). A note id appears once, at its first role. `expected_revision` makes the
+    subject's write conditional on the revision the writer read: `None` writes whatever is there,
+    `0` requires the note to be new, `n` requires revision `n`.
+    """
+
+    subject: Note
+    dependencies: tuple[Note, ...] = ()
+    retirements: tuple[Note, ...] = ()
+    expected_revision: int | None = None
+
+    def ordered(self) -> list[tuple[Role, Note]]:
+        """The notes in write order, each id once, with the role it is written in."""
+        seen = {self.subject.id}
+        members: list[tuple[Role, Note]] = []
+        for dependency in self.dependencies:
+            if dependency.id not in seen:
+                seen.add(dependency.id)
+                members.append(("dependency", dependency))
+        members.append(("subject", self.subject))
+        for retired in self.retirements:
+            if retired.id not in seen:
+                seen.add(retired.id)
+                members.append(("retirement", retired))
+        return members
+
+
+class PutOutcome(NamedTuple):
+    """What a write did: the revision every note now holds, and which ones it just wrote.
+
+    `written` lists the ids that received a new revision, in write order. A note written with
+    identical content, a dependency that was already there and a retirement left alone are not in
+    it, so an idempotent repeat has an empty `written`.
+    """
+
+    subject: str
+    revisions: dict[str, int]
+    written: tuple[str, ...]
+
+    @property
+    def notes(self) -> int:
+        """1 when the subject received a revision, else 0: the count `record` books as recorded."""
+        return int(self.subject in self.written)
 
 
 class CorpusState(Protocol):
@@ -98,8 +184,9 @@ class NoteStore(CorpusState, Protocol):
     """The knowledge graph's notes: read by id, by relation, by neighbourhood and by search.
 
     An id the store does not define is `None` from `get` and `current_successor`, and a `KeyError`
-    from `related` and `neighborhood`, which cannot answer for it. Dangling link targets are nodes
-    in `neighborhood()` and `edges()`, and never notes.
+    from `related`, which cannot answer for it. Dangling link targets are nodes in `neighborhood()`
+    and `edges()`, and never notes: `neighborhood` of an id no note defines and no note cites is a
+    `KeyError`, and of one that is cited is the notes that cite it.
     """
 
     async def get(self, note_id: str) -> Note | None:
@@ -122,7 +209,11 @@ class NoteStore(CorpusState, Protocol):
         ...
 
     async def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
-        """Node ids within `hops` of `note_id`, following links both ways, `note_id` excluded."""
+        """Node ids within `hops` of `note_id`, following links both ways, `note_id` excluded.
+
+        Empty for `hops` below 1. The store applies no ceiling of its own; callers bound `hops`
+        (`graph_max_hops`).
+        """
         ...
 
     async def edges(self, note_id: str) -> list[Edge]:

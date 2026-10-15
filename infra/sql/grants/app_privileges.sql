@@ -146,6 +146,7 @@ BEGIN
         'plan_approvals, behaviour_proposals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'corpus_reactions, corpus_cursors, '
+        'kg_notes, '
         'tool_result_links TO %I', app_role);
 
     -- `composed_workflows` takes DELETE beside the two, and two things use it: the owner
@@ -200,7 +201,7 @@ BEGIN
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
         'experiment_protocol_status_events, pending_request_answers, experiment_arm_results, '
-        'session_exhibit_revisions TO %I',
+        'session_exhibit_revisions, kg_note_revisions TO %I',
         app_role
     );
 
@@ -224,6 +225,14 @@ BEGIN
     -- because an upload is conversation — a session delete, an erasure and the retention sweep
     -- remove it with the transcript.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_attachments TO %I', app_role);
+
+    -- The knowledge graph's notes (`128_kg_notes.sql`), written by `kg/postgres_store.py` in one
+    -- transaction per note. `kg_notes` takes INSERT and UPDATE above (a revision replaces the
+    -- current row; the history is the next table), and no DELETE: a note is corrected by a later
+    -- one, never removed. `kg_note_revisions` is INSERT-only above for the reason the protocol
+    -- revisions are: the history is the audit trail. `kg_edges` takes INSERT and DELETE and no
+    -- UPDATE: a revision deletes the note's edges and inserts the ones its new content asserts.
+    EXECUTE format('GRANT INSERT, DELETE ON kg_edges TO %I', app_role);
 
     -- A shared session's two tables (`110_shared_sessions.sql`). `session_members` takes INSERT and
     -- DELETE and no UPDATE: the owner admits and removes somebody, and a membership has nothing to

@@ -612,6 +612,27 @@ class NoteError(ChemclawError):
     """A note file could not be parsed or failed schema validation."""
 
 
+def note_from_text(text: str, origin: str) -> Note | None:
+    """Parse the text of a note file; return None if it has no frontmatter (not a note).
+
+    `origin` names where the text came from in an error. Malformed YAML (including non-string keys,
+    which surface as TypeError) or a schema violation raises `NoteError`.
+    """
+    try:
+        post = frontmatter.loads(text)
+    except (yaml.YAMLError, TypeError) as exc:
+        raise NoteError(f"{origin}: malformed frontmatter: {exc}") from exc
+    if not post.metadata:
+        return None
+    # The Markdown body is authoritative; a stray `body:` frontmatter key must not
+    # collide with the body kwarg (which would be an uncaught TypeError).
+    metadata = {key: value for key, value in post.metadata.items() if key != "body"}
+    try:
+        return Note(body=post.content, **metadata)
+    except (ValidationError, TypeError) as exc:
+        raise NoteError(f"{origin}: invalid note: {exc}") from exc
+
+
 def read_note(path: Path) -> Note | None:
     """Parse a note file; return None if it has no frontmatter (not a note).
 
@@ -623,19 +644,7 @@ def read_note(path: Path) -> Note | None:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise NoteError(f"{path}: unreadable: {exc}") from exc
-    try:
-        post = frontmatter.loads(text)
-    except (yaml.YAMLError, TypeError) as exc:
-        raise NoteError(f"{path}: malformed frontmatter: {exc}") from exc
-    if not post.metadata:
-        return None
-    # The Markdown body is authoritative; a stray `body:` frontmatter key must not
-    # collide with the body kwarg (which would be an uncaught TypeError).
-    metadata = {key: value for key, value in post.metadata.items() if key != "body"}
-    try:
-        return Note(body=post.content, **metadata)
-    except (ValidationError, TypeError) as exc:
-        raise NoteError(f"{path}: invalid note: {exc}") from exc
+    return note_from_text(text, str(path))
 
 
 def parse_note(path: Path) -> Note:
