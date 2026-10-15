@@ -17,13 +17,14 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.heartbeat import beating
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.publish import outbox
     from chemclaw.publish.driver import ResultSink, SinkUnavailableError
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
     return outcome
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def drain_result_publications() -> PublishOutcome:
     """Drain the outbox, heartbeating: this is delivery to somebody else's database.
@@ -202,7 +203,7 @@ class PublishResultsWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(drain_result_publications),
         )
 
 
@@ -229,7 +230,7 @@ class JobPublishInput(BaseModel):
     note_id: str = ""
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def publish_job_result(request: JobPublishInput) -> int:
     """Queue one finished job's composite result. Returns how many rows were written.

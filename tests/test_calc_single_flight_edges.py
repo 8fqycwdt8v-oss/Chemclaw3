@@ -16,7 +16,7 @@ from chemclaw.connectors.calc.remote import CalcBusyError, CalcToolError
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
-from chemclaw.durable.publish import _BAD_DATA_TYPES
+from chemclaw.durable.retry import _BAD_DATA_TYPES
 from chemclaw.science.calc import flight
 from chemclaw.science.calc.flight import (
     Claim,

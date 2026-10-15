@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.eln.adapter import (
         RawEntry,
         accepts_a_late_arrival_switch,
@@ -41,7 +41,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 # Module-level indirection so tests swap the production stores for in-memory ones.
 _reaction_store = default_reaction_store
@@ -127,7 +128,7 @@ def _absorb(state: ElnSyncState, summary: IngestSummary) -> None:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def plan_eln_sync() -> ElnSyncPlan:
     """Name the active ingest sources and fix the run chain's iteration bound.
@@ -228,7 +229,7 @@ class _BoundedIngest:
 # site covers a sync shorter than one interval.
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = True) -> SyncChunk:
     """Ingest a bounded chunk of entries newer than `since` from the one named ingest source.
@@ -272,14 +273,14 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def load_sync_cursor(source: str) -> datetime:
     """Return the persisted high-water cursor for `source` (epoch if it has never synced)."""
     return await load_cursor(source)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def store_sync_cursor(source: str, cursor: datetime) -> None:
     """Persist the advanced high-water cursor for `source` after a scheduled run."""
@@ -316,7 +317,7 @@ class ElnSyncWorkflow:
                 plan_eln_sync,
                 start_to_close_timeout=activity_timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(plan_eln_sync),
             )
             state = ElnSyncState(
                 max_iterations=plan.max_iterations, remaining=plan.sources, since=since
@@ -333,7 +334,7 @@ class ElnSyncWorkflow:
                         source,
                         start_to_close_timeout=activity_timeout,
                         schedule_to_start_timeout=queue_wait_timeout(),
-                        retry_policy=BAD_DATA_RETRY,
+                        retry_policy=retry_for(load_sync_cursor),
                     )
                 else:
                     state.source_since = state.since
@@ -347,7 +348,7 @@ class ElnSyncWorkflow:
                         seconds=settings.eln_sync_heartbeat_timeout_seconds
                     ),
                     # Bad data must reject-and-continue inside the sync, never retry the batch.
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(sync_eln_entries),
                 )
             except ActivityError as exc:
                 # One source's failure is not the run's: sources have separate cursors and backends,
@@ -380,7 +381,7 @@ class ElnSyncWorkflow:
                     args=[source, chunk.summary.next_cursor],
                     start_to_close_timeout=activity_timeout,
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(store_sync_cursor),
                 )
             if chunk.has_more and chunk.summary.next_cursor > state.source_since:
                 state.source_since = chunk.summary.next_cursor

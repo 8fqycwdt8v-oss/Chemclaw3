@@ -326,7 +326,7 @@ jobs:
   #
   # Each counts its cost before it starts (`science/calc/budget.py`) and refuses above
   # `calc_max_primitive_calls` with the count in the message. That refusal is a `ValueError`, which
-  # `BAD_DATA_RETRY` treats as non-retryable, so an over-budget request fails in the first second
+  # `durable/retry.py` treats as non-retryable, so an over-budget request fails in the first second
   # rather than three times over four hours.
 
   - name: refine_ensemble

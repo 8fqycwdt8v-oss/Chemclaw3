@@ -13,17 +13,18 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.results.specs import RepublishSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
     from chemclaw.publish.registry import ResultSinkError, unpublishable_reason
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
+from chemclaw.durable.publish import connector_queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 _QUEUE = bundle_queue("results")
 
 
-@durable_activity(_QUEUE)
+@durable_activity(_QUEUE, ActivityClass.COMPUTE)
 @activity.defn
 async def republish_stored_results(spec: RepublishSpec) -> dict[str, int]:
     """Walk the stored corpus and queue what has not been published. Returns the counts.
@@ -44,7 +45,7 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
 
     Refuses before scanning when this deployment publishes nowhere, since `enqueue` is then a no-op
     and the counts would look like an up-to-date corpus. `ResultSinkError` is non-retryable
-    (`durable/publish._BAD_DATA_TYPES`), so the job fails fast and the chemist reads the reason.
+    (`durable/retry._BAD_DATA_TYPES`), so the job fails fast and the chemist reads the reason.
     """
     reason = unpublishable_reason()
     if reason is not None:
@@ -96,7 +97,7 @@ class RepublishResultsWorkflow:
             # Bounds the queue wait, so a `connector-results` queue served by no pod fails promptly
             # rather than at the parent's ceiling. See `durable/publish.py`.
             schedule_to_start_timeout=connector_queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(republish_stored_results),
         )
         # Rows and records are different units, and the summary names each as what it is.
         queued = counts["calculations_queued"] + counts["jobs_queued"]

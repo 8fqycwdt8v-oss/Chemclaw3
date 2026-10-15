@@ -25,9 +25,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.temporal_client import connect
     from chemclaw.durable import pending_store
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ async def _latest_is_running(client: Any, request_id: str) -> bool:
 _PASS_BUDGET_FRACTION = 0.5
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def settle_orphaned_waits(after: pending_store.WaitingRow | None = None) -> OrphanSweep:
     """Settle every examined `waiting` row whose run the broker says is gone.
@@ -167,5 +168,5 @@ class OrphanedWaitsWorkflow:
             previous.resume_after if previous else None,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(settle_orphaned_waits),
         )

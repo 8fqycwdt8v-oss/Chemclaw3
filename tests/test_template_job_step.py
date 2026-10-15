@@ -217,8 +217,8 @@ def test_a_template_step_cannot_launch_a_wait_the_operator_never_funded(
 def test_an_unknown_job_fails_the_activity_naming_what_is_declared() -> None:
     """An unknown job fails the activity, naming what is declared.
 
-    `ConnectorError` is a `ValueError`, which `BAD_DATA_RETRY` lists as non-retryable, so it fails
-    on the first attempt.
+    `ConnectorError` is a `ValueError`, which the bad-data retry list lists as non-retryable, so it
+    fails on the first attempt.
     """
     with pytest.raises(ConnectorError) as caught:
         asyncio.run(authorize_job_step(_step("no_such_job_anywhere")))

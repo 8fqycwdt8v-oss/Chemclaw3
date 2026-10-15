@@ -46,7 +46,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.registry import durable_activity
+from chemclaw.durable.registry import ActivityClass, durable_activity
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
         reset_current_identity(identity_token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     """Resolve, validate and authorize one `job` step as its requester — outside the workflow.
@@ -266,8 +266,8 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     registry from disk, which would make replay depend on the replaying worker's bundle set; the
     activity records the answer in history. And a `ConnectorError` raised in workflow code suspends
     the run in the SDK's task-failure loop forever, while across an activity boundary it fails it.
-    Both `ConnectorError` and `AuthorizationError` are listed by name in `BAD_DATA_RETRY`
-    (`chemclaw.durable.publish`), so a bad job name or an unentitled step fails on the first
+    Both `ConnectorError` and `AuthorizationError` are listed by name in the bad-data list of
+    `durable/retry.py`, so a bad job name or an unentitled step fails on the first
     attempt with its reason.
     """
     connector, job = find_job(step.job)
@@ -292,7 +292,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
 
 
 # On the background queue, so the background worker registers it.
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def run_tool_step(step: ToolStepInput) -> Any:
     """Call one tool as the run's actor, through the same audit + authz chain a chat turn uses.
@@ -426,7 +426,7 @@ class ResumeRequest(BaseModel):
 _RESUMABLE = frozenset({"failed", "cancelled"})
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
     """The steps a previous failed or cancelled run of `request.job_id` already finished, or `{}`.
@@ -505,7 +505,7 @@ def bounded_prompt(step: AgentStepInput) -> str:
     return str(bounded)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.GOVERNED)
 @activity.defn
 async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     """Run one agent turn as the run's actor and return its answer **with its degradation**.

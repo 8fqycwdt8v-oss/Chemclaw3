@@ -2044,7 +2044,7 @@ the broker's own 2 MiB `limit.blobSize.error`. `durable/interceptor.py` raises i
 result is uploaded, on purpose: left to the broker, an oversized result either failed the workflow
 with no first-party trace or (over the 4 MiB gRPC frame) retried for ever as a `ResourceExhausted`
 "network" error, with no counter moving. The refusal is non-retryable, so it costs one attempt
-rather than `CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`.
+rather than the attempt bound of its retry class (`durable/retry.py`).
 
 The fix is almost always to bound the activity's output rather than to raise the ceiling — the
 message names the activity and the byte count. `collect_digests` is the one shipped activity whose

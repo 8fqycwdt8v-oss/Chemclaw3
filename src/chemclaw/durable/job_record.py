@@ -19,7 +19,7 @@ from temporalio import activity
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.durable.registry import durable_activity
+from chemclaw.durable.registry import ActivityClass, durable_activity
 from chemclaw.kg.note import Note
 
 logger = logging.getLogger(__name__)
@@ -259,14 +259,14 @@ async def search_job_records(
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def record_job(record: JobRecord) -> None:
     """Persist one finished job's record through the configured sink, and publish what it consumed.
 
     On the light background queue: one small write after the heavy work is done. Metrics are booked
     in the activity (a workflow body may replay) and after the write (the activity retries under
-    `BAD_DATA_RETRY`), so they mean "a run was recorded". A lost completion report can still
+    the `IO` class), so they mean "a run was recorded". A lost completion report can still
     redeliver a committed write, so the counters read "at least once each"; the upsert on `job_id`
     keeps the row single.
     """

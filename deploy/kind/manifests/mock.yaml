@@ -11,11 +11,13 @@
 #
 # The auth mode's environment (MOCK_ENTRA_*, and MOCK_SSL_* in oidc-mock) arrives through the
 # `chemclaw-mock-auth` ConfigMap `up.sh` writes per mode, so one manifest serves both. In oidc-mock
-# `mock-eln` serves https (MSAL.js accepts only an https authority) with the cluster CA's
-# `mock-eln-tls`, and `mock-eln-public` is the browser's way to it: NodePort 30443, which
-# kind-config.yaml maps to 127.0.0.1:18443 — the authority the UI hands the browser and the issuer
-# every token carries. The image's own `start.sh` is the entrypoint, because it is what turns
-# MOCK_SSL_* into uvicorn's TLS flags.
+# `mock-eln` serves https with the cluster CA's `mock-eln-tls`, which names `tenant.localhost`. The
+# tenant has one address for everyone, because the issuer every token carries is that address as a
+# string and the UI's BFF discovers it: the browser reaches `https://tenant.localhost:18443` through
+# `mock-eln-public` (NodePort 30443, mapped by kind-config.yaml), and the UI pod through
+# `mock-tenant`, whose fixed ClusterIP manifests/ui.yaml `hostAliases` names (inside the kind
+# default service range, 10.96.0.0/16, and its static band). The image's own `start.sh` is the
+# entrypoint, because it is what turns MOCK_SSL_* into uvicorn's TLS flags.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -40,6 +42,22 @@ spec:
   ports:
     - name: http
       port: 8090
+      targetPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-tenant
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-eln
+spec:
+  clusterIP: 10.96.0.200
+  selector:
+    app.kubernetes.io/name: mock-eln
+  ports:
+    - name: https
+      port: 18443
       targetPort: 8090
 ---
 apiVersion: v1

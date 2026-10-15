@@ -10,6 +10,15 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
+def backoff_seconds(retries: int, initial: float, longest: float) -> float:
+    """The pauses a retry policy spends between `retries + 1` attempts, doubling to a cap.
+
+    Pure arithmetic over the settings that shape a policy (`durable/retry.py`), so a ceiling that
+    must contain every attempt can be checked where it is configured.
+    """
+    return sum(min(initial * 2.0**step, longest) for step in range(retries))
+
+
 class TemporalSettings(BaseSettings):
     """Temporal — durable execution of long scientific jobs (plan Phase 1).
 
@@ -53,14 +62,28 @@ class TemporalSettings(BaseSettings):
     # so a killed run restarts from page one.
     schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
 
-    # Retry bound under `workflows.publish.BAD_DATA_RETRY`: bad data is non-retryable by type; this
-    # caps transient retries so an unclassified deterministic failure gives up.
+    # Attempts under the retry classes that wait on something slow: `COMPUTE`, `REMOTE` and `CALC`,
+    # and the restarts of a fan-out child and of the hypothesis calculation child
+    # (`durable/retry.py::child_workflow_retry`). Bad data is non-retryable by type; this caps
+    # transient retries so an unclassified deterministic failure gives up, not pinning a worker.
     activity_max_attempts: int = Field(default=5, ge=1)
 
-    # Retries of a template's agent step (`publish.agent_step_retry`); 1 = none. A retry replays the
-    # whole turn and re-runs its side-effecting tools, while the provider SDK already retries a 503
-    # in-process (`llm_max_retries`). A long outage therefore fails the step; raise this only
-    # knowing what each attempt may duplicate.
+    # The `IO` class: short Postgres and in-process work, where a fault clears in seconds. Many
+    # attempts at a short, capped spacing: 1, 2, 4, 8, 16, 30, 30 s between eight attempts rides out
+    # a failover without waiting out a calculation.
+    io_retry_max_attempts: int = Field(default=8, ge=1)
+    io_retry_initial_seconds: float = Field(default=1.0, gt=0)
+    io_retry_max_interval_seconds: float = Field(default=30.0, gt=0)
+
+    # The first and longest pause between attempts of `COMPUTE` and `REMOTE` work, which repeats
+    # something slow or leans on a dependency that may be down: 10, 20, 40, 80 s between five.
+    slow_retry_initial_seconds: float = Field(default=10.0, gt=0)
+    slow_retry_max_interval_seconds: float = Field(default=300.0, gt=0)
+
+    # Attempts of a `GOVERNED` activity (`durable/retry.py`): a template's agent step or a
+    # hypothesis check; 1 = none. A retry replays the whole turn and re-runs its side-effecting
+    # tools, while the provider SDK already retries a 503 in-process (`llm_max_retries`). A long
+    # outage therefore fails the step; raise this only knowing what each attempt may duplicate.
     agent_step_max_attempts: int = Field(default=1, ge=1)
 
     # Concurrent activities per worker process. At most the worker's Postgres pool width
