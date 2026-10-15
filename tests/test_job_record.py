@@ -295,7 +295,7 @@ def test_a_run_with_no_durable_record_is_not_counted_as_compute(
 ) -> None:
     """A run with no durable record is not counted as compute.
 
-    `record_job` retries under `BAD_DATA_RETRY`, so an increment before the awaited write would book
+    `record_job` retries under the `IO` class, so an increment before the awaited write would book
     once per attempt, counting cluster time for runs with no row. Driven once per attempt, as
     Temporal would.
     """

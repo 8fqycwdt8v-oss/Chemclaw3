@@ -27,7 +27,7 @@ class AuthorizationError(Exception):
     Deliberately not a `ChemclawError`: that means "invalid input", and the same call succeeds for
     another user. It also keeps `surface_domain_errors` (which answers `"Error: ..."`) from
     swallowing it before `surface_authorization_denials` answers `"Refused: ..."`. Registered by
-    name as non-retryable in `durable.publish._BAD_DATA_TYPES`, since a refusal never changes on
+    name as non-retryable in `durable.retry._BAD_DATA_TYPES`, since a refusal never changes on
     retry.
     """
 

@@ -24,7 +24,6 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity, workflow
-from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -39,7 +38,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
     from chemclaw.durable.governed_launch import audited_launch
     from chemclaw.durable.job_record import JobRecord, record_job
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.durable.template_job import TemplateRunInput, TemplateRunResult
     from chemclaw.hypotheses.dispatch import SWEEPABLE_FIELDS, Dispatch
     from chemclaw.hypotheses.models import (
@@ -59,12 +58,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.manifest import Template
 
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
     light_write_queue_wait_timeout,
     publish_note,
     publish_note_best_effort,
     queue_wait_timeout,
 )
+from chemclaw.durable.retry import child_workflow_once, child_workflow_retry, retry_for
 
 # How many evidence chunks ride into one prompt. Small on purpose: a comparison prompt carries two
 # hypotheses' evidence, so this is doubled there, and the budget that matters is the endpoint's.
@@ -271,7 +270,7 @@ def _describe(hypothesis: Hypothesis) -> str:
     return "\n".join(parts)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def resolve_field_limits() -> _FieldLimits:
     """Read the field-size settings once, in an activity, so the workflow's shape is in history."""
@@ -300,7 +299,7 @@ _DRAFT_ANGLES = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def draft_angles(request: TournamentRequest, wanted: int = 4) -> _AngleSet:
     """Ask for the framings worth taking on this question, one per generator."""
@@ -317,7 +316,7 @@ async def draft_angles(request: TournamentRequest, wanted: int = 4) -> _AngleSet
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def gather_hypothesis_evidence(
     query: str, hypothesis_id: str = "", requested_by: str = "", correlation_id: str = ""
@@ -368,7 +367,7 @@ _GENERATE_HYPOTHESES = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def generate_hypotheses(request: _GenerateRequest) -> _HypothesisBatch:
     """Produce candidate explanations from one angle, each with a refutation condition."""
@@ -406,7 +405,7 @@ _CRITIQUE_HYPOTHESIS = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def critique_hypothesis(request: _CritiqueRequest) -> _ObjectionBatch:
     """Raise stated objections against one hypothesis. It cannot remove anything.
@@ -448,7 +447,7 @@ _COMPARE_HYPOTHESES = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def compare_hypotheses(request: _ComparisonRequest) -> _ComparisonVerdict:
     """Judge which of two hypotheses the evidence better supports."""
@@ -555,7 +554,7 @@ _DERIVE_CHECK = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
     """Name the cheapest observation that would separate this hypothesis from its rivals.
@@ -579,7 +578,7 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn
 async def record_hypothesis_proposal(
     body: str,
@@ -607,7 +606,7 @@ async def record_hypothesis_proposal(
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn
 async def record_hypothesis_field(
     body: str,
@@ -632,7 +631,7 @@ async def record_hypothesis_field(
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.GOVERNED)
 @activity.defn
 async def run_computable_check(
     check: DiscriminatingCheck,
@@ -789,7 +788,7 @@ class _GroundedTemplate(BaseModel):
         return bool(self.refusal_code)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def ground_check_template(
     check: DiscriminatingCheck,
@@ -937,7 +936,7 @@ class _GroundedJob(BaseModel):
         return bool(self.refusal_code)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def ground_check_job(
     check: DiscriminatingCheck,
@@ -1170,7 +1169,7 @@ _READ_CHECK_RESULT = ModelProse(
 )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def read_check_result(
     check: DiscriminatingCheck, result: str, requested_by: str = "", correlation_id: str = ""
@@ -1203,7 +1202,7 @@ async def read_check_result(
         reset_current_identity(token)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def fit_ratings(hypothesis_ids: list[str], judgements: list[_WireJudgement]) -> _RatingReport:
     """Fit the ratings in an activity rather than in workflow code.
@@ -1258,7 +1257,7 @@ class HypothesisTournamentWorkflow:
             resolve_field_limits,
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(resolve_field_limits),
         )
 
         angles = await self._angles(request, limits)
@@ -1287,7 +1286,7 @@ class HypothesisTournamentWorkflow:
             args=[[h.id for h in field], judgements],
             start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(fit_ratings),
         )
         checks = await self._checks(request, field, evidence)
         outcomes = await self._settle(
@@ -1338,7 +1337,7 @@ class HypothesisTournamentWorkflow:
                 args=[request, limits.angles],
                 start_to_close_timeout=timedelta(seconds=settings.hypothesis_call_timeout_seconds),
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(draft_angles),
             )
         except ActivityError:
             workflow.logger.warning("angle drafting failed; generating from one unframed angle")
@@ -1360,7 +1359,7 @@ class HypothesisTournamentWorkflow:
                     seconds=settings.hypothesis_evidence_timeout_seconds
                 ),
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(gather_hypothesis_evidence),
             )
         except ActivityError:
             workflow.logger.warning(
@@ -1401,7 +1400,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(generate_hypotheses),
                 )
                 for angle in angles
             ),
@@ -1453,7 +1452,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(critique_hypothesis),
                 )
                 for hypothesis in field
             ),
@@ -1590,7 +1589,7 @@ class HypothesisTournamentWorkflow:
             ),
             start_to_close_timeout=timedelta(seconds=settings.hypothesis_call_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(compare_hypotheses),
         )
         if verdict.better == "tie":
             return pair[0], 0.5, False
@@ -1621,7 +1620,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(derive_check),
                 )
                 for hypothesis in field
             ),
@@ -1728,7 +1727,7 @@ class HypothesisTournamentWorkflow:
                     schedule_to_start_timeout=queue_wait_timeout(),
                     # One attempt: in-process failures are already refusals, and a retry would
                     # re-invoke the governed tool and write another audit row.
-                    retry_policy=RetryPolicy(maximum_attempts=1),
+                    retry_policy=retry_for(run_computable_check),
                 )
                 for check in computable
             ),
@@ -1775,7 +1774,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(read_check_result),
                 )
                 for check, outcome in ran
             ),
@@ -1831,7 +1830,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_evidence_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(ground_check_job),
                 )
                 for check in allowed
             ),
@@ -1874,7 +1873,7 @@ class HypothesisTournamentWorkflow:
                     ),
                     id=f"{workflow.info().workflow_id}-calc-{check.hypothesis_id}",
                     task_queue=plan.task_queue,
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=child_workflow_retry(),
                     result_type=ConnectorJobResult,
                 )
                 for check, plan in launches
@@ -1942,7 +1941,7 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_evidence_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(ground_check_template),
                 )
                 for check in checks
             ),
@@ -1981,8 +1980,9 @@ class HypothesisTournamentWorkflow:
                     # The ceiling `start_template_run` passes and `unrunnable_reason` gated on; also
                     # the only bound on an enumeration's fan-out.
                     execution_timeout=timedelta(seconds=plan.run_timeout_seconds),
-                    # No retry policy, matching `start_template_run`: a retry would re-run the whole
+                    # One attempt, matching `start_template_run`: a retry would re-run the whole
                     # procedure, including an uncached metered model turn.
+                    retry_policy=child_workflow_once(),
                     result_type=TemplateRunResult,
                 )
                 for check, plan, definition in launches
@@ -2121,7 +2121,7 @@ class HypothesisTournamentWorkflow:
                 task_queue=settings.background_task_queue,
                 start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
                 schedule_to_start_timeout=light_write_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(record_job),
             )
         except ActivityError:
             workflow.logger.warning(

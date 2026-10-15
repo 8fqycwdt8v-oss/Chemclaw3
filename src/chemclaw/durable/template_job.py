@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import workflow
-from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+from temporalio.common import WorkflowIDReusePolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -47,12 +47,11 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.durable.publish import (
-    BAD_DATA_RETRY,
-    agent_step_retry,
     light_write_queue_wait_timeout,
     queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
+from chemclaw.durable.retry import child_workflow_once, retry_for
 
 
 class TemplateRunInput(BaseModel):
@@ -107,7 +106,7 @@ class _StepFailed(Exception):
 #
 # `failure_exception_types=[Exception]` so the sequencer's own plain exceptions (unknown step kind,
 # unresolved reference) fail the run instead of suspending it in the SDK's endless task-failure
-# retry loop. Retry classification at activity boundaries is `BAD_DATA_RETRY`'s job.
+# retry loop. Retry classification at activity boundaries is `durable/retry.py`'s job.
 #
 # The family a template run occupies in `job_records.connector`, which `find_past_jobs` filters on.
 # A literal, because it is stored in rows; changing it would orphan them.
@@ -375,7 +374,7 @@ class TemplateWorkflow:
                 # since starting over is correct (`tests/test_activity_queue_bound.py` requires a
                 # bound).
                 schedule_to_start_timeout=light_write_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(completed_steps),
             ),
         )
 
@@ -397,7 +396,7 @@ class TemplateWorkflow:
                 # `connector_job._record_run` and `durable/notify.py` use: a total schedule-to-close
                 # would be spent on a busy shared queue and cap all retries together.
                 schedule_to_start_timeout=light_write_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(record_job),
             )
         except Exception:
             workflow.logger.warning(
@@ -512,12 +511,12 @@ class TemplateWorkflow:
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(run_tool_step),
             )
         if isinstance(step, AgentStep):
-            # Not on `BAD_DATA_RETRY`: an activity has no checkpointer, so a retried agent step
+            # A `GOVERNED` activity: an activity has no checkpointer, so a retried agent step
             # re-runs the whole turn and repeats every side effect. The SDK's own `llm_max_retries`
-            # absorbs blips; see `publish.agent_step_retry`.
+            # absorbs blips; see `agent_step_max_attempts`.
             return await workflow.execute_activity(
                 run_agent_step,
                 AgentStepInput(
@@ -536,7 +535,7 @@ class TemplateWorkflow:
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
-                retry_policy=agent_step_retry(),
+                retry_policy=retry_for(run_agent_step),
             )
         if isinstance(step, JobStep):
             return await self._run_job_step(step, scope, identity, timeout)
@@ -567,7 +566,7 @@ class TemplateWorkflow:
                 identity=identity,
             ),
             start_to_close_timeout=timeout,
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(authorize_job_step),
         )
         # Addressed by type name, so the child's return is untyped at the call site; `result_type`
         # is what actually decodes it into a `ConnectorJobResult`.
@@ -609,10 +608,10 @@ class TemplateWorkflow:
                 # collide on an id, which is a template-authoring bug worth failing loudly on.
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 # One attempt, as in `ConnectorJobWorkflow._run_child`: at a child-workflow boundary
-                # the outermost failure is a child failure, so `BAD_DATA_RETRY` classifies nothing
+                # the outermost failure is a child failure, so the bad-data list classifies nothing
                 # and would rerun the whole job up to five times. The child's own activities carry
-                # `BAD_DATA_RETRY`, where classification works.
-                retry_policy=RetryPolicy(maximum_attempts=1),
+                # their retry class, where classification works.
+                retry_policy=child_workflow_once(),
                 # Bounded by the wrapper's ceiling, which must exceed the child's: an execution
                 # timeout is not delivered to workflow code, so if the wrapper expired first there
                 # would be no push-back and no record. See `wrapper_execution_timeout`.

@@ -38,7 +38,7 @@ _WHOLE = re.compile(f"^{_REFERENCE.pattern}$")
 class UnresolvedReference(ChemclawError):
     """A template referenced an input or step result that is not available.
 
-    Registered by class name in `chemclaw.durable.publish._BAD_DATA_TYPES`, because Temporal matches
+    Registered by class name in `chemclaw.durable.retry._BAD_DATA_TYPES`, because Temporal matches
     non-retryable error types by exact name; it must fail fast rather than retry.
     """
 

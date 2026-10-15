@@ -24,7 +24,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.kg.conflicts import conflict_index
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
@@ -36,7 +36,8 @@ from chemclaw.durable.deliver_message import (
     deliver_message_activity,
 )
 from chemclaw.durable.notify import notify_session_best_effort
-from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class DigestItem(BaseModel):
     headlines: dict[str, str] = Field(default_factory=dict)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def collect_digests() -> list[DigestItem]:
     """Find, per subscription, the notes matching it that appeared since its watermark.
@@ -206,7 +207,7 @@ def _is_new(note: Note, subscription: Subscription, arrived: date | None = None)
     return note.id not in subscription.last_seen_note_ids
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
     """Advance a subscription's watermark and record what it delivered, once delivery succeeded."""
@@ -224,7 +225,7 @@ class DeliveryInput(BaseModel):
     note_ids: list[str] = Field(default_factory=list)
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.REMOTE)
 @activity.defn
 async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
     """Deprecated: here only so a run opened on the previous release can replay.
@@ -259,7 +260,7 @@ class DigestWorkflow:
             collect_digests,
             start_to_close_timeout=timeout,
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(collect_digests),
         )
         delivered = 0
         for item in digests:
@@ -284,7 +285,7 @@ class DigestWorkflow:
                 args=[item.subscription_id, item.note_ids],
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                retry_policy=retry_for(acknowledge_digest),
             )
             # Outbound delivery runs strictly after the acknowledgement and does not affect it: the
             # mailbox is the durable handover, and a channel outage must neither block the watermark
@@ -307,7 +308,7 @@ class DigestWorkflow:
                     DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
                     start_to_close_timeout=timeout,
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    retry_policy=retry_for(deliver_digest_activity),
                 )
             delivered += 1
         return delivered

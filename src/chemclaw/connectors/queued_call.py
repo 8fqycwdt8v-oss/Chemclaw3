@@ -6,7 +6,7 @@ one is free, so a burst waits first-come-first-served instead of being refused.
 
 Three outcomes: any server answer (a domain refusal included) is the result and is returned as
 sent; a full server raises the retryable `ConnectorAtCapacity`
-(`durable.publish.queued_tool_retry`); any other fault is retried
+(`durable.retry`'s `QUEUED_TOOL` class); any other fault is retried
 `settings.queued_tool_fault_attempts` times and then failed, so an outage reaches the chemist
 promptly.
 """
@@ -29,6 +29,7 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.mcp_session import at_capacity, text_of
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.registry import ActivityClass, activity_in_class
 
 #: The `ApplicationError.type` of a full server — retryable, and the only fault that is retried
 #: until the call's own deadline.
@@ -77,6 +78,7 @@ def _acting_for(actor: str, correlation_id: str, session_id: str) -> Iterator[No
             reset_current_identity(identity)
 
 
+@activity_in_class(ActivityClass.QUEUED_TOOL)
 @activity.defn
 async def call_queued_tool(
     call: QueuedToolCall, actor: str = "", correlation_id: str = "", session_id: str = ""

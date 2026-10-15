@@ -50,7 +50,7 @@ from chemclaw.core.config.retrieval import (
 from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
-from chemclaw.core.config.temporal import TemporalSettings
+from chemclaw.core.config.temporal import TemporalSettings, backoff_seconds
 from chemclaw.core.egress import pin_langsmith_egress
 from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 from chemclaw.core.netguard_preload import publish_state as publish_preload_state
@@ -711,6 +711,50 @@ class Settings(
         return self
 
     @model_validator(mode="after")
+    def _the_fan_out_ceiling_covers_the_retries_of_the_section_it_bounds(self) -> Self:
+        """The retries of the longest fan-out activity, back to back, fit the child's ceiling.
+
+        The rule above counts one attempt. A report section is retried under `REMOTE` and a note
+        write under `NOTE_WRITE` (`durable/retry.py`), so a section that fails every attempt spends
+        `activity_max_attempts` budgets plus the backoff between them, and a child past its ceiling
+        dies as an execution timeout no workflow code sees. This counts the retries alone, not on
+        top of a full queue wait, which is derived from what the one-attempt rule leaves.
+        """
+        windows = (
+            (
+                self.activity_max_attempts * self.report_section_timeout_seconds
+                + backoff_seconds(
+                    self.activity_max_attempts - 1,
+                    self.slow_retry_initial_seconds,
+                    self.slow_retry_max_interval_seconds,
+                ),
+                "report_section_timeout_seconds",
+                "activity_max_attempts",
+            ),
+            (
+                self.note_write_max_attempts * self.note_write_timeout_seconds
+                + backoff_seconds(
+                    self.note_write_max_attempts - 1,
+                    self.io_retry_initial_seconds,
+                    self.io_retry_max_interval_seconds,
+                ),
+                "note_write_timeout_seconds",
+                "note_write_max_attempts",
+            ),
+        )
+        window, budget, attempts = max(windows)
+        needed = window + self.activity_timeout_seconds
+        if self.fan_out_child_timeout_seconds <= needed:
+            raise ValueError(
+                f"fan_out_child_timeout_seconds={self.fan_out_child_timeout_seconds} does not "
+                f"cover the retries of the activity it bounds: {attempts} attempts at {budget} and "
+                f"the backoff between them take {window}s, and the child's own overhead up to "
+                f"{self.activity_timeout_seconds}s more. Raise fan_out_child_timeout_seconds above "
+                f"{needed}, or lower {budget} or {attempts}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _a_bounded_run_fits_the_ceiling_that_kills_it(self) -> Self:
         """A drain that bounds its own run must be able to finish one inside `run_timeout`.
 
@@ -811,7 +855,7 @@ class Settings(
         It guarantees one full-length attempt, never two: `connector_queue_wait_timeout` is derived
         from the same ceiling, so a worst-case attempt (wait plus work) always consumes nearly all
         of it. Retries remain spendable by attempts that fail quickly, which is what
-        `BAD_DATA_RETRY`'s transient failures do. On the composed class because the ceiling and the
+        the retry classes' transient failures do. On the composed class because the ceiling and the
         budgets live in different sections.
         """
         # The max over every activity budget a bundle child can spend, from
@@ -879,6 +923,24 @@ class Settings(
                 "ceiling — shortening the client bound alone only abandons work the server "
                 "finishes anyway."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _a_retry_never_starts_longer_than_it_is_allowed_to_wait(self) -> Self:
+        """The first retry interval of a class may not exceed that class's longest.
+
+        Temporal refuses a policy whose `initial_interval` exceeds its `maximum_interval`, and from
+        inside a workflow that refusal is a failed workflow task, retried without end.
+        """
+        for first, longest in (
+            ("io_retry_initial_seconds", "io_retry_max_interval_seconds"),
+            ("slow_retry_initial_seconds", "slow_retry_max_interval_seconds"),
+        ):
+            if getattr(self, first) > getattr(self, longest):
+                raise ValueError(
+                    f"{first}={getattr(self, first)} exceeds {longest}={getattr(self, longest)}: "
+                    f"raise {longest} or lower {first}."
+                )
         return self
 
 

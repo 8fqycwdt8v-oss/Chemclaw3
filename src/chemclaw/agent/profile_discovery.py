@@ -24,7 +24,7 @@ class ProfileError(ChemclawError):
     """A profile file is malformed, or two of them claim the same name.
 
     A `ChemclawError` (a `ValueError`) so entry points catch misconfiguration uniformly; also listed
-    by name in `chemclaw.durable.publish._BAD_DATA_TYPES`, since Temporal matches by exact name.
+    by name in `chemclaw.durable.retry._BAD_DATA_TYPES`, since Temporal matches by exact name.
     """
 
 

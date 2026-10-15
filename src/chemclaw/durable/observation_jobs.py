@@ -15,7 +15,7 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
-    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.note import Note
@@ -34,7 +34,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.memory.supersede import retire_note
 
 from chemclaw.durable.memory_jobs import read_corpus
-from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, queue_wait_timeout
+from chemclaw.durable.publish import queue_wait_timeout
+from chemclaw.durable.retry import retry_for
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class MiningReport(BaseModel):
     complete: bool
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.COMPUTE)
 @activity.defn
 async def mine_observations_activity() -> MiningReport:
     """Run both miners over the merged corpus and upsert what they found. Returns the count.
@@ -85,7 +86,7 @@ async def mine_observations_activity() -> MiningReport:
     )
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.IO)
 @activity.defn
 async def retire_stale_observations_activity() -> int:
     """Retire open observations the corpus has stopped supporting. Returns how many.
@@ -98,7 +99,7 @@ async def retire_stale_observations_activity() -> int:
     return retired
 
 
-@durable_activity("background")
+@durable_activity("background", ActivityClass.NOTE_WRITE)
 @activity.defn
 async def promote_observations_activity() -> list[str]:
     """Record one `playbook` note per observation that has crossed both thresholds.
@@ -198,7 +199,7 @@ class ObservationSynthesisWorkflow:
             mine_observations_activity,
             start_to_close_timeout=budget,
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(mine_observations_activity),
         )
         if report.corpus_reactions == 0 or not report.complete:
             # A pass that saw no or a partial corpus refreshed nothing, so retiring on it would
@@ -214,7 +215,7 @@ class ObservationSynthesisWorkflow:
             retire_stale_observations_activity,
             start_to_close_timeout=budget,
             schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
+            retry_policy=retry_for(retire_stale_observations_activity),
         )
 
 
@@ -237,6 +238,6 @@ class ObservationPromotionWorkflow:
                 promote_observations_activity,
                 start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
                 schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=note_publish_retry(),
+                retry_policy=retry_for(promote_observations_activity),
             )
         )
