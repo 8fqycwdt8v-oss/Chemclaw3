@@ -24,6 +24,15 @@ Secrets this release reads (the chart creates none of them):
 {{- if .Values.secrets.temporalTls.enabled }}
   {{ .Values.secrets.temporalTls.secretName }}: tls.crt, tls.key, ca.crt
 {{- end }}
+{{- if .Values.postgres.cluster.enabled }}
+
+POSTGRES: this release rendered a CloudNativePG Cluster "{{ include "chemclaw.pgClusterName" . }}" with WAL archiving to
+{{ .Values.postgres.cluster.backup.destinationPath }} and a ScheduledBackup. The chart cannot read Secrets, so the DSNs stay yours to write:
+CHEMCLAW_POSTGRES_DSN names {{ include "chemclaw.pgClusterName" . }}-rw (sslmode=verify-full, the operator's CA), and networkPolicy.egressDestinations
+needs a peer for pods labelled cnpg.io/cluster={{ include "chemclaw.pgClusterName" . }}. Declared targets: RPO {{ .Values.postgres.cluster.targets.rpoSeconds }} s, RTO {{ .Values.postgres.cluster.targets.rtoSeconds }} s.
+Nothing is recoverable until the first Backup is "completed", and a backup nobody has restored is a guess:
+run `make restore-drill`, then rehearse a restore into a scratch namespace (docs/guides/runbook.md § "Backup, restore and PITR").
+{{- end }}
 {{- if not (get .Values.config "CHEMCLAW_ENTRA_PRIVILEGED_ROLES") }}
 
 WARNING: config.CHEMCLAW_ENTRA_PRIVILEGED_ROLES is empty, so every expensive job (conformer

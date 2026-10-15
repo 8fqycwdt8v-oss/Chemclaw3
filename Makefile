@@ -56,7 +56,7 @@ SHELL := bash
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe live-replicas \
-  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval
+  retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval restore-drill
 
 help:  ## List every target, grouped by section.
 	@awk 'BEGIN {FS = ":.*?## "} /^##@ / {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
@@ -179,7 +179,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true --set postgres.cluster.enabled=true --set postgres.cluster.imageName=registry.example/pgvector:16 --set postgres.cluster.backup.destinationPath=s3://chemclaw-backups/prod --set postgres.cluster.targets.rpoSeconds=900 --set postgres.cluster.targets.rtoSeconds=14400 --set postgres.cluster.temporalDatabases.enabled=true --set postgres.cluster.temporalDatabases.passwordSecret=temporal-db"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -431,6 +431,11 @@ phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts>
 	uv run python -m chemclaw.cli.phoenix_publish $(DIR) $(if $(NAME),--name $(NAME),)
 
 ##@ Tools
+
+restore-drill:  ## Back up a throwaway Postgres, restore it to a marked instant, verify (needs Docker; JSON report on stdout, ARGS=--no-temporal to skip Temporal).
+	@# Own containers, network and volumes under a per-run label, all removed on every exit path;
+	@# `ARGS=--prune` removes what a killed run left. Exit 1 = a check failed, 2 = it could not run.
+	@uv run python -m chemclaw.cli.restore_drill $(ARGS)
 
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }

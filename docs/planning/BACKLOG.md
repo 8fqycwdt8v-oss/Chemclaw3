@@ -37,6 +37,12 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
 - [ ] **The turn relay polls Postgres 8 times a second per held turn and per remote watcher** [L] — measured (two processes, defaults): idle holder 0.4 → 8.3 xact/s, +8.0 per remote watcher; remote attach 0.35 s vs 0.05 s local, remote Stop 0.32 s vs 0.07 s;
   a payload-free `LISTEN` wake-up before the same rows needs one session-mode connection per replica (`science/calc/flight.py::_Listener`, the `tests/test_db.py` allow-list, `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`); then `api/turn_relay.py::TurnRelay.run`, `agent/session_queue.py` can poll rarely.
+- [ ] **No alert fires on a stopped WAL archive or a missing base backup** [M] — a failing archiver fills the WAL volume and stops the database; add rules on the operator's archiver/backup metrics with runbook sections;
+  `deploy/helm/chemclaw/templates/prometheusrule.yaml::ChemclawDatabaseUnavailable`, `docs/guides/runbook.md` § Backup, restore and PITR.
+- [ ] **An erasure is not recorded where a restore can find it** [M] — "erasure applies on restore" needs the `make user-erase` runs since the backup, kept outside the database; the command keeps none (the runbook asks the operator to log them);
+  `src/chemclaw/cli/erase_actor.py::main`.
+- [ ] **The drill's knowledge arm is written against the draft `kg_*` schema** [S] — when W4 lands, confirm the fixture columns and point `kg-validate` at the Postgres store (W4.10); until then the `kg_tables` check is a named skip;
+  `src/chemclaw/cli/restore_drill_db.py::load_knowledge_rows`, `src/chemclaw/cli/restore_drill.py::kg_checks`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised
@@ -105,7 +111,9 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A chart for `Chemclaw3_ui` and the `Chemclaw3-mcp` servers** — neither repo is deployable as a chart yet · *Revisit:* the rollout row above closes.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
 - **A live target for the results store** — the publish path is built, no real sink exists · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
-- **Backup and restore tooling for Postgres and Temporal** — no owner of those stores is named · *Revisit:* an owner exists to run and verify a restore.
+- **Backup and restore on a real CloudNativePG cluster** — the template is schema-validated and the drill runs in containers; neither has met the operator, the Barman plugin or a real bucket (RTO at real size, the exported metric names, `firstRecoverabilityPoint` under the plugin) · *Revisit:* a cluster with the operator and plugin: render `postgres.cluster`, restore into a scratch namespace (`docs/guides/runbook.md` § Backup, restore and PITR).
+- **A backup archive in one region, and a platform Temporal outside the cluster** — the drill restores Temporal's SQL databases in the same cluster only; an Elasticsearch visibility store or a platform-owned Postgres is the platform's to back up · *Revisit:* the platform names its Temporal persistence, or a second region is required.
+- **PgBouncer as CloudNativePG `Pooler`s** — two (transaction and session mode) would serve `deploy/README.md` § PgBouncer; not templated, the `-rw` Service is the direct endpoint · *Revisit:* a release runs above three replicas.
 - **A worker whose broker is down never opens its probe port** — `durable/background_worker.py::main` connects first · *Revisit:* a second dependency joins `connect()` or an operator misdiagnoses an outage.
 - **Readiness cannot see a connector that is up and broken** — `connectors/health.py::_probe` only reads `/healthz` · *Revisit:* `connectors_required` becomes a runtime gate, or a long-broken connector is reported.
 - **A template step's roles cross the durable boundary unsigned** — `durable/template_activities.py::_acting_as` trusts the payload · *Revisit:* a broker other teams can write to, or one without mTLS.

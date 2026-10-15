@@ -13,6 +13,11 @@ app.kubernetes.io/name: chemclaw
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- /* The CloudNativePG Cluster's name, which is also its Services' (`<name>-rw`, `-ro`, `-r`). */ -}}
+{{- define "chemclaw.pgClusterName" -}}
+{{- default (printf "%s-pg" .Release.Name) .Values.postgres.cluster.name -}}
+{{- end -}}
+
 {{- /* Env shared by every component: the ConfigMap (non-secret) + every declared secret key.
 
        The three mTLS paths are gated on `secrets.temporalTls.enabled`, and that gate is the whole
