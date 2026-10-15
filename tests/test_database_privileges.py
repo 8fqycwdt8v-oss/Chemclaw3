@@ -65,7 +65,14 @@ _MIGRATOR_ONLY = {"schema_migrations"}
 # `cli/rekey_compounds.py --dispose-superseded` issues the fingerprint `DELETE` that
 # `infra/sql/094_fingerprint_definition_identity.sql` names as an operator statement, through
 # `core.migrate.migration_dsn`, so nothing a turn reaches can prune an index.
-_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py", "cli/rekey_compounds.py"}
+# `core/restore_check.py` is the restore drill's fixture and checks (`make restore-drill`): it
+# writes every kind of state into a throwaway server as its superuser, and its `UPDATE audit_events`
+# is a negative test that the runtime role is refused. Never run with the application's credential.
+_ADMIN_ONLY_MODULES = {
+    "cli/rekey_campaigns.py",
+    "cli/rekey_compounds.py",
+    "core/restore_check.py",
+}
 
 # Modules that build a statement around an **interpolated** table name, mapped to every table they
 # can target. `_joined` renders an interpolation as `?` and the verb patterns match `(\w+)`, so

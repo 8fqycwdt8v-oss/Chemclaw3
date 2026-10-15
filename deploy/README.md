@@ -18,7 +18,7 @@ For a local, cluster-shaped run of all four repositories (kind, mock tenant, moc
 | Dependency | Who provides it | What this release needs from it |
 | --- | --- | --- |
 | OpenShift (or Kubernetes with a Route CRD; `route.enabled: false` otherwise) | the platform | one namespace per release |
-| Postgres with the `pgvector` extension available | a DBA or a managed service | **one database per release**, TLS on, reachable on 5432 |
+| Postgres with the `pgvector` extension available | a DBA or a managed service (or, opt-in, `deploy/helm/chemclaw-postgres`: a CloudNativePG Cluster, installed as its own release first) | **one database per release**, TLS on, reachable on 5432, **continuous WAL archiving with point-in-time recovery** ([runbook § Backup, restore and PITR](../docs/guides/runbook.md)) |
 | Temporal (self-hosted, one broker per cluster) | the platform team | **one Temporal namespace per release**, registered; mTLS on the frontend |
 | An OpenAI-compatible LLM gateway | the platform team | a base URL, a model name, an API key |
 | An Entra tenant | identity team | tenant id, an app registration whose audience the front door validates, app roles for privileged users |
@@ -494,7 +494,12 @@ pod and prepended to `CHEMCLAW_RESULT_SINKS_DIR`, so a folder named `postgres` r
   party. Temporal Cloud stays a values change away (`CHEMCLAW_TEMPORAL_API_KEY` in the Secret and
   `secrets.temporalTls.enabled: false`) if that trade changes.
 - **Postgres/pgvector**: an operator-run or managed instance, over TLS, with the existing
-  `pg_statement_timeout_seconds`. The chart does not deploy it. Migrations run as a **pre-deploy
+  `pg_statement_timeout_seconds`. The chart does not deploy it; `deploy/helm/chemclaw-postgres` can, as a release of its own
+  installed *before* this one (a CloudNativePG `Cluster` with WAL archiving and scheduled base backups;
+  it refuses until the image, an `s3://` destination and the RPO/RTO targets are stated —
+  D-2026-10-15-postgres-is-backed-up-by-wal-archiving-to-an-object-store). It cannot live in this
+  release: the migrate hook below runs before the release's other resources exist.
+  Migrations run as a **pre-deploy
   Helm hook** Job (`templates/migrate-job.yaml` → the `migrate` component: `chemclaw.core.migrate`,
   the store setup and `chemclaw.core.grants`, i.e. `make db-migrate` + `make db-grants`, D-034)
   that completes before any app container starts — no container ever races the DDL. The migrator

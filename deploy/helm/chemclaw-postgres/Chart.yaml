@@ -1,0 +1,10 @@
+apiVersion: v2
+name: chemclaw-postgres
+description: >-
+  The Postgres a Chemclaw release runs on, as a CloudNativePG Cluster that archives WAL to an object
+  store and takes scheduled base backups. A release of its own, installed before the application
+  chart (`deploy/helm/chemclaw`) and outliving it: the application's migrate hook needs the database
+  to exist, and a restore is a new release of this chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
