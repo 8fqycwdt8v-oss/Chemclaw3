@@ -976,10 +976,14 @@ def test_only_the_two_known_statements_write_the_table_the_sort_key_mirrors() ->
     A third writer that does not maintain `updated_at` fails here by name.
     """
     package = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    # The restore drill's fixture writes rows into a throwaway server to be backed up and restored;
+    # it opens no session and nothing reads those rows as a conversation, so there is no sort key.
+    fixtures = {"core/restore_check.py"}
     writers = sorted(
         path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
         if "INSERT INTO session_messages" in path.read_text(encoding="utf-8")
+        and path.relative_to(package).as_posix() not in fixtures
     )
     assert writers == ["agent/session_fork.py", "agent/session_store.py"], (
         f"{', '.join(writers)} appends to session_messages. Every writer of that table has to "
