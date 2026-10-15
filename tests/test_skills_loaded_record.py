@@ -85,8 +85,8 @@ def test_a_read_that_delivered_nothing_announces_nothing(emitted: list[Any]) -> 
 
 def test_the_ledger_folds_both_tiers_into_one_set() -> None:
     """The row carries skill names deduplicated, sorted, with both tiers in one set."""
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _TurnLedger
+    from chemclaw.spend.ledger import TurnUsage
 
     ledger = _TurnLedger(correlation_id="c-1", usage=TurnUsage())
     for signal in (
@@ -105,9 +105,9 @@ def test_a_revision_round_still_records_what_it_loaded() -> None:
     Later graph runs of a turn suppress only job launches; a skill read during revision must still
     be recorded, or the distiller would count that session as independent evidence.
     """
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _TurnLedger
     from chemclaw.core.turn_signals import JobSignal
+    from chemclaw.spend.ledger import TurnUsage
 
     ledger = _TurnLedger(correlation_id="c-1", usage=TurnUsage())
     ledger.note_signal_without_job_chaining(JobSignal(job_id="job-that-must-not-chain", kind="xtb"))
@@ -137,14 +137,13 @@ async def test_the_row_really_carries_what_the_ledger_folded(
     Drives `_book_turn_spend` over a real ledger into the real Postgres sink and reads it back
     through the distiller's own query.
     """
-    from chemclaw.agent import turn_cost
     from chemclaw.agent.session import TurnSession
-    from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _book_turn_spend, _TurnLedger
     from chemclaw.cli.distill import _skills_by_session
     from chemclaw.core.config import settings
     from chemclaw.skills.manifest import skill_fingerprint
+    from chemclaw.spend import ledger as turn_cost
+    from chemclaw.spend.ledger import PostgresTurnCostSink, TurnUsage
     from tests.pg import migrated_db_or_skip
 
     await migrated_db_or_skip()

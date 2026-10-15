@@ -16,9 +16,9 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from chemclaw.agent import checkpointer as checkpointer_module
 from chemclaw.agent.checkpointer import checkpointer, close_checkpointer, stored_thread_bytes
 from chemclaw.agent.state import turn_config
-from chemclaw.api.budget import BudgetExceeded, check_thread_size
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.spend.limits import BudgetExceeded, check_thread_size
 from tests.fakes_turn import Piece
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 

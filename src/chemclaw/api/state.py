@@ -20,7 +20,6 @@ from fastapi import FastAPI, Request
 
 from chemclaw.agent.plan_approval_store import ApprovalStore
 from chemclaw.agent.session_queue import InMemoryTurnQueue, SessionTurnQueue, TurnQueue
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.detach import RunningTurns
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core.bounded import BoundedLru
@@ -28,6 +27,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.tenancy import DEFAULT_TENANT, current_tenant
 from chemclaw.core.turn_fence import TurnFence
+from chemclaw.spend.limits import BudgetTracker
 
 if TYPE_CHECKING:  # `api/turn_relay` reads this module's lease and holder identity at import
     from chemclaw.api.turn_relay import TurnRelay

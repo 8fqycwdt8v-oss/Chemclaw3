@@ -16,13 +16,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.turn_cost import TurnCost
-from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api import runner
-from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.api.events import TokenEvent
 from chemclaw.api.runner import _book_turn_spend, _settle_outcome, _TurnLedger, run_turn
 from chemclaw.core.config import settings
+from chemclaw.spend.ledger import TurnCost, TurnUsage
+from chemclaw.spend.limits import BudgetExceeded, BudgetTracker
 from tests.fakes_langgraph import ScriptedChatModel
 from tests.fakes_turn import Piece, ScriptedTurn
 from tests.test_template_agent_step import _USAGE, _CostRecorder, _scripted, _step
@@ -36,9 +35,7 @@ def booked(monkeypatch: pytest.MonkeyPatch) -> list[TurnCost]:
     yields once afterwards — the same seam and the same reason as `tests/test_template_agent_step`.
     """
     rows: list[TurnCost] = []
-    monkeypatch.setattr(
-        "chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: _CostRecorder(rows)
-    )
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: _CostRecorder(rows))
     return rows
 
 
@@ -228,9 +225,7 @@ def _drive_step(
     monkeypatch.setattr(
         "chemclaw.agent.langgraph_agent.build_chat_model", lambda *_a, **_k: _scripted(script)
     )
-    monkeypatch.setattr(
-        "chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: _CostRecorder(rows)
-    )
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: _CostRecorder(rows))
 
     async def _open(_stack: AsyncExitStack, _specs: Any) -> tuple[list[Any], list[str]]:
         return [], []

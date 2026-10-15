@@ -150,7 +150,7 @@ def test_the_cap_refuses_rather_than_ending_the_turn() -> None:
     """A refusal leaves the agent holding control with everything else it had.
 
     Ending the run would discard what the conversation produced, which is the position
-    `agent/loop_cap.py` takes and the reason this is a returned string rather than a jump.
+    `spend/guard.py` takes and the reason this is a returned string rather than a jump.
     """
     assert refuse_a_handoff_past_the_cap({"handoffs": 3}, 3)
     assert not refuse_a_handoff_past_the_cap({"handoffs": 2}, 3)

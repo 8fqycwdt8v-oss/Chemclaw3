@@ -13,15 +13,14 @@ from typing import Any
 import pytest
 
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.turn_cost import TurnCost
-from chemclaw.agent.turn_usage import TurnUsage
-from chemclaw.api import budget_store
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
 from chemclaw.core import bookkeeping
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.spend import limits as budget_store
+from chemclaw.spend.ledger import TurnCost, TurnUsage
+from chemclaw.spend.limits import BudgetTracker
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
@@ -88,10 +87,10 @@ def _counter(name: str) -> float:
 def sink(monkeypatch: pytest.MonkeyPatch) -> _Sink:
     """A cost sink that lands its rows, and a durable budget window, both under a 0.5 s bound."""
     landing = _Sink(_lands)
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: landing)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: landing)
     monkeypatch.setattr(settings, "budget_enabled", True)
     monkeypatch.setattr(settings, "budget_max_turns_per_user", 100)
-    monkeypatch.setattr("chemclaw.api.budget._durable", lambda: True)
+    monkeypatch.setattr("chemclaw.spend.limits._durable", lambda: True)
     monkeypatch.setattr(settings, "service_turn_bookkeeping_timeout_seconds", 0.5)
     return landing
 

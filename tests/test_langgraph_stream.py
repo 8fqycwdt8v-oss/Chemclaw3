@@ -148,7 +148,7 @@ def test_a_model_call_inside_a_tool_is_metered_and_never_streamed_as_the_answer(
     A model call inside a tool body inherits the graph's callbacks, so upstream would stream it as
     if it were the reply. Driven through a real `create_agent` graph because the namespace and node
     metadata are the engine's to produce. Both halves are asserted: tagging the call `nostream`
-    would hide it but also drop its usage from the ledger `agent/spend_cap.py` reads.
+    would hide it but also drop its usage from the ledger `spend/guard.py` reads.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models import GenericFakeChatModel
@@ -156,7 +156,7 @@ def test_a_model_call_inside_a_tool_is_metered_and_never_streamed_as_the_answer(
     from langchain_core.outputs import ChatGenerationChunk
     from langchain_core.tools import tool
 
-    from chemclaw.agent.turn_usage import TurnUsage
+    from chemclaw.spend.ledger import TurnUsage
 
     class _Digest(GenericFakeChatModel):
         """The condenser's shape: one streamed JSON object carrying its own usage."""
@@ -293,15 +293,15 @@ def test_the_cap_stops_the_loop_at_exactly_its_limit(
     from langchain.agents.middleware import after_model, wrap_model_call
     from langchain_core.tools import tool
 
-    from chemclaw.agent.loop_cap import (
+    from chemclaw.agent.state import ChemclawState
+    from chemclaw.core.config import settings
+    from chemclaw.spend.guard import (
         begin_loop_watch,
         end_loop_watch,
         enforce_loop_cap,
         loop_capped,
         loop_hit_cap,
     )
-    from chemclaw.agent.state import ChemclawState
-    from chemclaw.core.config import settings
 
     # The hook reads the limit from config rather than taking one, so the case has to set it.
     monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
@@ -349,7 +349,7 @@ def test_the_cap_stops_the_loop_at_exactly_its_limit(
             cast(Any, {"messages": [("user", "go")]}), cast(Any, {"recursion_limit": 200})
         )
         # The cap's calls, then the one tool-less call a graph at the cap is owed to write its
-        # answer (`loop_cap.AnswerAtTheCap`, not attached here, so the tools stay on and the next
+        # answer (`guard.AnswerAtTheCap`, not attached here, so the tools stay on and the next
         # arrival is what ends it) — an after_model jump must not buy a second.
         assert calls["n"] == cap + 1, (
             f"the loop ran {calls['n']} model calls against a cap of {cap} plus one wrap-up"

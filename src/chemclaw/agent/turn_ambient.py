@@ -20,10 +20,14 @@ from contextlib import contextmanager
 from typing import Any
 
 from chemclaw.agent.context_budget import begin_context_watch, end_context_watch
-from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
-from chemclaw.agent.spend_cap import begin_spend_watch, end_spend_watch
-from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
+from chemclaw.spend.guard import (
+    begin_loop_watch,
+    begin_spend_watch,
+    end_loop_watch,
+    end_spend_watch,
+)
+from chemclaw.spend.ledger import TurnUsage, reset_turn_usage, set_turn_usage
 
 logger = logging.getLogger(__name__)
 

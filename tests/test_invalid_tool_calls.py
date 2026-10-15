@@ -29,7 +29,6 @@ from langchain_core.tools import tool
 
 from chemclaw.agent.audit import AuditEvent, AuditSink, make_audit_middleware
 from chemclaw.agent.langgraph_agent import tool_call_middleware
-from chemclaw.agent.loop_cap import enforce_loop_cap, loop_capped
 from chemclaw.agent.model_calls import PromoteInvalidToolCalls
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.state import ChemclawState
@@ -37,6 +36,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
 from chemclaw.core.turn_signals import ToolFailureSignal
+from chemclaw.spend.guard import enforce_loop_cap, loop_capped
 
 _ANSWER = "pKa 4.2"
 
@@ -432,7 +432,7 @@ def test_a_corrected_turn_still_hits_the_runaway_cap() -> None:
 
     assert loop_capped(final), "the cap must still stop a turn whose model call was promoted"
     # One capped call, then the one wrap-up call a graph at the cap is owed to write its answer
-    # (`loop_cap.AnswerAtTheCap` is not attached here, so its tools stay on and the next arrival at
+    # (`guard.AnswerAtTheCap` is not attached here, so its tools stay on and the next arrival at
     # the cap is what ends the run) — never a third.
     assert len(model.seen) == 2, "the cap did not bound the turn to its call plus one wrap-up"
 

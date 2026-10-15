@@ -133,6 +133,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # agent: layer 1. "LangGraph — conversation orchestration" is the definition of the layer.
     ("chemclaw.agent", "langgraph"): "layer 1 IS LangGraph (D-2026-08-10)",
     ("chemclaw.agent", "postgres"): "durable sessions, preferences and plan approvals (F3)",
+    ("chemclaw.spend", "langgraph"): (
+        "`spend/guard.py` is a `before_model`/`wrap_model_call` middleware pair and "
+        "`spend/ledger.py` reads usage off LangChain messages and callbacks; the guard is "
+        "assembled into layer 1's graph"
+    ),
     # skills: the backends and middleware the skills tiers are read through subclass deepagents'.
     ("chemclaw.skills", "langgraph"): (
         "skills/backends.py subclasses deepagents' `FilesystemBackend`, `StoreBackend` and "
@@ -269,6 +274,10 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "'the workload-identity and OBO token exchanges are HTTP'; both exchanges were deleted "
         "unused, and what is left of agent's HTTP is one lazy client factory"
     ),
+    ("chemclaw.spend", "llm"): (
+        "`spend/ledger.py` reads a provider's usage block with `langchain_openai`'s own "
+        "normalisation inside `error_result_usage`, only on the error path of a served reply"
+    ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
     ("chemclaw.cli", "mcp"): (
         "cli/model_text_inventory serves each in-repo bundle's FastMCP server over an in-memory "
@@ -334,7 +343,7 @@ _KNOWN_LEAKS: dict[Site, str] = {
 _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
     # Empty on purpose: a private import that gains a public home or goes away loses its row.
     (
-        "src/chemclaw/agent/turn_usage.py",
+        "src/chemclaw/spend/ledger.py",
         "langchain_openai.chat_models.base._create_usage_metadata",
     ): (
         "**The alternative to this row is a second parser of a shape upstream owns.** A judge "

@@ -24,8 +24,8 @@ from chemclaw.api.events import (
 
 def _ledger() -> object:
     """A fresh turn ledger, built the way the runner builds one."""
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _TurnLedger
+    from chemclaw.spend.ledger import TurnUsage
 
     return _TurnLedger(correlation_id="c-1", usage=TurnUsage(), started=0.0)
 
@@ -138,8 +138,8 @@ def test_the_row_carries_every_dimension_the_ledger_counted() -> None:
 
     A field missing from `_COLUMNS` would be written nowhere and raise nothing.
     """
-    from chemclaw.agent.turn_cost_store import _COLUMNS
     from chemclaw.core.turn_cost import TurnCost
+    from chemclaw.spend.ledger import _COLUMNS
 
     for field in (
         "retrieval_calls",

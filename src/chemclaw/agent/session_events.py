@@ -182,6 +182,6 @@ async def stream_new_events(
             await asyncio.sleep(interval)
 
 
-#: Strong references to in-flight restores — the `agent/turn_cost.py` `_PENDING` shape, because a
+#: Strong references to in-flight restores — the `spend/ledger.py` `_PENDING` shape, because a
 #: bare `create_task` from a dying generator is garbage-collectable mid-write.
 _PENDING_RESTORES: set[asyncio.Task[None]] = set()

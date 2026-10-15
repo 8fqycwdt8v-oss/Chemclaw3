@@ -257,7 +257,7 @@ def spend_approval_after_teardown(session_id: str) -> "asyncio.Task[None] | None
 
     A turn torn down after issuing a state-changing call has used its authorization (jobs and writes
     are not rolled back), so its approval is spent; otherwise dropping the connection would allow
-    acting twice under one approval. Synchronous like `turn_cost.record_turn_cost`: the write runs
+    acting twice under one approval. Synchronous like `ledger.record_turn_cost`: the write runs
     on its own tracked task and swallows its failure; the task is returned for a caller that can
     wait. The caller decides whether the turn acted.
     """

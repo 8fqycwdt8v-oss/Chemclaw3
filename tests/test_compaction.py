@@ -54,11 +54,11 @@ from chemclaw.agent.context_budget import (
 from chemclaw.agent.context_budget import _prefix as _prefix_var
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.loop_cap import WRAP_UP_NOTE, begin_loop_watch, end_loop_watch
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.spend.guard import WRAP_UP_NOTE, begin_loop_watch, end_loop_watch
 
 
 def _count(messages: Any) -> int:
@@ -1173,7 +1173,7 @@ def test_the_wrap_up_at_the_cap_still_carries_the_chemists_question(
 ) -> None:
     """The window never cuts the chemist's latest message, even at the loop cap.
 
-    `loop_cap.AnswerAtTheCap` appends a human-role wrap-up note from outside the compaction group;
+    `guard.AnswerAtTheCap` appends a human-role wrap-up note from outside the compaction group;
     the window must not treat it as the newest group and cut the question. Driven through the
     compiled graph with a thread budget below the turn's own tool calls, so the window cuts on every
     call.

@@ -438,7 +438,7 @@ _COUNTERS: dict[str, str] = {
         "report one."
     ),
     # What the gateway billed and never reported: usage arrives only on the terminal stream chunk,
-    # so an abandoned turn's prompt is estimated (`agent/turn_usage.InFlightPrompts`), charged to
+    # so an abandoned turn's prompt is estimated (`spend/ledger.InFlightPrompts`), charged to
     # the budget and recorded in `turn_costs.estimated_tokens`. A separate counter rather than a
     # label or a sum, so measured series stay measured and panels can show inferred spend beside
     # them.

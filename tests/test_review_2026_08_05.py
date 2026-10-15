@@ -16,7 +16,6 @@ from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 from chemclaw.agent.session import TurnSession
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.runner import run_turn
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.connectors import jobs as jobs_module
@@ -24,6 +23,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import WriteOutcome, record_note
+from chemclaw.spend.limits import BudgetTracker
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"

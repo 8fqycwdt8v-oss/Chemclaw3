@@ -5,7 +5,7 @@ has no request context, so the turn's actor, roles, session and correlation id t
 input and are stamped ambient before the work runs (`_acting_as`): the audit trail names the real
 user and conversation, and `enforce_tool_authz` decides against that user, so a template cannot
 run a tool its requester could not. An `agent` step is metered like a chat turn (counters and
-`turn_costs`), but not capped: `api/budget.py` lives in the front door's process.
+`turn_costs`), but not capped: `spend/limits.py` lives in the front door's process.
 """
 
 import asyncio
@@ -21,15 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from temporalio import activity
 
 from chemclaw.agent.context_budget import current_context
-from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
 from chemclaw.agent.turn_ambient import turn_caps
-from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
-from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
@@ -47,6 +43,8 @@ from chemclaw.core.session_context import reset_current_session_id, set_current_
 from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import ActivityClass, durable_activity
+from chemclaw.spend.guard import loop_capped, spend_capped
+from chemclaw.spend.ledger import TurnCost, TurnUsage, llm_result_usage, record_turn_cost
 
 logger = logging.getLogger(__name__)
 
@@ -519,8 +517,8 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     by default — every side-effecting tool it did not declare is removed. An agent-authored template
     can declare none (`templates/composed.py::authored_problems`).
 
-    Metered like a chat turn (counters and a `turn_costs` row) but not capped: `api/budget.py` lives
-    in the front door's process. All per-turn cap ambients are opened via
+    Metered like a chat turn (counters and a `turn_costs` row) but not capped: `spend/limits.py`
+    lives in the front door's process. All per-turn cap ambients are opened via
     `agent.turn_ambient.turn_caps`, including the repeat guard.
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent

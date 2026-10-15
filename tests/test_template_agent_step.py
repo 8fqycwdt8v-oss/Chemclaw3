@@ -27,7 +27,6 @@ from chemclaw.agent.chemclaw_agent import advertised_tool_names
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.state import answer_text
 from chemclaw.agent.tool_result_size import STEP_REMEDY, TOOL_REMEDY
-from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.template_activities import (
@@ -38,6 +37,7 @@ from chemclaw.durable.template_activities import (
     step_profile,
 )
 from chemclaw.durable.template_job import run_summary, template_job_record
+from chemclaw.spend.ledger import TurnCost
 from chemclaw.templates.manifest import AgentStep
 from tests.fakes_langgraph import ScriptedChatModel
 
@@ -149,7 +149,7 @@ def _drive(
         lambda *_a, **_k: _scripted(script),
     )
     monkeypatch.setattr(
-        "chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: _CostRecorder(costs)
+        "chemclaw.spend.ledger.default_turn_cost_sink", lambda: _CostRecorder(costs)
     )
 
     async def fake_open(_stack: AsyncExitStack, specs: Any) -> tuple[list[Any], list[str]]:
@@ -637,9 +637,7 @@ def _beats_of(monkeypatch: pytest.MonkeyPatch, activity: Any, payload: Any) -> _
         settings, "template_step_heartbeat_timeout_seconds", _TEST_HEARTBEAT_TIMEOUT_SECONDS
     )
     monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: _Recorder())
-    monkeypatch.setattr(
-        "chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: _CostRecorder([])
-    )
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: _CostRecorder([]))
     monkeypatch.setattr(
         "chemclaw.agent.langgraph_agent.build_chat_model",
         lambda *_a, **_k: _scripted([{"name": _SLOW_TOOL, "args": {"smiles": "CCO"}}, "done"]),
@@ -894,7 +892,7 @@ def test_a_loop_capped_step_answers_with_prose_and_is_booked_as_capped(
     assert "No files found" not in step.answer, (
         "the step answered with the tool's own output; a ToolMessage is not an assistant answer"
     )
-    # The fourth call is the tool-less wrap-up the cap owes the step (`loop_cap.AnswerAtTheCap`);
+    # The fourth call is the tool-less wrap-up the cap owes the step (`guard.AnswerAtTheCap`);
     # its text is the answer, and its tool call is dropped rather than run.
     assert step.answer == "partial 3"
     assert [row.outcome for row in step.costs] == ["loop_capped"]

@@ -11,10 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.spend.ledger import graph_usage_tokens
+from chemclaw.spend.limits import BudgetExceeded, BudgetTracker
 
 
 @pytest.fixture
@@ -295,7 +295,7 @@ def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, LLMResult
 
-    from chemclaw.agent.turn_usage import TurnUsage, off_stream_metering, set_turn_usage
+    from chemclaw.spend.ledger import TurnUsage, off_stream_metering, set_turn_usage
 
     served = LLMResult(
         generations=[
@@ -331,7 +331,7 @@ def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served
                     ValueError("no structured VerificationResult"), response=response, run_id="r"
                 )
             finally:
-                from chemclaw.agent.turn_usage import reset_turn_usage
+                from chemclaw.spend.ledger import reset_turn_usage
 
                 reset_turn_usage(token)
         return billed, unbilled
@@ -359,7 +359,7 @@ def test_the_warning_fires_before_the_cap_rather_than_at_it(
     tracker = BudgetTracker()
 
     before = METRICS.value("chemclaw_budget_warnings_total")
-    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.spend.limits"):
         tracker.record("s1", None, tokens=800)
 
     assert METRICS.value("chemclaw_budget_warnings_total") == before + 1
@@ -381,7 +381,7 @@ def test_the_warning_fires_once_for_a_crossing_rather_than_on_every_turn_in_the_
     tracker = BudgetTracker()
 
     before = METRICS.value("chemclaw_budget_warnings_total")
-    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.spend.limits"):
         tracker.record("s1", None, tokens=800)
         for _ in range(9):
             tracker.record("s1", None, tokens=20)
@@ -403,7 +403,7 @@ def test_the_warning_names_the_principal_it_is_about(
     monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
     tracker = BudgetTracker()
 
-    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.spend.limits"):
         tracker.record("session-abc-123", "oid-alice-9999", tokens=850)
 
     assert "session-abc-123" in caplog.text, "the session warning must name the session"

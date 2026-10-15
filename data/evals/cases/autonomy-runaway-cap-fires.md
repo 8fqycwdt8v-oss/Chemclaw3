@@ -25,7 +25,7 @@ never been observed to fire — and a version of `runaway_rate` that stopped rea
 this case is what closes it for this metric.
 
 The second transcript is the shape the runner really emits when
-`chemclaw.agent.loop_cap.enforce_loop_cap` stops a turn: an `ErrorEvent` carrying
+`chemclaw.spend.guard.enforce_loop_cap` stops a turn: an `ErrorEvent` carrying
 `loop_cap_reached`, followed by whatever partial answer the turn had. That pairing is the point —
 the capped turn *does* answer, which is exactly why the metric reads the explicit code instead of
 inferring a cap from residue (see `runaway_rate`'s own docstring for the defect that caused).

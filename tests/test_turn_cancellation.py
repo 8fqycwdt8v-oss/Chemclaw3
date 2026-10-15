@@ -22,8 +22,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.turn_usage import _prompt_estimate
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
 from chemclaw.core.identity_context import (
@@ -34,6 +32,8 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.turn_flags import is_dry_run
+from chemclaw.spend.ledger import _prompt_estimate
+from chemclaw.spend.limits import BudgetTracker
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
@@ -178,7 +178,7 @@ async def test_abandoned_turn_still_books_its_tokens() -> None:
     """Tokens spent before the client vanished count, otherwise abandon-and-retry is free.
 
     A gateway reports usage only on the terminal frame, so a cut-off turn bills the estimated prompt
-    already handed to the provider (`agent/turn_usage.InFlightPrompts`). Asserted: it is non-zero,
+    already handed to the provider (`spend/ledger.InFlightPrompts`). Asserted: it is non-zero,
     it lands in `chemclaw_estimated_tokens_total` and binds the budget, and `chemclaw_tokens_total`
     (measured spend) does not move. No figure is asserted, since it depends on the bound tools.
     """
@@ -236,14 +236,14 @@ def test_an_abandoned_prompt_charges_the_system_message_once(
     system_tokens = int(count_tokens_approximately([system]))
     prompt_tokens = int(count_tokens_approximately(prompt))
 
-    monkeypatch.setattr("chemclaw.agent.turn_usage.prefix_tokens", lambda: 5_000)
+    monkeypatch.setattr("chemclaw.spend.ledger.prefix_tokens", lambda: 5_000)
 
     assert _prompt_estimate([prompt]) == prompt_tokens + 5_000 - system_tokens, (
         "the system message is inside `prefix_tokens()` and inside the prompt, so charging it "
         "twice bills an abandoned turn its whole prefix over again"
     )
 
-    monkeypatch.setattr("chemclaw.agent.turn_usage.prefix_tokens", lambda: 1)
+    monkeypatch.setattr("chemclaw.spend.ledger.prefix_tokens", lambda: 1)
 
     assert _prompt_estimate([prompt]) == prompt_tokens, (
         "a prefix smaller than the system message inside it booked a negative schema cost"
@@ -398,7 +398,7 @@ async def test_a_disconnect_after_the_answer_is_billed_as_completed(
     `TurnCost.completed` means "the turn answered", not "the turn was never torn down"; otherwise
     every disconnect-after-answer would look abandoned in the spend ledger.
     """
-    from chemclaw.agent.turn_cost import TurnCost
+    from chemclaw.spend.ledger import TurnCost
 
     booked: list[TurnCost] = []
 
@@ -406,7 +406,7 @@ async def test_a_disconnect_after_the_answer_is_billed_as_completed(
         async def record(self, cost: TurnCost) -> None:
             booked.append(cost)
 
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", _CapturingSink)
     history = _RecordingHistory()
 
     agent = _AnsweringAgent()

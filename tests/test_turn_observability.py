@@ -174,7 +174,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
     A source check would pass on a call that never runs, so this drives `run_turn` and reads the
     sink: its tokens must match the metric's and the row must carry the actor.
     """
-    from chemclaw.agent.turn_cost import TurnCost
+    from chemclaw.spend.ledger import TurnCost
 
     booked: list[TurnCost] = []
 
@@ -182,7 +182,7 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
         async def record(self, cost: TurnCost) -> None:
             booked.append(cost)
 
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", _CapturingSink)
 
     class _MeteredAgent(ScriptedTurn):
         """The same shape as the agent above: one update carrying a split usage report."""

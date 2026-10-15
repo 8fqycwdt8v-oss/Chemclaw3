@@ -146,7 +146,7 @@ _NOT_PRUNED: dict[str, str] = {
         "refused: `pending_requests`' attribution, archived on a re-ask so the answer is not "
         "blanked — the same record, so the same refusal"
     ),
-    # One row per principal, reset in place by `api/budget_store.py`'s upsert, so size tracks
+    # One row per principal, reset in place by `spend/limits.py`'s upsert, so size tracks
     # distinct users, not turns. Erased with its subject (`leaver._ERASE`), which is the only
     # removal.
     "budget_usage": (

@@ -1285,13 +1285,13 @@ config:
   # The *within-turn* half of the same guard, and it ships **off** where the one above ships on.
   # `BUDGET_ENABLED` meters whole turns — `check()` before one, `record()` after it — so the case
   # neither half sees is a single turn spending without a bound while it runs
-  # (`agent/spend_cap.py`). This is that ceiling, in billed tokens across every model call of a
+  # (`spend/guard.py`). This is that ceiling, in billed tokens across every model call of a
   # turn, the subagent's included.
   #
   # **This shipped at 0 (no cap) and no longer does.** The caution behind that 0 was real and is
   # kept: the others refuse a *request*, this one acts on a turn that is already running, so a
   # number set too low costs work a chemist has waited for. Two things make a number the better
-  # side of that trade. `spend_cap.py` jumps the graph `to end` rather than raising, and the runner
+  # side of that trade. `spend/guard.py` jumps the graph `to end` rather than raising, and the runner
   # emits `spend_cap_reached` naming the answer **partial** — so a capped turn returns what it had.
   # And the alternative was never "no cap" but an unbounded one: measured, one turn billed 250,000
   # tokens against a 1,000-token session cap, which neither half of `BUDGET_ENABLED` can see.

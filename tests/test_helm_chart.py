@@ -572,11 +572,11 @@ def test_the_shipped_budget_guard_actually_refuses_a_turn(monkeypatch: pytest.Mo
     the number of turns is unbounded. Executed rather than read off the flag, since enabled with
     every cap at 0 parses and guards nothing.
     """
-    from chemclaw.api.budget import BudgetTracker
+    from chemclaw.spend.limits import BudgetTracker
 
     chart = _settings_from_chart(monkeypatch)
     assert chart.budget_enabled, "the chart no longer enables the runaway-cost guard"
-    monkeypatch.setattr("chemclaw.api.budget.settings", chart)
+    monkeypatch.setattr("chemclaw.spend.limits.settings", chart)
 
     tracker = BudgetTracker()
     tracker.record("s1", "alice", tokens=chart.budget_max_tokens_per_session)

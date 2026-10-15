@@ -103,16 +103,16 @@ class ChemclawState(PlanningState):
     from the upstream declaration it otherwise copies. `PrivateStateAttr` is
     `OmitFromSchema(input=True, output=True)`, so it would strip the field from what `ainvoke`
     *returns* — and once the value is out of the checkpoint, the return is the only place left to
-    read it. `loop_cap.loop_capped(state)` is that reader: it takes "the turn's final graph state",
+    read it. `guard.loop_capped(state)` is that reader: it takes "the turn's final graph state",
     which callers get from `ainvoke`, and hiding the field from the output would leave it with
-    nothing to read — a capped turn unreportable again, which is the defect `agent/loop_cap.py`
+    nothing to read — a capped turn unreportable again, which is the defect `spend/guard.py`
     exists to fix. Upstream's own `run_model_call_count` does carry `PrivateStateAttr` and is
     therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
     # How many model calls this turn has *authorised* — the runaway guard's counter
-    # (`agent/loop_cap.py`). The increment is written in `before_model`, so a later `before_model`
-    # hook that ends the run (`spend_cap.enforce_spend_cap`) leaves one increment for a call never
+    # (`spend/guard.py`). The increment is written in `before_model`, so a later `before_model`
+    # hook that ends the run (`guard.enforce_spend_cap`) leaves one increment for a call never
     # made; the cap can bind one call early, never late (pinned by `tests/test_spend_cap.py`).
     #
     # Counted in `before_model` because an `after_model` count can be skipped by any middleware
@@ -122,13 +122,13 @@ class ChemclawState(PlanningState):
     model_calls: NotRequired[Annotated[int, TurnTotal(int)]]
 
     # Whether the runaway guard stopped this turn — the fact beside the count, written by
-    # `loop_cap.enforce_loop_cap` on the branch that fires, so the two cannot disagree. Untracked,
+    # `guard.enforce_loop_cap` on the branch that fires, so the two cannot disagree. Untracked,
     # so a capped turn does not mark every later turn partial; the value lives only in what the run
     # returns.
     loop_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
     # What this turn has billed so far across every model call — the spend guard's counter
-    # (`agent/spend_cap.py`). Untracked (the turn's, not the session's), not private (one budget
+    # (`spend/guard.py`). Untracked (the turn's, not the session's), not private (one budget
     # across delegation), and a `TurnTotal` (fan-out writes fold additively). Written from
     # `wrap_model_call` as an absolute total, which is what `TurnTotal`'s fold is defined against.
     billed_tokens: NotRequired[Annotated[int, TurnTotal(int)]]

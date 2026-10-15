@@ -20,11 +20,8 @@ from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.loop_cap import loop_capped
-from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.turn_ambient import turn_caps
-from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -32,6 +29,8 @@ from chemclaw.core.identity_context import reset_current_identity, set_current_i
 from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
+from chemclaw.spend.guard import loop_capped, spend_capped
+from chemclaw.spend.ledger import TurnUsage
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 

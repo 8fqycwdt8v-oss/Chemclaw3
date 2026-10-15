@@ -3,7 +3,7 @@
 `run_turn` opens the turn's MCP connectors, compiles the turn's graph over them, and streams it as
 typed `chemclaw.api.events` (`api/graph_stream.py`); a failure becomes one user-safe `ErrorEvent`.
 This module owns the lifecycle (exit stack, state rollback, ambient contextvars); the pure parts are
-`runner_trace`, `runner_usage` and `runner_answer`.
+`runner_trace` and `runner_answer`.
 """
 
 import asyncio
@@ -33,7 +33,6 @@ from chemclaw.agent.exhibit_notes import exhibit_turn_note, mark_told
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.llm_provider import classify_model_failure
-from chemclaw.agent.loop_cap import loop_hit_cap
 from chemclaw.agent.plan_gate import (
     PLAN_APPROVAL_PROMPT,
     approval_stands,
@@ -48,7 +47,6 @@ from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.session_store import InterruptedTurn
-from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.tool_result_size import (
     bounded_content,
@@ -56,7 +54,6 @@ from chemclaw.agent.tool_result_size import (
     set_full_result_sink,
 )
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
-from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
 from chemclaw.agent.turn_resume import (
     Refusal,
@@ -65,8 +62,6 @@ from chemclaw.agent.turn_resume import (
     resume_point,
     resume_point_fresh,
 )
-from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
-from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     AnswerEvent,
     ApprovalRequestEvent,
@@ -121,6 +116,9 @@ from chemclaw.exhibits.models import ExhibitRef
 from chemclaw.kg.note import cited_ids
 from chemclaw.skills.manifest import skill_fingerprint
 from chemclaw.skills.store import personal_skills_available, stored_skill_declarations
+from chemclaw.spend.guard import loop_hit_cap, spend_hit_cap, turn_billed_tokens
+from chemclaw.spend.ledger import InFlightPrompts, TurnCost, TurnUsage, record_turn_cost
+from chemclaw.spend.limits import BudgetTracker, SpendPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -1304,7 +1302,7 @@ def _partial_answer_clause(ledger: _TurnLedger) -> str:
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
     """Say out loud that the runaway guard fired, or `None` if it did not.
 
-    The iteration cap (`chemclaw.agent.loop_cap`) stopped work the loop still wanted to do. Said
+    The iteration cap (`chemclaw.spend.guard`) stopped work the loop still wanted to do. Said
     before the answer so a surface can mark it partial. The turn is not failed: the answer ships and
     is billed as completed (`loop_cap_reached` shares its turn with an answer, as does
     `_spend_cap_event`'s).
@@ -1314,15 +1312,16 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
         return None
     # Marked on the ledger: by teardown the watch is gone and `loop_hit_cap()` answers False.
     ledger.loop_capped = True
+    cap = SpendPolicy.current().model_calls_per_turn
     METRICS.increment("chemclaw_turn_loop_caps_total")
     logger.warning(
         "the harness loop for session %s hit its %d-iteration cap with work still open",
         session.session_id,
-        settings.harness_max_loop_iterations,
+        cap,
     )
     return ErrorEvent(
         message=(
-            f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
+            f"The turn reached its {cap}-iteration limit "
             f"and stopped with work still open, {_partial_answer_clause(ledger)} "
             f"(session {session.session_id})."
         ),
@@ -1347,16 +1346,17 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
     # Marked on the ledger: by teardown the watch is gone and `spend_hit_cap()` answers False.
     ledger.spend_capped = True
     billed = turn_billed_tokens()
+    budget = SpendPolicy.current().billed_tokens_per_turn
     METRICS.increment("chemclaw_turn_spend_caps_total")
     logger.warning(
         "the turn for session %s hit its %d billed-token cap after %d tokens",
         session.session_id,
-        settings.agent_max_turn_billed_tokens,
+        budget,
         billed,
     )
     return ErrorEvent(
         message=(
-            f"The turn reached its {settings.agent_max_turn_billed_tokens:,}-token budget "
+            f"The turn reached its {budget:,}-token budget "
             f"after billing {billed:,} and stopped with work still open, "
             f"{_partial_answer_clause(ledger)} (session {session.session_id})."
         ),

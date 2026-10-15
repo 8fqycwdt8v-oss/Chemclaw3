@@ -345,7 +345,7 @@ def test_a_spend_cap_tripped_inside_a_revision_is_announced(
     """A cap that fires during the revision must reach the chemist, not just stop the graph.
 
     The guards are checked after every pass, not once above the loop. Driven through the real
-    `agent/spend_cap.py` with a budget the first pass exceeds, so the revision's `before_model`
+    `spend/guard.py` with a budget the first pass exceeds, so the revision's `before_model`
     fires.
     """
     _grades_by_text(monkeypatch)

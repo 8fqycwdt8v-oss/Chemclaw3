@@ -203,7 +203,7 @@ def test_a_source_path_that_stopped_resolving_fails_the_gate(tmp_path: Path) -> 
     The survivors' rate is above the floor, which is the trap; mutmut says nothing about the missing
     entry, so the absent `.meta` is the only evidence.
     """
-    dropped = "src/chemclaw/api/budget.py"
+    dropped = "src/chemclaw/spend/limits.py"
     stats = dict(_HEALTHY, total=750, killed=559)  # 74.5%, comfortably above the floor
     result = _run_gate(_gate_workspace(tmp_path, stats=stats, missing=dropped))
     assert result.returncode != 0, result.stdout
@@ -315,10 +315,7 @@ def test_a_selection_that_stopped_covering_a_module_fails_the_gate(tmp_path: Pat
 _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
     "src/chemclaw/agent/audit_store.py",
     "src/chemclaw/agent/authz.py",
-    "src/chemclaw/agent/loop_cap.py",
     "src/chemclaw/agent/plan_gate.py",
-    "src/chemclaw/agent/spend_cap.py",
-    "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
     "src/chemclaw/core/chem.py",
     "src/chemclaw/core/fulltext.py",
@@ -330,6 +327,8 @@ _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
     "src/chemclaw/publish/outbox.py",
     "src/chemclaw/science/calc/store.py",
     "src/chemclaw/skills/backends.py",
+    "src/chemclaw/spend/guard.py",
+    "src/chemclaw/spend/limits.py",
     "src/chemclaw/templates/resolve.py",
 )
 
@@ -343,6 +342,7 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_audit_store.py",
     "tests/test_authz.py",
     "tests/test_budget.py",
+    "tests/test_budget_window.py",
     "tests/test_compound_identity.py",
     "tests/test_concurrency_claims.py",
     "tests/test_disconnect_teardown.py",
@@ -364,6 +364,7 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_runner.py",
     "tests/test_skill_backend.py",
     "tests/test_spend_cap.py",
+    "tests/test_spend_golden.py",
     "tests/test_store.py",
     "tests/test_templates.py",
     "tests/test_tool_authz.py",

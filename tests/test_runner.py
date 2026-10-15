@@ -20,11 +20,9 @@ import chemclaw.agent.verifier as verifier
 import chemclaw.agent.verifier as verifier_module
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_trace as runner_trace
-from chemclaw.agent.loop_cap import record_loop_cap
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT, approval_stands, plan_identity
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.spend_cap import record_spend_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
@@ -37,6 +35,7 @@ from chemclaw.api.events import (
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import record_job_started
+from chemclaw.spend.guard import record_loop_cap, record_spend_cap
 from tests.fakes_turn import Piece, ScriptedTurn
 
 

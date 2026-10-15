@@ -208,7 +208,7 @@ def test_create_agent_still_bakes_a_recursion_limit_this_repo_overrides() -> Non
     """`create_agent` still bakes a recursion limit this repository overrides.
 
     Upstream's 9999 supersteps is effectively no ceiling, and hitting it raises
-    `GraphRecursionError`, discarding the partial answer `agent/loop_cap.py` lets out. Read off the
+    `GraphRecursionError`, discarding the partial answer `spend/guard.py` lets out. Read off the
     compiled graph rather than grepped from source, which a comment could satisfy.
     """
     from langchain.agents import create_agent
@@ -645,10 +645,10 @@ def test_the_deepagents_symbols_this_repo_names_are_importable(
 def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys() -> None:
     """The gateway client still publishes cache tokens under two flat keys, with no per-TTL keys.
 
-    `agent/turn_usage.graph_usage_tokens` subtracts `cache_read` and `cache_creation` from
+    `spend/ledger.graph_usage_tokens` subtracts `cache_read` and `cache_creation` from
     `input_tokens` and books `cache_creation` as the write; a rename would price every cached token
     as full input. The per-TTL keys are asserted absent: if `langchain_openai` starts emitting them,
-    `turn_usage` needs a reader for them.
+    `ledger` needs a reader for them.
     """
     from langchain_openai.chat_models.base import _create_usage_metadata
 
@@ -662,18 +662,18 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
     )
     details = usage["input_token_details"]
     assert details.get("cache_read") == 700, (
-        "langchain_openai renamed the cache-read key — agent/turn_usage.graph_usage_tokens "
+        "langchain_openai renamed the cache-read key — spend/ledger.graph_usage_tokens "
         "subtracts it from input_tokens and would now double-count every cached token"
     )
     assert details.get("cache_creation") == 100, (
-        "langchain_openai renamed the cache-write key — agent/turn_usage.graph_usage_tokens "
+        "langchain_openai renamed the cache-write key — spend/ledger.graph_usage_tokens "
         "reads it, and turn_costs.cache_write_tokens is what it fills"
     )
     # `prompt_tokens` includes the cached share, which is the whole reason `input` is a residual.
     assert usage["input_tokens"] == 1000
     assert not [key for key in details if key.startswith("ephemeral_")], (
         "langchain_openai now publishes a per-TTL cache-write breakdown; it zeroes the flat key "
-        "when it does, so agent/turn_usage needs the `_cache_creation` helper back"
+        "when it does, so spend/ledger needs the `_cache_creation` helper back"
     )
 
     # With a service tier taken from the response body, the same function prefixes both keys
@@ -692,7 +692,7 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
     tiered_details = tiered["input_token_details"]
     assert "flex_cache_read" in tiered_details and "flex_cache_creation" in tiered_details, (
         "langchain_openai changed how service_tier prefixes the cache keys; "
-        "agent/turn_usage._cache_detail matches `<tier>_cache_read`/`<tier>_cache_creation` by "
+        "spend/ledger._cache_detail matches `<tier>_cache_read`/`<tier>_cache_creation` by "
         "suffix, so a tiered deployment's cache reads would be billed as fresh input again"
     )
     from langchain_openai import ChatOpenAI
@@ -706,7 +706,7 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
 def test_a_failed_model_call_still_carries_the_gateways_own_usage_block() -> None:
     """A failed model call still carries the gateway's own usage block.
 
-    `turn_usage.error_result_usage` reads `on_llm_error`'s `response=` kwarg and
+    `ledger.error_result_usage` reads `on_llm_error`'s `response=` kwarg and
     `response_metadata["body"]`. With `method="json_schema"` a malformed reply raises inside the SDK
     and `on_llm_end` never fires, so this is the only source of the measured usage. Asserted against
     the private helper that builds the shape.
@@ -723,7 +723,7 @@ def test_a_failed_model_call_still_carries_the_gateways_own_usage_block() -> Non
     body = generations[0].message.response_metadata.get("body")
     assert isinstance(body, dict) and body.get("usage"), (
         "langchain_core stopped putting the failing call's raw HTTP body on the error result — "
-        "agent/turn_usage.error_result_usage reads it, and the verifier's degrade path would book "
+        "spend/ledger.error_result_usage reads it, and the verifier's degrade path would book "
         "zero against a request the gateway billed in full"
     )
 
@@ -1230,7 +1230,7 @@ def test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_decl
             if "ModelCallLimitMiddleware" in names:
                 importers.append(str(path.relative_to(root)))
     assert importers == [], (
-        f"{importers} import ModelCallLimitMiddleware; the cap is `agent/loop_cap.py`'s "
+        f"{importers} import ModelCallLimitMiddleware; the cap is `spend/guard.py`'s "
         "`before_model` counter, and composing upstream's with a middleware that jumps from "
         "`after_model` skips it (D-2026-08-15)"
     )

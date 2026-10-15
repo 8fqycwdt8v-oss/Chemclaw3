@@ -215,8 +215,8 @@ def test_a_turn_acts_for_its_senders_tenant_whatever_context_it_inherited(
     tenancy_on: None,
 ) -> None:
     """The turn binds the tenant it is given, and gives back the one it found."""
-    from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _turn_ambient
+    from chemclaw.spend.ledger import TurnUsage
 
     with bound_tenant("globex"):
         with _turn_ambient("s", "alice", frozenset(), False, "c", TurnUsage(), [], None, "acme"):

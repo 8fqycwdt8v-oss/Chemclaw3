@@ -17,7 +17,6 @@ from langchain_core.language_models import GenericFakeChatModel
 from pydantic import SecretStr, ValidationError
 
 from chemclaw.agent.framing import ENVELOPE_TAG
-from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
@@ -33,6 +32,7 @@ from chemclaw.agent.verifier import (
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.spend.ledger import TurnUsage, reset_turn_usage, set_turn_usage
 from tests.served import ServerThread
 
 
@@ -1000,8 +1000,8 @@ def test_the_runner_publishes_the_ledger_the_judge_books_into() -> None:
     `off_stream_metering()` is inert unless the turn's ledger is ambient, so the production stamper
     `api/runner._turn_ambient` is driven and its ledger must be the one `_book_turn_spend` reads.
     """
-    from chemclaw.agent.turn_usage import _ledger
     from chemclaw.api.runner import _turn_ambient
+    from chemclaw.spend.ledger import _ledger
 
     ledger = TurnUsage()
     with _turn_ambient("s-1", "oid-abc", frozenset({"chemist"}), False, "cid-1", ledger, ["hello"]):

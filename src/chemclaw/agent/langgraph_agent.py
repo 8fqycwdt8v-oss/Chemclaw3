@@ -44,7 +44,6 @@ from chemclaw.agent.exhibit_notes import ExhibitListing
 from chemclaw.agent.exhibit_tools import described_for_deployment
 from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
-from chemclaw.agent.loop_cap import AnswerAtTheCap, enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
@@ -53,7 +52,6 @@ from chemclaw.agent.preferences import StandingPreferences
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
-from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
@@ -94,6 +92,7 @@ from chemclaw.skills.store import (
     StoredSkillTools,
     personal_skills_available,
 )
+from chemclaw.spend.guard import AnswerAtTheCap, MeterTurnSpend, enforce_loop_cap, enforce_spend_cap
 
 if TYPE_CHECKING:
     from deepagents.backends import CompositeBackend
@@ -723,7 +722,7 @@ def _bound_surface(
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """The plan/execute harness's todo list, and the runaway caps every profile gets.
 
-    The loop cap (`agent/loop_cap.py`) and the spend cap (`agent/spend_cap.py`) are unconditional: a
+    The loop cap (`spend/guard.py`) and the spend cap (`spend/guard.py`) are unconditional: a
     runaway is a property of the model/tool cycle, and without them the only bound is
     `agent_recursion_limit`, whose `GraphRecursionError` discards the turn's work. The loop cap
     counts in `before_model`, where no jump can skip it. The spend cap is a `before_model` enforcer

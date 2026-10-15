@@ -10,10 +10,10 @@ import asyncio
 
 import pytest
 
-from chemclaw.api import budget_store
-from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core import bookkeeping, db
 from chemclaw.core.config import settings
+from chemclaw.spend import limits as budget_store
+from chemclaw.spend.limits import BudgetExceeded, BudgetTracker
 from tests.pg import migrated_db_or_skip
 
 

@@ -49,7 +49,7 @@ class AgentProfile(BaseModel):
     effort: Literal["low", "medium", "high"] | None = None
     # Which entry of `settings.model_routes` builds this agent's model — a route key, never a model
     # id, so no site's model name is checked in. `None` takes the `"agent"` route. A model is not a
-    # capability, so this does not need to narrow; cost is bounded by `agent/spend_cap.py`. A key
+    # capability, so this does not need to narrow; cost is bounded by `spend/guard.py`. A key
     # with no entry in `model_routes` reuses the model already built.
     model_route: str | None = None
     # Which skills this agent may reach, narrowing the discovered set; `None` leaves the surface to

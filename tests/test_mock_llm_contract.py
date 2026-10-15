@@ -21,11 +21,11 @@ from pydantic import SecretStr
 
 from chemclaw.agent.context_budget import estimator_ratio, note_model_call, reset_calibration
 from chemclaw.agent.llm_provider import classify_model_failure
-from chemclaw.agent.turn_usage import graph_usage_tokens
 from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
 from chemclaw.cli.e2e_behaviours import E2E_BEHAVIOURS
 from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall, build_app
 from chemclaw.cli.storm_behaviours import BEHAVIOURS as STORM_BEHAVIOURS
+from chemclaw.spend.ledger import graph_usage_tokens
 
 
 def _app(*behaviours: Behaviour) -> Any:
@@ -77,8 +77,8 @@ def test_streamed_usage_arrives_only_when_the_request_asked_for_it() -> None:
 
     A gateway sends no usage without `stream_options`, so `ChatOpenAI(stream_usage=False)` assembles
     `usage_metadata: None`. The mock must match, or the escape hatch for endpoints rejecting
-    `stream_options` looks metered in every lane while `turn_usage`, `api/budget.py`,
-    `agent/spend_cap.py` and `context_budget.note_model_call` would in fact read nothing.
+    `stream_options` looks metered in every lane while `ledger`, `spend/limits.py`,
+    `spend/guard.py` and `context_budget.note_model_call` would in fact read nothing.
     """
     app = _app(Behaviour(name="plain", text="Done."))
 
@@ -231,7 +231,7 @@ def test_refusing_by_size_while_billing_a_constant_is_refused_at_startup() -> No
 def test_a_cached_prefix_reaches_the_price_split_through_the_service_tier_prefix() -> None:
     """A cached prefix reaches the price split, through the service-tier prefix.
 
-    The mock can emit `prompt_tokens_details.cached_tokens` so `turn_usage.graph_usage_tokens`'
+    The mock can emit `prompt_tokens_details.cached_tokens` so `ledger.graph_usage_tokens`'
     cache-read arithmetic (including tier prefixes like `priority_cache_read`) is driven over a
     wire. The cached share is inside `prompt_tokens`, so 900 billed with 400 cached is 500 priced
     input.
@@ -244,7 +244,7 @@ def test_a_cached_prefix_reaches_the_price_split_through_the_service_tier_prefix
 
     assert message.usage_metadata is not None
     # Read off a plain dict: upstream's `InputTokenDetails` TypedDict declares only the bare
-    # `cache_read`, which is the whole reason `turn_usage._cache_detail` matches by suffix
+    # `cache_read`, which is the whole reason `ledger._cache_detail` matches by suffix
     # instead of by name — the tier-prefixed key is not in the type it arrives under.
     details = dict(message.usage_metadata["input_token_details"])
     assert details["priority_cache_read"] == 400

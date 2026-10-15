@@ -45,7 +45,6 @@ from chemclaw.api.events import (
 )
 from chemclaw.api.exhibit_drafts import DraftStream
 from chemclaw.api.runner_trace import ToolCallTrace
-from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
 from chemclaw.core.result_handle import without_handle_line
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
@@ -59,6 +58,7 @@ from chemclaw.core.turn_signals import (
     ToolFailureSignal,
     ToolQueuedSignal,
 )
+from chemclaw.spend.ledger import graph_usage_tokens
 
 logger = logging.getLogger(__name__)
 

@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.agent.turn_cost import (
+from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS, Metrics
+from chemclaw.spend.ledger import (
     NullTurnCostSink,
     TurnCost,
     default_turn_cost_sink,
     record_turn_cost,
 )
-from chemclaw.core.config import settings
-from chemclaw.core.metrics import METRICS, Metrics
 
 
 class _RecordingSink:
@@ -68,7 +68,7 @@ async def test_a_turn_cost_carries_the_identity_the_metric_cannot(
 ) -> None:
     """The gap the table closes: spend booked against an actor, not only a profile."""
     sink = _RecordingSink()
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: sink)
 
     record_turn_cost(
         TurnCost(
@@ -94,7 +94,7 @@ async def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) ->
     skip the context-var resets after it. Proven by calling it from a cancelled task.
     """
     sink = _RecordingSink()
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", lambda: sink)
 
     async def _turn() -> None:
         try:
@@ -122,7 +122,7 @@ async def test_a_failed_write_is_logged_and_never_escapes(
     An exception raised in the write task would surface only as an unattributed `Task exception was
     never retrieved` — the same trap the durable rollback documents — so the task swallows and logs.
     """
-    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _FailingSink)
+    monkeypatch.setattr("chemclaw.spend.ledger.default_turn_cost_sink", _FailingSink)
 
     with caplog.at_level(logging.WARNING):
         record_turn_cost(TurnCost(correlation_id="cid-doomed"))

@@ -2251,15 +2251,6 @@
       "sha256": "0af3e8d5c062f9ae"
     },
     {
-      "id": "prose:chemclaw.agent.loop_cap:WRAP_UP_NOTE",
-      "kind": "prose-constant",
-      "owner": "src/chemclaw/agent/loop_cap.py:WRAP_UP_NOTE",
-      "residence": "on-demand",
-      "tokens": 128,
-      "chars": 496,
-      "sha256": "130acc01718ae1dc"
-    },
-    {
       "id": "prose:chemclaw.agent.plan_scope:_SCOPE_GUIDANCE",
       "kind": "prose-constant",
       "owner": "src/chemclaw/agent/plan_scope.py:_SCOPE_GUIDANCE",
@@ -2509,6 +2500,15 @@
       "tokens": 18,
       "chars": 53,
       "sha256": "09114a813e0a169a"
+    },
+    {
+      "id": "prose:chemclaw.spend.guard:WRAP_UP_NOTE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/spend/guard.py:WRAP_UP_NOTE",
+      "residence": "on-demand",
+      "tokens": 128,
+      "chars": 496,
+      "sha256": "130acc01718ae1dc"
     },
     {
       "id": "response-format:chemclaw.agent.condense._Extraction",

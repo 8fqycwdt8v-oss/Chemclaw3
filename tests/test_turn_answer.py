@@ -8,9 +8,9 @@ and stored as part of the answer.
 import asyncio
 from collections.abc import AsyncIterator
 
-from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api.events import Event, TokenEvent, ToolCallEvent, ToolResultEvent
 from chemclaw.api.runner import _stream_into, _TurnLedger
+from chemclaw.spend.ledger import TurnUsage
 
 
 def _collect(events: list[Event]) -> _TurnLedger:

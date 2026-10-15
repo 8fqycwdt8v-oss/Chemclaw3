@@ -87,7 +87,7 @@ runs first.
 
 ## First-party shim, and what turns red when this is fixed
 
-- Shim: `src/chemclaw/agent/loop_cap.py::enforce_loop_cap` counts model calls in `before_model` over
+- Shim: `src/chemclaw/spend/guard.py::enforce_loop_cap` counts model calls in `before_model` over
   the `ChemclawState.model_calls` channel; nothing in `src/` imports `ModelCallLimitMiddleware`.
 - Pin: `tests/test_upstream_surface.py::test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_declines`
   asserts upstream still increments in `after_model` and not in `before_model`; it turns red when the

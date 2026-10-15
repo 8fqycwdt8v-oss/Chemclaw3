@@ -16,15 +16,15 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.loop_cap import (
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.state import turn_input
+from chemclaw.core.config import settings
+from chemclaw.spend.guard import (
     begin_loop_watch,
     calls_already_made,
     end_loop_watch,
     enforce_loop_cap,
 )
-from chemclaw.agent.profiles import AgentProfile
-from chemclaw.agent.state import turn_input
-from chemclaw.core.config import settings
 
 
 def test_a_resumed_turn_does_not_get_a_fresh_iteration_budget() -> None:
@@ -97,7 +97,7 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
             how = "with a watch open" if watching else "with no watch"
             decision = enforce_loop_cap.before_model(cast(Any, dict(resumed)), cast(Any, None))
             # At the cap a graph is owed exactly one tool-less call to write its answer
-            # (`loop_cap.AnswerAtTheCap`), so "did not start again from zero" reads as: the one
+            # (`guard.AnswerAtTheCap`), so "did not start again from zero" reads as: the one
             # call authorised is that wrap-up, counted past the budget the thread already spent.
             assert decision == {
                 "loop_capped": True,
@@ -209,7 +209,7 @@ def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(
 
     fanning = _FanOut(messages=iter([]))
     final = _drive(fanning)
-    # One tool-less wrap-up per graph that reaches the cap (`loop_cap.AnswerAtTheCap`) — the
+    # One tool-less wrap-up per graph that reaches the cap (`guard.AnswerAtTheCap`) — the
     # supervisor and each helper — is the whole of what the bound pays for an answer. The defect
     # this holds closed is still far outside it: `1 + W*(cap - 1)` is 25 here, against 13.
     graphs = helpers + 1
@@ -331,7 +331,7 @@ def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
         asyncio.run(cli_chat.converse(graph, "split this several ways", session_id=thread))
 
     # The shared allowance plus the one tool-less wrap-up each graph that reaches the cap is owed
-    # (`loop_cap.AnswerAtTheCap`): the supervisor and every helper.
+    # (`guard.AnswerAtTheCap`): the supervisor and every helper.
     bound = cap + helpers + 1
     wired = _FanOut(messages=iter([]))
     _cli_fan_out(wired, thread="cli-fan-out-wired")

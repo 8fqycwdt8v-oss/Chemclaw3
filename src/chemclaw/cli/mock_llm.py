@@ -106,7 +106,7 @@ class Behaviour:
     # gateway does.
     cached_tokens: int = 0
     # `service_tier` on the response body. `priority` and `flex` prefix the cache keys
-    # (`priority_cache_read`), which `turn_usage._cache_detail` matches by suffix; this drives that
+    # (`priority_cache_read`), which `ledger._cache_detail` matches by suffix; this drives that
     # over the wire.
     service_tier: str = ""
     # Refuse any request whose billed input exceeds this with a gateway-shaped HTTP 400 ("prompt is

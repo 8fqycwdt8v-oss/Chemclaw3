@@ -112,7 +112,7 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
     Driven through `graph_usage_tokens` on a real chunk shape, since reading is where it can go
     wrong.
     """
-    from chemclaw.api.runner_usage import graph_usage_tokens
+    from chemclaw.spend.ledger import graph_usage_tokens
 
     chunk = SimpleNamespace(
         usage_metadata={
@@ -142,7 +142,7 @@ def test_a_provider_that_reports_cache_outside_its_input_meters_no_negative_inpu
     Some gateways report cached tokens beside input rather than inside it, so the subtraction is
     clamped at 0; the total, which the budget binds on, is untouched.
     """
-    from chemclaw.api.runner_usage import graph_usage_tokens
+    from chemclaw.spend.ledger import graph_usage_tokens
 
     chunk = SimpleNamespace(
         usage_metadata={
@@ -166,8 +166,7 @@ def test_an_unreadable_usage_block_is_counted_once_per_chunk() -> None:
     value is asserted, not just truthiness. Unreadable means usage was reported but could not be
     read (e.g. an upstream rename), distinct from no usage reported.
     """
-    from chemclaw.agent.turn_usage import TurnUsage
-    from chemclaw.api.runner_usage import graph_usage_tokens
+    from chemclaw.spend.ledger import TurnUsage, graph_usage_tokens
 
     turn = TurnUsage()
     for _ in range(3):
@@ -186,8 +185,8 @@ def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> N
 
     A fabricated zero is indistinguishable from a genuinely uncached deployment.
     """
-    from chemclaw.api.runner_usage import graph_usage_tokens
     from chemclaw.core.metrics import METRICS
+    from chemclaw.spend.ledger import graph_usage_tokens
 
     chunk = SimpleNamespace(
         usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}

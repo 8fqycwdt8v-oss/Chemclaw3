@@ -213,6 +213,15 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
+    ("chemclaw.spend", "chemclaw.agent"): (
+        "the per-turn guard is a middleware over `agent.state.ChemclawState` and its wrap-up note "
+        "is an `agent.compaction.request_note`; the usage ledger charges the prefix "
+        "`agent.context_budget` measures"
+    ),
+    ("chemclaw.agent", "chemclaw.spend"): (
+        "the agent assembles the guard into its middleware chain, installs the turn's watches and "
+        "meters the verifier's judge through the ledger"
+    ),
     ("chemclaw.agent", "chemclaw.skills"): (
         "the graph builder mounts the three skills tiers and narrows them per turn, and the "
         "scratchpad, distiller and erasure sweep reach the stored tiers' keys"
@@ -346,6 +355,13 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # The prescriptive-design layer: a leaf reading the kernel and `science.labels.vocabulary`, so a
     # design and a precedent share one species-role vocabulary. It imports neither `ingest` nor
     # `kg`: a design is prescriptive and their shapes are descriptive.
+    # Spend: the ledger, the per-turn guard and the per-session and per-principal budget. A leaf on
+    # the kernel apart from the `agent` cycle declared above; the front door, the durable template
+    # steps and the terminal entrypoints book and read through it.
+    ("chemclaw.spend", "chemclaw.core"),
+    ("chemclaw.api", "chemclaw.spend"),
+    ("chemclaw.durable", "chemclaw.spend"),
+    ("chemclaw.cli", "chemclaw.spend"),
     ("chemclaw.protocols", "chemclaw.core"),
     ("chemclaw.protocols", "chemclaw.science"),
     # Artefacts: a leaf on the kernel that reuses `protocols`' `FieldChange` diff shape and CSV
