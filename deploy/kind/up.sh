@@ -14,8 +14,9 @@
 #   CHEMCLAW_KIND_TAG        tag of every other image: chemclaw/mcp-*, chemclaw/mock (default `kind`)
 #   CHEMCLAW_KIND_AUTH       `devauth` (default): sign-in off, the UI in AUTH_MODE=dev.
 #                            `oidc-mock`: sign-in enforced against the mock tenant over https, the UI
-#                            in AUTH_MODE=msal, Postgres TLS and Temporal mTLS (what core requires
-#                            beside CHEMCLAW_ENTRA_REQUIRED=true). See README.md, "Modes".
+#                            in AUTH_MODE=bff (the BFF holds the tokens), Postgres TLS and Temporal
+#                            mTLS (what core requires beside CHEMCLAW_ENTRA_REQUIRED=true). See
+#                            README.md, "Modes".
 #   CHEMCLAW_KIND_LLM        `mock` (default): the scripted mock LLM. `live`: the host's gateway,
 #                            from `chemclaw-live-env.sh` beside the checkouts (macOS Keychain), whose
 #                            key goes straight into the cluster Secret and is never printed or written.
@@ -40,10 +41,13 @@ readonly UI_URL="http://127.0.0.1:15173"
 # (manifests/ui.yaml); probed here on the loopback address the mapping listens on.
 readonly SANDBOX_URL="http://127.0.0.1:15174"
 readonly TEMPORAL_UI_URL="http://127.0.0.1:18091"
-# The mock tenant as the browser reaches it, and therefore the `iss` every token carries: MSAL.js
-# requires an https authority, and the issuer is compared as a string, so the one value the browser,
-# the mock and core all agree on is the host-mapped address (kind-config.yaml, 18443).
-readonly TENANT_URL="https://127.0.0.1:18443/entra/mock-tenant"
+# The mock tenant as the browser reaches it, and therefore the `iss` every token carries. The UI's
+# BFF discovers the same URL from inside the cluster and the browser follows its authorize
+# redirect to it, so one host name must resolve from both: `*.localhost` is loopback in a browser
+# (kind-config.yaml maps 18443 to the mock), and the UI pod maps it to the `mock-tenant` Service
+# (manifests/ui.yaml `hostAliases`, manifests/mock.yaml). The mock's certificate names it.
+readonly TENANT_HOST="tenant.localhost"
+readonly TENANT_URL="https://$TENANT_HOST:18443/entra/mock-tenant"
 
 log() { printf '\033[36m[kind]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[kind] %s\033[0m\n' "$*" >&2; }
@@ -184,17 +188,19 @@ ALLOW_INSECURE_AUTH=true"
       temporal=""
       ;;
     oidc-mock)
-      ui="AUTH_MODE=msal
+      ui="AUTH_MODE=bff
+ENTRA_CLIENT_AUTH=none
 ENTRA_TENANT_ID=mock-tenant
 ENTRA_CLIENT_ID=mock-spa-client
 API_SCOPE=api://chemclaw/Chat.Access
 ENTRA_AUTHORITY=$TENANT_URL
+NODE_EXTRA_CA_CERTS=/etc/chemclaw-kind-ca/ca.crt
 REVIEWER_ROLES=chemist"
       mock="MOCK_ENTRA_ENABLED=true
 MOCK_ENTRA_ISSUER=$TENANT_URL/v2.0
 MOCK_ENTRA_AUDIENCE=api://chemclaw
 MOCK_ENTRA_SPA_CLIENT_ID=mock-spa-client
-MOCK_ENTRA_REDIRECT_URIS=http://127.0.0.1:15173/auth/callback,http://localhost:15173/auth/callback
+MOCK_ENTRA_REDIRECT_URIS=http://127.0.0.1:15173/auth/callback
 MOCK_SSL_CERTFILE=/tls/tls.crt
 MOCK_SSL_KEYFILE=/tls/tls.key"
       # The server's own frontend and internode TLS (auto-setup's config template), client
@@ -222,7 +228,7 @@ TEMPORAL_TLS_ENABLE_HOST_VERIFICATION=true"
   AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$temporal" | apply_env_configmap chemclaw-temporal-tls-env)"
 }
 
-# The mock tenant on 127.0.0.1:18443 for a cluster that has no host mapping for it.
+# The mock tenant on the loopback port 18443 for a cluster that has no host mapping for it.
 #
 # A fresh cluster gets the port from kind-config.yaml (30443 → 18443). One created before that
 # mapping existed cannot gain it — Docker fixes a container's ports at creation — and recreating it
@@ -274,6 +280,12 @@ ensure_tls() {
   for secret in "${TLS_SECRETS[@]}"; do
     k get secret "$secret" >/dev/null 2>&1 || missing="$missing $secret"
   done
+  # A mock certificate issued before it named the tenant host fails the UI's discovery; reissuing
+  # replaces the whole set, as for any missing Secret.
+  if [ -z "$missing" ] && ! k get secret mock-eln-tls -o jsonpath='{.data.tls\.crt}' \
+    | base64 -d | openssl x509 -noout -text 2>/dev/null | grep -q "DNS:$TENANT_HOST"; then
+    missing=" mock-eln-tls (does not name $TENANT_HOST)"
+  fi
   [ -n "$missing" ] || return 0
   log "issuing this cluster's CA and TLS certificates (missing:$missing)"
   local dir
@@ -303,7 +315,7 @@ CNF
     issue postgres "DNS:postgres,DNS:postgres.$NS.svc"
     issue temporal "DNS:temporal-frontend,DNS:temporal-frontend.$NS.svc,DNS:localhost,IP:127.0.0.1"
     issue temporal-client "DNS:chemclaw-temporal-client"
-    issue mock-eln "DNS:mock-eln,DNS:mock-eln.$NS.svc,DNS:localhost,IP:127.0.0.1"
+    issue mock-eln "DNS:mock-eln,DNS:mock-eln.$NS.svc,DNS:$TENANT_HOST,DNS:localhost,IP:127.0.0.1"
   ) || die "issuing the cluster's certificates failed (openssl: $(command -v openssl))"
   apply_secret() { k create secret generic "$@" --dry-run=client -o yaml | k apply -f - >/dev/null; }
   apply_secret chemclaw-kind-ca --from-file=ca.crt="$dir/ca.crt"
@@ -606,7 +618,7 @@ smoke_credential() {
   local ca token
   ca="$(mktemp)"
   k get secret chemclaw-kind-ca -o jsonpath='{.data.ca\.crt}' | base64 -d >"$ca"
-  token="$(curl -sf -m 20 --cacert "$ca" -X POST "$TENANT_URL/oauth2/v2.0/token" \
+  token="$(curl -sf -m 20 --cacert "$ca" --resolve "$TENANT_HOST:18443:127.0.0.1" -X POST "$TENANT_URL/oauth2/v2.0/token" \
     -H 'content-type: application/json' \
     -d '{"oid":"00000000-0000-0000-0000-00000000a11c","upn":"alice@mock-tenant.test","roles":["chemist","reviewer"]}' \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')" \
