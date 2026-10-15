@@ -266,6 +266,15 @@ _NOT_PRUNED: dict[str, str] = {
     "key-sized row per key whose last attempt died and was never asked for again "
     "(`infra/sql/125_calculation_claims.sql`) — never on a clock of its own, because a live row is "
     "a computation another pod is waiting on",
+    # Knowledge is never pruned on a clock: a note is retired by closing its validity window, and
+    # its history is the record of what the corpus held.
+    "kg_notes": "never: knowledge is corrected by `supersede` and a closed `valid_to`, not aged "
+    "out, and a deleted note would leave every link that cites it dangling "
+    "(`infra/sql/128_kg_notes.sql`)",
+    "kg_note_revisions": "never: the append-only history that replaces the repository log as the "
+    "audit trail, bounded by the number of edits to a note (`infra/sql/128_kg_notes.sql`)",
+    "kg_edges": "derived from the note that asserts them and replaced when it is revised; cascades "
+    "from `kg_notes` (`infra/sql/128_kg_notes.sql`)",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",

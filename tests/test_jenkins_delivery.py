@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.siblings import SIBLING_SKIP, sibling_root
+from tests.siblings import SIBLING_SKIP, fleet_objects, sibling_root
 
 _ROOT = Path(__file__).resolve().parents[1]
 _JENKINS_DIR = _ROOT / "deploy" / "jenkins"
@@ -183,24 +183,22 @@ def test_every_free_text_release_parameter_is_allowlist_validated() -> None:
         assert "c.value ==~ c.pattern" in text, f"{pipeline.name}: validation is not a regex match"
 
 
-def _fleet_workloads(checkout: Path) -> dict[str, set[str]]:
+def _fleet_workloads(checkout: Path) -> tuple[dict[str, set[str]], str]:
     """Every Deployment `Chemclaw3-mcp` creates, mapped to the container names inside it.
 
-    Read off the sibling's own manifests, since a name for another repository's object is a claim
-    only that repository can confirm.
+    Read off the sibling's own manifests or chart, since a name for another repository's object is a
+    claim only that repository can confirm. The reason is non-empty when they could not be read.
     """
-    import yaml
-
+    documents, reason = fleet_objects(checkout)
     workloads: dict[str, set[str]] = {}
-    for manifest in sorted(checkout.glob("servers/*/deploy/deployment.yaml")):
-        for document in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
-            if not isinstance(document, dict) or document.get("kind") != "Deployment":
-                continue
-            spec = document["spec"]["template"]["spec"]
-            workloads[str(document["metadata"]["name"])] = {
-                str(container["name"]) for container in spec["containers"]
-            }
-    return workloads
+    for document in documents:
+        if document["kind"] != "Deployment":
+            continue
+        spec = document["spec"]["template"]["spec"]
+        workloads[str(document["metadata"]["name"])] = {
+            str(container["name"]) for container in spec["containers"]
+        }
+    return workloads, reason
 
 
 #: A component descriptor's `deployment:` value and the `container:` beside it, in either the Groovy
@@ -240,8 +238,12 @@ def test_a_release_patches_a_fleet_workload_that_exists() -> None:
             f"{SIBLING_SKIP} {reason}; NOT checked against the fleet's own workloads: {listed}"
         )
 
-    workloads = _fleet_workloads(checkout)
-    assert workloads, f"{checkout} declares no servers/*/deploy/deployment.yaml to compare against"
+    workloads, unreadable = _fleet_workloads(checkout)
+    if unreadable:
+        pytest.skip(f"{SIBLING_SKIP} {unreadable}; NOT checked against the fleet's own workloads")
+    assert workloads, (
+        f"{checkout} declares no fleet Deployment (chart or servers/*/deploy) to compare against"
+    )
 
     servers = sorted(name.removeprefix("chemclaw-mcp-") for name in workloads)
     wrong: list[str] = []

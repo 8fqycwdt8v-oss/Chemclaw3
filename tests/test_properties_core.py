@@ -225,11 +225,12 @@ _SLUGS = st.from_regex(r"\A[a-z0-9][a-z0-9._-]{0,20}\Z").filter(
 
 # Bodies are generated stripped and CR-free: `python-frontmatter` strips content and
 # `Path.read_text` translates newlines, both normalisations Markdown does not distinguish (and
-# `render.py`'s docstring says so). Surrogates are excluded because `Note._text_is_writable` refuses
-# them; `test_a_note_refuses_text_utf8_cannot_encode` pins that refusal.
-_TEXT = st.characters(exclude_categories=["Cs"])
+# `render.py`'s docstring says so). Surrogates and NUL are excluded because `Note._text_is_writable`
+# refuses them; `test_a_note_refuses_text_utf8_cannot_encode` pins that refusal, and
+# `tests/test_kg_schema.py` the NUL.
+_TEXT = st.characters(exclude_categories=["Cs"], exclude_characters="\x00")
 _BODIES = st.text(
-    alphabet=st.characters(exclude_characters="\r", exclude_categories=["Cs"]), max_size=120
+    alphabet=st.characters(exclude_characters="\r\x00", exclude_categories=["Cs"]), max_size=120
 ).map(str.strip)
 
 

@@ -12,6 +12,7 @@ import logging
 
 import pytest
 
+from tests import recorded_workflow_histories
 from tests.recorded_workflow_histories import (
     ArchivedHistory,
     archived_histories,
@@ -168,6 +169,31 @@ async def test_a_divergence_the_sdk_logged_beats_a_replay_that_returned_quietly(
     assert await replay_failure(archived, _workflow_for(archived)) == "", (
         "with nothing logged, a replay that returns without raising is still clean"
     )
+
+
+async def test_a_replay_the_sdk_cannot_shut_down_still_reports_its_divergence(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A replay the SDK cannot shut down still reports its divergence and is abandoned.
+
+    Core can be left waiting for an activation nobody will complete, and the bridge worker's
+    `finalize_shutdown` then never resolves. Run on the caller's loop, that parked `asyncio.run`'s
+    teardown until the test timeout. The shutdown is made to hang here, and the verdict must come
+    back within the unwind bound with a warning that the replay was abandoned.
+    """
+
+    async def _never(_self: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("temporalio.bridge.worker.Worker.finalize_shutdown", _never)
+    monkeypatch.setattr(recorded_workflow_histories, "REPLAY_UNWIND_SECONDS", 1.0)
+    archived = superseded_histories()[0]
+
+    with caplog.at_level(logging.WARNING, logger=recorded_workflow_histories.logger.name):
+        failure = await asyncio.wait_for(replay_failure(archived, _workflow_for(archived)), 30)
+
+    assert failure, "the divergence was lost when the replay could not be shut down"
+    assert "was abandoned" in caplog.text, "the abandoned replay left no trace in the log"
 
 
 def test_the_background_workflows_this_control_does_not_cover_are_named() -> None:

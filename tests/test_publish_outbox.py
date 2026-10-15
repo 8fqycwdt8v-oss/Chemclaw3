@@ -530,6 +530,89 @@ async def test_two_workers_claiming_at_once_split_the_queue(
     )
 
 
+# The shape `_CLAIM` had: the pick as an `IN (subselect)`. Kept as the control of the two tests
+# below: it must over-claim under the plans they force, or the tests prove nothing.
+_IN_SUBSELECT_CLAIM = f"""
+    UPDATE result_publications
+    SET attempts = attempts + 1, claimed_at = now()
+    WHERE id IN (
+        SELECT id
+        FROM result_publications
+        WHERE sink = %s AND state = 'pending' AND attempts < %s AND {outbox._UNLEASED}
+        ORDER BY enqueued_at
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, calc_ref, document, attempts
+"""
+
+# With these off, Postgres joins the pick by a nested loop that re-runs it once per outer row.
+_PLAN_THAT_RERUNS_THE_PICK = (
+    "enable_hashjoin",
+    "enable_mergejoin",
+    "enable_material",
+    "enable_hashagg",
+    "enable_sort",
+)
+
+
+async def _rows_one_claim_takes(
+    sql: str, limit: int, *, planner_off: tuple[str, ...] = ()
+) -> list[Any]:
+    """Run one claim statement in a transaction that is rolled back, so the queue is unchanged."""
+    async with outbox._connect("test_fixture") as conn:
+        for setting in planner_off:
+            await conn.execute(f"SET LOCAL {setting} = off")
+        cursor = await conn.execute(
+            sql,
+            ("alpha", 5, settings.result_publish_lease_seconds, limit),
+        )
+        rows = await cursor.fetchall()
+        await conn.rollback()
+    return rows
+
+
+@pytest.mark.parametrize("stale_statistics", [False, True], ids=["forced-plan", "stale-statistics"])
+async def test_a_claim_takes_its_limit_and_no_more_whatever_plan_runs_it(
+    monkeypatch: pytest.MonkeyPatch, stale_statistics: bool
+) -> None:
+    """A claim takes at most `limit` rows under the plan that re-runs the pick per outer row.
+
+    A nested-loop semi join over `IN (subselect LIMIT n FOR UPDATE SKIP LOCKED)` re-runs the
+    subselect for each outer row, and each re-run skips the rows this statement already updated,
+    so one claim hands out the whole queue. The planner picks that join when its statistics say the
+    table holds a single row and several arrive before the next analyze (`stale-statistics`), or
+    when the alternatives are priced out (`forced-plan`). The old statement is the control: if it
+    stops over-claiming here, this test no longer reaches the plan it exists for.
+    """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    if stale_statistics:
+        # The statistics describe a one-row table; four rows arrive after them.
+        await outbox.enqueue([_record("stats-0")])
+        async with outbox._connect("test_fixture") as conn:
+            await conn.execute("ANALYZE result_publications")
+            await _reset(conn)
+    await outbox.enqueue([_record(f"plan-{index}") for index in range(4)])
+    if not stale_statistics:
+        async with outbox._connect("test_fixture") as conn:
+            await conn.execute("ANALYZE result_publications")
+            await conn.commit()
+    off = () if stale_statistics else _PLAN_THAT_RERUNS_THE_PICK
+
+    control = await _rows_one_claim_takes(_IN_SUBSELECT_CLAIM, 2, planner_off=off)
+    assert len(control) > 2, (
+        "the IN-subselect claim no longer over-claims under this plan, so this test no longer "
+        "reaches the plan that made it unsafe"
+    )
+    claimed = await _rows_one_claim_takes(outbox._CLAIM, 2, planner_off=off)
+
+    assert len(claimed) == 2, f"a claim with LIMIT 2 took {len(claimed)} rows"
+
+
 async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

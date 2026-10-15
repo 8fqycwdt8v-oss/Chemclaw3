@@ -8,7 +8,6 @@ import asyncio
 import json
 import re
 import socket
-import threading
 import time
 from collections.abc import AsyncIterator, Callable, MutableMapping
 from contextlib import asynccontextmanager
@@ -19,7 +18,6 @@ from urllib.parse import quote
 
 import psycopg
 import pytest
-import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -35,6 +33,7 @@ from tests.pg import (
     drop_test_schema,
     migrated_db_or_skip,
 )
+from tests.served import ServerThread
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -2312,36 +2311,22 @@ def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None
         await send({"type": "http.response.body", "body": b"ok"})
 
     limit = 4
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, limit_concurrency=limit, log_level="error")
-    )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert server.started, "uvicorn did not come up"
-
-    held: list[socket.socket] = []
-    try:
-        # `limit - 1`: the arriving connection is already counted, so usable capacity is one below
-        # the configured number; `service_connection_headroom` absorbs that.
-        held = _held_keepalive_sockets(port, limit - 1)
-        fresh = socket.create_connection(("127.0.0.1", port), timeout=5)
-        held.append(fresh)
-        fresh.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
-        assert b"503" in fresh.recv(256), (
-            "uvicorn served /healthz above its connection limit; the cross-check in "
-            "core/config/__init__.py is guarding against something that no longer happens"
-        )
-    finally:
-        for client in held:
-            client.close()
-        server.should_exit = True
-        thread.join(timeout=10)
+    with ServerThread(app, limit_concurrency=limit) as served:
+        held: list[socket.socket] = []
+        try:
+            # `limit - 1`: the arriving connection is already counted, so usable capacity is one
+            # below the configured number; `service_connection_headroom` absorbs that.
+            held = _held_keepalive_sockets(served.port, limit - 1)
+            fresh = socket.create_connection(("127.0.0.1", served.port), timeout=5)
+            held.append(fresh)
+            fresh.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            assert b"503" in fresh.recv(256), (
+                "uvicorn served /healthz above its connection limit; the cross-check in "
+                "core/config/__init__.py is guarding against something that no longer happens"
+            )
+        finally:
+            for client in held:
+                client.close()
 
 
 def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() -> None:

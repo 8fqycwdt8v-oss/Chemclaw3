@@ -23,8 +23,8 @@ from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.connectors.registry import _mcp_connection, _with_contract, open_connector_specs
 from chemclaw.connectors.server import connector_app
 from tests.conftest import _free_port
+from tests.served import ServerThread
 from tests.test_capability_degradation import _stream_events
-from tests.test_connector_transport import _Server
 
 _NAME = "stub"
 
@@ -124,7 +124,7 @@ def test_a_major_mismatch_refuses_the_connector_by_name_without_dialling_it(
     """The server is asked on `/healthz` and never on `/mcp`; the name comes back unreachable."""
     stub = _Stub({"contract_version": "2.0.0"})
     port = _free_port()
-    with _Server(stub.app, port), caplog.at_level(logging.WARNING):
+    with ServerThread(stub.app, port), caplog.at_level(logging.WARNING):
         tools, unreachable = _open(stub.manifest(port, "1.4.0"))
 
     assert tools == []
@@ -144,7 +144,7 @@ def test_a_major_mismatch_reaches_the_chemist_as_capability_degraded() -> None:
     manifest = stub.manifest(port, "1.4.0")
     assert manifest.endpoint is not None
     spec = _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
-    with _Server(stub.app, port):
+    with ServerThread(stub.app, port):
         events = _stream_events([spec])
 
     assert [event["type"] for event in events][:2] == ["capability_degraded", "token"]
@@ -155,7 +155,7 @@ def test_a_minor_mismatch_is_used_and_warned_about_once(caplog: pytest.LogCaptur
     """An additive difference keeps the connector; the warning is not repeated every turn."""
     stub = _Stub({"contract_version": "1.5.0"})
     port = _free_port()
-    with _Server(stub.app, port), caplog.at_level(logging.WARNING):
+    with ServerThread(stub.app, port), caplog.at_level(logging.WARNING):
         first = _open(stub.manifest(port, "1.4.0"))
         second = _open(stub.manifest(port, "1.4.0"))
 
@@ -170,7 +170,7 @@ def test_an_agreeing_server_is_used_silently(caplog: pytest.LogCaptureFixture) -
     """Same major and minor, a different patch: nothing to say."""
     stub = _Stub({"contract_version": "1.4.7"})
     port = _free_port()
-    with _Server(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
+    with ServerThread(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
         assert _open(stub.manifest(port, "1.4.0")) == (["echo"], [])
     assert not [r for r in caplog.records if "contract" in r.getMessage()]
 
@@ -181,7 +181,7 @@ def test_a_server_that_reports_no_version_is_used_and_logged_once(
     """Unknown on the server's side is no refusal; the log line is written on the first open."""
     stub = _Stub({"status": "ok"})
     port = _free_port()
-    with _Server(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
+    with ServerThread(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
         assert _open(stub.manifest(port, "1.4.0")) == (["echo"], [])
         assert _open(stub.manifest(port, "1.4.0")) == (["echo"], [])
 
@@ -195,7 +195,7 @@ def test_a_manifest_that_declares_no_version_is_used_without_asking_the_server(
     """Unknown on the manifest's side: no `/healthz` round trip, one line, no refusal."""
     stub = _Stub({"contract_version": "9.9.9"})
     port = _free_port()
-    with _Server(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
+    with ServerThread(stub.app, port), caplog.at_level(logging.INFO, logger="chemclaw.connectors"):
         assert _open(stub.manifest(port, None)) == (["echo"], [])
         assert _open(stub.manifest(port, None)) == (["echo"], [])
 
@@ -208,7 +208,7 @@ def test_the_servers_answer_is_remembered_so_a_turn_does_not_probe_every_open() 
     """The fleet's `/healthz` runs a readiness check, so it is asked once per window."""
     stub = _Stub({"contract_version": "1.5.0"})
     port = _free_port()
-    with _Server(stub.app, port):
+    with ServerThread(stub.app, port):
         for _ in range(3):
             assert _open(stub.manifest(port, "1.4.0")) == (["echo"], [])
 
@@ -221,7 +221,7 @@ def test_a_refusal_for_the_contract_does_not_trip_the_reachability_breaker() -> 
 
     stub = _Stub({"contract_version": "2.0.0"})
     port = _free_port()
-    with _Server(stub.app, port):
+    with ServerThread(stub.app, port):
         assert _open(stub.manifest(port, "1.4.0")) == ([], [_NAME])
         assert not recently_unreachable(_NAME)
 
@@ -238,7 +238,7 @@ def test_a_flaky_healthz_does_not_flip_a_verdict(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(contract, "_now", lambda: clock[0])
     stub = _Stub({"contract_version": "2.0.0"})
     port = _free_port()
-    with _Server(stub.app, port):
+    with ServerThread(stub.app, port):
         manifest = stub.manifest(port, "1.4.0")
         assert _open(manifest) == ([], [_NAME])
 

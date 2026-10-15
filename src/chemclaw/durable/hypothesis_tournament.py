@@ -659,7 +659,7 @@ async def run_computable_check(
         refuse_unless_dispatchable,
         structure_of,
     )
-    from chemclaw.kg.graph import build_graph, note_in
+    from chemclaw.kg.store import note_store
 
     call = check.call
     if call is None or not call.tool:
@@ -688,9 +688,9 @@ async def run_computable_check(
     # wire is trusted: only this repository's code puts requests on the broker.
     token = set_current_identity(requested_by, frozenset(requested_roles or ()))
     try:
-        # `note_in` rather than membership: the graph mints bare nodes for cited-but-undefined ids.
-        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-        smiles, refusal = structure_of(note_in(graph, call.subject_note_id), call.subject_note_id)
+        # A cited-but-undefined id is `None`, not a note.
+        subject = await asyncio.to_thread(note_store().get, call.subject_note_id)
+        smiles, refusal = structure_of(subject, call.subject_note_id)
         if refusal is not None or smiles is None:
             return (
                 _refused(check, refusal.code, refusal.detail)
@@ -809,7 +809,7 @@ async def ground_check_template(
     """
     from chemclaw.agent.authz import STATE_CHANGING_TOOLS
     from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs, structure_of
-    from chemclaw.kg.graph import build_graph, note_in
+    from chemclaw.kg.store import note_store
     from chemclaw.templates.registry import _params_model as template_params_model
     from chemclaw.templates.registry import enabled as enabled_templates
     from chemclaw.templates.registry import tool_name as template_tool_name
@@ -843,8 +843,8 @@ async def ground_check_template(
                 refusal_code="template-unrunnable-here", refusal_detail=blocked
             )
 
-        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-        smiles, refusal = structure_of(note_in(graph, call.subject_note_id), call.subject_note_id)
+        subject = await asyncio.to_thread(note_store().get, call.subject_note_id)
+        smiles, refusal = structure_of(subject, call.subject_note_id)
         if refusal is not None or smiles is None:
             code = refusal.code if refusal else "subject-not-found"
             detail = refusal.detail if refusal else call.subject_note_id
@@ -959,7 +959,7 @@ async def ground_check_job(
     from chemclaw.connectors.queues import bundle_queue
     from chemclaw.connectors.registry import ConnectorError, find_job
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params, structure_of
-    from chemclaw.kg.graph import build_graph, note_in
+    from chemclaw.kg.store import note_store
 
     call = check.call
     if call is None or not call.job:
@@ -976,13 +976,16 @@ async def ground_check_job(
             # which is exactly what a chemist reading "the check could not be run" wants.
             return _GroundedJob(refusal_code="job-unavailable", refusal_detail=str(exc))
 
-        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+        # One read of the corpus before the loop, even with no subjects, so a corpus error surfaces.
+        subjects = await asyncio.to_thread(
+            note_store().get_many, [i for ids in call.subjects.values() for i in ids]
+        )
         structures: dict[str, str] = {}
         for ids in call.subjects.values():
             for note_id in ids:
                 if note_id in structures:
                     continue
-                smiles, refusal = structure_of(note_in(graph, note_id), note_id)
+                smiles, refusal = structure_of(subjects[note_id], note_id)
                 if refusal is not None or smiles is None:
                     code = refusal.code if refusal else "subject-not-found"
                     detail = refusal.detail if refusal else note_id

@@ -3,8 +3,8 @@
 Knowledge is written directly and corrected rather than pre-approved
 (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): it carries its provenance, is read beside
 its citations, and can be contradicted or superseded. `settings.knowledge_path` is the directory
-`load_notes` reads and the writer commits into, so a note is in the graph once its bytes land; the
-commit provides durability and history.
+the note store reads and the writer commits into, so a note is in the graph once its bytes land;
+the commit provides durability and history.
 """
 
 import asyncio
@@ -19,9 +19,10 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.kg.graph import dangling_links, load_notes
+from chemclaw.kg.graph import dangling_links
 from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.render import render_note
+from chemclaw.kg.store import note_store
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[
     note this write puts on disk, so a subject citing a dependency written beside it resolves.
     External ids resolve in a store and are not dangling.
     """
-    reported = dangling_links([*load_notes(notes_dir), *landing])
+    reported = dangling_links([*note_store(notes_dir).notes(), *landing])
     # Deduplicated: on a re-record the subject is in both the corpus and `landing`.
     return list(dict.fromkeys(target for source, target in reported if source == note.id))
 

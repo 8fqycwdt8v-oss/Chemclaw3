@@ -85,10 +85,14 @@ _UNLEASED = "(claimed_at IS NULL OR claimed_at < now() - make_interval(secs => %
 # The lease is a timestamp, not a fourth state: a leased row is still `pending` (it has not been
 # delivered), so every reader of `state` stays correct. Oldest first, so a backlog drains in
 # order. `attempts` is returned with the row as the fence (see `Lease`).
+#
+# The picking select is a `MATERIALIZED` CTE, not an `IN (subselect)`: the planner may turn that
+# into a nested-loop semi join which re-runs the `LIMIT ... FOR UPDATE` once per outer row, and
+# each re-run skips the rows this statement already updated and takes the next ones, so one claim
+# hands out every row. A materialized CTE is evaluated once, whatever the join strategy or the
+# table statistics.
 _CLAIM = f"""
-    UPDATE result_publications
-    SET attempts = attempts + 1, claimed_at = now()
-    WHERE id IN (
+    WITH picked AS MATERIALIZED (
         SELECT id
         FROM result_publications
         WHERE sink = %s AND state = 'pending' AND attempts < %s AND {_UNLEASED}
@@ -96,7 +100,11 @@ _CLAIM = f"""
         LIMIT %s
         FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, calc_ref, document, attempts
+    UPDATE result_publications AS p
+    SET attempts = p.attempts + 1, claimed_at = now()
+    FROM picked
+    WHERE p.id = picked.id
+    RETURNING p.id, p.calc_ref, p.document, p.attempts
 """
 
 # Retire rows whose budget is spent but which no mark ever recorded.

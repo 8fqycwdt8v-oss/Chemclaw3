@@ -26,9 +26,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.kg.conflicts import conflict_index
-    from chemclaw.kg.graph import load_notes, note_arrivals
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
+    from chemclaw.kg.store import note_store
 
 from chemclaw.durable.deliver_message import (
     OutboundMessage,
@@ -89,8 +89,8 @@ async def collect_digests() -> list[DigestItem]:
 
     Matching uses `find_notes`' haystack and tokenizer (`chemclaw.kg.search`), so a watch behaves
     like the search it replaces. Freshness is the note's `valid_from`; a note without one is judged
-    on when its file was committed (`kg.graph.note_arrivals`). Notes are read through
-    `settings.knowledge_path` like every other reader.
+    on when its file was committed (`NoteStore.arrivals`). Notes are read through the
+    note store like every other reader.
 
     The read and match run in one `to_thread` hop: both are blocking and O(subscriptions x notes),
     and the worker's loop also carries heartbeat timers for long jobs. One hop also keeps
@@ -104,14 +104,15 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
     """Read the corpus and find each subscription's new matches — the whole blocking half."""
     if not subscriptions:
         return []
-    notes = load_notes(settings.knowledge_path)
+    store = note_store()
+    notes = store.notes()
     # One conflict scan for every subscription; usually cold in this process, hence the early
     # return above when there are no subscriptions. Scoped `as_of` today so a superseded note is not
     # reported as disagreeing with its own replacement.
     disputes = conflict_index(settings.knowledge_path, date.today())
     # When each note reached the corpus, for the notes that carry no `valid_from` — see `_is_new`.
     # One `git log` per run, incremental after the first in this process.
-    arrivals = note_arrivals(settings.knowledge_path)
+    arrivals = store.arrivals()
     digests: list[DigestItem] = []
     for subscription in subscriptions:
         # Tokenized once per subscription, not per note: this loop is subscriptions x notes.
@@ -187,7 +188,7 @@ def _is_new(note: Note, subscription: Subscription, arrived: date | None = None)
     also remembers which ids it sent at that date.
 
     A note with no `valid_from` is judged on `arrived`, the date its file was committed to the
-    corpus (`kg.graph.note_arrivals`); it stands in for nothing else. With neither date (a corpus
+    corpus (`NoteStore.arrivals`); it stands in for nothing else. With neither date (a corpus
     that is not a git work tree), the note is not new.
     """
     when = note.valid_from or arrived

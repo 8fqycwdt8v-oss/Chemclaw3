@@ -6,7 +6,9 @@ names the file that defines the requirement, so when the code and this guide dis
 wins.
 
 Paths without a prefix are in this repository. Paths in the two sibling repositories are written
-`Chemclaw3-mcp:servers/calc/deploy/deployment.yaml` and `Chemclaw3_ui:deploy/openshift/deployment.yaml`.
+`Chemclaw3-mcp:deploy/helm/chemclaw-fleet/values.yaml` and `Chemclaw3_ui:deploy/openshift/deployment.yaml`. A
+`Chemclaw3-mcp` checkout that predates its chart has `Chemclaw3-mcp:servers/<name>/deploy/*.yaml` instead, which
+is what the per-server paths below name.
 
 **Before you start, know these three rules.** The chart refuses to render if you skip them:
 
@@ -16,7 +18,7 @@ Paths without a prefix are in this repository. Paths in the two sibling reposito
    can run only one release per Kubernetes namespace.
 2. The MCP fleet runs in the **same** Kubernetes namespace as the release. Each fleet server's
    NetworkPolicy admits its callers with a bare `podSelector`
-   (`Chemclaw3-mcp:servers/calc/deploy/networkpolicy.yaml`), and that only matches pods in its own
+   (its chart's `templates/networkpolicy.yaml`; `Chemclaw3-mcp:servers/calc/deploy/networkpolicy.yaml` before it), and that only matches pods in its own
    namespace.
 3. Every posture has to be written down: where pods may send traffic, how long data is kept, and
    which Temporal namespace to use. The chart has no permissive default for any of them.
@@ -120,7 +122,7 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
 | Every Temporal worker | `workerMetricsPort` (9000), port name `metrics` | `/healthz` (startup, liveness), `/readyz` (readiness), `/metrics` | `templates/_helpers.tpl` (`chemclaw.workerProbes`) |
 | Temporal SDK metrics (optional) | `monitoring.temporalSdkMetrics.port` (9001) | `/metrics` | `templates/_helpers.tpl` |
 | MCP face (optional) | 8080 | `/healthz` (startup, readiness), `/livez` (liveness), `/mcp` | `templates/deployment-mcp-face.yaml` |
-| Fleet servers | per `Chemclaw3-mcp:MODULES.md` | `/healthz` (readiness), `/livez` (liveness), `/mcp`, `/metrics` | `Chemclaw3-mcp:servers/<name>/deploy/deployment.yaml` |
+| Fleet servers | per `Chemclaw3-mcp:MODULES.md` | `/healthz` (readiness), `/livez` (liveness), `/mcp`, `/metrics` | `Chemclaw3-mcp` chart (formerly `servers/<name>/deploy/deployment.yaml`) |
 | UI | 8080 (`http`), 8081 (`sandbox`) | `/readyz`, `/healthz` on `http`. `/sandbox/frame` on `sandbox` (startup). | `Chemclaw3_ui:deploy/openshift/deployment.yaml` |
 | PostgreSQL / Temporal / OTLP | 5432 / 7233 / 4317 | — | `networkPolicy.egressPorts` in `values.yaml` |
 
@@ -587,11 +589,11 @@ Deploy the fleet **before** the backend. The backend dials it, and the release o
 
 | Server | Manifests | Bearer variable (in the server pod **and** in the chart pods) | `MCP_ALLOWED_HOSTS` (already set in its Deployment) |
 |---|---|---|---|
-| `chem` | `Chemclaw3-mcp:servers/chem/deploy/*.yaml` | `CHEMCLAW_CHEM_TOKEN` | `chemclaw-mcp-chem:8858` |
-| `safety` | `Chemclaw3-mcp:servers/safety/deploy/*.yaml` | `CHEMCLAW_SAFETY_TOKEN` | `chemclaw-mcp-safety:8859` |
-| `rxnpredict` | `Chemclaw3-mcp:servers/rxnpredict/deploy/*.yaml` | `CHEMCLAW_RXNPREDICT_TOKEN` | `chemclaw-mcp-rxnpredict:8857` |
-| `calc` | `Chemclaw3-mcp:servers/calc/deploy/*.yaml` | `CHEMCLAW_CALC_TOKEN` | `chemclaw-mcp-calc:8860` |
-| `rxnlabel` | `Chemclaw3-mcp:servers/rxnlabel/deploy/*.yaml` | `CHEMCLAW_RXNLABEL_TOKEN` | `chemclaw-mcp-rxnlabel:8865` |
+| `chem` | `Chemclaw3-mcp` chart entry `servers.chem` (formerly `servers/chem/deploy/*.yaml`) | `CHEMCLAW_CHEM_TOKEN` | `chemclaw-mcp-chem:8858` |
+| `safety` | `Chemclaw3-mcp` chart entry `servers.safety` (formerly `servers/safety/deploy/*.yaml`) | `CHEMCLAW_SAFETY_TOKEN` | `chemclaw-mcp-safety:8859` |
+| `rxnpredict` | `Chemclaw3-mcp` chart entry `servers.rxnpredict` (formerly `servers/rxnpredict/deploy/*.yaml`) | `CHEMCLAW_RXNPREDICT_TOKEN` | `chemclaw-mcp-rxnpredict:8857` |
+| `calc` | `Chemclaw3-mcp` chart entry `servers.calc` (formerly `servers/calc/deploy/*.yaml`) | `CHEMCLAW_CALC_TOKEN` | `chemclaw-mcp-calc:8860` |
+| `rxnlabel` | `Chemclaw3-mcp` chart entry `servers.rxnlabel` (formerly `servers/rxnlabel/deploy/*.yaml`) | `CHEMCLAW_RXNLABEL_TOKEN` | `chemclaw-mcp-rxnlabel:8865` |
 
 These five are the servers the shipped chart turns on. The off-by-default servers (`props` 8850,
 `thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
@@ -617,7 +619,12 @@ overlay below rewrites it to your digest.
 Service short name. If you dial a server by any other name, such as a namespace-qualified name or
 an ingress host, add that name too, or `/mcp` answers `421` while `/healthz` stays green.
 
-### 6.2 Render and apply with a kustomize overlay
+### 6.2 Install the fleet chart (or, before it, a kustomize overlay)
+
+If the checkout has `deploy/helm/chemclaw-fleet`, install that: one `release.yaml` names the registry and
+each server's image digest, and `helm upgrade --install chemclaw-fleet <Chemclaw3-mcp>/deploy/helm/chemclaw-fleet
+--namespace $NS -f release.yaml` creates every object below (`Chemclaw3-mcp:docs/operations.md` §2). The
+overlay that follows is for a checkout that predates the chart.
 
 Run this from any directory next to a `Chemclaw3-mcp` checkout. It copies each server's shipped
 manifests and pins the image by digest. It does not add the bearer, because the Deployment already
@@ -649,8 +656,8 @@ done
 - The token naming rule `CHEMCLAW_<NAME>_TOKEN` holds for every server in the table, and
   `deploy/kind/render-fleet.sh` checks it against each server's source before relying on it.
 - Without Prometheus Operator CRDs, drop `servicemonitor.yaml` from both the `cp` and `resources`.
-- Optional KEDA scalers live in `Chemclaw3-mcp:servers/<name>/deploy/keda/`, and each server's
-  README explains them.
+- Optional KEDA scalers are the chart's `autoscaling.mode=keda` (`Chemclaw3-mcp:servers/<name>/deploy/keda/`
+  before it), and each server's README explains them.
 - Resource sizing per server (replicas, requests) is in `Chemclaw3-mcp:MODULES.md`. `calc` alone
   asks for 1 CPU and 1 GiB per pod across 2 to 8 replicas.
 

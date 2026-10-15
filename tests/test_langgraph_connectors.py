@@ -7,14 +7,12 @@ properties of a real connection and invisible against a mock.
 """
 
 import asyncio
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from typing import Any, cast
 
 import pytest
-import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
@@ -30,29 +28,7 @@ from chemclaw.core.call_identity import HEADER_ACTOR
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from tests.conftest import _free_port
 from tests.fakes_langgraph import ScriptedChatModel, tool_outputs
-
-
-class _Server:
-    """A uvicorn server on a background thread, started and stopped around one test."""
-
-    def __init__(self, app: FastAPI, port: int) -> None:
-        self._config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-        self._server = uvicorn.Server(self._config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-
-    def __enter__(self) -> "_Server":
-        """Start the server and wait until it is actually accepting connections."""
-        self._thread.start()
-        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
-            if self._server.started:
-                return self
-            threading.Event().wait(0.05)
-        raise RuntimeError("connector test server did not start")
-
-    def __exit__(self, *_exc: object) -> None:
-        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
-        self._server.should_exit = True
-        self._thread.join(timeout=10)
+from tests.served import ServerThread
 
 
 def _probe_app(name: str, capture: list[str] | None = None) -> FastAPI:
@@ -116,9 +92,9 @@ def _spec(name: str, port: int, allowed: tuple[str, ...] = _PROBE_TOOLS) -> Conn
 @pytest.fixture
 def probe() -> Iterator[int]:
     """One connector server on an ephemeral port, torn down with the test."""
-    port = _free_port()
-    with _Server(_probe_app("lg-probe"), port):
-        yield port
+    server = ServerThread(_probe_app("lg-probe"))
+    with server:
+        yield server.port
 
 
 def test_a_reachable_connectors_tools_reach_the_graph_and_run(probe: int) -> None:
@@ -253,7 +229,8 @@ def test_concurrent_turns_get_their_own_session_and_their_own_identity() -> None
     A shared session would attribute one turn's calls to another user in the connector's log.
     """
     seen: list[str] = []
-    port = _free_port()
+    server = ServerThread(_probe_app("ident-probe", capture=seen))
+    port = server.port
 
     async def _turn(actor: str) -> None:
         token = set_current_identity(actor, frozenset())
@@ -268,7 +245,7 @@ def test_concurrent_turns_get_their_own_session_and_their_own_identity() -> None
     async def _both() -> None:
         await asyncio.gather(_turn("user-A"), _turn("user-B"))
 
-    with _Server(_probe_app("ident-probe", capture=seen), port):
+    with server:
         asyncio.run(_both())
 
     assert set(seen) == {"user-A", "user-B"}

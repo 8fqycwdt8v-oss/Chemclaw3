@@ -60,7 +60,7 @@ All in one namespace, `chemclaw` (the fleet's NetworkPolicies admit callers by a
 | Core: front door, background worker, connector servers and workers, interactive workers, the migrate / convert / schedules hook Jobs | `deploy/helm/chemclaw` + `values-kind.yaml` | the production chart, overlaid, never forked |
 | Postgres + pgvector | `manifests/postgres.yaml` | three principals as in production: owner (migrations), `chemclaw_app` (runtime, granted by the migrate hook), `temporal` |
 | Temporal + Temporal UI | `manifests/temporal.yaml` | `temporalio/auto-setup:1.25.2`, namespace `chemclaw` registered at start |
-| The MCP fleet, one Deployment + Service + NetworkPolicy per server | `Chemclaw3-mcp/servers/<name>/deploy/*.yaml` via `render-fleet.sh` | the fleet's own files, with image, replicas, bearer and requests patched by kustomize |
+| The MCP fleet, one Deployment + Service + NetworkPolicy per server | `Chemclaw3-mcp`'s `deploy/helm/chemclaw-fleet` chart, or `servers/<name>/deploy/*.yaml` in a checkout that predates it, via `render-fleet.sh` | the fleet's own description, with image, replicas, bearer and requests set by chart values (or kustomize patches), and the namespace and `enableServiceLinks: false` by kustomize |
 | Mock ELN/ORD/Entra app and the mock vendor MCP | `manifests/mock.yaml` | the ELN/ORD exports land on a claim the background worker mounts read-only |
 | Scripted mock LLM (`python -m chemclaw.cli.mock_llm --catalogue e2e`) | `manifests/mock-llm.yaml` | the default model gateway; its markers are below |
 | UI | `manifests/ui.yaml` | |
@@ -176,7 +176,7 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
   DNS-rebinding guard with a loopback-only `Host` list, so a caller dialling a connector by Service
   name was refused while `/healthz` stayed green. Core's `connector_app` now admits loopback plus the
   connector's own `connector_urls` address. The fleet servers have the same default; their fix is
-  `Chemclaw3-mcp` #153, which reads `MCP_ALLOWED_HOSTS` — set by the fleet's own deployment files
+  `Chemclaw3-mcp` #153, which reads `MCP_ALLOWED_HOSTS` — set by the fleet's own chart (or deployment files)
   and, for a checkout that predates it, by `render-fleet.sh`.
 - **The `bo` server is OOM-killed by the shared 512Mi connector limit** (measured 864 MiB at start).
   Connector servers can now declare `connectors.<name>.serverResources`, and `bo` does.

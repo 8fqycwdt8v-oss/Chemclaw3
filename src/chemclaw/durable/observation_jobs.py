@@ -18,9 +18,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.kg.git_writer import default_writer
-    from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
     from chemclaw.kg.record import record_note
+    from chemclaw.kg.store import note_store
     from chemclaw.memory.observation_mining import mine_corpus, mine_interactions
     from chemclaw.memory.observations import (
         Observation,
@@ -68,8 +68,8 @@ async def mine_observations_activity() -> MiningReport:
     through `retire_stale`.
     """
     corpus = await read_corpus()
-    # Off the loop: `load_notes` is a synchronous full parse of the corpus.
-    notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
+    # Off the loop: reading the corpus is a synchronous full parse.
+    notes = await asyncio.to_thread(note_store().notes)
     found = [
         *mine_corpus(corpus.reactions),
         *mine_interactions(notes, corpus.reactions),
@@ -113,9 +113,7 @@ async def promote_observations_activity() -> list[str]:
     # Read from the store, so earlier promotions are visible and a retry sees the same view.
     earlier = [(row.id, frozenset(row.evidence_note_ids)) for row in await promoted_observations()]
     promoted: list[frozenset[str]] = [evidence for _, evidence in earlier]
-    merged = {
-        note.id: note for note in await asyncio.to_thread(load_notes, settings.knowledge_path)
-    }
+    merged = {note.id: note for note in await asyncio.to_thread(note_store().notes)}
     # **Best-supported first, so a superset is seen before the subset it supersedes.**
     # `promotable()` orders by id, which is a hash and therefore arbitrary here.
     for observation in sorted(await promotable(), key=lambda o: o.support, reverse=True):

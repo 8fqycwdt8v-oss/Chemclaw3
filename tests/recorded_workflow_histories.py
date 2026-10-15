@@ -21,8 +21,10 @@ To re-record, with a broker up (`make up`):
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,14 @@ REPLAY_DEADLINE_SECONDS = 60.0
 # for them turns the hang into a prompt failure; the deadline is the backstop if upstream rewords
 # them.
 _NONDETERMINISM_MARKERS = ("NonDeterministicError", "TMPRL1100")
+
+# How long a cancelled replay gets to unwind before its thread is abandoned. Unwinding takes
+# milliseconds, or two seconds when the SDK's eviction loop swallows the cancel once and retries.
+REPLAY_UNWIND_SECONDS = 10.0
+
+logger = logging.getLogger(__name__)
+
+_ABANDONED_LOOPS: list[asyncio.AbstractEventLoop] = []
 
 
 @dataclass(frozen=True)
@@ -112,7 +122,63 @@ async def replay_failure(archived: ArchivedHistory, workflow_class: type) -> str
     """Replay one archived history against today's code; return "" if it replayed clean.
 
     Returns the divergence rather than raising, because callers assert both that it is empty and
-    that it is not.
+    that it is not. The replay runs on its own thread and event loop (`_replay_on_a_private_loop`).
+    """
+    verdict: concurrent.futures.Future[str] = concurrent.futures.Future()
+    threading.Thread(
+        target=_replay_on_a_private_loop,
+        args=(archived, workflow_class, verdict),
+        name="workflow-replay",
+        daemon=True,
+    ).start()
+    return await asyncio.wrap_future(verdict)
+
+
+def _replay_on_a_private_loop(
+    archived: ArchivedHistory, workflow_class: type, verdict: "concurrent.futures.Future[str]"
+) -> None:
+    """Thread body: replay, cancel what is left like `asyncio.run` would, and hand back the verdict.
+
+    A replay that found its divergence never finishes (see `REPLAY_DEADLINE_SECONDS`), so the SDK's
+    tasks are cancelled and given `REPLAY_UNWIND_SECONDS` to unwind, which is what `asyncio.run`'s
+    teardown did on the test's own loop. That teardown can park for good: a cancel that lands while
+    core is handing out an activation drops it, and the bridge worker's `finalize_shutdown` then
+    waits for an activation nobody will complete. Here it costs one abandoned daemon thread and a
+    logged warning; the verdict is already known. The verdict is returned only after the unwind,
+    so a replay never logs into the next one's watcher.
+    """
+    loop = asyncio.new_event_loop()
+    wedged: set[asyncio.Task[object]] = set()
+    try:
+        failure = loop.run_until_complete(_replay_race(archived, workflow_class))
+        leftover = asyncio.all_tasks(loop)
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            _, wedged = loop.run_until_complete(
+                asyncio.wait(leftover, timeout=REPLAY_UNWIND_SECONDS)
+            )
+        verdict.set_result(failure)
+    except BaseException as error:  # handed to the awaiting test, not swallowed
+        verdict.set_exception(error)
+    if wedged:
+        # Left open and referenced: the bridge worker may still call back into this loop, and
+        # collecting it would report its parked tasks as destroyed while another test runs.
+        _ABANDONED_LOOPS.append(loop)
+        logger.warning(
+            "the cancelled replay of %s did not unwind within %ss and was abandoned: the SDK's "
+            "bridge worker could not shut down",
+            archived,
+            REPLAY_UNWIND_SECONDS,
+        )
+    else:
+        loop.close()
+
+
+async def _replay_race(archived: ArchivedHistory, workflow_class: type) -> str:
+    """Race the replay against the SDK's own report of a divergence; return the verdict.
+
+    The tasks it leaves pending are cancelled by the caller.
     """
     # Imported here rather than at module scope: constructing a `Replayer` builds an SDK bridge
     # worker, and this module is imported by the test collector on every run, including the ones
@@ -129,16 +195,11 @@ async def replay_failure(archived: ArchivedHistory, workflow_class: type) -> str
         replayer = Replayer(workflows=[workflow_class], data_converter=pydantic_data_converter)
         replay = asyncio.ensure_future(replayer.replay_workflow(archived.history))
         detected = asyncio.ensure_future(watcher.tripped.wait())
-        done, pending = await asyncio.wait(
+        done, _pending = await asyncio.wait(
             {replay, detected},
             timeout=REPLAY_DEADLINE_SECONDS,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        # Cancelled and not awaited: a replay abandoned mid-divergence is parked in the SDK's bridge
-        # poll and ignores cancellation, so awaiting would reintroduce the hang. Each caller's own
-        # `asyncio.run` tears the loop down.
-        for task in pending:
-            task.cancel()
         # The watcher is asked first: with `FIRST_COMPLETED`, both futures can be done in one cycle,
         # and a replay that completed without raising must not override a logged divergence.
         # `reason` rather than `tripped` because `emit` sets it synchronously, while the event is

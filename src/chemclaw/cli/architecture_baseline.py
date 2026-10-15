@@ -115,6 +115,61 @@ def _agent_build() -> dict[str, Any]:
     }
 
 
+# Run in a fresh interpreter so the RSS delta is the parsed corpus and its graph, not the imports.
+# Notes are ~1.1 kB of prose with two typed links each, which is the order of a real ELN reaction.
+_KG_PROBE = """
+import json, resource, sys, tempfile
+from pathlib import Path
+from chemclaw.kg.graph import build_graph
+from chemclaw.kg.note import Note
+from chemclaw.kg.render import render_note
+
+def rss_kb():
+    with open("/proc/self/statm") as handle:
+        return int(handle.read().split()[1]) * resource.getpagesize() // 1024
+
+count = int(sys.argv[1])
+root = Path(tempfile.mkdtemp())
+(root / "reaction").mkdir()
+text = (
+    "Suzuki coupling of an aryl bromide with a boronic acid in aqueous dioxane at 80 C for 4 h; "
+    "isolated yield 82 percent, purity 98 percent by HPLC. The major impurity was the homocoupled "
+    "biaryl at 0.4 area percent. Palladium loading 1 mol percent, base potassium carbonate. "
+    "Workup by extraction and recrystallisation from ethanol. See [[reaction-{prev}]] and "
+    "[[precursor-of:reaction-{nxt}]]. "
+) * 2
+for index in range(count):
+    note = Note(
+        id=f"reaction-{index:06d}", type="reaction", created_by="agent", tags=["suzuki", "pd"],
+        compound_smiles="c1ccc(cc1)-c1ccccc1", source="eln:synthetic",
+        body=text.format(prev=f"{max(index - 1, 0):06d}", nxt=f"{index + 1:06d}"),
+    )
+    (root / "reaction" / f"{note.id}.md").write_text(render_note(note), encoding="utf-8")
+before = rss_kb()
+build_graph(root)
+print(json.dumps({"kb_per_note": round((rss_kb() - before) / count, 2)}))
+"""
+
+
+def _kg_graph_memory(counts: tuple[int, ...] = (1000, 5000)) -> dict[str, float]:
+    """Resident memory per note of the parsed corpus and its NetworkX graph, by corpus size.
+
+    This is the per-pod cost the Postgres store removes; the figures are what
+    `D-2026-10-14-the-notes-live-in-postgres-and-git-leaves-the-knowledge-path` cites.
+    """
+    measured: dict[str, float] = {}
+    for count in counts:
+        done = subprocess.run(
+            [sys.executable, "-c", _KG_PROBE, str(count)],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+        )
+        measured[str(count)] = float(json.loads(done.stdout.splitlines()[-1])["kb_per_note"])
+    return measured
+
+
 def _count_lines(paths: list[Path]) -> int:
     """Total line count over `paths`."""
     return sum(len(p.read_text(encoding="utf-8", errors="replace").splitlines()) for p in paths)
@@ -157,6 +212,7 @@ def main() -> None:
             "api_app_cold_second": _import_seconds("chemclaw.api.app"),
         },
         "agent_build": _agent_build(),
+        "kg_graph_kb_per_note": _kg_graph_memory(),
         "prose": _prose_by_package(),
         "static": _static(),
     }

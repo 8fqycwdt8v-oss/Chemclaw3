@@ -19,15 +19,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_fie
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.agent.session_store import owner_permits
-from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_text import get_current_user_texts
-from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import external_record_ref
+from chemclaw.kg.store import note_store
 from chemclaw.memory.failure import failures_against, observation_of
 from chemclaw.protocols.checks import (
     blockers,
@@ -289,9 +288,7 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
         return []
     try:
         notes = await asyncio.to_thread(
-            lambda: failures_against(
-                load_notes(settings.knowledge_path), cited=cited, structures=structures
-            )
+            lambda: failures_against(note_store().notes(), cited=cited, structures=structures)
         )
     except Exception as exc:
         degraded(
