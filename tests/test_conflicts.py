@@ -272,6 +272,25 @@ def test_the_conflict_index_is_computed_once_per_corpus_state(
     assert sorted(third["b"].ids) == ["a", "c"]
 
 
+def test_an_older_snapshot_arriving_late_does_not_replace_a_newer_cached_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests race: the one that asked later has the newer corpus and keeps the cache.
+
+    The slower one still gets its own answer, computed from its own snapshot.
+    """
+    monkeypatch.setattr(settings, "conflict_detection_enabled", True)
+    conflicts_module._INDEX_CACHE.clear()
+    key = str(tmp_path)
+
+    newer = conflicts_module._index_for(tmp_path, "newer-corpus", [], None, 2.0)
+    older = conflicts_module._index_for(tmp_path, "older-corpus", [], None, 1.0)
+
+    assert older == {}
+    assert conflicts_module._INDEX_CACHE[key][0] == "newer-corpus"
+    assert conflicts_module._index_for(tmp_path, "newer-corpus", [], None, 3.0) is newer
+
+
 def test_the_conflict_index_is_recomputed_for_a_different_day(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

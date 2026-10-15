@@ -269,27 +269,27 @@ async def find_notes(text: str) -> NoteSearch:
     return await _scan_notes(note_store(), terms, date.today(), settings.graph_max_results)
 
 
-def _edge_relations(edges: Sequence[Edge], source: str, target: str) -> list[str]:
-    """The relation names asserted on the `source -> target` edge, sorted; empty if there is none.
+#: The relation names on each `(source, target)` link, sorted: `_index_edges`'s answer.
+_EdgeIndex = dict[tuple[str, str], list[str]]
+
+
+def _index_edges(edges: Sequence[Edge]) -> _EdgeIndex:
+    """The relation names asserted on each `source -> target` edge, sorted, one pass over `edges`.
 
     Reports what the store says; filtering `cites` is `_neighbor_ref`'s job.
     """
-    return sorted(
-        {
-            relation.rel
-            for edge in edges
-            if edge.src == source and edge.dst == target
-            for relation in edge.relations
-        }
-    )
+    names: dict[tuple[str, str], set[str]] = {}
+    for edge in edges:
+        names.setdefault((edge.src, edge.dst), set()).update(r.rel for r in edge.relations)
+    return {link: sorted(rels) for link, rels in names.items()}
 
 
 def _neighbor_ref(
-    edges: Sequence[Edge], anchor_id: str, note: Note, via: str | None = None
+    edges: _EdgeIndex, anchor_id: str, note: Note, via: str | None = None
 ) -> NeighborRef:
     """One neighbour of `anchor_id`, carrying the typed edges between the two.
 
-    `edges` are the anchor's own (`NoteStore.edges`), which hold every link in either direction.
+    `edges` is the index of the anchor's own links (`NoteStore.edges`), in either direction.
 
     `via` is the node the edges actually join when `note` stands in for it (a retired compound
     reported as its successor). `cites` is dropped in both directions: it is what every untyped
@@ -299,11 +299,9 @@ def _neighbor_ref(
     return NeighborRef(
         **_ref(note).model_dump(),
         relations_out=[
-            rel for rel in _edge_relations(edges, anchor_id, joined) if rel != DEFAULT_RELATION
+            rel for rel in edges.get((anchor_id, joined), ()) if rel != DEFAULT_RELATION
         ],
-        relations_in=[
-            rel for rel in _edge_relations(edges, joined, anchor_id) if rel != DEFAULT_RELATION
-        ],
+        relations_in=[rel for rel in edges.get((joined, anchor_id), ()) if rel != DEFAULT_RELATION],
     )
 
 
@@ -387,7 +385,7 @@ async def _expand_compound(store: NoteStore, note_id: str, hops: int) -> NoteVie
         "What was run with it is in the reaction records — search them by this SMILES "
         f"(similar_reactions, substrate_precedent). {SYSTEM_SPEECH_MARK}"
     )
-    edges = await store.edges(note_id)
+    edges = _index_edges(await store.edges(note_id))
     return NoteView(
         note=_ref(rendered),
         body=f"{notice}\n\n{frame_untrusted(rendered.body, note_id=note_id)}",
@@ -510,21 +508,50 @@ async def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteVie
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
     today = date.today()
-    # The anchor is returned even if expired; non-current neighbours are dropped, except a retired
-    # compound, which stands for its successor.
-    neighbors: dict[str, NeighborRef] = {}
+    # The reads are awaited; everything built from what they returned is one worker-thread pass,
+    # because a hub note has thousands of neighbours and that assembly must not stall the loop.
     edges = await store.edges(note_id)
-    reached = sorted(await store.neighborhood(note_id, hops=hops))
-    for nid, neighbor in (await store.get_many(reached)).items():
+    reached = await store.neighborhood(note_id, hops=hops)
+    found = await store.get_many(reached)
+    retired = await asyncio.to_thread(_retired_compounds, found, today)
+    successors = await store.current_successors(retired, today)
+    return await asyncio.to_thread(_assemble_view, note, edges, found, successors, today)
+
+
+def _retired_compounds(found: dict[str, Note | None], today: date) -> list[str]:
+    """The neighbours that are compounds no longer current: those a successor may stand in for."""
+    return [
+        nid
+        for nid, neighbor in found.items()
+        if neighbor is not None and neighbor.type == "compound" and not neighbor.is_current(today)
+    ]
+
+
+def _assemble_view(
+    note: Note,
+    edges: Sequence[Edge],
+    found: dict[str, Note | None],
+    successors: dict[str, Note | None],
+    today: date,
+) -> NoteView:
+    """The `NoteView` of `note` over what the store returned, in id order.
+
+    The anchor is returned even if expired; non-current neighbours are dropped, except a retired
+    compound, which stands for its current successor (`successors`, keyed by the retired id).
+    """
+    index = _index_edges(edges)
+    neighbors: dict[str, NeighborRef] = {}
+    for nid in sorted(found):
+        neighbor = found[nid]
         if neighbor is None:
             continue
         if neighbor.is_current(today):
-            neighbors.setdefault(nid, _neighbor_ref(edges, note_id, neighbor))
+            neighbors.setdefault(nid, _neighbor_ref(index, note.id, neighbor))
             continue
-        replacement = await _current_compound(store, nid, today)
-        if replacement is not None and replacement.id != note_id:
+        replacement = successors.get(nid)
+        if replacement is not None and replacement.type == "compound" and replacement.id != note.id:
             neighbors.setdefault(
-                replacement.id, _neighbor_ref(edges, note_id, replacement, via=nid)
+                replacement.id, _neighbor_ref(index, note.id, replacement, via=nid)
             )
     # The body is note content (possibly ingested, not agent-authored): frame it as data.
     return NoteView(

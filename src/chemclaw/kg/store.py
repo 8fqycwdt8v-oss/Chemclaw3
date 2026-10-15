@@ -137,6 +137,12 @@ class NoteStore(CorpusState, Protocol):
         """The first note current on `as_of` that a chain of supersede links leads to."""
         ...
 
+    async def current_successors(
+        self, note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
+        """`current_successor` for each id from one read of the corpus, so the answers agree."""
+        ...
+
     async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         """The notes current on `as_of` that contain at least one of `terms`, as substrings."""
         ...
@@ -220,6 +226,16 @@ class GitNoteStore:
 
     def _current_successor(self, note_id: str, as_of: date) -> Note | None:
         return corpus.current_successor(corpus.build_graph(self._dir), note_id, as_of)
+
+    async def current_successors(
+        self, note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
+        """One graph read, then a successor walk per id."""
+        return await asyncio.to_thread(self._current_successors, note_ids, as_of)
+
+    def _current_successors(self, note_ids: Collection[str], as_of: date) -> dict[str, Note | None]:
+        graph = corpus.build_graph(self._dir)
+        return {note_id: corpus.current_successor(graph, note_id, as_of) for note_id in note_ids}
 
     async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
         """Substring-match `terms` over the notes current on `as_of`, in note id order.

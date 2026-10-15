@@ -278,6 +278,20 @@ async def test_current_successor_walks_a_supersede_chain_to_the_first_current_no
     assert await store.current_successor("no-such-id", _SPRING) is None
 
 
+async def test_current_successors_answers_each_id_as_current_successor_does(
+    harness: Harness,
+) -> None:
+    """A batch from one read gives the same note, or `None`, as asking one id at a time."""
+    store = await _loaded(harness)
+    ids = ["old", "mid", "alpha", "no-such-id", "cyclic-a"]
+    for as_of in (_SPRING, _AUTUMN):
+        batch = await store.current_successors(ids, as_of)
+        assert list(batch) == ids
+        for note_id in ids:
+            assert batch[note_id] == await store.current_successor(note_id, as_of), note_id
+    assert await store.current_successors([], _SPRING) == {}
+
+
 async def test_current_successor_ends_a_cycle_instead_of_walking_it(harness: Harness) -> None:
     """Two notes that replace each other have no current successor, and the walk terminates."""
     store = await _loaded(harness)
@@ -466,6 +480,8 @@ async def test_get_many_reads_the_corpus_once_however_many_ids_it_is_given(
     assert found["mid"] is not None and found["missing-note"] is None
     await store.get_many([])
     assert len(corpus_reads) == 2, "an empty batch still reads, so an unreadable corpus fails"
+    await store.current_successors(["old", "mid", "new"], _SPRING)
+    assert len(corpus_reads) == 3, "a batch of successors is one read too"
 
 
 async def test_a_premise_check_reads_the_corpus_once(corpus_reads: list[Path]) -> None:
@@ -583,6 +599,7 @@ async def test_every_read_of_the_store_runs_off_the_event_loop(
     await store.neighborhood("alpha")
     await store.edges("alpha")
     await store.current_successor("old", _SPRING)
+    await store.current_successors(["old"], _SPRING)
     await store.search(["suzuki"], _SPRING)
     await store.graph()
     await store.snapshot()

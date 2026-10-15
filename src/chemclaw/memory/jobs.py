@@ -177,9 +177,14 @@ async def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisU
             "retiring notes on a partial view retracts knowledge that may "
             "still be true"
         )
-        return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
+        return await asyncio.to_thread(_marked_units, notes)
     existing = await note_store().notes()
     return await asyncio.to_thread(_paired, notes, existing)
+
+
+def _marked_units(notes: list[Note]) -> list[SynthesisUnit]:
+    """Each note marked as built from a partial read, with no retirement."""
+    return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
 
 
 def _paired(notes: list[Note], existing: list[Note]) -> list[SynthesisUnit]:
