@@ -48,7 +48,8 @@ from chemclaw.core.mcp_session import (
     invoke,
     open_session,
 )
-from chemclaw.durable.publish import calculation_retry
+from chemclaw.durable.registry import ActivityClass
+from chemclaw.durable.retry import policy_for
 from chemclaw.ingest.labels.labeller import LabelServerError, LabelToolError, RxnLabelServer
 from tests.conftest import _free_port
 from tests.served import ServerThread
@@ -439,9 +440,11 @@ class _EmbedWorkflow:
 
 
 def _fast_calculation_retry() -> RetryPolicy:
-    """`calculation_retry()` itself, only with its half-hour backoff made milliseconds."""
-    return dataclasses.replace(
-        calculation_retry(),
+    """The calculation class's policy (attempts and bad-data list), with its backoff in ms."""
+    real = policy_for(ActivityClass.CALC)
+    return RetryPolicy(
+        maximum_attempts=real.maximum_attempts,
+        non_retryable_error_types=real.non_retryable_error_types,
         initial_interval=timedelta(milliseconds=20),
         maximum_interval=timedelta(milliseconds=20),
         backoff_coefficient=1.0,
@@ -501,7 +504,7 @@ def test_temporal_sees_the_bare_class_and_retries_only_what_it_should(
     assert failure.cause.type == failure_type
     # Temporal decides by this name against the policy's list, so both halves are asserted: the
     # name is (or is not) listed, and the attempt count shows the server acting on it.
-    listed = failure_type in (calculation_retry().non_retryable_error_types or [])
+    listed = failure_type in (policy_for(ActivityClass.CALC).non_retryable_error_types or [])
     assert listed is (attempts == 1)
     assert _CALLS.count == attempts
 
