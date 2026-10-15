@@ -16,7 +16,7 @@ keeps environment configuration and point the descriptor's `values` at that path
 belong in either place: the chart names Secrets and an `ExternalSecret`/`SealedSecret` fills them.
 
 Start from `deploy/helm/chemclaw/values.yaml`, which documents every key beside the argument for its
-default, and set only what differs. Four that every environment must state:
+default, and set only what differs. Five that every environment must state:
 
 - `networkPolicy.egressDestinations` (or `networkPolicy.allowAnyDestination: true`) — the chart
   refuses to render without one, because an empty list means *every* destination
@@ -29,6 +29,10 @@ default, and set only what differs. Four that every environment must state:
   (`retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` or
   `retention.exhibitsGrowthAccepted: true`) — keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least the
   artefacts' window if a bound value must stay readable (runbook, "(xvi-c) Artefacts").
+- `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` (with `CHEMCLAW_EMBEDDING_MODEL` and
+  `CHEMCLAW_EMBEDDING_DIM`), or `allowNonSemanticEmbeddings: true` — the code default is the offline
+  `hash` embedder, which ranks by shared tokens and is not semantic, so a release that did not
+  choose it must not get it by silence and the chart refuses to render one that did.
 - `temporal.namespace` — the chart refuses to render without it and ships **no** default, because
   this one is a value rather than a posture: `CHEMCLAW_TEMPORAL_ADDRESS` names a broker in the
   cluster-shared `temporal` namespace, so a constant put every environment on one namespace, one
@@ -40,12 +44,12 @@ default, and set only what differs. Four that every environment must state:
 - `config.CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — empty means every expensive job is refused for
   everyone, and nothing about the deployment looks wrong (`deploy/README.md`).
 
-The pipeline has an escape hatch for each of the first two (`ALLOW_ANY_EGRESS_DESTINATION`,
-`ACCEPT_UNBOUNDED_GROWTH`), and they exist so a first run is possible at all rather than as the
-answer: both state a posture nobody chose, in a parameter that is not part of the release
+The pipeline has an escape hatch for each of the first three (`ALLOW_ANY_EGRESS_DESTINATION`,
+`ACCEPT_UNBOUNDED_GROWTH`, `ACCEPT_NON_SEMANTIC_EMBEDDINGS`), and they exist so a first run is possible at all rather than as the
+answer: each states a posture nobody chose, in a parameter that is not part of the release
 descriptor. A values file here is the version a later reader can audit.
 
-`TEMPORAL_NAMESPACE` looks like a third of those and is not one: it carries no default and states no
+`TEMPORAL_NAMESPACE` looks like a fourth of those and is not one: it carries no default and states no
 posture, so leaving it unset does not fall back to anything — the render fails. That is the whole
 point of it, and it is why the parameter is a string rather than a boolean: three environments would
 each tick a boolean and still collide.

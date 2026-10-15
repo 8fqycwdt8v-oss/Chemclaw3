@@ -66,7 +66,7 @@ store, so a retry walks straight through the work it already did.
 | --- | --- |
 | The worker and its plumbing | `background_worker`, `serve` (run a worker so a pod termination drains rather than loses work), `registry`, `interceptor` (every activity says it ran and how it ended), `heartbeat`, `job_metrics`, `schedules` (the Temporal Schedules `make schedules-apply` writes) |
 | Connector jobs | `connector_job`, `governed_launch` (a launch through the same governed chain a turn's goes through), `job_record` + `job_record_store`, `orchestrator` (child-workflow fan-out) |
-| Ingest and indexes | `eln_sync`, `document_sync`, `corpus_sync`, `label_sync`, `commitment_sync`, `note_index` |
+| Ingest and indexes | `eln_sync`, `document_sync`, `corpus_sync`, `label_sync`, `commitment_sync`, `note_index`, `reembed` (on demand: bring every stored vector to a new embedding model or width; a separate request empties the old width's vectors) |
 | Knowledge and memory | `publish` (the durable note write), `memory_jobs`, `observation_jobs`, `hypothesis_tournament` |
 | Reports and templates | `report_workflow`, `template_job`, `template_activities` |
 | Waiting on people | `awaiting` + `pending_store` (a held-open question), `orphaned_waits`, `check_in`, `notify` (session push-back), `digest`, `deliver_message` |

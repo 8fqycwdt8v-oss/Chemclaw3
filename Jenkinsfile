@@ -43,6 +43,8 @@ pipeline {
                  description: 'State that any-destination egress is intended. The chart refuses to render without a stated posture.')
     booleanParam(name: 'ACCEPT_UNBOUNDED_GROWTH', defaultValue: false,
                  description: 'State that the durable tables may grow forever. The sibling of the flag above: the chart refuses to render until a release states its retention posture too. Leave false and put `retention.windows` in the environment values file, which is the answer a real deployment wants.')
+    booleanParam(name: 'ACCEPT_NON_SEMANTIC_EMBEDDINGS', defaultValue: false,
+                 description: 'State that the offline `hash` embedder is intended. The chart refuses to render a release that would embed with it unless `allowNonSemanticEmbeddings` is true. Leave false and put `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` (with the model and its dimension) in the environment values file, which is the answer a real deployment wants.')
     string(name: 'TEMPORAL_NAMESPACE', defaultValue: '',
            description: 'The Temporal namespace this release owns. Deliberately empty: unlike the two flags above this is not a posture with a permissive escape hatch, it is a value with no safe default, and the render fails until you give it one. The chart used to ship the constant `chemclaw` against a cluster-shared broker, so dev, staging and prod landed on one namespace, one task queue and one schedule-id space — a peer\'s upgrade rewrote this release\'s Schedules and deleted the ones it did not itself plan. A boolean would not help: three environments would each set it true and still collide. Two releases also need separate databases, which no chart guard can check.')
     string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'chemclaw-registry',
@@ -204,6 +206,7 @@ dry run    ${params.DRY_RUN}"""
           // Without the second one this stage failed on every openshift run, on shipped defaults.
           if (params.ALLOW_ANY_EGRESS_DESTINATION) { flags += ' --set networkPolicy.allowAnyDestination=true' }
           if (params.ACCEPT_UNBOUNDED_GROWTH) { flags += ' --set retention.unboundedGrowthAccepted=true' }
+          if (params.ACCEPT_NON_SEMANTIC_EMBEDDINGS) { flags += ' --set allowNonSemanticEmbeddings=true' }
           // The third thing the chart refuses to render without, and the one that is a value rather
           // than a posture. Passed unconditionally so an empty parameter reaches the chart's own
           // refusal here, in the render stage, with the message an operator would otherwise have met
@@ -251,6 +254,7 @@ dry run    ${params.DRY_RUN}"""
                 NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
                 ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
                 ACCEPT_UNBOUNDED_GROWTH='${params.ACCEPT_UNBOUNDED_GROWTH}' \
+                ACCEPT_NON_SEMANTIC_EMBEDDINGS='${params.ACCEPT_NON_SEMANTIC_EMBEDDINGS}' \
                 TEMPORAL_NAMESPACE='${params.TEMPORAL_NAMESPACE}' \
                   deploy/jenkins/targets/openshift.sh release.json
               """

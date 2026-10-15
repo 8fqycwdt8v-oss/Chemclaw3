@@ -39,6 +39,26 @@
 {{- if ne (default "" (get .Values.config "CHEMCLAW_SESSION_STORE")) "postgres" }}
 {{- fail (printf "config.CHEMCLAW_SESSION_STORE is %q; a chart release must set \"postgres\". This chart renders a front door and a background worker as separate pods, and `kg/git_writer.py::_cluster_lock` — the only thing that stops two pods racing a note write to one git remote — is taken *only* under the postgres session store. Under `memory` each pod holds its own host-local flock against one origin, so two pods proposing the same note id are last-writer-wins with no error. The memory store is for the CLI and the tests, which are single-process." (default "" (get .Values.config "CHEMCLAW_SESSION_STORE"))) }}
 {{- end }}
+{{- /* **A release that embeds with the offline hash embedder must say so.**
+
+       `CHEMCLAW_EMBEDDING_PROVIDER` defaults to `hash`: a feature-hash of the text's tokens, which
+       ranks by shared words and has no notion that two phrasings of one reaction mean the same.
+       Dense retrieval over it returns plausible, confident, wrong neighbours, and nothing anywhere
+       says the index is lexical in disguise. That is right for a laptop and for CI, which is why it
+       is the default; it is wrong for a release, so a release has to state either the semantic
+       provider or that it accepts this one, in its own values file where the next person greps.
+
+       The effective provider is read from `config` with the code's default applied, so a release
+       that never mentions the key is refused rather than waved through on its silence. The escape
+       hatch must be a real boolean first, for the reason the retention gate above gives at length:
+       `--set-string allowNonSemanticEmbeddings=false` is a non-empty string and would read as on.
+       See `deploy/README.md` § "Install, step by step". */ -}}
+{{- if kindIs "string" .Values.allowNonSemanticEmbeddings }}
+{{- fail (printf "allowNonSemanticEmbeddings must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would accept the offline hash embedder while reading as off. Set it as `allowNonSemanticEmbeddings: true`/`false` (no quotes), and do not pass it via --set-string." .Values.allowNonSemanticEmbeddings) }}
+{{- end }}
+{{- if and (eq (default "hash" (get .Values.config "CHEMCLAW_EMBEDDING_PROVIDER")) "hash") (not .Values.allowNonSemanticEmbeddings) }}
+{{- fail "embeddings: this release would embed with the `hash` provider (the default when config.CHEMCLAW_EMBEDDING_PROVIDER is unset), an offline feature-hash that ranks by shared tokens and is not semantic — dense retrieval would look like it works and return the wrong neighbours. Either state the semantic provider in the values file (config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible, with CHEMCLAW_EMBEDDING_MODEL and CHEMCLAW_EMBEDDING_DIM for the gateway's model), or set `allowNonSemanticEmbeddings: true` to say a lexical stand-in is what this release wants (a dev or air-gapped install without an embedding model)." }}
+{{- end }}
 {{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
 {{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}

@@ -50,7 +50,7 @@ SHELL := bash
   eval-baseline eln-validate skill-validate connector-validate datasource-validate sink-validate \
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
-  kind-smoke synthesize reindex reindex-full share-estimate share-sync rekey-compounds user-erase \
+  kind-smoke synthesize reindex reindex-full reembed share-estimate share-sync rekey-compounds user-erase \
   openapi sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
   live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
@@ -187,6 +187,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
+	      --set allowNonSemanticEmbeddings=true \
 	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
@@ -216,6 +217,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
 	    --set retention.unboundedGrowthAccepted=true \
+	    --set allowNonSemanticEmbeddings=true \
 	    --set temporal.namespace=chemclaw \
 	    --set connectors.molfp.url=https://model.invalid/mcp); \
 	  case "$$render" in *chemclaw-connector-molfp*) \
@@ -234,6 +236,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
+	      --set allowNonSemanticEmbeddings=true \
 	      --set temporal.namespace=chemclaw $$flag \
 	      > "$$work/render.yaml"; \
 	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
@@ -244,6 +247,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365 \
 	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=365 \
 	    --set retention.artifactGrowthAccepted=true \
+	    --set allowNonSemanticEmbeddings=true \
 	    --set temporal.namespace=chemclaw \
 	    > "$$work/render.yaml"; \
 	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
@@ -323,6 +327,9 @@ reindex:  ## Incrementally rebuild the derived note index — only notes changed
 
 reindex-full:  ## Full note-index rebuild, ignoring stored fingerprints (recovery only).
 	uv run python -m chemclaw.retrieval.vector_index --full
+
+reembed:  ## Re-embed every stored vector under the configured model and width (STATUS=1 reports; RECLAIM=1 empties the old width, no way back).
+	uv run python -m chemclaw.cli.reembed $(if $(filter 1,$(STATUS)),--status,)$(if $(filter 1,$(RECLAIM)), --reclaim,)
 
 share-estimate:  ## Cost a mounted document share before indexing it (reads nothing). SHARE=<source>
 	@test -n "$(SHARE)" || { echo "usage: make share-estimate SHARE=<source>"; exit 64; }

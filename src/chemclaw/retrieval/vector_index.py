@@ -21,7 +21,8 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.core.embeddings import embed_texts, embedding_config_key
+from chemclaw.core.embeddings import embed_texts
+from chemclaw.core.embeddings import note_embedding_key as note_embedding_key
 from chemclaw.core.fulltext import (
     TSQUERY_TERMS,
     normalize_search_text,
@@ -29,6 +30,7 @@ from chemclaw.core.fulltext import (
     reference_tokens,
 )
 from chemclaw.core.job_lock import exclusive_job
+from chemclaw.core.vector_schema import embedding_column
 from chemclaw.kg.search import search_text
 from chemclaw.kg.store import note_store
 
@@ -113,17 +115,6 @@ class NoteIndex(Protocol):
         (`chemclaw.core.fulltext`). `within` is an exact bound here.
         """
         ...
-
-
-# Version of the note-text derivation, folded into the note-side key. Bump it whenever the text a
-# fresh index would store differs from an existing row's (`kg.search.search_text` or `upsert`'s
-# normalisation); the next reindex then rewrites every row.
-_NOTE_TEXT_VERSION = "ntv3"
-
-
-def note_embedding_key() -> str:
-    """The embedding identity of a stored note vector: model configuration plus text derivation."""
-    return f"{embedding_config_key()}|{_NOTE_TEXT_VERSION}"
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -256,21 +247,22 @@ def _scope_array(within: set[str] | None) -> list[str] | None:
 class PostgresNoteIndex:
     """Durable `NoteIndex` backed by Postgres + pgvector over the `note_index` table.
 
-    `settings.embedding_dim` must equal the table's `vector(N)` width, or inserts raise.
+    Vectors live in the column for `settings.embedding_dim` (`core/vector_schema.py`), which the
+    migrator creates; a missing column fails the first statement and `/readyz` reports it earlier.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
         """Bind to the configured DSN and the configured embedding width."""
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
+        column = self._vector_column()
         self._upsert = (
-            "INSERT INTO note_index "
-            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at, "
-            "corpus_commit_count) "
+            f"INSERT INTO note_index (note_id, {column}, lexeme, fingerprint, embedding_key, "
+            "updated_at, corpus_commit_count) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
             "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now(), %(corpus)s) "
             "ON CONFLICT (note_id) DO UPDATE SET "
-            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
+            f"{column} = EXCLUDED.{column}, lexeme = EXCLUDED.lexeme, "
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
             "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"
         )
@@ -282,11 +274,11 @@ class PostgresNoteIndex:
         # index. `embedding_key` is a read predicate: rows from another model must not be scored.
         self._dense = (
             "SELECT note_id, score FROM ("
-            f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
-            "FROM note_index WHERE embedding IS NOT NULL AND embedding_key = %(key)s "
-            f"AND 1 - (embedding <=> %(q)s::vector({width})) > 0 "
+            f"SELECT note_id, 1 - ({column} <=> %(q)s::vector({width})) AS score "
+            f"FROM note_index WHERE {column} IS NOT NULL AND embedding_key = %(key)s "
+            f"AND 1 - ({column} <=> %(q)s::vector({width})) > 0 "
             f"{scope}"
-            f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
+            f"ORDER BY {column} <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, note_id"
         )
         # Any term matches; complete matches lead via the `lexeme @@ all_terms` sort key; widening
@@ -297,6 +289,14 @@ class PostgresNoteIndex:
             f"WHERE lexeme @@ any_terms {scope}"
             "ORDER BY (lexeme @@ all_terms) DESC, score DESC, note_id LIMIT %(k)s"
         )
+
+    def _vector_column(self) -> str:
+        """The `note_index` column this index reads and writes: the live width's.
+
+        A hook because the external-store subclass writes `NULL` to the original column, which
+        exists at every deployment, instead of one the migrator may not have created.
+        """
+        return embedding_column(settings.embedding_dim)
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
@@ -397,6 +397,17 @@ class PostgresNoteIndex:
                 )
                 rows = await cur.fetchall()
         return {r[0]: r[1] for r in rows}
+
+    async def count_unembedded(self, embedding_key: str) -> int:
+        """How many rows were not embedded under `embedding_key`: what a reindex still has to do."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM note_index WHERE embedding_key IS DISTINCT FROM %(key)s",
+                    {"key": embedding_key},
+                )
+                row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0
 
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None

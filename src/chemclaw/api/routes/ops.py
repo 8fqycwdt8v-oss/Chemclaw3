@@ -22,9 +22,12 @@ from chemclaw.api.deps import CurrentUser
 from chemclaw.api.state import FrontDoorState, state
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core import db
-from chemclaw.core.config import settings
+from chemclaw.core.config import MAX_VECTOR_DIM, settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.migrate import newest_shipped_migration
+from chemclaw.core.vector_schema import TableVectorState, inspect_tables, live_embedding_keys
+from chemclaw.durable.document_sync import share_sources
 from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
 log = logging.getLogger(__name__)
@@ -110,7 +113,7 @@ async def _database_ready(request: Request) -> bool:
     front = state(request)
     window = settings.service_readiness_cache_seconds
     if window and time.monotonic() - front.database_probed_at < window:
-        return front.database_reachable and front.schema_current
+        return front.database_reachable and front.schema_current and not front.vector_width_problem
     return await _shared_probe(front, "database", lambda: _probe_database(front))
 
 
@@ -133,7 +136,7 @@ async def _probe_database(front: FrontDoorState) -> bool:
     """
     try:
 
-        async def _ask() -> bool:
+        async def _ask() -> tuple[bool, list[TableVectorState] | None]:
             async with db.connection(
                 settings.session_store_dsn or settings.postgres_dsn,
                 statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
@@ -141,11 +144,16 @@ async def _probe_database(front: FrontDoorState) -> bool:
                 pool_max_size=1,
             ) as conn:
                 await conn.execute("SELECT 1")
-                return await _schema_carries_this_image(conn)
+                current = await _schema_carries_this_image(conn)
+                # Only against a schema this image can read: an unmigrated one is already unready,
+                # and its missing columns would be reported twice.
+                return current, (await _vector_tables_if_readable(conn) if current else [])
 
-        current = await asyncio.wait_for(
+        current, vector_tables = await asyncio.wait_for(
             _ask(), timeout=settings.service_readiness_db_timeout_seconds
         )
+        if vector_tables is not None:
+            _record_vector_verdict(front, vector_tables)
         reachable = True
     except (psycopg.Error, ConnectionError, TimeoutError):
         log.warning("readiness: Postgres did not answer", exc_info=True)
@@ -156,7 +164,102 @@ async def _probe_database(front: FrontDoorState) -> bool:
     front.database_reachable = reachable
     front.schema_current = current
     front.database_probed_at = time.monotonic()
-    return reachable and current
+    return reachable and current and not front.vector_width_problem
+
+
+async def _vector_tables(conn: psycopg.AsyncConnection[Any]) -> list[TableVectorState]:
+    """The vector tables' state for the configured width; empty where pgvector holds no vectors.
+
+    Empty too for a width pgvector cannot index: config refuses that where anything writes the note
+    index, and where nothing does there is nothing to be wrong about. Scoped to the cuttings the
+    enabled shares use, the set `make reembed` converges, so the two agree on what "mixed" means.
+    """
+    if settings.vector_store_provider != "pgvector" or settings.embedding_dim > MAX_VECTOR_DIM:
+        return []
+    chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
+    return await inspect_tables(conn, settings.embedding_dim, live_embedding_keys(), chunkings)
+
+
+async def _vector_tables_if_readable(
+    conn: psycopg.AsyncConnection[Any],
+) -> list[TableVectorState] | None:
+    """`_vector_tables`, nothing for a role that may not read them, `None` when it cannot be asked.
+
+    A split session store may use a role with no access to the vector tables, as it may have none to
+    the ledger (`_schema_carries_this_image`); refusing would be an outage over another server's
+    grants. The ledger read may have aborted the transaction, so it is cleared first.
+
+    The question reads the tables, so a migration holding a lock on one (`ensure_embedding_width`
+    on a large table) would otherwise stall it past the probe's budget and turn "a table is busy"
+    into `database unreachable` for every new pod. It gets short local bounds of its own and, when
+    they fire, no answer: the caller keeps the last verdict.
+    """
+    await conn.rollback()
+    budget = settings.service_readiness_db_timeout_seconds
+    try:
+        await conn.execute(
+            "SELECT set_config('lock_timeout', %s, true), "
+            "set_config('statement_timeout', %s, true)",
+            (f"{int(budget * 250)}ms", f"{int(budget * 500)}ms"),
+        )
+        return await _vector_tables(conn)
+    except psycopg.errors.InsufficientPrivilege:
+        log.warning(
+            "readiness: the vector tables cannot be read by this role, so their width and the "
+            "embedding configurations they hold are not being checked",
+            exc_info=True,
+        )
+        return []
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled):
+        log.warning(
+            "readiness: the vector tables are locked or slow to read, so their width and the "
+            "embedding configurations they hold keep their last verdict",
+            exc_info=True,
+        )
+        return None
+    finally:
+        await conn.rollback()
+
+
+def _record_vector_verdict(front: FrontDoorState, tables: list[TableVectorState]) -> None:
+    """Turn the tables' state into the two readiness verdicts, saying so once when one changes.
+
+    A column that is missing or the wrong width refuses readiness: nothing can read or write that
+    table's vectors, which no retry fixes. Rows from another configuration only degrade it: they
+    are never ranked (`embedding_key` is a read predicate) and the re-embed (`make reembed`) heals
+    them. Logged on the transition, not on every probe.
+    """
+    wrong = [
+        f"{one.table}.{one.column} is "
+        f"{'missing' if one.column_width is None else f'vector({one.column_width})'}"
+        for one in tables
+        if not one.width_ok(settings.embedding_dim)
+    ]
+    mixed = [f"{one.table}: {one.describe_foreign()}" for one in tables if one.mixed]
+    problem = "; ".join(wrong)
+    if problem and problem != front.vector_width_problem:
+        degraded(
+            log,
+            "embedding_width",
+            "embedding_dim=%d but %s — run the migration with this embedding_dim "
+            "(`make db-migrate`, or the chart's pre-upgrade hook)",
+            settings.embedding_dim,
+            problem,
+            level=logging.ERROR,
+            exc_info=False,
+        )
+    if mixed and not front.embedding_corpus_mixed:
+        degraded(
+            log,
+            "embedding_corpus_mixed",
+            "stored vectors from other embedding configurations are not ranked until re-embedded "
+            "(`make reembed`) — %s",
+            "; ".join(mixed),
+            level=logging.WARNING,
+            exc_info=False,
+        )
+    front.vector_width_problem = problem
+    front.embedding_corpus_mixed = bool(mixed)
 
 
 async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool:
@@ -234,10 +337,13 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
         ready = await _database_ready(request)
         if not ready:
             # Which verdict failed, so an operator running `curl` goes to the right system.
+            front = state(request)
             status = (
                 "database unreachable"
-                if not state(request).database_reachable
+                if not front.database_reachable
                 else "schema behind image"
+                if not front.schema_current
+                else "vector width behind config"
             )
     if not ready:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
@@ -247,6 +353,10 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
         # counts.
         "connectors_unhealthy": sum(1 for item in health if item.unhealthy),
     }
+    if state(request).embedding_corpus_mixed:
+        # Degraded, not unready: lexical and graph retrieval answer, and dense retrieval ranks only
+        # the rows already under the live configuration. A flag, not names: this body is public.
+        body["embedding_corpus"] = "mixed"
     overlay = text_overlay.active()
     if overlay is not None:
         # Present only on a model-text candidate arm, so an evaluation can confirm the door it was

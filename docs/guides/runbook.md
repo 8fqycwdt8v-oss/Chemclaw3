@@ -1064,6 +1064,59 @@ ERROR for the ones it cannot fix. To finish faster, raise the batch size or run
 `make share-sync SHARE=<name>` (`python -m chemclaw.cli.sync_share <name>`), which drains that
 share's re-embed to completion before it crawls.
 
+## (vi-c) Changing the embedding model or its vector width
+
+A vector is read only under the model that made it, so a new model leaves old rows unranked until
+they are re-embedded; a new *width* additionally needs a column of that width. Both are one release
+plus one command (D-2026-10-15-an-embedding-width-is-a-column-not-a-rewrite).
+
+1. **State the new model on the release**: `config.CHEMCLAW_EMBEDDING_PROVIDER`,
+   `CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_EMBEDDING_DIM`. The width is the model's output size. A
+   width over 2000 is refused by config (pgvector cannot index it): for a model that accepts a
+   `dimensions` parameter set `CHEMCLAW_EMBEDDING_REQUEST_DIMENSIONS` to the same smaller number as
+   `CHEMCLAW_EMBEDDING_DIM`, or move the vectors out of Postgres (`vector_store_provider`). Before
+   the upgrade, if you may want a cheap way back, record the keys now in the tables:
+   `SELECT DISTINCT embedding_key FROM document_chunks;` and the same for `note_index`.
+2. **Upgrade.** The pre-upgrade migrate hook adds `embedding_<DIM>` and its HNSW index to
+   `note_index` and `document_chunks` (`ensure_embedding_width`, called by `core/migrate.py` on every
+   run). Adding the column is instant, but both tables are locked `ACCESS EXCLUSIVE` through the
+   index builds, which scan every row: budget roughly 0.3-1.8 s per million rows, more for
+   `document_chunks`, and reads wait as well as writes. On a large corpus pre-build the columns and
+   indexes with `CONCURRENTLY` first, as `infra/sql/130_embedding_width_columns.sql` describes, and the hook
+   then finds them and takes no lock. An unchanged width does nothing at all. A pod configured for
+   a width with no column answers `/readyz` 503 `vector width behind config`, which is the signal
+   that the hook did not run; while a migration holds the tables the probe keeps its last verdict.
+3. **Re-embed**: `make reembed` (in a pod: `python -m chemclaw.cli.reembed`). It starts
+   `EmbeddingReembedWorkflow` on `background-jobs`, or rejoins the running one, and prints what was
+   embedded, how many chunks would not embed and what is left; exit 0 means every row is under the
+   configured key. It is idempotent and takes no lock across the embedding call: the crawl, the
+   scheduled sync and a second run proceed beside it, a chunk two passes both reach may be embedded
+   twice, and a write skips any row that moved meanwhile. A chunk the gateway refuses is passed once
+   and counted; a run stops early, reported `stopped early`, only when
+   `CHEMCLAW_DOCUMENT_REEMBED_MAX_FAILED_BATCHES` batches in a row fail entirely (the endpoint is
+   down: fix it and run again). `make reembed STATUS=1` shows which configurations the tables hold
+   without touching Temporal.
+4. **While it runs** `/readyz` stays 200 and carries `"embedding_corpus": "mixed"` (counting only
+   the cuttings the enabled shares use, the set the job converges), and
+   `chemclaw_degraded_total{subsystem="embedding_corpus_mixed"}` counts the change. Dense retrieval
+   ranks only the rows already moved; lexical and graph retrieval are unaffected.
+5. **Reclaim, when the release is settled**: `make reembed RECLAIM=1` empties the superseded
+   width's vectors from the old column, in batches, and only on rows already under the live key. It
+   is the point of no return for a cheap rollback and belongs at the same moment as dropping the old
+   columns, which no migration does: that is a deliberate operation by the schema owner, and it
+   frees nothing until the index pages are vacuumed.
+
+**Rolling back.** Deploy the previous image with its previous `CHEMCLAW_EMBEDDING_*`. It reads its
+own width's column and, because the move stamped the new key on every row, treats them all as
+stale: its own hourly `note-reindex` and document-sync passes re-embed them from the stored text
+(`document_chunks.content`, the notes), which costs gateway calls and leaves dense retrieval short
+until they finish. The rolled-back pods run no `EmbeddingReembedWorkflow` and `make reembed` would
+wait for a worker that does not have it; to go faster run the old image's own `make reindex-full`
+and `make share-sync SHARE=<name>`. The new sibling column stays, unread. If you recorded the old
+keys (step 1) and never reclaimed, the old vectors are still in the old column and
+`UPDATE <table> SET embedding_key = '<old key>' WHERE embedding_key = '<new key>'` brings dense
+retrieval back at once with no spend; after a reclaim only the re-embed is left.
+
 ## (vii) Read eval-drift alerts
 
 The scheduled `EvalDriftWorkflow` re-scores the committed eval case-set and raises one alert per
@@ -3085,11 +3138,13 @@ docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoD
 #    The three --set lines after the digest are refusals the chart makes until a release states them:
 #    allowAnyDestination=true (or list networkPolicy.egressDestinations instead),
 #    unboundedGrowthAccepted=true (or state retention.windows instead),
+#    allowNonSemanticEmbeddings=true (or state config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible),
 #    and temporal.namespace, which has no default: one Temporal namespace per release.
 helm upgrade --install chemclaw deploy/helm/chemclaw -n <ns> \
   --set image.digest="sha256:<the digest from step 2>" \
   --set networkPolicy.allowAnyDestination=true \
   --set retention.unboundedGrowthAccepted=true \
+  --set allowNonSemanticEmbeddings=true \
   --set temporal.namespace=chemclaw-prod
 ```
 

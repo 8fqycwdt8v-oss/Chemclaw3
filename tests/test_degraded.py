@@ -26,6 +26,11 @@ _COUNTER = "chemclaw_degraded_total"
 # failure message names what changed, and pinned at all because this is the metric's label value
 # space: a label whose values are not enumerable is how a registry ends up with unbounded series.
 _EXPECTED_SUBSYSTEMS = {
+    # `api/routes/ops.py`, from the readiness probe, once per change: a pod configured for a vector
+    # width the database has no column for (unready), and a corpus holding vectors from more than
+    # one embedding configuration (ready, dense retrieval ranking only the rows already moved).
+    "embedding_width",
+    "embedding_corpus_mixed",
     # `core/db.py`, where a DSN libpq cannot parse is swallowed: the error message degrades to
     # `<postgres>` and the DSN's `options` are dropped, invisible even on a connect that succeeds.
     "db_dsn",

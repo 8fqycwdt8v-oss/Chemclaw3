@@ -302,6 +302,9 @@ _MUST_FAIL = frozenset(
         # Schedule-only, and declared anyway: its output is a claim about a moment, so a resumed
         # park delivers a day-old verdict as current.
         "EvalDriftWorkflow",
+        # Started by `make reembed` and awaited by the operator who ran it, with no Schedule to
+        # bound a park: a bug must fail the run so the command says so (`durable/reembed.py`).
+        "EmbeddingReembedWorkflow",
         # Schedule-only drains declared by their own modules (`corpus_sync.py`, `label_sync.py`).
         # The rule would not require it; removing one is a decision, not a tidy-up.
         "ReactionCorpusWorkflow",

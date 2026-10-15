@@ -76,6 +76,7 @@ file does not state, refusing — with a sentence naming the missing value — w
 | `ENVIRONMENT` | `dev`/`staging`/`prod` | same | selects `environments/<env>.yaml` as the chart's values file |
 | `ALLOW_ANY_EGRESS_DESTINATION` | yes | yes | adds `--set networkPolicy.allowAnyDestination=true` when the values file lists no `egressDestinations` |
 | `ACCEPT_UNBOUNDED_GROWTH` | yes | **no** | adds `--set retention.unboundedGrowthAccepted=true` when the values file states no `retention.windows` |
+| `ACCEPT_NON_SEMANTIC_EMBEDDINGS` | yes | **no** | adds `--set allowNonSemanticEmbeddings=true` when the values file states neither `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` nor `allowNonSemanticEmbeddings: true` |
 | `TEMPORAL_NAMESPACE` | yes, no default | **no** | adds `--set temporal.namespace=<value>` when the values file names none |
 | `RUN_GATE` | default `false` | — | runs `make db-migrate` and `make ci` on the agent first, for a Jenkins-only estate; needs a real Postgres in `CHEMCLAW_POSTGRES_DSN`, or the Postgres-backed tests skip and still print green |
 | `IMAGE_REGISTRY`, `IMAGE_NAME`, `BASE_IMAGE`, `IMAGE_BUILDER` | yes | `IMAGE_REGISTRY` | where to push; `BASE_IMAGE` pins the base by digest (runbook §(xiv)); empty registry = build and verify only |
@@ -84,8 +85,10 @@ file does not state, refusing — with a sentence naming the missing value — w
 | `DATABRICKS_HOST` | yes | yes | the Databricks target |
 
 **So a `Jenkinsfile.release` run needs an environment values file that states `retention.windows`
-(or `retention.unboundedGrowthAccepted: true`) and `temporal.namespace`**: that pipeline has no
-parameter for either, and the target refuses without them. That file is the better answer for every
+(or `retention.unboundedGrowthAccepted: true`), the embedding provider
+(`config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible`, or `allowNonSemanticEmbeddings: true`) and
+`temporal.namespace`**: that pipeline has no parameter for any of them, and the target refuses
+without them. That file is the better answer for every
 pipeline anyway — a parameter states a posture outside the reviewed release descriptor.
 
 **What the agent needs installed:** `git`, `helm`, `kubeconform`, `oc`, `jq`, `curl`, one image

@@ -522,7 +522,9 @@ def test_a_re_embed_that_failed_everything_does_not_report_completion(
     class _Stale(InMemoryDocumentIndex):
         """An index holding one chunk cut under a superseded configuration."""
 
-        async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[Any]:
+        async def stale_chunks(
+            self, key: str, limit: int, chunkings: set[str], after: Any = None
+        ) -> list[Any]:
             """One stale chunk, deterministically — the shape that wedges a drain."""
             from chemclaw.ingest.documents.index import StaleChunk
 

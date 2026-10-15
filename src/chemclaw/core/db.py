@@ -84,7 +84,7 @@ def _redact(dsn: str) -> str:
 
 # Never serve a pooled query from a generic plan. psycopg auto-prepares after five executions and
 # Postgres may then switch to a generic plan; for the dense vector query
-# (`retrieval/vector_index.py` at `vector(1536)`) and the `IS NULL OR` filters elsewhere, the
+# (`retrieval/vector_index.py`'s `vector(N)` distance) and the `IS NULL OR` filters elsewhere, the
 # generic plan is a sequential scan orders of magnitude slower. `auto` currently avoids it only by a
 # cost estimate. `force_custom_plan` keeps the parse cached and re-plans with real parameters, for
 # ~25 µs per query. The checkpointer pool is excluded: its OR sits behind

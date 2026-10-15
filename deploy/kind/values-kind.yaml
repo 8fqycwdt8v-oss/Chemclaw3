@@ -179,6 +179,10 @@ secrets:
   temporalTls:
     enabled: false
 
+# The kind stack has no embedding model (its gateway is the loopback mock), so it embeds with the
+# offline `hash` provider on purpose; the chart refuses that unless a release says so.
+allowNonSemanticEmbeddings: true
+
 temporal:
   # Registered by `manifests/temporal.yaml` (auto-setup's DEFAULT_NAMESPACE). The broker is this
   # cluster's own, so the namespace-per-release hazard the chart guards against cannot arise.

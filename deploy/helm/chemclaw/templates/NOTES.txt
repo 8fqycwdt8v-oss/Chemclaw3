@@ -41,6 +41,12 @@ ports. List networkPolicy.egressDestinations instead once the destinations are k
 NOTE: retention.unboundedGrowthAccepted is true — no conversation, checkpoint or artifact history
 is ever deleted. State retention.windows to bound it.
 {{- end }}
+{{- if and .Values.allowNonSemanticEmbeddings (eq (default "hash" (get .Values.config "CHEMCLAW_EMBEDDING_PROVIDER")) "hash") }}
+
+NOTE: this release embeds with the offline hash provider (allowNonSemanticEmbeddings is true) — dense
+retrieval ranks by shared tokens, not meaning. Set config.CHEMCLAW_EMBEDDING_PROVIDER to
+openai_compatible, with its model and dimension, for semantic retrieval.
+{{- end }}
 {{ if .Values.monitoring.enabled }}
 MONITORING: TWO CLUSTER SWITCHES DECIDE WHETHER ANY OF THIS DOES ANYTHING
 ===========================================================================

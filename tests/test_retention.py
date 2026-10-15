@@ -2883,6 +2883,8 @@ def _rendered_retention_rule() -> dict[str, object]:
             "--set",
             "temporal.namespace=chemclaw",
             "--set",
+            "allowNonSemanticEmbeddings=true",
+            "--set",
             "retention.artifactGrowthAccepted=true",
             "--set",
             "retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365",
