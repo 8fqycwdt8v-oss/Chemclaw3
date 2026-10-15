@@ -179,12 +179,27 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true --set postgres.cluster.enabled=true --set postgres.cluster.imageName=registry.example/pgvector:16 --set postgres.cluster.backup.destinationPath=s3://chemclaw-backups/prod --set postgres.cluster.targets.rpoSeconds=900 --set postgres.cluster.targets.rtoSeconds=14400 --set postgres.cluster.temporalDatabases.enabled=true --set postgres.cluster.temporalDatabases.passwordSecret=temporal-db"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
 	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
+	        -schema-location default -schema-location \
+	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
+	  done
+	@# The Postgres chart is a release of its own (it must exist before the application's migrate hook
+	@# runs). Its four shapes go through the same schemas, strictly: the CloudNativePG and Barman Cloud
+	@# CRDs are in the catalogue, so a missing schema is a failure here, not a skip.
+	@set -e; \
+	  base="--set imageName=registry.example/pgvector:16 --set backup.destinationPath=s3://chemclaw-backups/prod --set targets.rpoSeconds=900 --set targets.rtoSeconds=14400"; \
+	  for flags in "" \
+	    "--set temporalDatabases.enabled=true --set temporalDatabases.passwordSecret=temporal-db --set tls.serverCASecret=pg-ca --set tls.serverTLSSecret=pg-tls --set backup.credentialsSecret=backup-keys --set backup.encryption=AES256" \
+	    "--set import.enabled=true --set import.source.host=old-pg.example --set import.source.user=chemclaw --set import.source.passwordSecret.name=old-pg" \
+	    "--set name=chemclaw-pg-r1 --set recovery.enabled=true --set recovery.sourceClusterName=chemclaw-pg --set recovery.targetTime=2026-01-01T00:00:00Z" \
+	    "--set name=pg-rehearsal --set recovery.enabled=true --set recovery.rehearsal=true --set recovery.sourceClusterName=chemclaw-pg --set instances=1"; do \
+	    helm template chemclaw-pg deploy/helm/chemclaw-postgres $$base $$flags \
+	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
 	  done

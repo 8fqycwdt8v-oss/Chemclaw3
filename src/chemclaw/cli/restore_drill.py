@@ -33,10 +33,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import psycopg
-
-from chemclaw.cli import restore_drill_db as db
-from chemclaw.cli.restore_drill_db import Check, failed, passed, skipped
+from chemclaw.core import restore_check as db
+from chemclaw.core.config import settings
+from chemclaw.core.restore_check import Check, failed, passed, skipped
 
 #: Same images as `infra/docker-compose.yml`; `tests/test_restore_drill.py` holds them equal.
 PG_IMAGE = "pgvector/pgvector:pg16"
@@ -89,6 +88,10 @@ REQUIRED_CHECKS = frozenset(
 
 class DrillError(RuntimeError):
     """The drill could not run (as opposed to a check failing)."""
+
+
+class ImageUnavailable(DrillError):
+    """An image is neither local nor pullable: the network's fault, not the procedure's."""
 
 
 @dataclass
@@ -199,6 +202,31 @@ def docker(*args: str, timeout: float = 300.0, check: bool = True, merge: bool =
     return done.stdout + done.stderr if merge else done.stdout
 
 
+def _succeeds(*args: str) -> bool:
+    """Whether `docker <args>` exits 0."""
+    try:
+        done = subprocess.run(["docker", *args], capture_output=True, check=False, timeout=60)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
+
+
+def ensure_images(*images: str) -> None:
+    """Pull what is not already local, so a registry refusing us is named before anything starts.
+
+    Raises:
+        ImageUnavailable: When an image is not local and cannot be pulled (rate limit, no network).
+    """
+    for image in images:
+        if _succeeds("image", "inspect", image):
+            continue
+        _say(f"== pulling {image}")
+        try:
+            docker("pull", image, timeout=900.0)
+        except DrillError as exc:
+            raise ImageUnavailable(f"{image} is not local and could not be pulled: {exc}") from exc
+
+
 def docker_available() -> str | None:
     """None when the daemon answers, else why not."""
     try:
@@ -278,18 +306,48 @@ class Stack:
         return out.strip() == "true"
 
 
-def remove_run(run_id: str | None) -> None:
-    """Remove every container, volume and network labelled for `run_id` (or for any run)."""
+def remove_run(run_id: str | None) -> list[str]:
+    """Remove every container, volume and network labelled for `run_id` (or for any run).
+
+    Never raises: a daemon that errors halfway must not mask the run's own result, so what could not
+    be removed is returned for the report to name.
+    """
     selector = f"{LABEL}={run_id}" if run_id else LABEL
-    containers = docker("ps", "-aq", "--filter", f"label={selector}", check=False).split()
+    problems: list[str] = []
+
+    def attempt(*args: str) -> str:
+        try:
+            return docker(*args, check=True)
+        except DrillError as exc:
+            problems.append(str(exc))
+            return ""
+
+    containers = attempt("ps", "-aq", "--filter", f"label={selector}").split()
     if containers:
-        docker("rm", "-f", "-v", *containers, check=False)
-    volumes = docker("volume", "ls", "-q", "--filter", f"label={selector}", check=False).split()
+        attempt("rm", "-f", "-v", *containers)
+    volumes = attempt("volume", "ls", "-q", "--filter", f"label={selector}").split()
     if volumes:
-        docker("volume", "rm", "-f", *volumes, check=False)
-    networks = docker("network", "ls", "-q", "--filter", f"label={selector}", check=False).split()
+        attempt("volume", "rm", "-f", *volumes)
+    networks = attempt("network", "ls", "-q", "--filter", f"label={selector}").split()
     if networks:
-        docker("network", "rm", *networks, check=False)
+        attempt("network", "rm", *networks)
+    return problems
+
+
+@contextmanager
+def uninterruptible() -> Iterator[None]:
+    """Ignore SIGINT and SIGTERM for the duration: a second signal must not abandon the cleanup."""
+    saved: dict[signal.Signals, Any] = {}
+    try:
+        for number in (signal.SIGINT, signal.SIGTERM):
+            saved[number] = signal.signal(number, signal.SIG_IGN)
+    except ValueError:  # not the main thread: there is no handler of ours to protect
+        pass
+    try:
+        yield
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
 
 
 @contextmanager
@@ -316,7 +374,7 @@ def wait_for(
         try:
             if probe():
                 return
-        except (psycopg.Error, OSError):
+        except OSError:
             pass
         if alive is not None and not alive():
             raise DrillError(f"{what}: the container exited")
@@ -326,15 +384,14 @@ def wait_for(
 
 def wait_for_postgres(port: int, stack: Stack, role: str, *, recovered: bool = False) -> None:
     """Until `role` accepts connections (and, if `recovered`, has left recovery)."""
-
-    def ready() -> bool:
-        with psycopg.connect(dsn(port), connect_timeout=2) as conn:
-            row = conn.execute("SELECT pg_is_in_recovery()").fetchone()
-            return row == (False,) if recovered else True
-
     seconds = _RECOVERY_SECONDS if recovered else _READY_SECONDS
     try:
-        wait_for(ready, seconds, f"{role} postgres", lambda: stack.alive(role))
+        wait_for(
+            lambda: db.is_ready(dsn(port), recovered=recovered),
+            seconds,
+            f"{role} postgres",
+            lambda: stack.alive(role),
+        )
     except DrillError as exc:
         raise DrillError(f"{exc}\n{stack.logs(role)}") from exc
 
@@ -372,20 +429,13 @@ def bootstrap_schema(target_dsn: str) -> None:
     run_module("chemclaw.core.migrate", target_dsn)
     run_module("chemclaw.agent.store_setup", target_dsn)
     asyncio.run(_setup_checkpointer(target_dsn))
-    with psycopg.connect(target_dsn) as conn:
-        db.create_app_role(conn, _APP_PASSWORD)
-        db.create_marker_table(conn)
+    db.prepare(target_dsn, _APP_PASSWORD)
     run_module("chemclaw.core.grants", target_dsn)
 
 
-def wait_for_archive(stack: Stack, role: str, conn: psycopg.Connection[Any]) -> Check:
+def wait_for_archive(stack: Stack, role: str, primary_dsn: str) -> Check:
     """Switch the WAL segment and wait until the archive holds everything written so far."""
-    current = conn.execute("SELECT pg_walfile_name(pg_current_wal_lsn())").fetchone()
-    conn.execute("SELECT pg_switch_wal()")
-    conn.commit()
-    if current is None:
-        return failed("wal_archiving", "the primary reports no current WAL file")
-    segment = str(current[0])
+    segment = db.switch_wal(primary_dsn)
 
     def archived() -> bool:
         done = subprocess.run(
@@ -398,10 +448,12 @@ def wait_for_archive(stack: Stack, role: str, conn: psycopg.Connection[Any]) -> 
         wait_for(archived, _ARCHIVE_SECONDS, f"WAL segment {segment} in the archive")
     except DrillError as exc:
         return failed("wal_archiving", str(exc))
-    stats = conn.execute("SELECT archived_count, failed_count FROM pg_stat_archiver").fetchone()
-    if stats is None or int(stats[1]) != 0:
-        return failed("wal_archiving", f"archived/failed counts {stats}")
-    return passed("wal_archiving", f"{stats[0]} segments archived, 0 failures; {segment} present")
+    archived_count, failed_count = db.archiver_stats(primary_dsn)
+    if failed_count != 0:
+        return failed("wal_archiving", f"{failed_count} archive attempts failed")
+    return passed(
+        "wal_archiving", f"{archived_count} segments archived, 0 failures; {segment} present"
+    )
 
 
 def directory_bytes(stack: Stack, role: str, path: str) -> int:
@@ -460,29 +512,37 @@ def _validate_kg(corpus: Path, target_dsn: str) -> int:
     return done.returncode
 
 
-def kg_checks(
-    restored: psycopg.Connection[Any], target_dsn: str, before: str, after: str
-) -> list[Check]:
+def knowledge_expected() -> bool:
+    """Whether the migrations this drill applies define the knowledge tables."""
+    return any(
+        "kg_notes" in path.read_text(encoding="utf-8")
+        for path in Path(settings.sql_migrations_dir).glob("*.sql")
+    )
+
+
+def kg_checks(target_dsn: str, before: str, after: str) -> list[Check]:
     """`kg-validate` against the restored database, with a negative control; and the `kg_*` tables.
 
     The corpus cites a calculation written before the target (must resolve) and, in a second
     corpus, one written after it (must NOT resolve: it proves the validator really asks the
-    restored database, and that the restore stopped where it was told to).
+    restored database, and that the restore stopped where it was told to). Absent tables are a skip
+    only for a schema that defines none; where the migrations define them it is a failure.
     """
-    tables = db.knowledge_tables(restored)
-    if tables:
-        counts = {t: db.count_rows(restored, t) for t in tables}
+    counts = db.knowledge_counts(target_dsn)
+    if counts:
         empty = [t for t, n in counts.items() if n == 0 and t != "kg_edges"]
         table_check = (
             failed("kg_tables", f"restored but empty: {empty}")
             if empty
             else passed("kg_tables", f"restored: {counts}")
         )
-    else:
-        table_check = skipped(
+    elif knowledge_expected():
+        table_check = failed(
             "kg_tables",
-            "this schema has no kg_* tables yet (the knowledge graph is not in Postgres)",
+            "the migrations define kg_notes but the restored database has no kg_* table",
         )
+    else:
+        table_check = skipped("kg_tables", "this schema defines no kg_* tables")
     with tempfile.TemporaryDirectory() as tmp:
         good, bad = Path(tmp) / "good", Path(tmp) / "bad"
         _write_note(good, "drill-note-cited", before)
@@ -542,7 +602,9 @@ def temporal_start(port: int, first: int, count: int) -> None:
             await client.start_workflow(
                 _WORKFLOW_TYPE, id=f"restore-drill-{i}", task_queue="restore-drill"
             )
-        await _count_workflows(client, first + count, 60.0)
+        seen = await _count_workflows(client, first + count, 60.0)
+        if seen != first + count:
+            raise DrillError(f"Temporal lists {seen} drill workflows, expected {first + count}")
 
     asyncio.run(go())
 
@@ -575,10 +637,16 @@ def run_drill(
     temporal_image: str = TEMPORAL_IMAGE,
     with_temporal: bool = True,
     keep: bool = False,
+    rto_seconds: float | None = None,
 ) -> Report:
-    """Run the whole drill and return its report; every container is removed unless `keep`."""
+    """Run the whole drill and return its report; every container is removed unless `keep`.
+
+    With `rto_seconds`, the restore's wall time is also checked against it. The drill restores a
+    fixture of a few megabytes, so that check measures the procedure, not a site's data volume.
+    """
     run_id = secrets.token_hex(3)
     stack = Stack(run_id, pg_image, temporal_image)
+    images = [pg_image, *([temporal_image] if with_temporal else [])]
     report = Report(
         run_id, {"postgres": pg_image, "temporal": temporal_image if with_temporal else "(not run)"}
     )
@@ -588,7 +656,10 @@ def run_drill(
         report.error = f"Docker unavailable: {reason}"
         return report
     try:
-        _drill(stack, report, with_temporal)
+        ensure_images(*images)
+        _drill(stack, report, with_temporal, rto_seconds)
+    except ImageUnavailable as exc:
+        report.error = f"Image unavailable: {exc}"
     except DrillError as exc:
         report.error = str(exc)
     except Exception as exc:
@@ -598,11 +669,17 @@ def run_drill(
         if keep:
             _say(f"--keep: run {run_id} left in place; remove it with `--prune`")
         else:
-            remove_run(run_id)
+            with uninterruptible():
+                try:
+                    leftovers = remove_run(run_id)
+                except Exception as exc:  # cleanup must never replace the run's own result
+                    leftovers = [f"{type(exc).__name__}: {exc}"]
+            if leftovers:
+                report.add(failed("cleanup", f"could not remove: {'; '.join(leftovers)[:400]}"))
     return report
 
 
-def _drill(stack: Stack, report: Report, with_temporal: bool) -> None:
+def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float | None) -> None:
     """The drill's steps, in order; checks land in `report` as they are made."""
     with phase(report, "start_primary"):
         stack.create()
@@ -616,10 +693,8 @@ def _drill(stack: Stack, report: Report, with_temporal: bool) -> None:
     primary = dsn(port)
     with phase(report, "migrate_and_load"):
         bootstrap_schema(primary)
-        with psycopg.connect(primary) as conn:
-            tag, rows, seed = _WAVES[0]
-            db.load_rows(conn, tag, rows, seed)
-            report.facts["knowledge_tables"] = db.knowledge_tables(conn)
+        tag, rows, seed = _WAVES[0]
+        report.facts["knowledge_tables"] = db.load_wave(primary, tag, rows, seed)
     temporal_port = 0
     if with_temporal:
         with phase(report, "temporal_up"):
@@ -627,32 +702,28 @@ def _drill(stack: Stack, report: Report, with_temporal: bool) -> None:
             temporal_start(temporal_port, 0, _TEMPORAL_WORKFLOWS)
     with phase(report, "base_backup"):
         report.facts["base_backup_bytes"] = take_base_backup(stack, "primary")
-    with psycopg.connect(primary) as conn:
-        with phase(report, "writes_after_backup"):
-            tag, rows, seed = _WAVES[1]
-            db.load_rows(conn, tag, rows, seed)
-            db.change_rows(conn, _WAVES[0][0])
-            db.write_marker(conn, db.MARKER_AT_TARGET)
-            expected = db.take_snapshot(conn)
-            probe = f"{_WAVES[0][0]}-0"
-            nearest, _ = db.nearest_fingerprint(conn, probe)
-            instant = conn.execute("SELECT clock_timestamp()").fetchone()
-        if instant is None:
-            raise DrillError("the primary returned no clock reading")
-        target: datetime = instant[0]
-        report.facts["target_time"] = format_recovery_target(target)
-        _say(f"== target instant {report.facts['target_time']}")
-        time.sleep(_TARGET_GAP_SECONDS)
-        with phase(report, "writes_after_target"):
-            tag, rows, seed = _WAVES[2]
-            db.load_rows(conn, tag, rows, seed)
-            db.write_marker(conn, db.MARKER_AFTER_TARGET)
-            db.disaster(conn)
-            if with_temporal:
-                temporal_start(temporal_port, _TEMPORAL_WORKFLOWS, 1)
-            final = db.take_snapshot(conn)
-        report.add(wait_for_archive(stack, "primary", conn))
-        report.facts["wal_archive_bytes"] = directory_bytes(stack, "primary", "/archive")
+    with phase(report, "writes_after_backup"):
+        tag, rows, seed = _WAVES[1]
+        db.load_wave(primary, tag, rows, seed)
+        db.change_wave(primary, _WAVES[0][0])
+        db.mark(primary, db.MARKER_AT_TARGET)
+        expected = db.snapshot(primary)
+        probe = f"{_WAVES[0][0]}-0"
+        nearest = db.nearest_neighbour(primary, probe)
+        target = db.clock_now(primary)
+    report.facts["target_time"] = format_recovery_target(target)
+    _say(f"== target instant {report.facts['target_time']}")
+    time.sleep(_TARGET_GAP_SECONDS)
+    with phase(report, "writes_after_target"):
+        tag, rows, seed = _WAVES[2]
+        db.load_wave(primary, tag, rows, seed)
+        db.mark(primary, db.MARKER_AFTER_TARGET)
+        db.empty_conversations(primary)
+        if with_temporal:
+            temporal_start(temporal_port, _TEMPORAL_WORKFLOWS, 1)
+        final = db.snapshot(primary)
+    report.add(wait_for_archive(stack, "primary", primary))
+    report.facts["wal_archive_bytes"] = directory_bytes(stack, "primary", "/archive")
     if with_temporal:
         docker("stop", "-t", "30", stack.container("temporal"))
     docker("stop", "-t", "30", stack.container("primary"))
@@ -660,24 +731,24 @@ def _drill(stack: Stack, report: Report, with_temporal: bool) -> None:
         restored_port = restore_cluster(stack, target)
         wait_for_postgres(restored_port, stack, "restored", recovered=True)
     restored_dsn = dsn(restored_port)
+    report.facts["restore_seconds"] = round(report.timings["restore_to_target"], 2)
+    if rto_seconds is not None:
+        report.add(_restore_time_check(report.facts["restore_seconds"], rto_seconds, report))
     with phase(report, "verify"):
-        with psycopg.connect(restored_dsn) as conn:
-            restored = db.take_snapshot(conn)
-            report.add(db.marker_check(restored.markers), *db.compare_snapshots(expected, restored))
-            report.add(db.post_target_check(restored.counts, final.counts))
-            report.add(db.pgvector_check(conn, probe, nearest))
+        restored = db.snapshot(restored_dsn)
+        report.add(db.marker_check(restored.markers), *db.compare_snapshots(expected, restored))
+        report.add(db.post_target_check(restored.counts, final.counts))
+        report.add(db.vector_query_check(restored_dsn, probe, nearest))
         report.add(db.notify_check(restored_dsn), db.advisory_lock_check(restored_dsn))
         report.add(db.app_role_check(dsn(restored_port, db.APP_ROLE, _APP_PASSWORD)))
-        with psycopg.connect(restored_dsn) as conn:
-            report.add(
-                *kg_checks(
-                    conn,
-                    restored_dsn,
-                    db.calculation_key(f"{_WAVES[0][0]}-0"),
-                    db.calculation_key(f"{_WAVES[2][0]}-0"),
-                )
+        report.add(
+            *kg_checks(
+                restored_dsn,
+                db.calculation_key(f"{_WAVES[0][0]}-0"),
+                db.calculation_key(f"{_WAVES[2][0]}-0"),
             )
-            report.add(db.writable_check(conn))
+        )
+        report.add(db.promotion_check(restored_dsn))
     if with_temporal:
         with phase(report, "verify_temporal"):
             temporal_port = stack.run_temporal("temporal-restored", "restored")
@@ -686,8 +757,16 @@ def _drill(stack: Stack, report: Report, with_temporal: bool) -> None:
         report.add(
             skipped("temporal", "--no-temporal: Temporal's databases were not part of this run")
         )
-    report.facts["restore_seconds"] = round(report.timings["restore_to_target"], 2)
     report.facts["rows_at_target"] = sum(expected.counts.values())
+
+
+def _restore_time_check(seconds: float, rto_seconds: float, report: Report) -> Check:
+    """The restore's wall time against a stated RTO, labelled with the size it was measured at."""
+    size = int(report.facts.get("base_backup_bytes", 0)) // 1_000_000
+    where = f"measured on a {size} MB fixture, not on the site's data"
+    if seconds > rto_seconds:
+        return failed("restore_time", f"{seconds} s exceeds {rto_seconds:g} s ({where})")
+    return passed("restore_time", f"{seconds} s within {rto_seconds:g} s ({where})")
 
 
 def _on_signal(signum: int, _frame: object) -> None:
@@ -714,6 +793,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--report", type=Path, help="also write the JSON report to this file")
     parser.add_argument(
+        "--rto-seconds",
+        type=float,
+        help="also fail when the restore takes longer (a fixture-size measure, not the site's RTO)",
+    )
+    parser.add_argument(
         "--keep", action="store_true", help="leave the containers and volumes for inspection"
     )
     parser.add_argument(
@@ -728,11 +812,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     if options.prune:
-        remove_run(None)
-        return 0
+        problems = remove_run(None)
+        for problem in problems:
+            _say(problem)
+        return 1 if problems else 0
     signal.signal(signal.SIGTERM, _on_signal)
     report = run_drill(
-        options.pg_image, options.temporal_image, not options.no_temporal, options.keep
+        options.pg_image,
+        options.temporal_image,
+        not options.no_temporal,
+        options.keep,
+        options.rto_seconds,
     )
     text = json.dumps(report.as_dict(), indent=2)
     print(text)

@@ -871,90 +871,11 @@ postgres:
   # declaration can only add a firing condition.
   sessionStoreMaxConnections: 0
 
-  # An optional CloudNativePG Cluster for this release's Postgres, archiving WAL to an object store
-  # and taking scheduled base backups (`templates/postgres-cluster.yaml`). Off: the chart otherwise
-  # owns no Postgres, and a site with its own operator or a managed service holds that to the same
-  # contract instead (docs/guides/runbook.md § "Backup, restore and PITR"). On, it needs the
-  # CloudNativePG operator and the Barman Cloud plugin installed in the cluster.
-  cluster:
-    enabled: false
-    # The Cluster's name, and the prefix of its Services (`<name>-rw` is the primary). Default
-    # `<release>-pg`.
-    name: ""
-    instances: 3
-    # A PostgreSQL 16 image that carries pgvector 0.7 or later. The operator's stock images do not,
-    # so there is no default; the render refuses without one.
-    imageName: ""
-    # The application database and its owner. The migrate Job's DSN is this owner's.
-    database: chemclaw
-    owner: chemclaw
-    # An existing kubernetes.io/basic-auth Secret for `owner`; empty = the operator generates
-    # `<name>-app`.
-    credentialsSecret: ""
-    storage:
-      size: 50Gi
-      storageClass: ""
-    # WAL on its own volume: while the object store is unreachable the archive backlog lands here,
-    # and on the data volume it would stop the database. Size it for the longest outage you accept.
-    walStorage:
-      size: 20Gi
-      storageClass: ""
-    resources: {}
-    # Extra postgresql.conf parameters, taking precedence over the two the chart derives:
-    # `max_connections` (postgres.maxConnections + connectionHeadroom, when the ceiling is
-    # declared) and `archive_timeout`.
-    parameters: {}
-    # Connections beyond the fleet's declared ceiling: Temporal's databases when they live here,
-    # backups, `psql`, the operator.
-    connectionHeadroom: 64
-    # The shipped Temporal persistence in the same cluster: separate databases, one WAL stream, one
-    # restore instant for the application and Temporal alike. Leave off when a platform Temporal
-    # keeps its own Postgres; that Postgres owes the same backup contract.
-    temporalDatabases:
-      enabled: false
-      role: temporal
-      # kubernetes.io/basic-auth Secret (username = role, password) for the role.
-      passwordSecret: ""
-    # What this site accepts for the loss of the whole cluster, in seconds. No default: the render
-    # refuses until both are stated, because a default would be a guarantee nobody agreed to.
-    # `rpoSeconds` must be at least `archiveTimeoutSeconds`; `rtoSeconds` is what `make
-    # restore-drill`'s measured restore time is read against, scaled to the real data volume.
-    targets:
-      rpoSeconds: 0
-      rtoSeconds: 0
-    # A WAL segment is shipped at least this often, so it bounds the data lost when the database
-    # is quiet. Smaller = more small objects.
-    archiveTimeoutSeconds: 300
-    # The plugin archives under the Cluster's name. Set a different name on a Cluster restored from
-    # a backup, so its WAL does not land in the archive it was restored from.
-    archiveServerName: ""
-    backup:
-      # s3://bucket/prefix of an S3 or S3-compatible store. One prefix per Cluster.
-      destinationPath: ""
-      # For a store that is not AWS (RustFS, MinIO, Ceph, ...).
-      endpointURL: ""
-      endpointCA:
-        name: ""
-        key: ca.crt
-      # A Secret holding the access key pair. Empty = the pod's cloud identity (IRSA and its kin):
-      # annotate the Cluster's ServiceAccount below.
-      credentialsSecret: ""
-      accessKeyIdKey: ACCESS_KEY_ID
-      secretAccessKeyKey: ACCESS_SECRET_KEY
-      serviceAccountAnnotations: {}
-      # Backups and WAL older than this, beyond the newest base backup that needs them, are removed.
-      # Everything a backup holds is retained that long, including rows this system later erased
-      # (runbook § "Retention, erasure and backups").
-      retentionPolicy: 30d
-      # Six fields, seconds first (the operator's cron, not Kubernetes').
-      schedule: "0 0 2 * * *"
-      # prefer-standby takes the backup from a replica when there is one.
-      target: prefer-standby
-      walCompression: gzip
-      walMaxParallel: 2
-      dataCompression: gzip
-      # Server-side encryption of what is stored: "", AES256 or aws:kms.
-      encryption: ""
+  # Backup and restore are not this chart's: the Postgres a release runs on is the separate chart
+  # `deploy/helm/chemclaw-postgres` (a CloudNativePG Cluster with WAL archiving), installed before this
+  # one, because the migrate hook below needs the database to exist when it runs. A site with its own
+  # operator or a managed service holds that Postgres to the same contract instead
+  # (docs/guides/runbook.md § "Backup, restore and PITR").
 
 # The migration hook Job (`pre-install,pre-upgrade,pre-rollback`, D-034): migrations, the store's
 # own tables, then the runtime role's grants (`infra/sql/grants/`), before any app pod changes.

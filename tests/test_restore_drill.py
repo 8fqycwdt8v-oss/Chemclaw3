@@ -6,6 +6,7 @@ skips, named and counted by `tests/conftest.py`, where no Docker daemon answers.
 """
 
 import re
+import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,9 +15,11 @@ import pytest
 import yaml
 
 from chemclaw.cli import restore_drill as drill
-from chemclaw.cli import restore_drill_db as db
-from chemclaw.cli.restore_drill_db import Check, Snapshot
+from chemclaw.core import restore_check as db
+from chemclaw.core.config import settings
+from chemclaw.core.restore_check import Check, Snapshot
 from chemclaw.kg.note import _CALC_REF
+from chemclaw.science.calc.store import CalculationKey
 
 #: The head of the skip reason an absent Docker daemon produces, counted by `tests/conftest.py`.
 DOCKER_SKIP = "Docker unavailable"
@@ -179,6 +182,12 @@ def test_the_fixture_key_has_the_shape_a_note_may_cite() -> None:
     """`kg-validate` only resolves a `calc_refs` entry of this shape against the cache."""
     assert _CALC_REF.fullmatch(db.calculation_key("a-0"))
     assert db.calculation_key("a-0") != db.calculation_key("c-0")
+    # The kernel module spells the key out rather than import `science`; this is the one place the
+    # two are compared.
+    real = CalculationKey(
+        calc_type="drill", calc_version="v1", input_hash="in-a-0", params_hash="pa-a-0"
+    )
+    assert real.as_str() == db.calculation_key("a-0")
 
 
 def test_the_make_target_and_the_readme_name_the_drill() -> None:
@@ -203,19 +212,22 @@ def test_the_drill_restores_a_backup_to_its_marker() -> None:
     """The whole drill, against a real Postgres and a real Temporal, in containers of its own.
 
     Expected to pass on a healthy stack: every required check present, none failed, the only
-    permitted skip the knowledge tables of a schema that has none yet, and nothing of the run left
-    behind.
+    permitted skip none (the schema defines the knowledge tables), and nothing of the run left
+    behind. An image that is neither local nor pullable (a registry rate limit, no network) skips
+    under the same counted marker: it says nothing about the procedure. Every other failure fails.
     """
     reason = drill.docker_available()
     if reason is not None:
         pytest.skip(f"{DOCKER_SKIP}: {reason}")
     report = drill.run_drill()
+    if report.error.startswith("Image unavailable"):
+        pytest.skip(f"{DOCKER_SKIP}: {report.error}")
     try:
         assert not report.error, report.error
         failed_checks = [c.as_dict() for c in report.checks if c.status == "fail"]
         assert not failed_checks, failed_checks
         assert report.missing() == []
-        assert {c.name for c in report.checks if c.status == "skip"} <= {"kg_tables"}
+        assert [c.name for c in report.checks if c.status == "skip"] == []
         assert report.ok
         assert report.facts["restore_seconds"] > 0
     finally:
@@ -233,3 +245,96 @@ def test_a_missing_docker_cli_is_an_error_report_not_a_crash(
     report = drill.run_drill()
     assert report.error.startswith("Docker unavailable")
     assert not report.ok
+
+
+def test_absent_knowledge_tables_fail_where_the_migrations_define_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A skipped `kg_tables` was a pass for a restore that lost the notes; now it is a failure."""
+    monkeypatch.setattr(db, "knowledge_counts", lambda _dsn: {})
+    monkeypatch.setattr(
+        drill, "_validate_kg", lambda corpus, _dsn: 0 if "good" in str(corpus) else 1
+    )
+    (tmp_path / "128_kg_notes.sql").write_text("CREATE TABLE kg_notes (id text);")
+    monkeypatch.setattr(settings, "sql_migrations_dir", str(tmp_path))
+    assert drill.knowledge_expected()
+    table_check, validated = drill.kg_checks("dsn", "before", "after")
+    assert table_check.status == "fail" and "no kg_* table" in table_check.detail
+    assert validated.status == "pass"
+
+    (tmp_path / "128_kg_notes.sql").write_text("CREATE TABLE other (id text);")
+    assert not drill.knowledge_expected()
+    assert drill.kg_checks("dsn", "before", "after")[0].status == "skip"
+
+
+def test_the_validator_must_refuse_the_post_target_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "knowledge_counts", lambda _dsn: {"kg_notes": 3})
+    monkeypatch.setattr(drill, "_validate_kg", lambda _corpus, _dsn: 0)
+    _, validated = drill.kg_checks("dsn", "before", "after")
+    assert validated.status == "fail" and "not restored to the target" in validated.detail
+
+
+def test_cleanup_names_what_it_could_not_remove_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: str, **_kwargs: object) -> str:
+        raise drill.DrillError("daemon went away")
+
+    monkeypatch.setattr(drill, "docker", broken)
+    problems = drill.remove_run("abc123")
+    assert problems and "daemon went away" in problems[0]
+
+
+def test_a_failed_cleanup_is_reported_without_replacing_the_runs_own_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object) -> None:
+        raise drill.DrillError("the primary died")
+
+    monkeypatch.setattr(drill, "docker_available", lambda: None)
+    monkeypatch.setattr(drill, "ensure_images", lambda *_images: None)
+    monkeypatch.setattr(drill, "_drill", boom)
+    monkeypatch.setattr(drill, "remove_run", lambda _id: ["volume busy"])
+    report = drill.run_drill()
+    assert report.error == "the primary died"
+    assert [(c.name, c.status) for c in report.checks] == [("cleanup", "fail")]
+    assert not report.ok
+
+    def explodes(_id: str) -> list[str]:
+        raise OSError("socket closed")
+
+    monkeypatch.setattr(drill, "remove_run", explodes)
+    assert drill.run_drill().error == "the primary died"
+
+
+def test_a_signal_while_cleaning_up_does_not_abandon_the_cleanup() -> None:
+    before = signal.getsignal(signal.SIGTERM)
+    with drill.uninterruptible():
+        signal.raise_signal(signal.SIGTERM)
+        signal.raise_signal(signal.SIGINT)
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_an_image_that_cannot_be_pulled_is_named_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refused(*args: str, **_kwargs: object) -> str:
+        raise drill.DrillError("toomanyrequests: rate limit")
+
+    monkeypatch.setattr(drill, "_succeeds", lambda *_args: False)
+    monkeypatch.setattr(drill, "docker", refused)
+    with pytest.raises(drill.ImageUnavailable, match="rate limit"):
+        drill.ensure_images("pgvector/pgvector:pg16")
+    monkeypatch.setattr(drill, "docker_available", lambda: None)
+    assert drill.run_drill().error.startswith("Image unavailable")
+
+
+def test_the_restore_time_is_checked_against_a_stated_rto_and_labelled_as_a_fixture() -> None:
+    report = drill.Report("t", {}, facts={"base_backup_bytes": 53_000_000})
+    ok = drill._restore_time_check(1.4, 600, report)
+    over = drill._restore_time_check(700.0, 600, report)
+    assert ok.status == "pass" and over.status == "fail"
+    assert "53 MB fixture" in over.detail and "not on the site's data" in over.detail
+    assert "restore_time" not in drill.REQUIRED_CHECKS

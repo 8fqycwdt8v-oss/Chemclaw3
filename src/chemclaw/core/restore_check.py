@@ -1,27 +1,27 @@
 """What the restore drill writes into a database and asks of it afterwards.
 
-`restore_drill.py` owns the containers and the clock; this module owns the SQL. A *snapshot* is
-everything the drill compares between the primary at the target instant and the restored cluster:
-per-table row counts, the migration ledger, every index, the runtime role's privileges and the
-`vector` extension. Comparison is pure (`compare_snapshots`), so a mismatch is a list of named
-checks rather than a boolean.
+Database administration, so it lives beside `migrate.py` and `grants.py`: `cli/restore_drill.py`
+owns the containers and the clock and calls this module with a DSN, never a connection, which
+keeps the entrypoint layer free of the driver. A *snapshot* is everything compared between the
+primary at the target instant and the restored cluster: row counts, the migration ledger, every
+index, the runtime role's privileges and the `vector` extension; `compare_snapshots` is pure, so
+a mismatch is a list of named checks.
 
-The fixture is written with plain SQL on purpose: a store's own writer would read the process-wide
-DSN, and the drill must keep working on a database no `Settings` points at. Every row carries a
-tag, so three waves (before the base backup, between backup and target, after the target) never
-collide and the ones after the target are exactly the ones a correct restore must not contain.
+The fixture is plain SQL on purpose: a store's own writer reads the process-wide DSN, and the drill
+must work against a server no `Settings` points at. Every row carries a tag, so three waves (before
+the base backup, between backup and target, after the target) never collide, and the last is exactly
+what a correct restore must not contain.
 """
 
 import json
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 
 import psycopg
 from psycopg import sql
-
-from chemclaw.science.calc.store import CalculationKey
 
 Status = Literal["pass", "fail", "skip"]
 
@@ -88,13 +88,13 @@ class Snapshot:
     markers: Sequence[str] = field(default_factory=tuple)
 
 
-def count_rows(conn: psycopg.Connection[Any], table: str) -> int:
+def _count_rows(conn: psycopg.Connection[Any], table: str) -> int:
     """The exact row count of `table`."""
     row = conn.execute(_COUNT_SQL.format(table=f'"{table}"')).fetchone()
     return int(row[0]) if row else 0
 
 
-def take_snapshot(conn: psycopg.Connection[Any]) -> Snapshot:
+def _snapshot(conn: psycopg.Connection[Any]) -> Snapshot:
     """Read a snapshot. Counts are exact (`count(*)`), not planner estimates.
 
     Run only while nothing else writes to the database: the drill's own connection is the sole
@@ -106,7 +106,7 @@ def take_snapshot(conn: psycopg.Connection[Any]) -> Snapshot:
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
         )
     ]
-    counts = {table: count_rows(conn, table) for table in tables}
+    counts = {table: _count_rows(conn, table) for table in tables}
     ledger = [
         (str(r[0]), str(r[1]))
         for r in conn.execute("SELECT filename, checksum FROM schema_migrations ORDER BY filename")
@@ -251,13 +251,11 @@ def _vector(rng: random.Random) -> str:
 
 
 def calculation_key(tag: str) -> str:
-    """A well-formed calculation key for `tag`, the shape `kg-validate` accepts in `calc_refs`."""
-    return CalculationKey(
-        calc_type="drill", calc_version="v1", input_hash=f"in-{tag}", params_hash=f"pa-{tag}"
-    ).as_str()
+    """A calculation key for `tag` in the shape a note may cite (`type@version:input:params`)."""
+    return f"drill@v1:in-{tag}:pa-{tag}"
 
 
-def create_marker_table(conn: psycopg.Connection[Any]) -> None:
+def _create_marker_table(conn: psycopg.Connection[Any]) -> None:
     """The table the drill's marker rows live in; created in the primary, restored with it."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS restore_drill_marker ("
@@ -267,13 +265,13 @@ def create_marker_table(conn: psycopg.Connection[Any]) -> None:
     conn.commit()
 
 
-def write_marker(conn: psycopg.Connection[Any], label: str) -> None:
+def _write_marker(conn: psycopg.Connection[Any], label: str) -> None:
     """Commit one marker row."""
     conn.execute("INSERT INTO restore_drill_marker (label) VALUES (%s)", (label,))
     conn.commit()
 
 
-def load_rows(conn: psycopg.Connection[Any], tag: str, rows: int, seed: int) -> None:
+def _load_rows(conn: psycopg.Connection[Any], tag: str, rows: int, seed: int) -> None:
     """Write `rows` of every kind of state the system keeps, all carrying `tag`.
 
     Conversation (`session_*`), the audit trail, the calculation cache, the publish outbox, the
@@ -338,7 +336,7 @@ def load_rows(conn: psycopg.Connection[Any], tag: str, rows: int, seed: int) -> 
     conn.commit()
 
 
-def knowledge_tables(conn: psycopg.Connection[Any]) -> list[str]:
+def _knowledge_tables(conn: psycopg.Connection[Any]) -> list[str]:
     """The `kg_*` tables this schema has; empty until the knowledge graph moves into Postgres."""
     return [
         str(r[0])
@@ -356,7 +354,7 @@ def load_knowledge_rows(conn: psycopg.Connection[Any], tag: str, rows: int) -> N
     schema that renames one fails the drill here, by name, rather than skipping the tables a restore
     must prove.
     """
-    if "kg_notes" not in knowledge_tables(conn):
+    if "kg_notes" not in _knowledge_tables(conn):
         return
     for i in range(rows):
         note = f"drill-note-{tag}-{i}"
@@ -377,7 +375,7 @@ def load_knowledge_rows(conn: psycopg.Connection[Any], tag: str, rows: int) -> N
             )
 
 
-def change_rows(conn: psycopg.Connection[Any], tag: str) -> None:
+def _change_rows(conn: psycopg.Connection[Any], tag: str) -> None:
     """An update and a delete, so replay is shown to carry more than inserts."""
     conn.execute(
         "UPDATE result_publications SET state = 'delivered', delivered_at = now() "
@@ -389,13 +387,13 @@ def change_rows(conn: psycopg.Connection[Any], tag: str) -> None:
     conn.commit()
 
 
-def disaster(conn: psycopg.Connection[Any]) -> None:
+def _disaster(conn: psycopg.Connection[Any]) -> None:
     """What the restore exists for: the conversation table emptied after the target instant."""
     conn.execute("DELETE FROM session_messages")
     conn.commit()
 
 
-def create_app_role(conn: psycopg.Connection[Any], password: str) -> None:
+def _create_app_role(conn: psycopg.Connection[Any], password: str) -> None:
     """The split runtime principal, before the grants that name it (`make db-grants`)."""
     # `CREATE ROLE` takes no bind parameters, so the password is rendered as a literal.
     conn.execute(
@@ -406,7 +404,7 @@ def create_app_role(conn: psycopg.Connection[Any], password: str) -> None:
     conn.commit()
 
 
-def nearest_fingerprint(conn: psycopg.Connection[Any], probe_id: str) -> tuple[str, str]:
+def _nearest_fingerprint(conn: psycopg.Connection[Any], probe_id: str) -> tuple[str, str]:
     """The nearest molecule to `probe_id` by Jaccard distance, and the plan that found it.
 
     Sequential scans are disabled so the plan names the HNSW index if it is usable: an index that
@@ -426,9 +424,9 @@ def nearest_fingerprint(conn: psycopg.Connection[Any], probe_id: str) -> tuple[s
     return (str(row[0]) if row else ""), plan
 
 
-def pgvector_check(conn: psycopg.Connection[Any], probe_id: str, expected_id: str) -> Check:
+def _pgvector_check(conn: psycopg.Connection[Any], probe_id: str, expected_id: str) -> Check:
     """The HNSW index answers a nearest-neighbour query with the primary's answer."""
-    found, plan = nearest_fingerprint(conn, probe_id)
+    found, plan = _nearest_fingerprint(conn, probe_id)
     if "molecule_fingerprints_jaccard_idx" not in plan:
         return failed("pgvector_query", f"the planner did not use the HNSW index: {plan!r}")
     if found != expected_id:
@@ -475,7 +473,7 @@ def advisory_lock_check(dsn: str) -> Check:
     )
 
 
-def writable_check(conn: psycopg.Connection[Any]) -> Check:
+def _writable_check(conn: psycopg.Connection[Any]) -> Check:
     """The promoted cluster accepts writes and its sequences continue past the restored rows."""
     in_recovery = conn.execute("SELECT pg_is_in_recovery()").fetchone()
     if in_recovery != (False,):
@@ -502,3 +500,105 @@ def app_role_check(dsn: str) -> Check:
     return failed(
         "app_role", f"{APP_ROLE} could rewrite audit_events: the append-only grant is gone"
     )
+
+
+# --- The connection-free surface: everything `cli/restore_drill.py` calls takes a DSN. ----------
+
+
+def is_ready(dsn: str, *, recovered: bool = False) -> bool:
+    """Whether the server answers (and, if `recovered`, has left recovery); False while not."""
+    try:
+        with psycopg.connect(dsn, connect_timeout=2) as conn:
+            row = conn.execute("SELECT pg_is_in_recovery()").fetchone()
+    except psycopg.Error:
+        return False
+    return row == (False,) if recovered else True
+
+
+def clock_now(dsn: str) -> datetime:
+    """The server's `clock_timestamp()`: the instant a restore is asked to stop at."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT clock_timestamp()").fetchone()
+    if row is None:
+        raise RuntimeError("the server returned no clock reading")
+    instant: datetime = row[0]
+    return instant
+
+
+def switch_wal(dsn: str) -> str:
+    """Close the current WAL segment and return its file name, so the caller can wait for it."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT pg_walfile_name(pg_current_wal_lsn())").fetchone()
+        conn.execute("SELECT pg_switch_wal()")
+    if row is None:
+        raise RuntimeError("the server reports no current WAL file")
+    return str(row[0])
+
+
+def archiver_stats(dsn: str) -> tuple[int, int]:
+    """`(archived_count, failed_count)` from `pg_stat_archiver`."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT archived_count, failed_count FROM pg_stat_archiver").fetchone()
+    return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def prepare(dsn: str, app_password: str) -> None:
+    """The runtime role the grants name, and the table the marker rows live in."""
+    with psycopg.connect(dsn) as conn:
+        _create_app_role(conn, app_password)
+        _create_marker_table(conn)
+
+
+def load_wave(dsn: str, tag: str, rows: int, seed: int) -> list[str]:
+    """Write one wave of fixture rows; the `kg_*` tables the schema has (empty = none)."""
+    with psycopg.connect(dsn) as conn:
+        _load_rows(conn, tag, rows, seed)
+        return _knowledge_tables(conn)
+
+
+def change_wave(dsn: str, tag: str) -> None:
+    """An update and a delete against the rows of wave `tag`."""
+    with psycopg.connect(dsn) as conn:
+        _change_rows(conn, tag)
+
+
+def empty_conversations(dsn: str) -> None:
+    """The accident the restore exists for: the conversation table emptied."""
+    with psycopg.connect(dsn) as conn:
+        _disaster(conn)
+
+
+def mark(dsn: str, label: str) -> None:
+    """Commit one marker row."""
+    with psycopg.connect(dsn) as conn:
+        _write_marker(conn, label)
+
+
+def snapshot(dsn: str) -> Snapshot:
+    """Read a snapshot of the database at `dsn`."""
+    with psycopg.connect(dsn) as conn:
+        return _snapshot(conn)
+
+
+def knowledge_counts(dsn: str) -> dict[str, int]:
+    """Row counts of the `kg_*` tables; empty when the schema has none."""
+    with psycopg.connect(dsn) as conn:
+        return {table: _count_rows(conn, table) for table in _knowledge_tables(conn)}
+
+
+def nearest_neighbour(dsn: str, probe_id: str) -> str:
+    """The id nearest to `probe_id` by Jaccard distance."""
+    with psycopg.connect(dsn) as conn:
+        return _nearest_fingerprint(conn, probe_id)[0]
+
+
+def vector_query_check(dsn: str, probe_id: str, expected_id: str) -> Check:
+    """The HNSW index answers a nearest-neighbour query with the primary's answer."""
+    with psycopg.connect(dsn) as conn:
+        return _pgvector_check(conn, probe_id, expected_id)
+
+
+def promotion_check(dsn: str) -> Check:
+    """The promoted cluster accepts writes and its sequences continue past the restored rows."""
+    with psycopg.connect(dsn) as conn:
+        return _writable_check(conn)

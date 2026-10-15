@@ -42,7 +42,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **An erasure is not recorded where a restore can find it** [M] — "erasure applies on restore" needs the `make user-erase` runs since the backup, kept outside the database; the command keeps none (the runbook asks the operator to log them);
   `src/chemclaw/cli/erase_actor.py::main`.
 - [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
-  `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/cli/restore_drill_db.py::load_knowledge_rows`.
+  `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/core/restore_check.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised
@@ -113,7 +113,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A chart for `Chemclaw3_ui` and the `Chemclaw3-mcp` servers** — neither repo is deployable as a chart yet · *Revisit:* the rollout row above closes.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
 - **A live target for the results store** — the publish path is built, no real sink exists · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
-- **Backup and restore on a real CloudNativePG cluster** — the template is schema-validated and the drill runs in containers; neither has met the operator, the Barman plugin or a real bucket (RTO at real size, the exported metric names, `firstRecoverabilityPoint` under the plugin) · *Revisit:* a cluster with the operator and plugin: render `postgres.cluster`, restore into a scratch namespace (`docs/guides/runbook.md` § Backup, restore and PITR).
+- **Backup and restore on a real CloudNativePG cluster** — the template is schema-validated and the drill runs in containers; neither has met the operator, the Barman plugin or a real bucket (the `import` and `recovery` bootstraps, RTO at real size, the exported metric names, `firstRecoverabilityPoint` under the plugin) · *Revisit:* a cluster with the operator and plugin: install `chemclaw-postgres`, rehearse a restore into a scratch namespace and time it (`docs/guides/runbook.md` § Backup, restore and PITR).
 - **A backup archive in one region, and a platform Temporal outside the cluster** — the drill restores Temporal's SQL databases in the same cluster only; an Elasticsearch visibility store or a platform-owned Postgres is the platform's to back up · *Revisit:* the platform names its Temporal persistence, or a second region is required.
 - **PgBouncer as CloudNativePG `Pooler`s** — two (transaction and session mode) would serve `deploy/README.md` § PgBouncer; not templated, the `-rw` Service is the direct endpoint · *Revisit:* a release runs above three replicas.
 - **A worker whose broker is down never opens its probe port** — `durable/background_worker.py::main` connects first · *Revisit:* a second dependency joins `connect()` or an operator misdiagnoses an outage.

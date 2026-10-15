@@ -659,20 +659,7 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # Checked as strictly as a core kind; listed apart only because the `Makefile` must supply the
 # catalog `-schema-location` for them. Each entry's schema was confirmed to exist in the catalog.
 _CATALOG_VALIDATED_KINDS = frozenset(
-    {
-        "ServiceMonitor",
-        "PodMonitor",
-        "PrometheusRule",
-        "ScaledObject",
-        "TriggerAuthentication",
-        # `postgres.cluster`: CloudNativePG's Cluster, ScheduledBackup and Database, and the Barman
-        # Cloud plugin's ObjectStore. Their schemas are in the catalogue (postgresql.cnpg.io and
-        # barmancloud.cnpg.io), which is what rejects a misspelt field before an operator does.
-        "Cluster",
-        "ScheduledBackup",
-        "Database",
-        "ObjectStore",
-    }
+    {"ServiceMonitor", "PodMonitor", "PrometheusRule", "ScaledObject", "TriggerAuthentication"}
 )
 
 # The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
@@ -2661,7 +2648,7 @@ def _makefile_renders() -> list[list[str]]:
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
     for index, line in enumerate(lines):
-        if "helm template chemclaw" not in line or line.lstrip().startswith("@#"):
+        if "helm template chemclaw " not in line or line.lstrip().startswith("@#"):
             continue
         block = [line]
         cursor = index
@@ -3696,17 +3683,6 @@ def test_stating_retention_windows_also_requires_an_artefact_posture() -> None:
     assert "now refuses to render" in runbook and refusal in " ".join(runbook.split())
 
 
-_CLUSTER_PREREQUISITES: tuple[str, ...] = (
-    "--set",
-    "postgres.cluster.imageName=registry.example/pgvector:16",
-    "--set",
-    "postgres.cluster.backup.destinationPath=s3://chemclaw-backups/prod",
-    "--set",
-    "postgres.cluster.targets.rpoSeconds=900",
-    "--set",
-    "postgres.cluster.targets.rtoSeconds=14400",
-)
-
 # What a switch needs *besides itself* to render the branch it gates: `monitoring.alertmanager`
 # refuses with no receivers, and `mcpFace.route` renders nothing without its Deployment. A switch
 # absent from this map needs nothing.
@@ -3722,16 +3698,6 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
     # A posture: every background worker mounts the share, so with two the chart asks for the
     # claim's access mode.
     "documentShare.enabled": ("--set", "documentShare.accessMode=ReadWriteMany"),
-    # The Cluster refuses to render without an image, a bucket and both recovery targets; the
-    # Temporal databases need the Cluster and a role Secret on top.
-    "postgres.cluster.enabled": _CLUSTER_PREREQUISITES,
-    "postgres.cluster.temporalDatabases.enabled": (
-        *_CLUSTER_PREREQUISITES,
-        "--set",
-        "postgres.cluster.enabled=true",
-        "--set",
-        "postgres.cluster.temporalDatabases.passwordSecret=temporal-db",
-    ),
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",
