@@ -132,7 +132,7 @@ _EXPECTED_SUBSYSTEMS = {
     "session_transcript",
     "skill_manifest",
     "spend_cap",
-    # `agent/stored_skill_tools._unreadable`: a stored `SKILL.md` whose frontmatter cannot be read
+    # `skills/store._unreadable`: a stored `SKILL.md` whose frontmatter cannot be read
     # is scoped to nothing. Separate from `skill_manifest` (the filed trees) because the remedy
     # differs: a stored body is fixable only by its owner or an administrator. The message carries
     # the exception type, never its text, which would quote a person's own words.

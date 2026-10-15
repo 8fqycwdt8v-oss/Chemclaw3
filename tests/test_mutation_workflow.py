@@ -317,7 +317,6 @@ _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/loop_cap.py",
     "src/chemclaw/agent/plan_gate.py",
-    "src/chemclaw/agent/skill_backend.py",
     "src/chemclaw/agent/spend_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
@@ -330,6 +329,7 @@ _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
     "src/chemclaw/kg/record.py",
     "src/chemclaw/publish/outbox.py",
     "src/chemclaw/science/calc/store.py",
+    "src/chemclaw/skills/backends.py",
     "src/chemclaw/templates/resolve.py",
 )
 
@@ -349,10 +349,12 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_fulltext.py",
     "tests/test_knowledge.py",
     "tests/test_logging.py",
+    "tests/test_local_skills.py",
     "tests/test_loop_cap_floor.py",
     "tests/test_metrics_bridge.py",
     "tests/test_note.py",
     "tests/test_note_visibility.py",
+    "tests/test_org_skills.py",
     "tests/test_plan_gate.py",
     "tests/test_postgres_store.py",
     "tests/test_properties_core.py",

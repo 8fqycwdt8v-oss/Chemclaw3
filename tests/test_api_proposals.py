@@ -19,13 +19,13 @@ from chemclaw.agent.behaviour_proposals import (
     content_hash,
     default_proposal_store,
 )
-from chemclaw.agent.local_skills import list_local_skills
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import proposals as proposal_routes
 from chemclaw.api.routes import skills as skill_routes
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tool_names
+from chemclaw.skills.store import list_local_skills
 
 _ALICE = Principal(oid="u-alice", upn="alice@example.com", roles=frozenset())
 _BOB = Principal(oid="u-bob", upn="bob@example.com", roles=frozenset())
@@ -290,7 +290,8 @@ def test_an_acceptance_that_loses_the_race_to_a_decline_undoes_its_write(
     write is then undone. Driven by committing the decline from inside the write; the tier ends as
     it began.
     """
-    from chemclaw.agent.local_skills import read_local_skill, save_local_skill
+    from chemclaw.skills import store as skill_store
+    from chemclaw.skills.store import read_local_skill, save_local_skill
 
     if held_before is not None:
         asyncio.run(save_local_skill(skills_store, _ALICE.oid, "cold-quench", held_before))
@@ -303,7 +304,7 @@ def test_an_acceptance_that_loses_the_race_to_a_decline_undoes_its_write(
                 actor, "skill", name, digest, accepted=False, decided_by=actor, reason="other tab"
             )
 
-    monkeypatch.setattr(proposal_routes, "save_local_skill", _write_then_lose)
+    monkeypatch.setattr(skill_store, "save_local_skill", _write_then_lose)
     client = _as(app, _ALICE)
 
     lost = client.post(
@@ -326,7 +327,8 @@ def test_a_lost_race_whose_undo_fails_is_still_a_409_that_names_the_live_skill(
     The answer is the 409 the race earned, saying the skill may still be there, plus an ERROR naming
     who and which skill.
     """
-    from chemclaw.agent.local_skills import read_local_skill, save_local_skill
+    from chemclaw.skills import store as skill_store
+    from chemclaw.skills.store import read_local_skill, save_local_skill
 
     digest = _propose()
 
@@ -339,8 +341,8 @@ def test_a_lost_race_whose_undo_fails_is_still_a_409_that_names_the_live_skill(
     async def _store_down(*_: Any) -> None:
         raise ConnectionError("the store went away")
 
-    monkeypatch.setattr(proposal_routes, "save_local_skill", _write_then_lose)
-    monkeypatch.setattr(proposal_routes, "delete_local_skill", _store_down)
+    monkeypatch.setattr(skill_store, "save_local_skill", _write_then_lose)
+    monkeypatch.setattr(skill_store, "delete_local_skill", _store_down)
     client = _as(app, _ALICE)
 
     with caplog.at_level("ERROR", logger=proposal_routes.__name__):

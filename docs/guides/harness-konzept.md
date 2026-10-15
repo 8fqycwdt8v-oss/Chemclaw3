@@ -208,7 +208,7 @@ kein nachgelagertes Gate mehr (§6).
   (`calculation-selection`, `reaction-search`, …) als *Urteil* geladen, welche Schritte in den Plan
   gehören. Progressive Disclosure bleibt — sie läuft jetzt über `deepagents.SkillsMiddleware`, die
   jedem Skill seinen *Pfad* in den System-Prompt schreibt und erwartet, dass das Modell den Körper
-  liest. Deshalb ist die Verengung am **Backend** verankert (`agent/skill_backend.py`) und nicht an
+  liest. Deshalb ist die Verengung am **Backend** verankert (`skills/backends.py`) und nicht an
   der angezeigten Liste: ein reiner Listen-Filter verbärge einen rollen-gegateten Skill und
   händigte ihn jedem aus, der den Pfad errät, den der Prompt ohnehin schon beigebracht hat.
 - **Berechnungs-Store (D-011).** Ein Schritt, dessen Ergebnis bereits im Store liegt, wird zum

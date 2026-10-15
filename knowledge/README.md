@@ -8,7 +8,7 @@ knowledge. Correction, not pre-approval, is the control here — provenance at t
 citations a chemist checks where the note is consumed, and a `contradicts` edge that argues with a
 note rather than editing it. The gated case is the opposite one: a `SKILL.md` is injected into the
 prompt with no citation trail, so no agent path may write one at all
-(`agent/skill_backend.SkillsReadOnlyRefusal`).
+(`skills/backends.SkillsReadOnlyRefusal`).
 
 ## What is here, and what it is for
 

@@ -1,14 +1,13 @@
-"""The validated `SKILL.md` manifest — a skill's frontmatter as a typed contract.
+"""What a skill is, as a document: its validated frontmatter, its declarations and its admission.
 
-`SkillManifest` makes the frontmatter a pydantic contract, so an invented key fails validation
-instead of being ignored. `name`/`description` are required (the model reads them to decide when to
-load a skill), and the optional `tools` declaration is checked against the live tool surface by
-`chemclaw.cli.validate_skills`, turning a skill that teaches a vanished tool into a CI failure.
-
-A declaration never grants access: tools are advertised by the agent's registry and profile and
-gated by `enforce_tool_authz`. At run time `ToolScopedSkills` reads it only to *hide* a skill whose
-declared capability is absent, so a declaration can cost a skill visibility but never buy it a tool.
-`declared_tools` reads the file directly because a loaded `Skill` object drops `tools:`.
+`SkillManifest` makes the `SKILL.md` frontmatter a pydantic contract, so an invented key fails
+validation instead of being ignored. `name`/`description` are required (the model reads them to
+decide when to load a skill); the optional `tools` declaration is checked against the live tool
+surface by `chemclaw.cli.validate_skills`. A declaration never grants access: at run time
+`access.ToolScopedSkills` reads it only to *hide* a skill whose capability is absent, so it can cost
+a skill visibility but never buy it a tool. `validated_skill` is the one admission rule every door
+into a stored tier goes through, and `declared_tools` reads the files directly because a loaded
+`Skill` object drops `tools:`.
 """
 
 import logging
@@ -18,8 +17,11 @@ from pathlib import Path
 from typing import Any
 
 import frontmatter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
@@ -78,9 +80,9 @@ def required_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
 def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     """Each discovered skill's declared tool dependencies, by skill name.
 
-    The run-time reader of `tools:` for `chemclaw.agent.skill_access.ToolScopedSkills`. Cached per
-    process (via `_declared_tools`), because the graph is compiled per turn and re-parsing every
-    `SKILL.md` would block the event loop each time.
+    The run-time reader of `tools:` for `access.ToolScopedSkills`. Cached per process (via
+    `_declared_tools`), because the graph is compiled per turn and re-parsing every `SKILL.md`
+    would block the event loop each time.
 
     Tolerant where `chemclaw.cli.validate_skills` is strict: a filter that raised would take down
     live turns over a frontmatter typo, while the validator catches it before deploy. Tolerant does
@@ -131,12 +133,12 @@ UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manife
 def declared_triple(metadata: Mapping[str, Any]) -> tuple[str, frozenset[str], frozenset[str]]:
     """`(name, declared tools, required tools)` off already-parsed frontmatter, or raise.
 
-    Shared by filed skills and stored skills (`agent/stored_skill_tools.py`, which has no path), so
-    a `tools:` declaration has one parser; only the fallback name differs. It reads the three keys
-    directly rather than validating the whole `SkillManifest`, so an unrelated frontmatter defect
-    cannot erase the declaration; it must stay in step with `SkillManifest`'s `str_strip_whitespace`
-    and `min_length=1` on `name`. It raises rather than returning a sentinel because the caller
-    knows the fallback name and what to log.
+    Shared by filed skills and stored skills (`store.stored_skill_declarations`, which has no path),
+    so a `tools:` declaration has one parser; only the fallback name differs. It reads the three
+    keys directly rather than validating the whole `SkillManifest`, so an unrelated frontmatter
+    defect cannot erase the declaration; it must stay in step with `SkillManifest`'s
+    `str_strip_whitespace` and `min_length=1` on `name`. It raises rather than returning a sentinel
+    because the caller knows the fallback name and what to log.
 
     Args:
         metadata: The frontmatter mapping, from `frontmatter.load` or `frontmatter.loads`.
@@ -195,3 +197,106 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str], frozenset[str]]:
         # leave the skill visible. Keyed by the directory name because the frontmatter is what could
         # not be read; `make skill-validate` requires the two to match.
         return path.parent.name, UNREADABLE_DECLARATION, UNREADABLE_DECLARATION
+
+
+def skill_fingerprint(name: str) -> str:
+    """The stable identity of one skill name, for a row that must not carry the name itself.
+
+    `turn_costs.skills_loaded` answers an equality question (was this skill already acting?), so it
+    holds a digest: a personal skill's name is a chemist's own words and `turn_costs` is retained
+    through erasure. Writer (`api/runner.py`) and reader (`agent/distiller.py`) share this one
+    function so the two hashes cannot diverge; shared skills are digested too, so the column has
+    one meaning.
+
+    Args:
+        name: The skill's name, as the frontmatter declares it.
+
+    Returns:
+        A digest stable across processes and restarts, so a guard comparing two runs' rows agrees.
+    """
+    return stable_hash(name)
+
+
+class SkillRefused(ChemclawError):
+    """A document a stored tier will not keep, and whether the reason is a conflict or a fault.
+
+    One exception carrying `conflict`, since every caller translates it (409/422, or prose) anyway.
+    """
+
+    def __init__(self, message: str, *, conflict: bool = False) -> None:
+        """Refuse, saying whether the name is taken (`conflict`) or the document is malformed."""
+        super().__init__(message)
+        self.conflict = conflict
+
+
+def storable_name(name: str) -> bool:
+    r"""Whether this name could ever have been written, which is what a read of it may assume.
+
+    The writer's rule, asked by the readers: the `GET`/`DELETE /skills/mine/{name}` routes accept
+    any URL bytes, and a name like `a\x00b` would make Postgres raise (a 500) where the honest
+    answer is 404.
+    """
+    return all(not character.isspace() and character.isprintable() for character in name)
+
+
+def validated_skill(body: str, *, expected_name: str | None = None) -> str:
+    """The name this body declares, or a refusal naming what is wrong with it.
+
+    Every door into a stored skills tier goes through here (save, proposal acceptance,
+    `propose_skill`, the distiller, org publish and revert), so the admission rules belong to the
+    tiers rather than to a surface. The size bound is not per tier: it bounds what a skill is.
+
+    Args:
+        body: The whole `SKILL.md`, frontmatter included.
+        expected_name: The caller's independent opinion of the name, if any (`propose_skill`'s
+            `name` argument); compared rather than preferred.
+
+    Returns:
+        The validated name, which is also the skill's directory and its store key.
+
+    Raises:
+        SkillRefused: With `conflict` set when the name is a shipped skill's — the one refusal that
+            is about the deployment rather than about the document.
+    """
+    if len(body) > settings.agent_local_skill_max_chars:
+        raise SkillRefused(
+            f"a skill may be at most {settings.agent_local_skill_max_chars} characters and this "
+            f"one is {len(body)}. A skill is judgment, not a transcript."
+        )
+    try:
+        parsed = frontmatter.loads(body)
+    except Exception as error:
+        raise SkillRefused(
+            f"the skill's frontmatter could not be parsed: {error}. It must open with `---`, a "
+            "`name:` and a `description:`, then `---`."
+        ) from error
+    try:
+        manifest = SkillManifest.model_validate(parsed.metadata)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise SkillRefused(f"the skill's frontmatter is not valid: {problems}") from error
+    if expected_name is not None and manifest.name != expected_name.strip():
+        raise SkillRefused(
+            f"the frontmatter declares the name {manifest.name!r} and the name given beside it is "
+            f"{expected_name.strip()!r}. Send the same name in both, since the frontmatter is what "
+            "a later turn reads."
+        )
+    if "/" in manifest.name or manifest.name.startswith("."):
+        raise SkillRefused("a skill name may not contain '/' or start with '.'")
+    if not storable_name(manifest.name):
+        raise SkillRefused(
+            "a skill name may not contain whitespace or control characters — use hyphens."
+        )
+    # Imported lazily: `langgraph_agent` imports this package.
+    from chemclaw.agent.langgraph_agent import shipped_skill_names
+
+    if manifest.name in shipped_skill_names():
+        raise SkillRefused(
+            f"{manifest.name!r} is the name of a skill this deployment already ships; give yours a "
+            "different name so it is clear which judgment is acting",
+            conflict=True,
+        )
+    return manifest.name

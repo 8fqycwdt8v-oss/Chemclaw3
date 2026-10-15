@@ -81,7 +81,7 @@ Getting onto the share is an AD-group decision; once on it, everyone sees everyt
 enforcement that matches reality is not per-file ACLs but: *a caller not in the share's group gets
 nothing from this source at all.* `ShareDocumentRetriever._entitled` checks the binding's
 `required_roles` against the turn's roles — the one entitlement vocabulary `authz.py`,
-`skill_access.py` and every manifest gate already share. An AD group reaches it either by being
+`skills/access.py` and every manifest gate already share. An AD group reaches it either by being
 assigned to an Entra app role, or — under `CHEMCLAW_ENTRA_GROUP_CLAIMS_AS_ROLES` — as its group
 claim namespaced with `core.identity_context.GROUP_ROLE_PREFIX`. So a group-gated binding names
 `group:<claim value>`, never the bare object-id, which lands in no role set and matches nothing.

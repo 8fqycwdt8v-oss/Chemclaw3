@@ -2272,15 +2272,6 @@
       ]
     },
     {
-      "id": "prose:chemclaw.agent.skill_backend:REFUSED",
-      "kind": "prose-constant",
-      "owner": "src/chemclaw/agent/skill_backend.py:REFUSED",
-      "residence": "on-demand",
-      "tokens": 18,
-      "chars": 53,
-      "sha256": "09114a813e0a169a"
-    },
-    {
       "id": "prose:chemclaw.agent.subagents:HELPER_BRIEF",
       "kind": "prose-constant",
       "owner": "src/chemclaw/agent/subagents.py:HELPER_BRIEF",
@@ -2509,6 +2500,15 @@
       "tokens": 298,
       "chars": 1175,
       "sha256": "5ab1556700c3fe65"
+    },
+    {
+      "id": "prose:chemclaw.skills.backends:REFUSED",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/skills/backends.py:REFUSED",
+      "residence": "on-demand",
+      "tokens": 18,
+      "chars": 53,
+      "sha256": "09114a813e0a169a"
     },
     {
       "id": "response-format:chemclaw.agent.condense._Extraction",

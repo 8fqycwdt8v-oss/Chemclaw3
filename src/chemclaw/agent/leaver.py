@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpoint_thread_delete_statements
-from chemclaw.agent.local_skills import local_skills_prefix
 from chemclaw.agent.scratchpad import memory_prefix
 from chemclaw.agent.session_store import (
     SessionTurnClaims,
@@ -37,6 +36,7 @@ from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tenancy import require_bound_tenant
 from chemclaw.durable.digest import digest_channel
+from chemclaw.skills.store import local_skills_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,9 @@ def store_prefixes(actors: Sequence[str]) -> list[str]:
     """Every `store.prefix` a departing person's rows live under, across both tiers.
 
     Memories and personal skills share the `store` table under different namespaces. Built from the
-    writers' own prefix functions, one per spelling of the id.
+    writers' own prefix functions, one per spelling of the id. Deleting a leaver's skills is
+    deliberately outside `skills.access.may_write`: it is erasure of a person's data on request, not
+    a change to what a tier says, and only this module's SQL does it.
 
     Args:
         actors: Every spelling of the departing person's id.

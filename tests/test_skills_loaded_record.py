@@ -10,13 +10,13 @@ from typing import Any
 import pytest
 from langgraph.store.memory import InMemoryStore
 
-from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT, save_local_skill
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
-from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core import bookkeeping, turn_signals
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import SkillLoadedSignal
+from chemclaw.skills.access import SkillNarrowing
+from chemclaw.skills.store import LOCAL_SKILLS_ROOT, save_local_skill
 
 _BODY = "---\nname: cold-quench\ndescription: how to quench this class cold\n---\n\nQuench cold.\n"
 
@@ -139,12 +139,12 @@ async def test_the_row_really_carries_what_the_ledger_folded(
     """
     from chemclaw.agent import turn_cost
     from chemclaw.agent.session import TurnSession
-    from chemclaw.agent.skill_fingerprint import skill_fingerprint
     from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
     from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _book_turn_spend, _TurnLedger
     from chemclaw.cli.distill import _skills_by_session
     from chemclaw.core.config import settings
+    from chemclaw.skills.manifest import skill_fingerprint
     from tests.pg import migrated_db_or_skip
 
     await migrated_db_or_skip()

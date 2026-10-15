@@ -20,12 +20,15 @@ from typing import Any
 import yaml
 
 from chemclaw.agent.behaviour_proposals import Proposal, content_hash, default_proposal_store
-from chemclaw.agent.local_skills import validated_skill
-from chemclaw.agent.skill_fingerprint import skill_fingerprint
-from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILL_NAME_CHARS
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
+from chemclaw.skills.manifest import (
+    MAX_SKILL_DESCRIPTION_CHARS,
+    MAX_SKILL_NAME_CHARS,
+    skill_fingerprint,
+    validated_skill,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -16,8 +16,8 @@ from chemclaw.agent.distiller import (
     independent_sessions,
     scaffold,
 )
-from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.core.config import settings
+from chemclaw.skills.manifest import skill_fingerprint
 
 _TOOLS = ("find_notes", "expand_note", "gather_evidence")
 _NAME = Candidate(_TOOLS, (), 0, ()).name
@@ -126,7 +126,7 @@ def test_a_scaffold_is_a_valid_skill_the_queue_will_accept() -> None:
     """
     import frontmatter
 
-    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.skills.manifest import SkillManifest
 
     body = scaffold(Candidate(_TOOLS, ("s1", "s2"), 6, ()))
     manifest = SkillManifest.model_validate(frontmatter.loads(body).metadata)
@@ -189,7 +189,7 @@ def test_the_guard_s_finding_is_carried_and_not_only_counted() -> None:
     `Candidate.self_confirming` is the guard's output; an empty one reads as "nothing discounted",
     the reassuring direction, so it is asserted non-empty here.
     """
-    from chemclaw.agent.skill_fingerprint import skill_fingerprint
+    from chemclaw.skills.manifest import skill_fingerprint
 
     name = Candidate(_TOOLS, (), 0, ()).name
     found = candidates(

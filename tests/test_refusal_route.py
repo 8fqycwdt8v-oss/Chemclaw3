@@ -21,7 +21,6 @@ from chemclaw.agent.authz import AuthorizationError, authorize_tool, authorize_t
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.plan_gate import out_of_scope_refusal, plan_approval_refusal
 from chemclaw.agent.refusal_route import FOOTER_OPENING, NO_PATH, routed, sentence_of
-from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.agent.tool_authz import (
     denial_result,
     dry_run_refusal,
@@ -31,6 +30,7 @@ from chemclaw.agent.tool_authz import (
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.skills.backends import SkillsReadOnlyRefusal
 from tests.middleware import run_middleware, tool_request
 
 # The codes whose `sanctioned path` is a real next action, and those with none. Written out,
@@ -126,12 +126,12 @@ def _every_routed_refusal(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     refusals["skills_read_only"] = str(SkillsReadOnlyRefusal(_skills_refusal()))
     # The chemist's own skills tier refuses with a different sentence and sanctioned path; read off
     # the module so a reword cannot silently diverge from a copy here.
-    from chemclaw.agent.local_skills import _LOCAL_READ_ONLY
+    from chemclaw.skills.backends import _LOCAL_READ_ONLY
 
     refusals["local_skills_read_only"] = _LOCAL_READ_ONLY
     # The organisation's tier: its sanctioned path names an administrator, since neither the turn
     # nor the chemist can save an org skill.
-    from chemclaw.agent.org_skills import _ORG_READ_ONLY
+    from chemclaw.skills.backends import _ORG_READ_ONLY
 
     refusals["org_skills_read_only"] = _ORG_READ_ONLY
     return refusals
@@ -139,7 +139,7 @@ def _every_routed_refusal(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 def _skills_refusal() -> str:
     """The skills tree's one refusal sentence, read from the module that raises it."""
-    from chemclaw.agent.skill_backend import _READ_ONLY
+    from chemclaw.skills.backends import _READ_ONLY
 
     return _READ_ONLY
 

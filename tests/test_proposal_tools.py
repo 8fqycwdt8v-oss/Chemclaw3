@@ -4,8 +4,11 @@ It writes a proposal and never a skill, so the first test is the absence one: no
 way to write judgment into its own prompt.
 """
 
+import ast
 import asyncio
+import fnmatch
 import pathlib
+from collections.abc import Callable
 
 import pytest
 
@@ -62,19 +65,30 @@ def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
 #: that adding one is a diff a reader sees.
 _ARGUED = {
     # The proposer imports the queue for `propose` and `content_hash`; it must not reach `decide`,
-    # which the symbol check holds. `local_skills` is imported for `validated_skill`, a read of the
-    # tier's admission rules; its writes (`save_local_skill`, `delete_local_skill`) are in
-    # `_WRITES_BEHAVIOUR`.
-    "chemclaw.agent.proposal_tools": {"behaviour_proposals", "local_skills"},
+    # which the symbol check holds. The skills package is reached for `manifest.validated_skill`, a
+    # read of the tiers' admission rules; the rest of the package, where every write lives, and the
+    # routes that are the doors to it are forbidden to a tool module outright (`_is_banned_module`).
+    "chemclaw.agent.proposal_tools": {"behaviour_proposals"},
     # The generated `run_*` job launchers resolve a manifest's `module:attribute` reference, so
     # `importlib` is their purpose; `check_driver_module` guards it and they name nothing in
     # `_WRITES_BEHAVIOUR`. Present only once `_register_generated_tools()` has run.
     "chemclaw.connectors.jobs": {"importlib"},
 }
 
-#: What a turn must not be able to reach. Two writes into the personal skills tier, and the one
+#: What a turn must not be able to reach. Every write into the stored skills tiers, and the one
 #: call that turns a proposal into behaviour.
-_WRITES_BEHAVIOUR = frozenset({"save_local_skill", "delete_local_skill", "decide"})
+_WRITES_BEHAVIOUR = frozenset(
+    {
+        "save_local_skill",
+        "delete_local_skill",
+        "save_org_skill",
+        "retire_org_skill",
+        "activate_org_version",
+        "store_writer",
+        "SkillStore",
+        "decide",
+    }
+)
 
 
 def _tool_defining_modules() -> dict[str, pathlib.Path]:
@@ -97,22 +111,123 @@ def _tool_defining_modules() -> dict[str, pathlib.Path]:
     return found
 
 
+def _resolved_imports(module: str, tree: ast.AST) -> set[str]:
+    """Every dotted name a module imports, relative imports resolved against `module`.
+
+    `from a.b import c` yields both `a.b` and `a.b.c`, since `c` may be a submodule.
+    """
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                package = module.split(".")[: -node.level]
+                base = ".".join([*package, *([node.module] if node.module else [])])
+            found.add(base)
+            found |= {f"{base}.{alias.name}" for alias in node.names}
+    return found
+
+
+def _is_banned_module(name: str) -> bool:
+    """Whether a tool module may not import `name`: the stored tiers' writers, or a door to them.
+
+    The skills package is reachable for `manifest` (admission rules, read-only) and nothing else;
+    the skill and proposal routes are the doors people use and a tool is not a person.
+    """
+    if name == "chemclaw.skills" or name.startswith("chemclaw.skills."):
+        return not name.startswith("chemclaw.skills.manifest")
+    return fnmatch.fnmatch(name, "chemclaw.api.routes.*skill*") or fnmatch.fnmatch(
+        name, "chemclaw.api.routes.proposals*"
+    )
+
+
+def _reaches_skill_writes(module: str, source: str, load: Callable[[str], str | None]) -> list[str]:
+    """Why a tool-defining module can reach a skill write, or `[]` if it cannot.
+
+    Direct: a banned name, a banned import, a dynamic `getattr` on an imported module, `importlib`.
+    Indirect, one level: a first-party module it imports that itself imports a banned module.
+    `load` returns another module's source, so a synthetic module can stand in for a real one.
+    """
+    tree = ast.parse(source)
+    problems: list[str] = []
+    names = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+    } | {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    names |= {node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)}
+    names |= {
+        alias.name.rsplit(".", 1)[-1]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    problems += [f"names {name}" for name in sorted(names & _WRITES_BEHAVIOUR)]
+
+    imports = _resolved_imports(module, tree)
+    problems += [f"imports {name}" for name in sorted(imports) if _is_banned_module(name)]
+
+    bound = {
+        (alias.asname or alias.name).split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            computed = len(node.args) > 1 and not isinstance(node.args[1], ast.Constant)
+            on_import = bool(node.args) and ast.unparse(node.args[0]).split(".")[0] in bound
+            if node.func.id == "__import__" or (
+                node.func.id == "getattr" and computed and on_import
+            ):
+                problems.append(f"calls {node.func.id} with a computed name on an imported module")
+
+    for name in sorted(imports):
+        if not name.startswith("chemclaw.") or _is_banned_module(name):
+            continue
+        other = load(name)
+        if other is None:
+            continue
+        reached = [m for m in _resolved_imports(name, ast.parse(other)) if _is_banned_module(m)]
+        problems += [f"imports {name}, which imports {m}" for m in sorted(reached)]
+    return problems
+
+
+def _source_of(module: str) -> str | None:
+    """The source of a first-party module that exists on disk, else `None`."""
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
+        return None
+    return pathlib.Path(spec.origin).read_text()
+
+
 def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
     """No turn can write a skill, even now that it can propose one.
 
     The subject is the tool registry: every module defining a tool, checked against the calls that
-    turn a proposal into behaviour, not one module's source text. `importlib` is refused because a
-    module name built at run time is the one thing a static reader cannot follow.
+    turn a proposal into behaviour, not one module's source text, and against reaching them one
+    import away. `importlib` is refused because a module name built at run time is the one thing a
+    static reader cannot follow.
     """
-    import ast
-
     for name, path in sorted(_tool_defining_modules().items()):
-        tree = ast.parse(path.read_text())
-        named = {
-            node.id if isinstance(node, ast.Name) else node.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name | ast.Attribute)
-        }
+        source = path.read_text()
+        reaches = _reaches_skill_writes(name, source, _source_of)
+        assert not reaches, (
+            f"{name} defines a tool and can reach a skill write: {reaches}; a turn proposes and a "
+            "person decides"
+        )
+        tree = ast.parse(source)
         imported = {
             alias.name.rsplit(".", 1)[-1]
             for node in ast.walk(tree)
@@ -123,14 +238,7 @@ def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module
         }
-
-        reaches = (named | imported) & _WRITES_BEHAVIOUR
-        assert not reaches, (
-            f"{name} defines a tool and names {sorted(reaches)}, which writes behaviour; a turn "
-            "proposes and a person decides"
-        )
         forbidden_imports = (imported - _ARGUED.get(name, set())) & {
-            "local_skills",
             "behaviour_proposals",
             "importlib",
         }
@@ -141,15 +249,57 @@ def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
         )
 
 
+_AS_A_TOOL_MODULE = "chemclaw.agent.fake_tools"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from chemclaw.skills.store import save_local_skill",
+        "from chemclaw.skills import store",
+        "import chemclaw.skills.store as s",
+        "import chemclaw.skills",
+        "from chemclaw import skills",
+        "from ..skills import store",
+        "from ..skills.store import SkillStore",
+        "from chemclaw.api.routes.proposals import _write_what_was_accepted",
+        "from chemclaw.api.routes.skills import save_skill",
+        "from chemclaw.api.routes import org_skills",
+        "from chemclaw.api.routes.skill_http import store_or_503",
+        "from chemclaw.skills.access import Writer",
+        "def f(store_writer): ...",
+        "x = 'save_org_skill'",
+        "from chemclaw import skills\nx = getattr(skills, 'st' + 'ore')",
+        "import chemclaw.agent.fake_helper as h\nx = getattr(h, 'sa' + 've')",
+        "import chemclaw.agent.fake_helper",
+    ],
+)
+def test_the_guard_refuses_each_route_to_a_skill_write(source: str) -> None:
+    """Negative controls: each indirect or renamed route fails the guard it is meant to close."""
+    helpers = {"chemclaw.agent.fake_helper": "from chemclaw.skills.store import SkillStore\n"}
+    assert _reaches_skill_writes(_AS_A_TOOL_MODULE, source, helpers.get)
+
+
+def test_the_guard_allows_what_a_tool_may_do() -> None:
+    """Positive control: admission rules are readable, and a module that only proposes is clean."""
+    source = (
+        "from chemclaw.skills.manifest import SkillRefused, validated_skill\n"
+        "from chemclaw.agent.behaviour_proposals import propose\n"
+        "x = getattr(validated_skill, '__name__', None)\n"
+    )
+    assert _reaches_skill_writes(_AS_A_TOOL_MODULE, source, lambda _m: "import os\n") == []
+
+
 def test_the_symbols_that_absence_test_names_still_exist() -> None:
     """The symbols the absence test names still exist.
 
     So a rename fails the guard rather than satisfying it.
     """
-    from chemclaw.agent import behaviour_proposals, local_skills
+    from chemclaw.agent import behaviour_proposals
+    from chemclaw.skills import store
 
-    assert callable(local_skills.save_local_skill)
-    assert callable(local_skills.delete_local_skill)
+    for name in _WRITES_BEHAVIOUR - {"decide"}:
+        assert callable(getattr(store, name)), f"{name} is no longer where the guard looks"
     assert callable(behaviour_proposals.ProposalStore.decide)
 
 

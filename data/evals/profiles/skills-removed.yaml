@@ -37,7 +37,7 @@
 #
 # **It reaches neither tier, and for two commits it reached one.** A chemist's own skills
 # (`POST /skills/mine`) are mounted by the backend rather than selected by `skill_names`, and
-# `local_skills.py` argues at length that the shared narrowings must not select among them — right
+# `skills/store.py` argues at length that the shared narrowings must not select among them — right
 # for a named subset, wrong for `[]`. Measured before it was fixed: this arm listed a personal skill
 # while listing none of the shared ones, so every A/B it reported still carried personal judgment
 # for any actor with a populated `/mine`. `langgraph_agent._skills_middleware` now drops that source

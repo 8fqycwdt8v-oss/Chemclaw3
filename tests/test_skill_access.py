@@ -9,15 +9,15 @@
 
 from typing import Any, cast
 
-from chemclaw.agent.skill_access import (
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.access import (
     EnabledSkills,
     RoleScopedSkills,
     ToolScopedSkills,
     skill_permits,
 )
-from chemclaw.agent.skill_manifest import declared_tools
-from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.skills.manifest import declared_tools
 
 
 def _discovered() -> set[str]:
@@ -230,8 +230,8 @@ def test_the_control_arm_that_removes_skills_removes_both_tiers() -> None:
     at all, including a chemist's own.
     """
     from chemclaw.agent.langgraph_agent import _skills_middleware
-    from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT
     from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.skills.store import LOCAL_SKILLS_ROOT
 
     class _Backend:
         routes = {LOCAL_SKILLS_ROOT: object()}
