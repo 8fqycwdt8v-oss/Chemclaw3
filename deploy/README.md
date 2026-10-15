@@ -18,7 +18,7 @@ For a local, cluster-shaped run of all four repositories (kind, mock tenant, moc
 | Dependency | Who provides it | What this release needs from it |
 | --- | --- | --- |
 | OpenShift (or Kubernetes with a Route CRD; `route.enabled: false` otherwise) | the platform | one namespace per release |
-| Postgres with the `pgvector` extension available | a DBA or a managed service | **one database per release**, TLS on, reachable on 5432 |
+| Postgres with the `pgvector` extension available | a DBA or a managed service (or, opt-in, `deploy/helm/chemclaw-postgres`: a CloudNativePG Cluster, installed as its own release first) | **one database per release**, TLS on, reachable on 5432, **continuous WAL archiving with point-in-time recovery** ([runbook § Backup, restore and PITR](../docs/guides/runbook.md)) |
 | Temporal (self-hosted, one broker per cluster) | the platform team | **one Temporal namespace per release**, registered; mTLS on the frontend |
 | An OpenAI-compatible LLM gateway | the platform team | a base URL, a model name, an API key |
 | An Entra tenant | identity team | tenant id, an app registration whose audience the front door validates, app roles for privileged users |
@@ -135,7 +135,11 @@ ReadWriteMany or ReadOnlyMany with more than one background worker) for an SMB/C
 Most scientific capability is served by `Chemclaw3-mcp`, which this chart **does not deploy**. The
 shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as externally hosted
 (`url:` set, so this chart renders no pod for them), and `config` points the two backends at
-`CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_RXNLABEL_SERVER_URL`. For each fleet server you rely on:
+`CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_RXNLABEL_SERVER_URL`. Those two backends also serve typed
+HTTP/JSON on the same port at `/rpc/<tool>`; `CHEMCLAW_CALC_TRANSPORT=rpc` (default `mcp`) moves
+both clients onto it, over pooled connections, once `/healthz` reports `contract_version` 1.1.0 or
+later (an older server is refused with an error, never answered over MCP), and `mcp` is the
+rollback. No Service, port or NetworkPolicy changes. For each fleet server you rely on:
 
 1. Deploy it from `Chemclaw3-mcp`'s `deploy/helm/chemclaw-fleet` chart (or, before that chart,
    its `servers/<name>/deploy/` files) **into this release's namespace** — its
@@ -169,6 +173,7 @@ chart with Helm 3.16:
 | `retention.windows` **or** `retention.unboundedGrowthAccepted: true` (exactly one) | `windows` is a map of `CHEMCLAW_RETENTION_*` day windows, e.g. `{CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365", CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30", CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"}` | every window defaults to disabled, so the durable tables grow forever unless a policy is stated. Each key must be one of the retention settings the template lists (a typo is refused); `CHEMCLAW_RETENTION_ENABLED` is derived and refused if written |
 | on the `windows` arm only: `retention.artifactStore` **or** `retention.artifactGrowthAccepted: true` | `artifactStore: {CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"}` and/or `CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS` | the calculation artifact store is swept by its own job and no retention window reaches it |
 | on the `windows` arm only: `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` **or** `retention.exhibitsGrowthAccepted: true` | e.g. `"365"`; keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least as long if bound artefact values must stay readable | artefacts are bounded by nothing else, and a session holding one is never forgotten |
+| `config.CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible` **or** `allowNonSemanticEmbeddings: true` | the semantic provider is `openai_compatible` through the gateway, with `config.CHEMCLAW_EMBEDDING_MODEL` and `config.CHEMCLAW_EMBEDDING_DIM` for the model (a width other than 1536 is built by the migrator and moved to by `make reembed`) | the code default is the offline `hash` embedder, which ranks by shared tokens and is not semantic: dense retrieval over it looks as if it works and returns the wrong neighbours. A release that did not choose it must not get it by silence; a dev or air-gapped install without an embedding model says so with the boolean |
 | `temporal.namespace` | this release's registered Temporal namespace (step 3) | the broker is cluster-shared; a shared namespace means shared queues and Schedules, and one release's upgrade rewrites and deletes the other's. `config.CHEMCLAW_TEMPORAL_NAMESPACE` is derived from it and refused if written |
 
 And these, which the shipped `values.yaml` already satisfies — they fail only if an override
@@ -490,7 +495,12 @@ pod and prepended to `CHEMCLAW_RESULT_SINKS_DIR`, so a folder named `postgres` r
   party. Temporal Cloud stays a values change away (`CHEMCLAW_TEMPORAL_API_KEY` in the Secret and
   `secrets.temporalTls.enabled: false`) if that trade changes.
 - **Postgres/pgvector**: an operator-run or managed instance, over TLS, with the existing
-  `pg_statement_timeout_seconds`. The chart does not deploy it. Migrations run as a **pre-deploy
+  `pg_statement_timeout_seconds`. The chart does not deploy it; `deploy/helm/chemclaw-postgres` can, as a release of its own
+  installed *before* this one (a CloudNativePG `Cluster` with WAL archiving and scheduled base backups;
+  it refuses until the image, an `s3://` destination and the RPO/RTO targets are stated —
+  D-2026-10-15-postgres-is-backed-up-by-wal-archiving-to-an-object-store). It cannot live in this
+  release: the migrate hook below runs before the release's other resources exist.
+  Migrations run as a **pre-deploy
   Helm hook** Job (`templates/migrate-job.yaml` → the `migrate` component: `chemclaw.core.migrate`,
   the store setup and `chemclaw.core.grants`, i.e. `make db-migrate` + `make db-grants`, D-034)
   that completes before any app container starts — no container ever races the DDL. The migrator
@@ -639,6 +649,7 @@ must live in different namespaces.
   $ helm template chemclaw deploy/helm/chemclaw \
       --set networkPolicy.allowAnyDestination=true \
       --set retention.unboundedGrowthAccepted=true \
+      --set allowNonSemanticEmbeddings=true \
       --set temporal.namespace=chemclaw
   ```
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route

@@ -62,6 +62,9 @@ class SourcesSettings(BaseSettings):
     document_sync_max_iterations: int = Field(default=30, ge=1)
     # Stale chunks one re-embedding pass refreshes; paced by the embedding endpoint, not the share.
     document_reembed_batch_size: int = Field(default=500, ge=1)
+    # Consecutive batches in which every chunk failed before a re-embed run stops as stalled: one
+    # such batch may be the chunks, several in a row are the endpoint.
+    document_reembed_max_failed_batches: int = Field(default=3, ge=1)
     # Crawl cadence in minutes; six hours, since a share changes over days and a crawl scans every
     # path.
     document_sync_schedule_minutes: int = 360

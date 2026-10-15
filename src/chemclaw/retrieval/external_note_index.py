@@ -18,6 +18,7 @@ note re-embed into the new store instead of silently searching an empty collecti
 import logging
 
 from chemclaw.core.config import settings
+from chemclaw.core.vector_schema import LEGACY_COLUMN
 from chemclaw.retrieval.vector_index import IndexHit, NoteRecord, PostgresNoteIndex
 from chemclaw.retrieval.vectors.base import (
     VectorPoint,
@@ -38,6 +39,10 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         super().__init__(dsn)
         self._store = store
         self._collection = collection or settings.vector_store_note_collection
+
+    def _vector_column(self) -> str:
+        """The original column, which every deployment has: this index only writes `NULL` to it."""
+        return LEGACY_COLUMN
 
     def _row_vector(self, record: NoteRecord) -> str | None:
         """`NULL`: the vector went to the store, and nothing here reads this column."""
@@ -60,6 +65,10 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Fingerprints of rows this store actually holds vectors for."""
         return await super().fingerprints(self._stored_key(embedding_key))
+
+    async def count_unembedded(self, embedding_key: str) -> int:
+        """Rows whose vector is not in this store under the live configuration."""
+        return await super().count_unembedded(self._stored_key(embedding_key))
 
     async def upsert(
         self,

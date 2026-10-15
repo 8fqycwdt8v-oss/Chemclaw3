@@ -787,14 +787,14 @@ async def test_a_revision_is_stamped_after_the_wait_for_its_lock_and_never_runs_
         assert row is not None
         before = row[0]
         waiting = asyncio.create_task(store.put(NoteUnit(_note("queued", "v2"))))
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(2.0)
         assert not waiting.done(), "the writer should be queued behind the lock"
         await holder.commit()
     await waiting
     stamps = await _rows(
         "SELECT recorded_at FROM kg_note_revisions WHERE note_id = 'queued' ORDER BY revision"
     )
-    assert stamps[1][0] >= before + timedelta(seconds=0.5)
+    assert stamps[1][0] >= before + timedelta(seconds=1.5)
     assert stamps[1][0] > stamps[0][0]
     assert await _rows("SELECT updated_at >= %s FROM kg_notes WHERE id = 'queued'", (before,)) == [
         (True,)

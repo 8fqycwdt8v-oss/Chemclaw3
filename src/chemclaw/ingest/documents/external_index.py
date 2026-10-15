@@ -16,9 +16,11 @@ from datetime import datetime
 
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.vector_schema import LEGACY_COLUMN
 from chemclaw.ingest.documents.index import (
     CITATION_SQL,
     CLAIMED_SQL,
+    ChunkCursor,
     ChunkRecord,
     DocumentFilter,
     DocumentHit,
@@ -156,6 +158,10 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         migrated for.
         """
 
+    def _vector_column(self) -> str:
+        """The original column, which every deployment has: this index only writes `NULL` to it."""
+        return LEGACY_COLUMN
+
     def _chunk_vector(self, chunk: ChunkRecord) -> str | None:
         """`None` — the embedding goes to the store, and the column stays NULL."""
         return None
@@ -194,9 +200,15 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """
         return await super().known_documents(doc_ids, self._stored_key(key), chunking_key)
 
-    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+    async def stale_chunks(
+        self, key: str, limit: int, chunkings: set[str], after: ChunkCursor | None = None
+    ) -> list[StaleChunk]:
         """Chunks whose vector was made by another configuration *or* left in another store."""
-        return await super().stale_chunks(self._stored_key(key), limit, chunkings)
+        return await super().stale_chunks(self._stored_key(key), limit, chunkings, after)
+
+    async def count_stale(self, key: str, chunkings: set[str]) -> int:
+        """Chunks whose vector was made by another configuration or left in another store."""
+        return await super().count_stale(self._stored_key(key), chunkings)
 
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Send the vectors, then commit the catalogue — in that order, always.
@@ -212,8 +224,28 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """Replace the vectors in the store, and only the `embedding_key` in the catalogue.
 
         Staleness (`document_chunks.embedding_key`) stays in Postgres, so `sync.reembed_stale` works
-        unchanged.
+        unchanged. The catalogue is asked first which chunks are still stale, so a chunk another
+        writer already moved is not sent; the store and the catalogue are two systems, so a writer
+        landing between that question and the send can still be overwritten by an older text.
         """
+        if not chunks:
+            return
+        stored = self._stored_key(key)
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                "SELECT doc_id, chunking_key, ordinal FROM document_chunks "
+                "WHERE (doc_id, chunking_key, ordinal) IN "
+                "(SELECT * FROM unnest(%(docs)s::text[], %(cks)s::text[], %(ords)s::int[])) "
+                "AND embedding_key IS DISTINCT FROM %(key)s",
+                {
+                    "docs": [c.doc_id for c in chunks],
+                    "cks": [c.chunking_key for c in chunks],
+                    "ords": [c.ordinal for c in chunks],
+                    "key": stored,
+                },
+            )
+            still_stale = {(r[0], r[1], r[2]) for r in await cursor.fetchall()}
+        chunks = [c for c in chunks if (c.doc_id, c.chunking_key, c.ordinal) in still_stale]
         if not chunks:
             return
         await self._store.upsert(self._collection, _points_for(chunks))
@@ -221,7 +253,8 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             for chunk in chunks:
                 await conn.execute(
                     "UPDATE document_chunks SET embedding_key = %(key)s "
-                    "WHERE doc_id = %(doc)s AND chunking_key = %(ck)s AND ordinal = %(ord)s",
+                    "WHERE doc_id = %(doc)s AND chunking_key = %(ck)s AND ordinal = %(ord)s "
+                    "AND embedding_key IS DISTINCT FROM %(key)s",
                     {
                         "key": self._stored_key(key),
                         "doc": chunk.doc_id,

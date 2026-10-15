@@ -392,6 +392,13 @@ _MODEL_TOUCHING_CLIS: dict[str, bool] = {
     # regenerable, so a mock rebuild costs a re-run; the deployment's reindex runs in the guarded
     # `background-worker`.
     "retrieval/vector_index.py": False,
+    # `make reembed` starts a workflow and reads the database; it embeds nothing itself. It imports
+    # `core.embeddings` only for the configuration key it prints. The embedding calls are the
+    # activities of `durable/reembed.py`, which run in the guarded `background-worker`
+    # (`_COMPONENT_MAKES_MODEL_CALLS`), and which, like the reindex and document-sync jobs beside
+    # them, spend no per-turn cap because no turn is running. A guard here would test the operator's
+    # shell environment, which is not the process that spends.
+    "cli/reembed.py": False,
 }
 
 #: Module-scope imports that mean "this process can reach the model gateway".

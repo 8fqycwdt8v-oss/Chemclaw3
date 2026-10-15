@@ -9,6 +9,8 @@ that are invisible when wrong:
   timeout and never reconnects;
 * a rejected credential arrives nested inside an `ExceptionGroup` and must not be classified as an
   outage, since a 401 never recovers on retry;
+* the SDK runs its transport on task groups, so an error raised in the caller's own block comes
+  back wrapped in an `ExceptionGroup`; `open_session` hands the caller the exception it raised;
 * `isError=True` covers "refused", "server broke", "server full" and "time budget"; the latter are
   told apart by markers the server writes at the head of the message (`server_marked`), since an
   unanchored match is forgeable from echoed arguments;
@@ -19,6 +21,7 @@ specific service. This module raises its own exceptions and knows nothing about 
 retryable split is the caller's contract with Temporal.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -361,6 +364,70 @@ def auth_rejection(exc: BaseException) -> int | None:
     return None
 
 
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Every non-group exception inside `exc`, through nested groups."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for member in exc.exceptions for leaf in _leaves(member)]
+    return [exc]
+
+
+def _holds(exc: BaseException, target: BaseException) -> bool:
+    """Whether `target` is `exc` or sits anywhere in its tree of nested groups, by identity."""
+    if exc is target:
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_holds(member, target) for member in exc.exceptions)
+    return False
+
+
+def _host_is_cancelling() -> bool:
+    """Whether a cancellation requested of the current task by someone outside it is pending.
+
+    The SDK's own task-group scopes have exited by the time this is asked, and `anyio` restores
+    the count they raised, so a positive count is an outer `asyncio.timeout`, `anyio` scope or
+    `Task.cancel()` rather than a transport crash.
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+def _surfaced(escaped: BaseException, body_error: BaseException | None) -> BaseException:
+    """The exception a caller of an established session should see, given what escaped the SDK.
+
+    The SDK's task groups wrap whatever the caller's block raised in an `ExceptionGroup`, which
+    matches none of the caller's `except` clauses. The exception the block raised is returned as
+    itself, whatever else the teardown added beside it, unless a sibling is an interpreter exit
+    or a cancellation, when the group is returned as it came. A block cancelled from outside
+    keeps its cancellation (so `asyncio.timeout` still reports `TimeoutError`) over what
+    teardown raised; a block cancelled by a transport crash surfaces the crash. With no block
+    error, a group holding a single `Exception` leaf yields that leaf; several leaves, or
+    cancellation and exits met only inside a group, are returned as they came.
+    """
+    leaves = _leaves(escaped)
+    if body_error is not None and _holds(escaped, body_error):
+        own = _leaves(body_error)
+        siblings = [leaf for leaf in leaves if not any(leaf is o for o in own)]
+        if any(not isinstance(leaf, Exception) for leaf in siblings):
+            return escaped
+        if siblings:
+            logger.warning(
+                "MCP session teardown raised %d further error(s) beside the caller's own",
+                len(siblings),
+                exc_info=escaped,
+            )
+        return body_error
+    if isinstance(body_error, asyncio.CancelledError) and _host_is_cancelling():
+        logger.warning(
+            "MCP session teardown raised while the caller was being cancelled; the cancellation "
+            "is kept",
+            exc_info=escaped,
+        )
+        return body_error
+    if len(leaves) == 1 and isinstance(leaves[0], Exception):
+        return leaves[0]
+    return escaped
+
+
 @asynccontextmanager
 async def open_session(
     url: str, *, token_env: str, timeout_seconds: float, request_hook: RequestHook | None = None
@@ -374,12 +441,15 @@ async def open_session(
     misattribute concurrent callers.
 
     Raises `McpCredentialRefused` or `McpConnectFailed` when the connection cannot be established.
-    Exceptions raised inside the caller's `async with` body pass through untouched (the `connected`
-    flag), so an unrelated failure is never relabelled as a service outage.
+    Exceptions raised inside the caller's `async with` body reach the caller as raised, never
+    wrapped in the SDK's `ExceptionGroup` and never relabelled as a service outage (the `connected`
+    flag).
     """
     token = bearer_from_env(token_env)
     headers = {"Authorization": f"Bearer {token}"} if token else None
     connected = False
+    body_error: BaseException | None = None
+    surfaced: BaseException | None = None
     try:
         async with streamablehttp_client(
             url,
@@ -394,14 +464,26 @@ async def open_session(
                 await session.initialize()
                 cancel_on_timeout(session)
                 connected = True
-                yield session
-    except Exception as exc:
-        if connected:
+                try:
+                    yield session
+                except BaseException as exc:
+                    body_error = exc
+                    raise
+    except BaseException as exc:
+        if not connected:
+            if not isinstance(exc, Exception):
+                raise
+            rejected = auth_rejection(exc)
+            if rejected is not None:
+                raise McpCredentialRefused(rejected) from exc
+            raise McpConnectFailed(url) from exc
+        surfaced = _surfaced(exc, body_error)
+        if surfaced is exc:
             raise
-        rejected = auth_rejection(exc)
-        if rejected is not None:
-            raise McpCredentialRefused(rejected) from exc
-        raise McpConnectFailed(url) from exc
+    # Raised outside the handler so the exception keeps its own `__context__` rather than gaining
+    # the group; `asynccontextmanager` re-raises the caller's own object with its traceback.
+    if surfaced is not None:
+        raise surfaced
 
 
 async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:

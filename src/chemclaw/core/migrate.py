@@ -27,7 +27,7 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import TupleRow
 
-from chemclaw.core.config import settings
+from chemclaw.core.config import MAX_VECTOR_DIM, settings
 from chemclaw.core.db import connect
 from chemclaw.core.logging import configure_logging, log_event
 
@@ -165,6 +165,33 @@ async def _warn_if_the_database_is_ahead(
     return unknown
 
 
+async def _ensure_vector_width(conn: psycopg.AsyncConnection[TupleRow]) -> None:
+    """Create the vector column and index for `settings.embedding_dim` where they do not exist.
+
+    The width is a setting that may change between releases while a migration file runs once, so
+    the file (`130_embedding_width_columns.sql`) defines the function and this calls it on every
+    run. It is a no-op for the original 1536 columns and for a column that exists. Skipped, with a
+    warning, where the vectors live outside Postgres or the width is one pgvector cannot index: a
+    deployment that never reads those columns must still migrate, and `/readyz` reports the
+    mismatch for one that does.
+    """
+    dim = settings.embedding_dim
+    if settings.vector_store_provider != "pgvector" or dim > MAX_VECTOR_DIM:
+        log_event(
+            logger,
+            "migrate.vector_width_skipped",
+            "no pgvector column is created for embedding_dim=%d (vector_store_provider=%s, "
+            "widest indexable width %d)",
+            dim,
+            settings.vector_store_provider,
+            MAX_VECTOR_DIM,
+            level=logging.WARNING if dim > MAX_VECTOR_DIM else logging.INFO,
+            embedding_dim=dim,
+        )
+        return
+    await conn.execute("SELECT ensure_embedding_width(%s)", (dim,))
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -272,6 +299,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
                 file=name,
                 duration_ms=round((time.perf_counter() - file_started) * 1000, 1),
             )
+        await _ensure_vector_width(conn)
         await conn.commit()
     log_event(
         logger,

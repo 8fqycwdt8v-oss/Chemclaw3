@@ -1097,6 +1097,8 @@ def test_the_background_worker_renders_two_replicas_and_a_pdb_that_leaves_one() 
                 "--set",
                 "retention.unboundedGrowthAccepted=true",
                 "--set",
+                "allowNonSemanticEmbeddings=true",
+                "--set",
                 "temporal.namespace=chemclaw",
                 *extra,
             ],
@@ -1459,6 +1461,8 @@ def test_the_rollout_peak_leaves_a_connection_for_each_held_job_lock() -> None:
             "--set",
             "retention.unboundedGrowthAccepted=true",
             "--set",
+            "allowNonSemanticEmbeddings=true",
+            "--set",
             "temporal.namespace=chemclaw",
         ],
         capture_output=True,
@@ -1513,6 +1517,8 @@ def test_a_shared_document_volume_is_required_before_a_second_worker_mounts_it()
                 "networkPolicy.allowAnyDestination=true",
                 "--set",
                 "retention.unboundedGrowthAccepted=true",
+                "--set",
+                "allowNonSemanticEmbeddings=true",
                 "--set",
                 "temporal.namespace=chemclaw",
                 *extra,
@@ -1611,6 +1617,8 @@ def _evaluate_alerts(
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
             "--set",
             "temporal.namespace=chemclaw",
         ],
@@ -1909,6 +1917,8 @@ def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
             "--set",
             "temporal.namespace=chemclaw",
         ],
@@ -2648,7 +2658,7 @@ def _makefile_renders() -> list[list[str]]:
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
     for index, line in enumerate(lines):
-        if "helm template chemclaw" not in line or line.lstrip().startswith("@#"):
+        if "helm template chemclaw " not in line or line.lstrip().startswith("@#"):
             continue
         block = [line]
         cursor = index
@@ -2735,6 +2745,152 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
     assert not unflagged, (
         f"a render states no retention posture, so the chart refuses it: {unflagged}"
     )
+
+
+def _render_stating_no_embedding_posture(*overrides: str) -> subprocess.CompletedProcess[str]:
+    """`helm template` with every other posture stated and the embedding provider left alone."""
+    return subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+            *overrides,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_an_unstated_embedding_provider_is_a_posture_the_chart_asks_for() -> None:
+    """The offline `hash` embedder is the code default; a release has to choose it to have it.
+
+    The guard reads the provider with the code's default applied, so silence is refused. The type
+    guard runs first, for the reason the retention gate's does: a quoted boolean is non-empty.
+    Every render of the shipped defaults states it, and so does the kind overlay.
+    """
+    config = (CHART / "templates" / "config.yaml").read_text()
+    type_guard = 'kindIs "string" .Values.allowNonSemanticEmbeddings'
+    guard = (
+        '(eq (default "hash" (get .Values.config "CHEMCLAW_EMBEDDING_PROVIDER")) "hash")'
+        " (not .Values.allowNonSemanticEmbeddings)"
+    )
+    assert type_guard in config and guard in config, "the embedding posture can be left unstated"
+    assert config.index(type_guard) < config.index(guard)
+    assert _values()["allowNonSemanticEmbeddings"] is False, (
+        "the shipped default accepts the non-semantic embedder the release never chose"
+    )
+    unflagged = [
+        block[0].strip()
+        for block in _makefile_renders()
+        if not any("--set allowNonSemanticEmbeddings=true" in line for line in block)
+    ]
+    assert not unflagged, f"a shipped-defaults render states no embedding posture: {unflagged}"
+    kind = yaml.safe_load((DEPLOY / "kind" / "values-kind.yaml").read_text())
+    assert kind["allowNonSemanticEmbeddings"] is True
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_release_that_would_embed_with_hash_refuses_to_render_unless_it_says_so() -> None:
+    """The shipped defaults mean `hash`: the render refuses, naming the switch and the way out."""
+    refused = _render_stating_no_embedding_posture()
+    assert refused.returncode != 0, "a release embedding with the non-semantic hash rendered"
+    assert "allowNonSemanticEmbeddings: true" in refused.stderr, refused.stderr
+    assert "CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible" in refused.stderr, refused.stderr
+
+    # Writing the default down is not a choice: an explicit `hash` is refused the same way.
+    explicit = _render_stating_no_embedding_posture(
+        "--set", "config.CHEMCLAW_EMBEDDING_PROVIDER=hash"
+    )
+    assert explicit.returncode != 0 and "allowNonSemanticEmbeddings: true" in explicit.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ("--set", "allowNonSemanticEmbeddings=true"),
+        ("--set", "config.CHEMCLAW_EMBEDDING_PROVIDER=openai_compatible"),
+        (
+            "--set",
+            "config.CHEMCLAW_EMBEDDING_PROVIDER=openai_compatible",
+            "--set",
+            "allowNonSemanticEmbeddings=false",
+        ),
+    ],
+    ids=["accepted", "semantic", "semantic-and-declined"],
+)
+def test_a_release_that_states_its_embedding_provider_renders(overrides: tuple[str, ...]) -> None:
+    """Either the boolean or the semantic provider is a statement; declining `hash` is no need."""
+    rendered = _render_stating_no_embedding_posture(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_quoted_embedding_escape_hatch_refuses_to_render() -> None:
+    """A `--set-string` boolean is a non-empty string, which would read as the switch being on."""
+    quoted = _render_stating_no_embedding_posture(
+        "--set-string", "allowNonSemanticEmbeddings=false"
+    )
+    assert quoted.returncode != 0
+    assert "allowNonSemanticEmbeddings must be a boolean" in quoted.stderr, quoted.stderr
+
+
+_SET_ACCEPT = "--set allowNonSemanticEmbeddings=true"
+
+
+@pytest.mark.parametrize(
+    ("body", "flag"),
+    [
+        ("config:\n  CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible\n", ""),
+        ('config:\n  CHEMCLAW_EMBEDDING_PROVIDER: "openai_compatible"  # the gateway\n', ""),
+        ("allowNonSemanticEmbeddings: true\n", ""),
+        ("allowNonSemanticEmbeddings: false\n", _SET_ACCEPT),
+        ("config:\n  CHEMCLAW_EMBEDDING_PROVIDER: hash\n", _SET_ACCEPT),
+        ("# config:\n#   CHEMCLAW_EMBEDDING_PROVIDER: openai_compatible\n", _SET_ACCEPT),
+        ("", _SET_ACCEPT),
+    ],
+    ids=["semantic", "semantic-quoted", "accepted", "declined", "hash", "in-a-comment", "silent"],
+)
+def test_the_deploy_script_states_the_embedding_posture_only_when_the_values_file_does_not(
+    body: str, flag: str, tmp_path: Path
+) -> None:
+    """A mentioned key is not a statement: `hash` and `false` fall through to the opt-in.
+
+    Driven against the real function with the opt-in set, so the answer is the flag it prints; with
+    the opt-in unset the same cases refuse.
+    """
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(body)
+
+    def _run(opt_in: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{_OPENSHIFT_SH}"; set +e; ACCEPT_NON_SEMANTIC_EMBEDDINGS={opt_in} '
+                f'embedding_flags "{values_file}"; echo "[$?]"',
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    accepted = _run("true")
+    assert accepted.stdout.strip() == f"{flag}[0]", accepted
+    refused = _run("false")
+    if flag:
+        assert refused.stdout.strip() == "[1]", refused
+        assert "ACCEPT_NON_SEMANTIC_EMBEDDINGS" in refused.stderr
+    else:
+        assert refused.stdout.strip() == "[0]", refused
 
 
 def test_dns_egress_survives_narrowing_the_destinations() -> None:
@@ -3317,6 +3473,8 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
             "--set",
             "retention.unboundedGrowthAccepted=true",
             "--set",
+            "allowNonSemanticEmbeddings=true",
+            "--set",
             "temporal.namespace=chemclaw",
             *overrides,
         ],
@@ -3486,6 +3644,8 @@ def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render()
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
         ],
         capture_output=True,
         text=True,
@@ -3549,6 +3709,8 @@ def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "temporal.namespace=chemclaw",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
             "--set-string",
             "retention.unboundedGrowthAccepted=false",
         ],
@@ -3898,6 +4060,8 @@ def _render_manifest_only(*overrides: str) -> str:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "allowNonSemanticEmbeddings=true",
             "--set",
             "temporal.namespace=chemclaw",
             "--no-hooks",

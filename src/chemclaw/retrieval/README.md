@@ -26,6 +26,10 @@ else — it knows no concrete source (gate G6). Sources are attached through the
 
 ## Where the note vectors live
 
+Under `pgvector` the vector sits in `embedding` (1536) or, for any other `embedding_dim`, in a sibling
+`embedding_<N>` the migrator builds (`core/vector_schema.py`); a row is ranked only under the live
+`embedding_key`, and `make reembed` moves a corpus to a new model or width.
+
 `default_note_index()` picks one of two shapes from `vector_store_provider`, exactly as
 `default_document_index()` does one layer over. Under `pgvector` — the default —
 `PostgresNoteIndex` answers ranking, eligibility and the row in a single statement, and there is

@@ -88,7 +88,7 @@ from chemclaw.api.tool_results import fetchable_refs, load_tool_result
 from chemclaw.api.turn_relay import TurnRelay
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
-from chemclaw.core import bookkeeping, db
+from chemclaw.core import backend_rpc, bookkeeping, db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
@@ -220,7 +220,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Before serving: a judge endpoint that cannot enforce structured output would silently degrade
     # every verified answer. A no-op unless `verifier_enabled`.
     await require_verifier_capability()
-    async with db.pooling():
+    async with db.pooling(), backend_rpc.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
         await warming
@@ -397,6 +397,10 @@ def create_app(
     app.state.database_reachable = True
     # Whether the schema has this image's newest migration; `True` unless a mismatch is proven.
     app.state.schema_current = True
+    # The vector columns' verdicts, from the same probe: no width problem and one embedding
+    # configuration in the corpus until the probe proves otherwise.
+    app.state.vector_width_problem = ""
+    app.state.embedding_corpus_mixed = False
     app.state.database_probed_at = float("-inf")
     # In-flight readiness probe tasks by name, for single-flight (`routes.ops._shared_probe`).
     app.state.readiness_probes = {}
