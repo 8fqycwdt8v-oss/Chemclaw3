@@ -236,8 +236,8 @@ from `calc`/`rxnlabel`, drop `manifests-internal/`, bump `contract_version`, re-
 
 ### C5. W5 remainder and W8
 W5.4 (build the deep agent once per profile/bundle-set, bind per turn via `runtime.context`),
-W5.6–W5.13 (one mechanism per concern; sequential and conflict-prone — do them one PR at a time
-right after a merge), W5.8's `DeltaChannel` decision (the checkpointer's `messages` writes are
+W5.7–W5.9, W5.11–W5.13 (one mechanism per concern; sequential and conflict-prone — do them one PR
+at a time right after a merge; W5.6 `spend/` and W5.10 `skills/` are in), W5.8's `DeltaChannel` decision (the checkpointer's `messages` writes are
 quadratic in thread length; wait for it to leave beta or for replication lag to be attributed to it),
 splitting `tests/test_upstream_surface.py` (target ≤ 500 lines), W8.1–W8.6 (files over ~800 LOC,
 CLI harness moves, vestiges, `vulture` dead-code sweep, the final W0 re-measure, the three CLAUDE.md
@@ -279,6 +279,29 @@ files and `ARCHITECTURE.md`).
   (`deploy/helm/chemclaw/templates/prometheusrule.yaml`); the archive is single-region; a platform
   Temporal outside the cluster or with non-SQL visibility owes the same contract; PgBouncer as CNPG
   `Pooler`s is not templated.
+- **`spend/` (W5.6).** The four middleware (`enforce_loop_cap`, `enforce_spend_cap`,
+  `AnswerAtTheCap`, `MeterTurnSpend`) are still four; folding them into one needs the four test files
+  that run `enforce_loop_cap` stand-alone rewritten. No separate "per-request" limit exists in the
+  code and none was invented — decide whether one is wanted before W5.6's wording is called done.
+  `agent<->spend` is a declared cycle (guard needs `agent.state`/`agent.compaction`, ledger needs
+  `agent.context_budget`). The mutation floor is not re-recorded after the population moved
+  (`make mutants`, ~80 min).
+- **`skills/` (W5.10).** `agent<->skills` is a declared cycle (needs W5.9's `AuthorizationError`/
+  `routed` and `bounded_repr` out of `agent/`, a `db.connection` writer-lock helper, W5.4); the two
+  backend classes repeat `ls`/`glob`/`grep`/`download_files` (a shared mixin waits for W5.2);
+  `SkillStore`'s repo-tier reads have only test callers; the raw per-tier writers stay public as the
+  ungated primitives (a test bans naming them outside `skills/`); a leaver's namespace erasure is
+  deliberately outside `may_write`. The mutation floor (57.0, no-tests ceiling 16.0) is not
+  re-recorded after `skills/backends.py` replaced `agent/skill_backend.py`.
+- **Tenancy follow-ups.** Connector servers hold no tenant (a tool call carries identity, not
+  tenant); no test runs through a real PgBouncer in transaction mode (RESET-on-return is proven on the
+  pool only); the restore drill has not run with tenancy on; knowledge (`kg_store=postgres` only) and
+  per-tenant data sources are not tenant-scoped yet; tenant offboarding (export and delete) has no
+  command; maintenance jobs that must cross tenants need a `BYPASSRLS` role, not provisioned.
+- **Dual-write (`kg_store=dual`).** Git stays the authority, so a human edit made directly in the
+  clone or a stale clone is not mirrored until `kg-validate --repair`; the retirement-resurrection
+  residual (a `SynthesisUnit` payload change on a retired note) is bounded by the compare and not
+  closed.
 - **Upstream.** File the seven drafted issues (`docs/planning/upstream-issues/`), each shim carrying
   its link and a test that turns red when upstream fixes it.
 
@@ -306,7 +329,8 @@ files and `ARCHITECTURE.md`).
 - **Disk.** Agent worktrees and virtualenvs of several hundred MB each filled the volume once
   (110 MB free). Remove a worktree when its branch is pushed and its agent is done; keep scratch out of
   the repo.
-- **CI cost.** The `check` job is ~45–55 minutes serial; any push to an open PR restarts it, and
+- **CI cost.** The `check` job is ~45–59 minutes serial and its job bound is 90 (it was 60 and
+  cancelled two green runs at the validator steps after the tests passed in 59 minutes); any push to an open PR restarts it, and
   `main` moving while a PR waits turns a green PR into a conflicted one. Merge sequentially, resolve
   the conflict immediately, and prefer one push per PR per cycle.
 - **A branch with only merged history cannot be deleted through the git proxy**
