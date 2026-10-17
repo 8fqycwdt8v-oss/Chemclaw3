@@ -2600,6 +2600,7 @@ nothing", not "the database matches this image".
 | 116 | no write — the `session_exhibits` kind `CHECK` widens, and the restored image writes only kinds it still admits. But a `geometry` artefact written before the rollback **cannot be opened or exported** by it: its spec model refuses the kind, so the listing shows the artefact and every read of its body fails | yes — a refusal naming `geometry` on every such read. Roll forward, or leave those artefacts unopened until you do |
 | 117 | no write — the kind `CHECK` widens again, for `html`. A restored image **cannot open or export** an `html` artefact, nor any revision whose spec binds a value (`$bind`, `rows_from`) — its spec model refuses both — so the listing shows them and every read of their bodies fails | yes — a refusal naming `html`, `$bind` or `rows_from` on every such read. Roll forward, or leave those artefacts unopened until you do |
 | 120 | uploads go back to the pod's memory: a file uploaded before the rollback **cannot be read** by the restored image, and one uploaded during it is visible only on the replica that took it (the affinity gap 120 closed). And since uploads have no foreign key to `session_owners`, the restored image **deletes a session, erases a leaver and forgets an empty session without their uploads** | **no — this one is silent.** Ask chemists to re-attach files they need. After rolling forward, run `DELETE FROM session_attachments a WHERE NOT EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = a.session_id)` on the session database, then re-run every erasure requested during the rollback window (`(xv)`, *Offboard: erase their data*) so a leaver's uploads to other people's sessions go too |
+| 135 | the restored image never names `reaction_labels.withheld`: it serves a withdrawn or citation-only entry's label row to the facet tools again, as before 135, and never clears the flag, so an entry re-published or amended back to structured during the rollback window stays out of every facet answer until its next amendment | **no — this one is silent.** After rolling forward, re-run 135's `DO` block by hand: it sets and clears every ELN row's flag from its `reaction_records` row |
 
 119 needs no row: it adds a nullable column the restored image never names, and a person's revision written during the window records no introduced figures, which the newer image derives from the revision and its parent exactly as it did before the column existed.
 
@@ -2610,7 +2611,7 @@ nothing", not "the database matches this image".
 **This table is checked against the registers.**
 `tests/test_migrations_are_additive.py::test_every_reviewed_break_tells_the_operator_what_it_costs`
 fails if an entry of `_REVIEWED_ROLLBACK_BREAKS` or `_REVIEWED_SEMANTIC_BREAKS` is missing from this
-section. Rows the registers do *not* hold (090, 115, 120) are here because they cost the operator
+section. Rows the registers do *not* hold (090, 115, 120, 135) are here because they cost the operator
 something even though no exemption was needed.
 
 **What no rollback undoes**: the ConfigMap history, the `post-upgrade` data conversion, and any row

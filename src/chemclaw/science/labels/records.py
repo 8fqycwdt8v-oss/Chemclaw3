@@ -9,7 +9,8 @@ A reaction reaches this index twice:
   `record_smiles`.
 
 `labeller_version` separates them: NULL means never derived, a value below the current one means
-derived by a superseded labeller, and both are found by one indexed `WHERE` scan.
+derived by a superseded labeller, and both are found by one indexed `WHERE` scan. `withheld` belongs
+to neither phase: it follows the entry, because the app role cannot delete a row.
 """
 
 import math
@@ -99,6 +100,9 @@ class ReactionLabel(BaseModel):
         ),
     )
     species: list[SpeciesLabel] = Field(default_factory=list)
+    # True while no facet may serve this row: its ELN entry was withdrawn by the source, or amended
+    # to name a species without its structure. A corpus row is never withheld.
+    withheld: bool = False
 
     # --- derived phase ---
     mapped_smiles: str | None = None
