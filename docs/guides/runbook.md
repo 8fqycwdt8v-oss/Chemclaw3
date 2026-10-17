@@ -3038,9 +3038,26 @@ Deployment scaled to zero at zero; they come back only in step 7.
      the old cluster;
    - the NetworkPolicy peer is unchanged (it selects `chemclaw/postgres: "true"`, on both);
    - Temporal's persistence, if its databases were in the cluster, at the new `-rw` and role Secret.
-6. **Re-apply the erasures** recorded since the backup (next section), from a host that has the
-   image and the new DSN, with the writers still at zero:
-   `CHEMCLAW_POSTGRES_DSN=<new> python -m chemclaw.cli.erase_actor <entra-oid> --apply`.
+6. **Re-apply the erasures** the ledger records after the target (*Retention, erasure and backups*
+   below), with the writers still at zero. The ledger is on the background worker's
+   `erasureLedger` claim, and `oc debug` starts a copy of that pod from its template — its volumes,
+   ConfigMap and Secrets, so the new DSN of step 5 — running only the command given, even while the
+   Deployment is at zero (without the init containers, which clone the note repository and are not
+   needed here):
+
+   ```bash
+   oc -n <ns> debug deploy/chemclaw-background-worker --keep-init-containers=false -- \
+     python -m chemclaw.cli.erase_actor --replay-since '2026-10-14 09:41:00+00'          # dry run
+   oc -n <ns> debug deploy/chemclaw-background-worker --keep-init-containers=false -- \
+     python -m chemclaw.cli.erase_actor --replay-since '2026-10-14 09:41:00+00' --apply  # commits
+   ```
+
+   The time is step 3's `targetTime` (the session database's own, if it is split and restored to
+   another point). Every erasure stamped after it is re-applied, in ledger order and in the tenant
+   its record names, and recorded again, so a later restore to before this replay finds it too.
+   Running it twice is harmless: an erasure re-applied removes nothing the first did not. With the
+   record kept by hand, re-run each erasure on your list since that time instead:
+   `python -m chemclaw.cli.erase_actor <entra-oid> --tenant <tenant> --apply`.
 7. **Scale back up explicitly**, per Deployment from the recorded counts (the loop in (b) 5), the
    front door to its HPA's `minReplicas`, and remove the KEDA pause. Pods read the DSN Secret at
    start, so there is nothing to restart. Check `/readyz`, a turn, and a durable job. The next
@@ -3064,9 +3081,10 @@ It starts its own pgvector Postgres 16 with WAL archived to a directory, applies
 the migrate Job does (migrations, the store's tables, the checkpointer's tables, the grants for a
 split `chemclaw_app` role), loads a fixture across every kind of state, takes a base backup, writes
 more, commits a marker and records its timestamp, then writes what a restore must not contain —
-including the conversation table emptied — and archives the WAL. A second container is built from
-the base backup and replayed to the marker with `restore_command` and `recovery_target_time`; the
-drill checks it against the primary as it stood at the marker:
+including a person erased with `erase_actor --apply` into a ledger outside both clusters, and the
+conversation table emptied — and archives the WAL. A second container is built from the base backup
+and replayed to the marker with `restore_command` and `recovery_target_time`; the drill checks it
+against the primary as it stood at the marker:
 
 | Check | What it proves |
 | --- | --- |
@@ -3075,6 +3093,7 @@ drill checks it against the primary as it stood at the marker:
 | `grants`, `app_role` | the runtime role's privileges are intact: it appends to the audit trail and cannot rewrite it |
 | `listen_notify`, `advisory_lock`, `promoted` | the restored server does the coordination work (LISTEN/NOTIFY, session-level advisory locks) and accepts writes, with sequences continuing past the restored rows |
 | `kg_tables`, `kg_validate` | the `kg_*` notes, revisions and edges are restored non-empty (a **failure** where the migrations define them and the restore has none; a named skip only on a schema that defines none); `kg-validate` against the restored database resolves a citation written before the target and refuses one written after it — it validates the citations of a notes directory against the restored calculation cache until W4.10 points it at the notes in Postgres |
+| `erasure_replay` | the person erased after the marker is back in the restore (the control: otherwise a replay proves nothing), the ledger's record is stamped after the marker, `erase_actor --replay-since <marker> --apply` leaves none of their rows, and a second replay changes no row anywhere |
 | `temporal` | a second Temporal started on the restored databases lists exactly the workflows running at the target |
 | `wal_archiving` | the archiver reported no failure |
 | `restore_time` (only with `--rto-seconds`) | the fixture restore took no longer than N seconds — a guard on the procedure, not your RTO |
@@ -3127,11 +3146,31 @@ The policy question is whether an erased person's data may live on in backups fo
 standard answer, and the one this system assumes, is: **yes, because erasure applies on restore** —
 backups are not rewritten, the backup lifetime is stated as part of the retention a data subject is
 told about, and after any restore the erasures made since the backup are re-applied before the
-system serves traffic (step 6 above). That makes one thing the operator's job: **keep a record of
-every `make user-erase ... APPLY=1` outside the database** (the actor id, the time, the ticket) — a
-record inside the database is rewound by the very restore it exists for. After a restore, re-run each
-erasure listed since the backup's time. If your obligations are stricter (no copy beyond N days),
-set `retentionPolicy`, the lock and the lifecycle to N and accept the shorter recovery window.
+system serves traffic (step 6 above). That needs every erasure recorded **outside the database** —
+a record inside it is rewound by the very restore it exists for — and the command keeps that record
+itself (D-2026-10-17-an-erasure-is-logged-outside-the-database). Each applied erasure, `--finish`
+and replay included, appends one line to the **erasure ledger**, `CHEMCLAW_ERASURE_LEDGER_PATH`, the
+moment it commits: the actor id, an instant no earlier than the commit on the session database's
+clock, and the scope (the route and the tenant, or a `--finish`'s session ids). No counts, no
+ticket, no name. If your obligations are stricter (no copy beyond N days), set `retentionPolicy`,
+the lock and the lifecycle to N and accept the shorter recovery window.
+
+- **Where it lives.** On the chart, give the background worker — the pod `erase_actor` runs in —
+  a claim of your own: `erasureLedger.enabled=true`, `erasureLedger.claimName`, and
+  `erasureLedger.accessMode=ReadWriteMany` with more than one worker (every worker appends to the
+  one file). Put it on storage **backed up apart from the database**: a ledger snapshotted with the
+  database is rewound with it. A line is needed while a backup from before it can still be restored
+  (the backup lifetime above), and may be removed after that.
+- **Without one, an applied erasure is refused** before it deletes anything, naming both ways out.
+  The other posture is `CHEMCLAW_ERASURE_LEDGER_KEPT_BY_HAND: "true"` in `config`: the operator
+  keeps the record, each applied run prints the line to keep, and after a restore the operator
+  re-runs each erasure on their list.
+- **What can go wrong.** The ledger is JSON Lines, appended under a POSIX record lock (which NFS and
+  CephFS honour) and fsynced with its directory, so two operators erasing at once each get a whole
+  line. A line cut short by a crash stops a replay by its number: re-run that erasure (it is
+  idempotent and records itself), then delete the line. An erasure that committed and could not be
+  recorded exits `3` and prints the line: fix the ledger and run the same command again. A replay
+  refuses a ledger that is not there rather than re-applying nothing.
 
 ### What breaks, and what to watch
 
@@ -3336,8 +3375,12 @@ one rule — **the conversation is erasable, the record is not**:
 
 ```bash
 make user-erase ACTOR=<entra-oid>            # dry run: real counts, writes nothing
-make user-erase ACTOR=<entra-oid> APPLY=1    # commits
+make user-erase ACTOR=<entra-oid> APPLY=1    # commits, and records it in the erasure ledger
 ```
+
+An applied run is refused before it deletes anything when no erasure ledger is configured, because a
+restore would bring the person back with nothing to say so; §(xiii-b) *Retention, erasure and
+backups* says where the ledger goes and how a restore replays it (`make user-erase-replay SINCE=<t>`).
 
 It removes their sessions, messages, events, turn lease, preferences and watch subscriptions. It
 **keeps and counts** the rows that attribute scientific work to them, and prints the reason beside

@@ -60,6 +60,9 @@ _BAD_DATA_TYPES = [
     # A sweep over the registered tenants that would pass `tenancy_sweep_max_tenants`; the registry
     # does not shrink between attempts.
     "TenantSweepError",
+    # The erasure ledger unset, unreadable, or holding a line that is not a record
+    # (`core/erasure_ledger.py`); none of that changes between attempts.
+    "LedgerError",
     # An activity result over `activity_result_max_bytes` (`durable/interceptor.py`); the result is
     # deterministic in the arguments, so a retry is the same size.
     "ActivityResultTooLarge",

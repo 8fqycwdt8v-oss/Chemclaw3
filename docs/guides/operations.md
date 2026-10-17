@@ -267,7 +267,8 @@ is read:
 
 Identity is Entra only; there is no user table. Onboard = assign the app role (or group) in
 Entra, nothing to restart. Revoke = remove it; takes effect within the tenant's token lifetime.
-Erase = `make user-erase ACTOR=<oid>` (dry run), then `APPLY=1`. Full procedure:
+Erase = `make user-erase ACTOR=<oid>` (dry run), then `APPLY=1`, which needs the erasure ledger
+(`CHEMCLAW_ERASURE_LEDGER_PATH`) a restore replays. Full procedure:
 [runbook § (xv)](runbook.md#xv-onboard-entitle-and-offboard-a-person).
 
 `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` ships empty, which refuses every expensive job to everyone —
@@ -418,6 +419,7 @@ Following one request across processes: [troubleshooting § 1](troubleshooting.m
 | `make schedules-apply` | create/update/prune the Temporal Schedules (the chart's hook does this) |
 | `make explain SESSION=<id>` | reconstruct why a session's tools ran |
 | `make user-erase ACTOR=<oid> [APPLY=1]` | offboard a person's conversational data; dry run by default |
+| `make user-erase-replay SINCE=<recovery point> [APPLY=1]` | after a database restore, re-apply every erasure the erasure ledger records after that point |
 | `make synthesize KIND=campaign\|playbook\|optimization\|observation-promotion [FRESH=1]` | start a memory-synthesis job on demand |
 | `make reindex` / `make reindex-full` | rebuild the derived note index |
 | `make share-estimate SHARE=<source>` / `make share-sync SHARE=<source>` | cost / crawl a mounted document share |
@@ -438,7 +440,7 @@ Following one request across processes: [troubleshooting § 1](troubleshooting.m
 | --- | --- |
 | `schedules` | apply the Temporal Schedules (`make schedules-apply`) |
 | `explain` | reconstruct why a session's tool calls happened |
-| `erase_actor` | offboard a person (`--finish <session-id>…` clears sessions a concurrent turn left orphaned) |
+| `erase_actor` | offboard a person, recorded in the erasure ledger (`--finish <session-id>…` clears sessions a concurrent turn left orphaned; `--replay-since <t>` re-applies the ledger after a restore) |
 | `sync_share` | cost, then crawl, a mounted document share |
 | `backfill_publications` | queue results computed before a results store was attached |
 | `backfill_corpus` | write knowledge notes from a directory of existing documents |

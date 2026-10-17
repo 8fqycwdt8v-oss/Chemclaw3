@@ -141,9 +141,7 @@ sessions that built this. Live arms use `claude-haiku-5-5` against `https://api.
   `status.firstRecoverabilityPoint` is set; write rows, note a timestamp, write more, restore to that
   `targetTime` in a scratch namespace (`recovery.rehearsal: true` writes nothing to the bucket); run
   the by-hand checks; time the restore against `rtoSeconds`.
-- **Decisions owed.** The data-protection owner confirms the 30-day default `retentionPolicy`; the
-  erasure-on-restore policy requires the operator to log every `make user-erase APPLY=1` outside the
-  database (`cli/erase_actor.py::main` keeps no ledger).
+- **Decisions owed.** The data-protection owner confirms the 30-day default `retentionPolicy`.
 - **Gate.** Run `make restore-drill` and one real-cluster rehearsal before W4.9 deletes the git path.
 
 ### B5. Flip `calc_transport` to `rpc` (then W6.4)

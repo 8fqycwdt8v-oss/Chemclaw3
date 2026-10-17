@@ -43,8 +43,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   a payload-free `LISTEN` wake-up before the same rows needs one session-mode connection per replica (`science/calc/flight.py::_Listener`, the `tests/test_db.py` allow-list, `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`); then `api/turn_relay.py::TurnRelay.run`, `agent/session_queue.py` can poll rarely.
 - [ ] **No alert fires on a stopped WAL archive or a missing base backup** [M] — a failing archiver fills the WAL volume and stops the database; add rules on the operator's archiver/backup metrics with runbook sections;
   `deploy/helm/chemclaw/templates/prometheusrule.yaml::ChemclawDatabaseUnavailable`, `docs/guides/runbook.md` § Backup, restore and PITR.
-- [ ] **An erasure is not recorded where a restore can find it** [M] — "erasure applies on restore" needs the `make user-erase` runs since the backup, kept outside the database; the command keeps none (the runbook asks the operator to log them);
-  `src/chemclaw/cli/erase_actor.py::main`.
 - [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
   `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/core/restore_check.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions

@@ -6,7 +6,8 @@ and a fixture loaded through the real migrations, a base backup, more writes, a 
 timestamp, then writes the restore must NOT contain (including the conversation table emptied). A
 second container is built from the base backup and replayed to the marker with
 `restore_command` + `recovery_target_time`; Temporal's own databases ride the same cluster and are
-restored with it.
+restored with it. A person erased after the marker comes back with the restore, and replaying the
+erasure ledger (`erase_actor --replay-since`) must remove them again.
 
 It uses its own containers, network, volumes and ephemeral loopback ports, every one labelled with
 this run's id and removed on every exit path; it never touches the dev database. Progress goes to
@@ -33,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from chemclaw.core import erasure_ledger
 from chemclaw.core import restore_check as db
 from chemclaw.core.config import settings
 from chemclaw.core.restore_check import Check, failed, passed, skipped
@@ -81,6 +83,7 @@ REQUIRED_CHECKS = frozenset(
         "advisory_lock",
         "kg_tables",
         "kg_validate",
+        "erasure_replay",
         "temporal",
     }
 )
@@ -406,6 +409,63 @@ def wait_for_postgres(port: int, stack: Stack, role: str, *, recovered: bool = F
         raise DrillError(f"{exc}\n{stack.logs(role)}") from exc
 
 
+def erase(target_dsn: str, ledger: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """`python -m chemclaw.cli.erase_actor <args>` against `target_dsn`, recording into `ledger`.
+
+    The operator's own entry point, so what the drill proves is the command the runbook gives.
+    """
+    env = {
+        **os.environ,
+        "CHEMCLAW_POSTGRES_DSN": target_dsn,
+        "CHEMCLAW_ERASURE_LEDGER_PATH": str(ledger),
+        "CHEMCLAW_ERASURE_LEDGER_KEPT_BY_HAND": "false",
+    }
+    env.pop("CHEMCLAW_SESSION_STORE_DSN", None)
+    return subprocess.run(
+        [sys.executable, "-m", "chemclaw.cli.erase_actor", *args],
+        env=env, capture_output=True, text=True, check=False, timeout=300,
+    )  # fmt: skip
+
+
+def erasure_replay_check(
+    restored_dsn: str,
+    ledger: Path,
+    target: datetime,
+    erased: subprocess.CompletedProcess[str],
+) -> Check:
+    """The person erased after the target is back after the restore, and the ledger erases them.
+
+    The restore holding their rows again is the control: without it the replay proves nothing.
+    The replay runs twice, as an operator might; the first must leave none of their rows and the
+    second must change no row anywhere, and the record must be stamped after the target.
+    """
+    name = "erasure_replay"
+    if erased.returncode != 0:
+        output = (erased.stdout + erased.stderr)[-400:]
+        return failed(name, f"the erasure after the target exited {erased.returncode}: {output}")
+    if not erasure_ledger.records_since(ledger, target):
+        return failed(name, "the ledger holds no record stamped after the target")
+    restored = db.person_rows(restored_dsn, db.LEAVER)
+    if not any(restored.values()):
+        return failed(name, f"the restore does not hold the erased person's rows: {restored}")
+    replay = ("--replay-since", format_recovery_target(target), "--apply")
+    first = erase(restored_dsn, ledger, *replay)
+    left = db.person_rows(restored_dsn, db.LEAVER)
+    if first.returncode != 0 or any(left.values()):
+        output = (first.stdout + first.stderr)[-400:]
+        return failed(name, f"the replay exited {first.returncode} and left {left}: {output}")
+    before = db.snapshot(restored_dsn).counts
+    second = erase(restored_dsn, ledger, *replay)
+    drift = db.diff_counts(before, db.snapshot(restored_dsn).counts)
+    if second.returncode != 0 or drift:
+        return failed(name, f"a second replay exited {second.returncode} and changed {drift}")
+    return passed(
+        name,
+        f"{sum(restored.values())} row(s) restored with the erased person, none after replaying "
+        "the ledger; a second replay changed nothing",
+    )
+
+
 def run_module(module: str, target_dsn: str) -> None:
     """Run `python -m <module>` against `target_dsn` as `make db-migrate` and the migrate Job do."""
     env = {
@@ -667,7 +727,8 @@ def run_drill(
         return report
     try:
         ensure_images(*images)
-        _drill(stack, report, with_temporal, rto_seconds)
+        with tempfile.TemporaryDirectory(prefix="restore-drill-") as work:
+            _drill(stack, report, with_temporal, rto_seconds, Path(work) / "erasures.jsonl")
     except ImageUnavailable as exc:
         report.error = f"Image unavailable: {exc}"
     except DrillError as exc:
@@ -706,8 +767,13 @@ def _clean_up(run_id: str, report: Report) -> None:
         raise interrupted
 
 
-def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float | None) -> None:
-    """The drill's steps, in order; checks land in `report` as they are made."""
+def _drill(
+    stack: Stack, report: Report, with_temporal: bool, rto_seconds: float | None, ledger: Path
+) -> None:
+    """The drill's steps, in order; checks land in `report` as they are made.
+
+    `ledger` is the erasure ledger, outside both clusters as a real one is outside the database.
+    """
     with phase(report, "start_primary"):
         stack.create()
         port = stack.run_postgres(
@@ -722,6 +788,7 @@ def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float
         bootstrap_schema(primary)
         tag, rows, seed = _WAVES[0]
         report.facts["knowledge_tables"] = db.load_wave(primary, tag, rows, seed)
+        db.load_person(primary, db.LEAVER)
     temporal_port = 0
     if with_temporal:
         with phase(report, "temporal_up"):
@@ -744,6 +811,7 @@ def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float
     with phase(report, "writes_after_target"):
         tag, rows, seed = _WAVES[2]
         db.load_wave(primary, tag, rows, seed)
+        erased = erase(primary, ledger, db.LEAVER, "--tenant", db.DRILL_TENANT, "--apply")
         db.mark(primary, db.MARKER_AFTER_TARGET)
         db.empty_conversations(primary)
         if with_temporal:
@@ -776,6 +844,8 @@ def _drill(stack: Stack, report: Report, with_temporal: bool, rto_seconds: float
             )
         )
         report.add(db.promotion_check(restored_dsn))
+    with phase(report, "replay_erasures"):
+        report.add(erasure_replay_check(restored_dsn, ledger, target, erased))
     if with_temporal:
         with phase(report, "verify_temporal"):
             temporal_port = stack.run_temporal("temporal-restored", "restored")
