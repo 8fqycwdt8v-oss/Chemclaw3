@@ -19,11 +19,27 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `core/config/temporal.py::worker_max_cached_workflows`, `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
 - [ ] **IPv4-mapped arm of the compiled egress guard is unmeasured** [S] — needs a host with IPv6;
   `tests/test_netguard_preload.py::test_an_ipv4_mapped_address_is_not_a_way_around_the_check`.
+- [ ] **An HTTP result sink accepts `verify_tls: false` from its manifest** [S] — only a docstring forbids it and `make sink-validate` binds the signature, not the values;
+  refuse it at construction (at least under `entra_required`); `publish/drivers/http.py::HttpResultSink`.
+- [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
+  which holds only for bundles this repo serves; frame or mark it, or correct the claim; `agent/tool_authz.py::answered_failure`.
+- [ ] **Share-document chunks reach the model with their wikilinks intact** [S] — note excerpts and report cells strip links, share chunks do not, so a share author's `[[note-id]]`
+  arrives verbatim inside the envelope; strip as `retrieval/retrievers.py::_excerpt` does; `ingest/documents/retriever.py::ShareDocumentRetriever._chunks`.
 
 ### Answers that are wrong without saying so
 
 - [ ] **A metal hydride standardizes to its metal without the hydride** [S] — `[PdH]Cl` → `[Cl-].[Pd+]`, so hydride and salt share a
   `compound_id`; trace the dropping step in `core/chem.py::_cleaned` / `core/chem.py::standardize`.
+- [ ] **An external vector store cites cross-model neighbours after an embedding-model swap** [S] — its dense read binds no `embedding_key`, so stale vectors resolve and look correct
+  until a reindex; keep only ids catalogued under the live key, notes and documents alike; `retrieval/external_note_index.py::ExternalVectorNoteIndex.search_dense`, `ingest/documents/external_index.py::ExternalVectorDocumentIndex._resolve`.
+- [ ] **A reaction fingerprint whose record write has not landed is served at full similarity** [S] — the unfiltered path drops withheld records, not absent ones, so `gather_evidence`
+  returns a hit `expand_note` refuses; treat an absent record as withheld; `retrieval/retrievers.py::FingerprintReactionRetriever.retrieve`, `ingest/eln/records.py::structurally_withheld`.
+- [ ] **A report section is bounded by neither evidence budget** [S] — `gather_section` dedups but concatenates legs in order with no chunk or character cap; reuse the conversational
+  merge and both `gather_evidence_max_*` caps, and render the cut; `retrieval/harness.py::gather_section`, `agent/research_tools.py::_interleave_dedup`.
+- [ ] **A declared tool the server stopped advertising is dropped without a word** [S] — the plan gate, the skills backend and `skill-validate` still count it, so a skill is offered for
+  a tool that cannot be called; log and count the gap per open; `connectors/transport.py::_allowed`, `connectors/session_pool.py::tools_for`.
+- [ ] **`find_calculations` with `calc_type="xtb"` and a SMILES answers empty instead of refusing** [S] — no type is a bare `xtb`, so the structure-keyed refusal never fires; refuse a bare
+  family name; the docstring's `xtb`/`dft`/`descriptors` examples change only behind a live eval; `science/calc/store.py::CalculationQuery._molecule_filter_addresses_the_type`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
@@ -33,6 +49,10 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
+- [ ] **One bundle a deployment cannot use breaks every turn** [M] — a `stdio` bundle with stdio off raises out of `mcp_connections` unhandled while health calls it `unprobed`, and a
+  malformed manifest nobody enabled raises out of `enabled()`; skip and report per bundle; `connectors/registry.py::mcp_connections`, `connectors/registry.py::_discovered_in`.
+- [ ] **Two calc tools are told to wait past the hop that cancels them** [M] — `compute_atomic_descriptors`/`compute_surface_potential` pass `calc_atomic_timeout_seconds` to a backend
+  behind a queued call bounded by `request_timeout`, so a long run is cut and stores nothing; clamp to the hop and assert it there; `connectors/calc/server/tools.py::compute_atomic_descriptors`.
 - [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms), a cluster run on `rpc` that proves no hop with a shorter idle or read timeout (mesh sidecar, load balancer, ingress at 60 s) cuts a long call, and a decision on `/rpc` having no `cancel_on_timeout` counterpart; then delete the MCP path for backends:
   `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `short_connect_client`, `invoke`), `connectors/calc/remote.py::_open_transport`, `ingest/labels/labeller.py::_open_transport`, `core/backend_rpc.py::BackendSession`, the `calc_transport` setting and `tests/test_backend_rpc_fleet.py`'s MCP arms.
 - [ ] **A NaN or infinity is refused in a request but not in an answer over `/rpc`** [S] — `/rpc` returns such a float as null while MCP's text carries it; fleet contract decision (reject in the tool or declare null), then pin in `tests/test_backend_rpc_fleet.py`;
@@ -62,6 +82,18 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   times on top of its CALC attempts (a child failure is not in the bad-data list), and each LLM activity multiplies Temporal attempts by `llm_max_retries`; `durable/hypothesis_tournament.py::HypothesisTournamentWorkflow._settle_jobs`.
 - [ ] **A hard Postgres outage makes each per-item swallowed write cost the whole IO window** [M] — ~91 s a subscriber in `DigestWorkflow` (about 950 pass `schedule_run_timeout_seconds`
   = 86400 s), same shape in the `CommitmentSyncWorkflow` and `ReactionCorpusWorkflow` source loops; stop a loop after N consecutive failures; `durable/digest.py::DigestWorkflow`.
+- [ ] **A finished calculation is thrown away when its cache write fails** [S] — a `store.put` error fails the leader and every waiter with the database's error; return the payload and
+  count the unstored write, as `publish_stored_result` argues for itself; `science/calc/store.py::cached_compute`.
+- [ ] **A sink's refusal spends the whole attempt budget before dead-lettering** [S] — `_drain_one` books a `SinkRejectedError` like any refusal and `mark_failed` retires it only at the
+  last attempt, against `publish/driver.py::SinkRejectedError`'s own contract; retire on refusal; `durable/publish_results.py::_drain_one`, `publish/outbox.py::mark_failed`.
+- [ ] **`request_timeout` has no ceiling, and `calc` declares the turn deadline itself** [S] — which bound fires first is a race, so the recoverable transport error may never arrive;
+  bound it below `service_turn_timeout_seconds`; `connectors/manifest.py::HttpEndpoint`, `connectors/registry.py::request_timeout_seconds`.
+- [ ] **A rewritten artifact strands its old blob, and an evicted one leaves its row served** [M] — `_UPSERT_LINK` moves the link with no sweep (deleting in place raced an insert), and
+  eviction never touches `calculation_results`, so `find`/`known`/backfill name a dead hash; `science/calc/postgres_artifacts.py::_UPSERT_LINK`, `durable/artifact_eviction.py::_evict_cold_artifacts`.
+- [ ] **A site registry missing a property this release adds is found only by a refused fact row** [S] — the pre-write check asks only that `property_definition` is non-empty; compare it
+  with the local registry first, and keep a failed column probe so a per-record replay does not re-probe; `publish/drivers/sql.py::SqlResultSink._known_columns`.
+- [ ] **A payload with no projector is dropped on the live hooks with a debug line and no counter** [S] — in-repo shapes are pinned by `tests/test_publish_reaches_the_hooks.py`, a new
+  bundle's are not; count it (the backfill's skip of retired calculators may stay quiet); `publish/outbox.py::enqueue_payload`.
 
 ### Where the field moved past us
 
@@ -69,6 +101,10 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   question; `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`.
 - [ ] **Enumeration and scan tools rest on one probe each** [S] — add second phrasings for `enumerate_*`, `scan_coordinate`,
   `profile_rotation`, `optimize_geometry` in `data/evals/probes/`, ranked by `audit_events` once a deployment exists.
+- [ ] **The default prompt names `find_past_jobs` but never `find_calculations`** [S] — the molecule-level "already computed" read is named only in the `evidence`/`computation` profiles;
+  add it to the research-loop block behind a `make live-ab` arm; `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`.
+- [ ] **`fetch_artifact` refuses every artifact this release stores and is still bound** [S] — kept only for older notes' `artifact_refs`; unbind it from the `computation`/`evidence`
+  profiles, or bind it only when a text artifact exists, behind a live eval; `connectors/calc/server/tools.py::fetch_artifact`.
 - [ ] **A chat-room connector over a shared session** [M] — prerequisites shipped
   (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`); left: the connector and the queue/stream UI in `Chemclaw3_ui`.
 - [ ] **A routing corpus where the right profile is not inferable from the wording** [M] — build the corpus, compare on answers;
@@ -100,10 +136,28 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A retirement through the Postgres store applies `valid_to` and `superseded-by` only** [S] — the prose the retire helpers append to the body is dropped; stop
   writing it once the file writer is gone; `kg/postgres_store.py::_closed`, `memory/supersede.py::retire_note`.
 
+- [ ] **A published result names no requester, and a second chemist's identical run is dropped** [M] — the cache hook returns on a hit before publishing, neither hook passes a
+  `Publication`, and `_ENQUEUE`'s `DO NOTHING` drops a later row carrying one; fix all three together, test the set of actors; `science/calc/store.py::cached_compute`, `publish/outbox.py::_ENQUEUE`.
+- [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
+  give them a durable record and a walk, or declare the loss; `publish/hooks.py::publish_tool_result`, `connectors/results/workflows.py::_walk`.
+- [ ] **A published record carries no calculation epoch, so the backfill republishes superseded rows** [M] — `find` drops them by the row's epoch, but `ResultRecord` has none and
+  `_CACHED` selects none, so a sink holds both epochs' values for one subject; `publish/record.py::ResultRecord`, `publish/backfill.py::_CACHED`.
+
 ### Everything else
 
 - [ ] **Follow-ups the architecture programme's reviews recorded** [M] — retry-exhaustion counter, note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
-- [ ] **PR #321's review findings never landed** [M] — extract what is still open from its review document into rows, then close #321.
+- [ ] **A failure returned inside a `Command` is invisible to audit and the failure observers** [S] — no tool returns one today; add the absence test (or unwrap `update["messages"]`)
+  before one does; `agent/audit.py::returned_failure`.
+- [ ] **The read/write partition test sees only registered tools, not the middleware verbs a graph binds** [S] — `task`, `write_todos`, the scratchpad verbs and handoffs are classified by
+  special cases nothing enumerates; `agent/authz.py::side_effecting_call`, `tests/test_authz.py::test_every_advertised_tool_is_classified_write_or_read`.
+- [ ] **A malformed key from the calc server reaches the chemist as a pydantic traceback** [S] — `remote_key` wraps only `KeyError`/`TypeError`; same pass: `_IN_FLIGHT` ignores which store a
+  waiter joins, and the outbox `_CLAIM` has no tie-break; `connectors/calc/remote.py::remote_key`, `science/calc/store.py::_IN_FLIGHT`.
+- [ ] **A capped evidence pack drops a session's newest effects** [S] — `assemble` reads `effects` oldest first and only flags `truncated`; read newest first (latent while no shipped job
+  declares an effect); `operations/evidence_pack.py::assemble`.
+- [ ] **Agent tests that prove less than they say** [S] — the framer-order test reads back a literal list, the positive authz tests pass with the gate deleted, and a plan-gate docstring
+  claims an unchecked fail-closed; `tests/test_tool_framing.py::test_the_framer_sits_inside_the_converters_and_outside_the_trail`, `tests/test_plan_gate.py::test_spending_never_raises_when_the_store_is_unreachable`.
+- [ ] **Retrieval tests and guards that prove less than they say** [S] — `PostgresNoteIndex`'s empty-`keep` guard survives deletion (only the in-memory twin is pinned), and the "semantic
+  note" test passes on token overlap; `retrieval/vector_index.py::PostgresNoteIndex._retire_absent_ids`, `tests/test_vector_index.py::test_reindex_then_dense_search_finds_the_semantic_note`.
 - [ ] **Dependabot group #431 needs hand-made bumps** [S] — mutmut 3.8 drops `Config.ensure_loaded`; deepagents `task` schema vs the
   900-token bound in `tests/test_context_floor.py`; rdkit 2026.3.6 lands paired with Chemclaw3-mcp (`tests/test_calc_rotation.py`).
 
@@ -134,12 +188,13 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 - **The programme's cluster-, tenant- and person-gated items** — the kind `oidc-mock` lane, the Entra registration, UI egress, a real CloudNativePG rehearsal, the `calc_transport=rpc` flip, fleet session affinity and W4.9; steps in `docs/planning/programme-deferred-2026-10.md` §B · *Revisit:* a kind or OpenShift cluster with the operator installed and an Entra tenant (or the mock).
 - **Databricks workspace** — vector store and warehouse driver proven only against fakes; three vendor facts unpinned, score formula first · *Revisit:* a real workspace with a Direct Vector Access index and SQL warehouse.
+- **A real Qdrant server** — `retrieval/vectors/qdrant.py` runs only against an injected fake, so a filter it sends is not one it is known to apply · *Revisit:* a deployment sets `vector_store_provider` to `qdrant`, or the gate gains a Qdrant container.
 - **Per-user reads from the warehouse ELN** — warehouse connects as one service identity · *Revisit:* Databricks plus an Entra tenant and a new OBO decision (D-046).
 - **`X-Chemclaw-Actor` as durable attribution** — the header is unauthenticated · *Revisit:* an OBO exchange or a signed actor memo on core's MCP calls.
 - **Push-to-registry + `helm upgrade` rollout, run** — written, never run · *Revisit:* a registry, namespace and the Jenkins credential ids in `deploy/jenkins/README.md`.
 - **The core chart consuming the fleet's, and a chart for `Chemclaw3_ui`** — `Chemclaw3-mcp` ships `deploy/helm/chemclaw-fleet` and the kind lane renders it (`deploy/kind/render-fleet.sh`), but this chart does not depend on it, so each `connectors.<name>.url`, port and token key is written here and held against its render by `tests/test_helm_chart.py` (W6.8); the UI still ships plain manifests (W6.9) · *Revisit:* the rollout row above closes.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
-- **A live target for the results store** — the publish path is built, no real sink exists · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
+- **A live target for the results store** — the publish path is built, no real sink exists, so outbox pruning (`retention_result_publications_days` ships off) and drain throughput are unsized · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
 - **Backup and restore on a real CloudNativePG cluster** — the template is schema-validated and the drill runs in containers; neither has met the operator, the Barman plugin or a real bucket (the `import` and `recovery` bootstraps, RTO at real size, the exported metric names the `chemclaw.backup` alerts read, `firstRecoverabilityPoint` under the plugin) · *Revisit:* a cluster with the operator and plugin: install `chemclaw-postgres`, rehearse a restore into a scratch namespace and time it (`docs/guides/runbook.md` § Backup, restore and PITR).
 - **A backup archive in one region, and a platform Temporal outside the cluster** — the drill restores Temporal's SQL databases in the same cluster only; an Elasticsearch visibility store or a platform-owned Postgres is the platform's to back up · *Revisit:* the platform names its Temporal persistence, or a second region is required.
 - **PgBouncer as CloudNativePG `Pooler`s** — two (transaction and session mode) would serve `deploy/README.md` § PgBouncer; not templated, the `-rw` Service is the direct endpoint · *Revisit:* a release runs above three replicas.
@@ -159,6 +214,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a live model budget
 
+- **Tool selection is never exercised by `make test`** — every test scripts its own `tool_call` and `tests/test_probe_coverage.py` checks probe names only, so a prompt change that stops the model reaching for a tool passes the gate · *Revisit:* a gateway credential in the environment that runs `make live-ab`; gate on its tool-selection accuracy.
 - **Model-facing text rewrite (W2.15–W2.17), the deepagents upgrade merge (W5.2), the delegation re-check (W5.14), a semantic default embedder (W7.1) and the retrieval-eval floor (W7.3)** — each ships only behind the live arm; the first step of each is in `docs/planning/programme-deferred-2026-10.md` §A · *Revisit:* a gateway credential in the environment that runs `make live-ab`.
 - **The judge names no claims on 88% of turns** — schema half fixed, measurement half open · *Revisit:* a live run re-counts non-empty `claims`.
 - **Whether a `stated` quote's figure is about this slot** — `agent/protocol_design_tools.py::_quote_supports` cannot attribute · *Revisit:* a deployment's real turns to count over.
@@ -188,6 +244,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A distiller from recurring trajectories to procedures** — no sessions to distil · *Revisit:* a deployment with sessions.
 - **Review scaling over distilled skills** — downstream of the distiller · *Revisit:* the distiller produces proposals.
 - **Three row-projecting tools defang a whole page on the event loop** — cheap at today's page sizes · *Revisit:* a latency profile names one, or a page bound is raised.
+- **A write-time ceiling on `calculation_results.result`** — none is stated: TOAST absorbs large payloads, `calc_hessian_max_atoms` and `crest_max_members` fence the families that grow, and `calc_find_max_result_chars` bounds what reaches the model · *Revisit:* a payload family with no fence.
 - **Exact accounting of the helper `files` budget** (issues #463, #489) — shares are over-charged, nothing measured it · *Revisit:* `checkpoint_writes` holds a `files` row and truncations move.
 
 ### Gated on a capability, source or licence not in scope
