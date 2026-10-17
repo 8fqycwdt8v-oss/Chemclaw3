@@ -264,6 +264,30 @@ def test_the_connector_job_ceiling_stays_above_the_activity_it_bounds() -> None:
         )
 
 
+def test_a_served_session_outlives_the_pool_that_keeps_it() -> None:
+    """A served connector's idle reaper may not fire before the session pool reuses the session.
+
+    Equal values are the defect: the pool's next checkout would find the session gone. Either half
+    at 0 is switched off and leaves nothing to order.
+    """
+    with pytest.raises(ValueError, match="connector_server_session_idle_timeout_seconds"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            connector_session_ttl_seconds=300.0,
+            connector_server_session_idle_timeout_seconds=300.0,
+        )
+    Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        connector_session_ttl_seconds=300.0,
+        connector_server_session_idle_timeout_seconds=0.0,
+    )
+    Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        connector_session_ttl_seconds=0.0,
+        connector_server_session_idle_timeout_seconds=1.0,
+    )
+
+
 def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignored() -> None:
     """Raising only the activity budget is refused rather than silently ignored.
 
