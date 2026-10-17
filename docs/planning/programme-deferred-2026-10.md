@@ -228,10 +228,9 @@ from `calc`/`rxnlabel`, drop `manifests-internal/`, bump `contract_version`, re-
   `.env.example`, docs); target ≤ 200 fields; split Helm `values.yaml` the same way. Last, because it
   touches everything. Settings were added by this programme (retry classes, vector width, session
   pool, RPC keepalive); count them when planning.
-- **W7.12 UI issues #12 and #22** need core changes first: `GET /sessions/{id}/events` is a
-  destructive at-most-once claim (needs an acknowledged or `Last-Event-ID` replay); the shared-session
-  queue's `running` is per-replica (needs cross-replica `running`, `running_sender`, `question`,
-  `started_at` and a queued-turn-started frame). Then bump the UI contract pin to core's 1.0.2.
+- **W7.12 UI issue #12** needs a core change first: `GET /sessions/{id}/events` is a destructive
+  at-most-once claim (needs an acknowledged or `Last-Event-ID` replay). Issue #22's core half is in
+  (`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`).
 - **Tenancy leftovers** are recorded by the tenancy PR; read its notes first.
 
 ### C5. W5 remainder and W8

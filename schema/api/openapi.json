@@ -4095,6 +4095,38 @@
         "title": "RowsFrom",
         "type": "object"
       },
+      "RunningTurnOut": {
+        "description": "The turn a session's line waits on — `SessionQueueOut.running_turn`.\n\n`sender` is whose turn it is, `started_at` when it took the session (for a resumed turn, when\nit was resumed), and `question` what it asked — `None` while not yet recorded: a durable\ndeployment reads it from the transcript, which the turn writes once admitted, so a turn still\nwaiting for capacity has none yet. Any participant may read it, as they may the transcript.",
+        "properties": {
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "sender": {
+            "title": "Sender",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sender",
+          "question",
+          "started_at"
+        ],
+        "title": "RunningTurnOut",
+        "type": "object"
+      },
       "ScheduleHealth": {
         "description": "One periodic job's operational state, as an admin surface renders it (gap SCH-4).\n\nRead from Temporal's own schedule state rather than a mirrored table: Temporal is already the\nauthority on when a Schedule fired and how often, and a second copy could only ever drift.\n\n`skipped_overlap` is the load signal worth watching — it counts fires dropped because the\nprevious run was still going (the SKIP policy from gap SCH-3). A steadily climbing value means\nthe job no longer fits inside its interval, which is the early warning that a corpus has\noutgrown its cadence.\n\n**`last_outcome` is the field that makes a dead job distinguishable from a quiet one**, and\nevery other field on this model was measured to be blind to it. A schedule whose every run is\nkilled by `schedule_run_timeout_seconds` reports `runs_total` climbing, `last_run` advancing,\n`running_now` 0 and `skipped_overlap` 0 — the same six values a healthy job reports, because\nTemporal's `ScheduleInfo` carries no outcome anywhere: `recent_actions` names the workflow and\nwhen it started, and there is no failure counter beside `num_actions_skipped_overlap`. The\nwedge the ceiling replaced *did* have a signature here (`last_run` frozen, `running_now` stuck\nat 1, `skipped_overlap` climbing), so the ceiling was a real fix that moved the failure to a\nsurface that said nothing.",
         "properties": {
@@ -4306,11 +4338,21 @@
         "type": "object"
       },
       "SessionQueueOut": {
-        "description": "A session's line, first in line first, and whether a turn is running ahead of it here.\n\n`running` is this replica's view: the turn's pump lives in one process, so another replica\nanswers `false` for a turn it cannot see — the same scope `POST /sessions/{id}/turn/stop` has.",
+        "description": "A session's line, first in line first, and the turn running ahead of it.\n\n`running` says whether a turn holds the session and `running_turn` whose it is (`None` exactly\nwhen `running` is false). Both are the deployment's answer, the same on every replica: where\nsessions are durable they are read from the shared turn claim, not from the memory of the\nprocess that runs the turn. A hold that excludes a turn (a fork or a delete in progress) is not\na running turn.",
         "properties": {
           "running": {
             "title": "Running",
             "type": "boolean"
+          },
+          "running_turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunningTurnOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "waiting": {
             "items": {
@@ -5120,13 +5162,17 @@
             "tool_call": "#/components/schemas/ToolCallEvent",
             "tool_failed": "#/components/schemas/ToolFailedEvent",
             "tool_queued": "#/components/schemas/ToolQueuedEvent",
-            "tool_result": "#/components/schemas/ToolResultEvent"
+            "tool_result": "#/components/schemas/ToolResultEvent",
+            "turn_started": "#/components/schemas/TurnStartedEvent"
           },
           "propertyName": "type"
         },
         "oneOf": [
           {
             "$ref": "#/components/schemas/QueuedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TurnStartedEvent"
           },
           {
             "$ref": "#/components/schemas/PlanEvent"
@@ -5189,6 +5235,26 @@
             "$ref": "#/components/schemas/ErrorEvent"
           }
         ]
+      },
+      "TurnStartedEvent": {
+        "description": "A message that waited in the session's line has taken the turn\n(`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`).\n\nSent once, on the waiting message's own stream, the moment its place became the running turn\nand before anything the turn sends. From here the message is no longer in the line: `DELETE\n/sessions/{id}/queue/{ticket}` answers 404 and `POST /sessions/{id}/turn/stop` is what ends it.\nA withdrawal that removed the ticket first wins instead, and the stream ends on\n`queue_cancelled`; a stream carries one of the two, never both. A turn that never waited does\nnot send it. `ticket` is the place the message held.",
+        "properties": {
+          "ticket": {
+            "title": "Ticket",
+            "type": "integer"
+          },
+          "type": {
+            "const": "turn_started",
+            "default": "turn_started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket"
+        ],
+        "title": "TurnStartedEvent",
+        "type": "object"
       },
       "ValidationError": {
         "properties": {
@@ -5453,7 +5519,7 @@
   },
   "info": {
     "title": "Chemclaw",
-    "version": "1.0.2"
+    "version": "1.1.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -7434,7 +7500,7 @@
     },
     "/sessions/{session_id}/queue": {
       "get": {
-        "description": "The session's line — who is waiting for the running turn to end, first in line first.\n\nAny participant may read it: it names senders and places, not what they said.",
+        "description": "The session's line — who is waiting for the running turn to end, first in line first.\n\nAny participant may read it: it names the waiting senders and their places, not what they\nsaid, and the running turn's sender and question, which the transcript already shows them. The\nrunning turn is the deployment's answer, the same on every replica (`_running_turn`).",
         "operationId": "session_queue_sessions__session_id__queue_get",
         "parameters": [
           {
@@ -7474,7 +7540,7 @@
     },
     "/sessions/{session_id}/queue/{ticket}": {
       "delete": {
-        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions. The waiting request notices on its next look (within\n`service_turn_queue_poll_seconds` on another replica) and ends with `queue_cancelled`.",
+        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions, and for one whose message has just taken the turn (its\nstream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting\nrequest notices on its next look (within `service_turn_queue_poll_seconds` on another replica),\nor at its hand-over, and ends with `queue_cancelled`.",
         "operationId": "withdraw_queued_sessions__session_id__queue__ticket__delete",
         "parameters": [
           {

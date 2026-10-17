@@ -158,5 +158,9 @@
   "tool_result/minimal": {
     "data": "{\"type\":\"tool_result\",\"tool\":\"predict_pka\",\"preview\":\"\",\"note_ids\":[],\"numbers\":[],\"values\":[],\"result_ref\":\"\",\"result_inline\":\"\",\"result_cut\":false,\"agent\":\"\"}",
     "event": "tool_result"
+  },
+  "turn_started/full": {
+    "data": "{\"type\":\"turn_started\",\"ticket\":7}",
+    "event": "turn_started"
   }
 }

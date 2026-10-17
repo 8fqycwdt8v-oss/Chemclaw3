@@ -14,11 +14,12 @@ which command to run. Output is sorted and indented, so two runs produce the sam
 ## What it contains
 
 - Every route, with its request and response model under `components.schemas`.
-- **The turn events.** `TurnEvent` is a `oneOf` of 21 models with `discriminator.propertyName:
-  type`; each `text/event-stream` response (`POST /sessions/{id}/messages`, `GET
-  /sessions/{id}/turn/stream`, `GET /sessions/{id}/events`) points at it. A frame's SSE `event:`
-  name equals the body's `type`. Fields with a default are optional in the schema: a reader must
-  tolerate their absence in an older stored event, though the current serialiser always sends them.
+- **The turn events.** `TurnEvent` is a `oneOf` of every event model, with
+  `discriminator.propertyName: type`; each `text/event-stream` response (`POST
+  /sessions/{id}/messages`, `GET /sessions/{id}/turn/stream`, `GET /sessions/{id}/events`) points
+  at it. A frame's SSE `event:` name equals the body's `type`. Fields with a default are optional
+  in the schema: a reader must tolerate their absence in an older stored event, though the current
+  serialiser always sends them.
 - `ProtocolReadout`, `ProtocolReceipt`, `ArmRow`: the payload of the protocol read tool, rendered by
   the UI from a stored tool result rather than returned by a route.
 

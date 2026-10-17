@@ -444,6 +444,43 @@ async def test_a_question_under_a_live_claim_is_never_marked_and_a_successors_cl
     assert await history.latest_turn_status(session_id) == "interrupted"
 
 
+async def test_the_running_turn_is_read_off_the_live_claim_and_the_question_it_covers(
+    durable: None,
+) -> None:
+    """Whose turn, since when and what it asked, from the shared claim and the transcript.
+
+    A hold with no sender is no turn; a claim names its sender before its question is written and
+    its question once it is; a question an earlier claim left `running` is not a successor's; a
+    released claim is no turn.
+    """
+    await migrated_db_or_skip()
+    session_id = f"sess-write-ahead-{uuid.uuid4().hex[:10]}"
+    await SessionOwnerStore().record(session_id, _ALICE.oid, None)
+    history = PostgresHistoryProvider()
+    claims = SessionTurnClaims()
+    assert await history.running_turn(session_id) is None
+    assert await claims.claim(session_id, "a-fork", 60)
+    assert await history.running_turn(session_id) is None, "a hold read as somebody's turn"
+    await claims.release(session_id, "a-fork")
+
+    assert await claims.claim(session_id, "first", 60, actor="alice-sender")
+    admitted = await history.running_turn(session_id)
+    assert admitted is not None, "a claimed session read as idle"
+    assert (admitted.sender, admitted.question) == ("alice-sender", None), admitted
+    await history.begin_turn(session_id, HumanMessage(content="pKa of acetic acid?"))
+    running = await history.running_turn(session_id)
+    assert running == ("alice-sender", "pKa of acetic acid?", admitted.started_at), running
+
+    await _expire_claim(session_id)
+    assert await claims.claim(session_id, "second", 60, actor="bob-sender")
+    successor = await history.running_turn(session_id)
+    assert successor is not None, "a successor's claim read as idle"
+    assert (successor.sender, successor.question) == ("bob-sender", None), successor
+    assert successor.started_at > running.started_at
+    await claims.release(session_id, "second")
+    assert await history.running_turn(session_id) is None, "a released claim read as a turn"
+
+
 async def test_an_answer_overrides_a_mark_and_an_unanswered_ending_never_demotes(
     durable: None,
 ) -> None:

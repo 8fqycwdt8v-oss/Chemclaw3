@@ -135,6 +135,16 @@ class LapsedTurn(NamedTuple):
     eligible: bool
 
 
+class RunningTurn(NamedTuple):
+    """The turn holding a session now: whose it is, what it asked, and since when."""
+
+    sender: str
+    #: `None` until the turn has written its question ahead (it may still be waiting for capacity).
+    question: str | None
+    #: When the turn took the session; for a resumed turn, when it was resumed.
+    started_at: datetime
+
+
 #: Where a stored message carries its turn's status, stamped as the correlation id is.
 STORED_TURN_STATUS = "chemclaw_turn_status"
 
@@ -379,6 +389,18 @@ _UNRESUME_MARK = (
 _LOCK_LAPSED = (
     "SELECT m.id FROM session_messages m WHERE m.session_id = %s AND m.turn_status = 'running' "
     f"AND NOT {COVERED} FOR UPDATE OF m"
+)
+# The turn the session's live claim covers, for `GET /sessions/{id}/queue` on any replica: the claim
+# says whose turn it is and since when, and the question it wrote ahead (`COVERED`, read from the
+# claim's side) what it asked — absent until written. A claim with no sender is a hold that excludes
+# a turn (a fork, a delete, an erasure), not a turn. The partial index serves the lateral read.
+_RUNNING_TURN = (
+    "SELECT t.actor, t.claimed_at, q.message, q.message_shape FROM session_turns t "
+    "LEFT JOIN LATERAL (SELECT m.message, m.message_shape FROM session_messages m "
+    "  WHERE m.session_id = t.session_id AND m.turn_status = 'running' "
+    "  AND COALESCE(m.resumed_at, m.created_at) >= t.claimed_at ORDER BY m.id DESC LIMIT 1) q "
+    "ON true "
+    "WHERE t.session_id = %s AND t.expires_at > now() AND t.actor IS NOT NULL"
 )
 # The newest turn's status, for the reattach route's "what happened to the turn I was following".
 _LATEST_TURN_STATUS = (
@@ -991,6 +1013,21 @@ class PostgresHistoryProvider:
                 await cur.execute(_LATEST_TURN_STATUS, (session_id,))
                 row = await cur.fetchone()
         return turn_status_of(row[0]) if row is not None else None
+
+    async def running_turn(self, session_id: str) -> RunningTurn | None:
+        """The turn holding `session_id` on whichever replica runs it, or `None` when none does.
+
+        Read from the shared claim and the transcript, never from a process's memory, so every
+        replica answers the same (`_RUNNING_TURN`).
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_RUNNING_TURN, (session_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        question = None if row[2] is None else str(message_from_row(row[2], row[3]).content)
+        return RunningTurn(str(row[0]), question, row[1])
 
 
 def _rows(session_id: str, messages: Sequence[BaseMessage]) -> list[tuple[Any, ...]]:

@@ -57,8 +57,9 @@ class ServiceSettings(BaseSettings):
     # `service_max_event_streams_per_user` slot.
     service_turn_max_watchers: int = Field(default=4, ge=0)
     # How long a watcher's membership is trusted before re-reading it on the next event, bounding
-    # how long a removed member keeps watching.
-    service_turn_watch_recheck_seconds: float = Field(default=5.0, gt=0)
+    # how long a removed member keeps watching. Floored, so a fast stream cannot turn every frame
+    # into a membership lookup.
+    service_turn_watch_recheck_seconds: float = Field(default=5.0, ge=0.5)
     # Poll interval for cross-replica turn relay (`agent/turn_remotes.py`): a reattach or Stop
     # landing on another replica becomes a row the holder polls for, and relayed frames come back
     # the same way. Polls run only while there is something to relay.
