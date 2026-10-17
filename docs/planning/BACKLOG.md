@@ -22,8 +22,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Answers that are wrong without saying so
 
-- [ ] **A metal hydride standardizes to its metal without the hydride** [S] — `[PdH]Cl` → `[Cl-].[Pd+]`, so hydride and salt share a
-  `compound_id`; trace the dropping step in `core/chem.py::_cleaned` / `core/chem.py::standardize`.
+- [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
+  `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
