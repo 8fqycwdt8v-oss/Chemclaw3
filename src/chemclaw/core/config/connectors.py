@@ -69,8 +69,9 @@ class ConnectorSettings(BaseSettings):
     # How long an idle MCP session to a connector is kept for its caller's next turn, and the oldest
     # a tool listing may be when a session is used: a session is replaced once its listing is this
     # old, however busy it is (`connectors/session_pool.py`). Keep it well under the fleet's idle
-    # reaper (`MCP_SESSION_IDLE_TIMEOUT_SECONDS`, 1800 s). 0 disables reuse: every turn opens and
-    # closes its own sessions.
+    # reaper (`MCP_SESSION_IDLE_TIMEOUT_SECONDS`, 1800 s) and under
+    # `connector_server_session_idle_timeout_seconds` (checked at startup). 0 disables reuse: every
+    # turn opens and closes its own sessions.
     connector_session_ttl_seconds: float = Field(default=300.0, ge=0)
     # Ceiling on the MCP sessions one process keeps, idle, in use and being checked out. One session
     # is one (actor, connector), so with 8 connectors 512 holds 64 actors' sessions. Each costs this
@@ -119,6 +120,14 @@ class ConnectorSettings(BaseSettings):
     # (`core.asgi.BodySizeLimit`). Smaller than the front door's because an `/mcp` request is one
     # JSON-RPC call, never a file upload. 0 disables.
     connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
+
+    # The MCP sessions a connector this release serves (`connectors/server.py`: the bundles with a
+    # `server/` package, and the read-only face) holds. A session with no request in flight (an
+    # open stream counts as one) for the idle timeout is closed, and its id then answers 404; must
+    # exceed `connector_session_ttl_seconds`, or the pool's kept sessions are reaped under it
+    # (checked at startup). Past the ceiling a new session is refused with 503. 0 disables either.
+    connector_server_session_idle_timeout_seconds: float = Field(default=1800.0, ge=0)
+    connector_server_max_sessions: int = Field(default=10_000, ge=0)
 
     # Characters of one tool's description carried per model call. A description is untrusted text
     # from the server's `tools/list`, sent ahead of the system message on every call; bounding it
