@@ -21,7 +21,7 @@ Versions compared (checked against PyPI on 2026-10-14):
 | `langchain` | 1.3.16 | 1.4.6 | `langchain-mcp-adapters` | 0.3.2 | 0.3.2 |
 | `langchain-core` | 1.6.0 | 1.6.10 | `langgraph-checkpoint-postgres` | 3.1.2 | 3.2.0 |
 | `langgraph` | 1.2.11 | 1.2.15 | `langgraph-checkpoint` | 4.2.0 | 4.3.0 |
-| `langgraph-prebuilt` | 1.1.0 | 1.1.0 | `mcp` (capped `<2`) | 1.29.0 | 1.30.0 (2.3.0 is past the cap) |
+| `langgraph-prebuilt` | 1.1.0 | 1.1.0 | `mcp` (capped `<2`) | 1.30.0 | 1.30.0 (2.3.0 is past the cap) |
 
 `uv lock --upgrade-package …` resolves all of them together without touching a floor in
 `pyproject.toml`. Upstream's release notes were read from the repository's changelog
