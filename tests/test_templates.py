@@ -660,16 +660,16 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     assert result.template == "probe"
 
 
-# --- the agent step's retry is narrower than every other step's -------------------------------
+# --- a step that repeats a governed side effect is attempted once -----------------------------
 
 
-async def test_only_the_agent_step_carries_the_narrowed_retry(
+async def test_a_tool_step_and_an_agent_step_both_carry_the_governed_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the `agent` step carries the narrowed retry.
+    """A tool step and an agent step both carry the `GOVERNED` retry.
 
-    Replaying a whole agent turn on a provider blip would re-run every tool it already ran, so the
-    agent step gets the `GOVERNED` policy; a tool step keeps the `REMOTE` transient-retry budget.
+    Replaying a whole agent turn on a provider blip would re-run every tool it already ran, and a
+    re-run tool step repeats its governed call and its audit row, so neither is retried by default.
     Asserts what `_run_step` hands Temporal per branch, with the module's `workflow` handle
     substituted.
     """
@@ -708,11 +708,14 @@ async def test_only_the_agent_step_carries_the_narrowed_retry(
         )
 
     tool_policy, agent_policy = seen
-    assert tool_policy.maximum_attempts == policy_for(ActivityClass.REMOTE).maximum_attempts
-    assert agent_policy.maximum_attempts == settings.agent_step_max_attempts
-    assert agent_policy.maximum_attempts < tool_policy.maximum_attempts
-    # Narrower in attempts only: which failures count as transient must not depend on the branch.
-    assert agent_policy.non_retryable_error_types == tool_policy.non_retryable_error_types
+    governed = policy_for(ActivityClass.GOVERNED)
+    assert (
+        tool_policy.maximum_attempts
+        == agent_policy.maximum_attempts
+        == settings.agent_step_max_attempts
+    )
+    assert tool_policy.maximum_attempts < policy_for(ActivityClass.REMOTE).maximum_attempts
+    assert tool_policy.non_retryable_error_types == governed.non_retryable_error_types
 
 
 # --- DARK-2: a connector tool step is governed exactly as an in-process one (D-168) ------------
@@ -800,6 +803,92 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
     assert calls == [], "the tool body ran despite the refusal"
     (event,) = sink.events
     assert event.outcome == "refused", "a denied connector step left no audit row"
+
+
+def test_a_tool_step_that_fails_is_called_once_and_audited_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool step that fails is called once and audited once, whatever the failure.
+
+    Driven through `TemplateWorkflow` and the real `run_tool_step` on the time-skipping server, with
+    a tool whose server drops the call: a `ConnectionError`, which any retrying class would try
+    again. A retry would invoke the governed tool a second time and write a second audit row for one
+    step, as `run_computable_check` must not either.
+    """
+    from temporalio import activity
+    from temporalio.client import WorkflowFailureError
+    from temporalio.worker import Worker
+
+    from chemclaw.durable import template_activities
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    sink = _Recorder()
+    monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: sink)
+    calls: list[list[str]] = []
+
+    @tool_decorator(name_or_callable="screen_hazards", description="screen a molecule for hazards")
+    async def dropped(smiles: list[str]) -> str:
+        calls.append(smiles)
+        raise ConnectionError("the hazard server dropped the call")
+
+    monkeypatch.setattr(template_activities, "_agent_surface", lambda: (lambda: [dropped], list))
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Screen one molecule.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "molecule"}],
+            "steps": [
+                {
+                    "id": "hazards",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": ["${inputs.smiles}"]},
+                }
+            ],
+        }
+    )
+
+    @activity.defn(name="completed_steps")
+    async def no_completed_steps(request: Any) -> dict[str, Any]:
+        return {}
+
+    @activity.defn(name="record_job")
+    async def no_record(record: Any) -> None:
+        return None
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-templates-governed",
+                    workflows=[TemplateWorkflow],
+                    activities=[template_activities.run_tool_step],
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[no_record, no_completed_steps],
+                ),
+            ):
+                with pytest.raises(WorkflowFailureError):
+                    await client.execute_workflow(
+                        TemplateWorkflow.run,
+                        TemplateRunInput(
+                            template=template, inputs={"smiles": "CCO"}, requested_by="chemist-1"
+                        ),
+                        id="template-tool-step-governed",
+                        task_queue="test-templates-governed",
+                    )
+
+    asyncio.run(_run())
+
+    assert calls == [["CCO"]], f"the governed tool was invoked {len(calls)} times for one step"
+    assert [(event.tool, event.outcome) for event in sink.events] == [
+        ("screen_hazards", "error")
+    ], f"one failed step wrote {len(sink.events)} audit rows"
 
 
 def test_a_step_result_is_something_temporal_can_carry() -> None:

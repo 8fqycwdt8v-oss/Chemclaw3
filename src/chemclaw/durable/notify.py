@@ -97,11 +97,20 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
 
     For a workflow whose real result is the calculation: a failed notification must not fail the
     job. Returns whether the event was recorded; a caller that advances a watermark past what it
-    sent must check it (`durable/digest.py`).
+    sent must check it.
+    """
+    return await notify_session_or_failure(session_id, kind, payload) is None
 
-    A cancellation (`ActivityError(cause=CancelledError)`) is not a delivery failure: it is
-    re-raised as `asyncio.CancelledError` so the caller's cleanup clause runs (e.g. a durable wait
-    settling its `pending_requests` row).
+
+async def notify_session_or_failure(
+    session_id: str, kind: str, payload: dict[str, Any]
+) -> ActivityError | None:
+    """`notify_session_best_effort`, returning the swallowed failure instead of a flag.
+
+    For a loop over many sessions that must tell an outage from one bad item
+    (`durable/loop_outage.py`). A cancellation (`ActivityError(cause=CancelledError)`) is not a
+    delivery failure: it is re-raised as `asyncio.CancelledError` so the caller's cleanup clause
+    runs (e.g. a durable wait settling its `pending_requests` row).
     """
     try:
         await notify_session(session_id, kind, payload)
@@ -119,5 +128,5 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
         # not re-count.
         if not workflow.unsafe.is_replaying():
             record_metric(lambda m: m.increment("chemclaw_pushback_dropped_total"))
-        return False
-    return True
+        return exc
+    return None

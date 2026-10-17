@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 _KEYLESS_PLACEHOLDER = "not-required"
 
 
-def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
+def build_chat_model(
+    task: str = "agent", *, effort: str | None = None, max_retries: int | None = None
+) -> Any:
     """Build the gateway chat model — the whole of this seam.
 
     Address, credential, per-task model route and transport are decided here and only here, so every
@@ -35,6 +37,9 @@ def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
         task: The routing key for per-task model selection.
         effort: Reasoning effort overriding `llm_effort` for this build; `None` takes the
             deployment's setting (usually absent from the request).
+        max_retries: The SDK's own retries of one call; `None` takes `llm_max_retries`. A caller
+            whose call is already retried by another layer passes 0, so the attempts do not
+            multiply.
 
     Returns:
         A LangChain `BaseChatModel` ready for `create_agent(model=...)`. Construction only, no
@@ -43,11 +48,17 @@ def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
     model = settings.model_routes.get(task)
     # Resolved once so the primary and the failover instance get the same effort.
     chosen = effort if effort is not None else settings.llm_effort
-    primary = _openai_compatible_model(model, effort=chosen)
-    return _with_failover(primary, model, effort=chosen)
+    primary = _openai_compatible_model(model, effort=chosen, max_retries=max_retries)
+    return _with_failover(primary, model, effort=chosen, max_retries=max_retries)
 
 
-def _with_failover(primary: Any, model: str | None, *, effort: str | None = None) -> Any:
+def _with_failover(
+    primary: Any,
+    model: str | None,
+    *,
+    effort: str | None = None,
+    max_retries: int | None = None,
+) -> Any:
     """`primary`, or a runnable that tries a second endpoint when the first one is *down*.
 
     Returns `primary` unchanged when no fallback is configured (the default). Only transport
@@ -60,7 +71,11 @@ def _with_failover(primary: Any, model: str | None, *, effort: str | None = None
     return primary.with_fallbacks(
         [
             _openai_compatible_model(
-                model, fallback=True, observer=_FallbackObserved(), effort=effort
+                model,
+                fallback=True,
+                observer=_FallbackObserved(),
+                effort=effort,
+                max_retries=max_retries,
             )
         ],
         exceptions_to_handle=_failover_exceptions(),
@@ -178,6 +193,7 @@ def _openai_compatible_model(
     fallback: bool = False,
     observer: Any = None,
     effort: str | None = None,
+    max_retries: int | None = None,
 ) -> Any:
     """`ChatOpenAI` against the internal endpoint — same base URL, credential and transport.
 
@@ -208,7 +224,7 @@ def _openai_compatible_model(
         # A `SecretStr` keeps the key out of reprs and log lines.
         api_key=SecretStr(key or _KEYLESS_PLACEHOLDER),
         timeout=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
+        max_retries=settings.llm_max_retries if max_retries is None else max_retries,
         http_client=_tls_http_clients()[0],
         http_async_client=_tls_http_clients()[1],
         stream_usage=settings.llm_stream_usage,

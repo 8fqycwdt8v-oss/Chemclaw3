@@ -247,12 +247,8 @@ files and `ARCHITECTURE.md`).
 
 ## D. Follow-ups the reviews recorded (code, no external trigger)
 
-- **Retry classes (`durable/retry.py`).** `run_tool_step` is classed REMOTE and keeps retrying; a
-  template tool step re-invokes a governed tool and writes another audit row — whether it moves to
-  GOVERNED is the owner's call. No retry-exhaustion signal: declare a per-class
-  retries-exhausted counter and increment it from `durable/interceptor.py` when
-  `activity.info().attempt` reaches the class bound (no such metric exists yet). Nothing sizes `schedule_run_timeout_seconds` or
-  job ceilings against the new IO/REMOTE windows.
+- **Retry classes (`durable/retry.py`).** Nothing sizes `schedule_run_timeout_seconds` or job
+  ceilings against the new IO/REMOTE windows.
 - **Postgres note store (`kg/postgres_store.py`).** `neighborhood` always walks to `hops` (cost
   hops × edges; callers clamp to `graph_max_hops`); `search` with a common term adds ~60 MB RSS at
   20 k notes — push the cap into SQL; `current_successors` is level-wise (one statement per level); a single-snapshot

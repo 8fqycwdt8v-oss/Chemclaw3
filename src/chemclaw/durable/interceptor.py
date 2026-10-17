@@ -2,9 +2,9 @@
 
 Around every activity it binds the turn's actor, session and correlation id to the ambient
 context (so worker log lines and audit rows are attributed), logs `activity.started` and
-`activity.finished`, counts failed attempts and drain cancellations, tracks activities in
-flight, and refuses a result too large for the broker. An interceptor, so a new activity is
-instrumented the day it is written.
+`activity.finished`, counts failed attempts, attempts that were the last their class allows, and
+drain cancellations, tracks activities in flight, and refuses a result too large for the broker.
+An interceptor, so a new activity is instrumented the day it is written.
 
 The ids are read from the activity's arguments: fields with the standard names on an argument
 model (one level into a nested identity), or identically named `str` parameters of the activity
@@ -21,6 +21,7 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, Interceptor
 
 from chemclaw.core.config import settings
@@ -34,6 +35,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.registry import activity_class_of
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,39 @@ class ActivityResultTooLarge(ChemclawError):
     """
 
 
+def _ran_out_of_attempts(info: activity.Info, exc: BaseException) -> bool:
+    """Whether this failed attempt ends the activity because its class's bound is spent.
+
+    The bound is the policy the activity was dispatched with (`durable/retry.py::retry_for`), read
+    off `info` rather than recomputed from settings that may have changed since. A failure the
+    policy refuses to retry (the bad-data list, `non_retryable`) is not counted: it ends the
+    activity by classification on any attempt, never because the attempts ran out. An unbounded
+    policy (`QUEUED_TOOL`) has no last attempt.
+    """
+    policy = info.retry_policy
+    if policy is None or policy.maximum_attempts < 1 or info.attempt < policy.maximum_attempts:
+        return False
+    if isinstance(exc, ApplicationError):
+        if exc.non_retryable:
+            return False
+        name = exc.type or type(exc).__name__
+    else:
+        name = type(exc).__name__
+    return name not in (policy.non_retryable_error_types or ())
+
+
+def _class_label(fn: Any) -> str:
+    """The retry class an activity declared, as a label; `unclassified` for one that declared none.
+
+    `tests/test_retry.py` makes an unclassified activity unreachable in `src/`; the fallback keeps
+    a stand-in registered by a test from failing the attempt it is observing.
+    """
+    try:
+        return activity_class_of(fn).value
+    except LookupError:
+        return "unclassified"
+
+
 def _result_payload_bytes(result: Any) -> int:
     """The serialized size of an activity's result, as the broker will count it.
 
@@ -252,6 +287,15 @@ class _ObservedActivity(ActivityInboundInterceptor):
                         "chemclaw_activity_failures_total", labels={"activity": info.activity_type}
                     )
                 )
+                # Once per activity, not per attempt: the attempt after which Temporal gives up.
+                if _ran_out_of_attempts(info, exc):
+                    exhausted = _class_label(input.fn)
+                    record_metric(
+                        lambda m: m.increment(
+                            "chemclaw_activity_retries_exhausted_total",
+                            labels={"activity_class": exhausted},
+                        )
+                    )
             if _DRAINING and isinstance(exc, asyncio.CancelledError):
                 # Temporal redelivers the work, so it is paid for twice; counted here because only
                 # this frame sees the cancellation.

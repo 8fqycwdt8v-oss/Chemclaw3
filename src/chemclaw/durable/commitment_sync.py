@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.registry import active_commitment_sources, make_data_source
 
 from chemclaw.durable.heartbeat import beating
+from chemclaw.durable.loop_outage import LoopOutage
 from chemclaw.durable.publish import queue_wait_timeout
 from chemclaw.durable.retry import retry_for
 
@@ -141,6 +142,9 @@ class CommitmentSyncReport(BaseModel):
     """Every source's pass, so one broken export is visible rather than absorbed."""
 
     results: list[CommitmentSyncResult] = Field(default_factory=list)
+    #: Sources not attempted because an outage stopped the run (`durable/loop_outage.py`); their
+    #: cursors are untouched, so the next run resumes them.
+    skipped: list[str] = Field(default_factory=list)
 
     @property
     def mirrored(self) -> int:
@@ -157,7 +161,7 @@ class CommitmentSyncWorkflow:
 
     @workflow.run
     async def run(self) -> CommitmentSyncReport:
-        """Sync each source independently; a failing export does not stop the others."""
+        """Sync each source on its own: a failed export does not stop the rest, an outage does."""
         timeout = timedelta(seconds=settings.commitment_sync_timeout_seconds)
         sources = await workflow.execute_activity(
             list_commitment_sources_activity,
@@ -166,7 +170,9 @@ class CommitmentSyncWorkflow:
             retry_policy=retry_for(list_commitment_sources_activity),
         )
         report = CommitmentSyncReport()
-        for source in sources:
+        outage = LoopOutage("commitment-sync-stops-on-an-outage")
+        for position, source in enumerate(sources):
+            failure: BaseException | None = None
             try:
                 report.results.append(
                     await workflow.execute_activity(
@@ -187,6 +193,11 @@ class CommitmentSyncWorkflow:
                     raise
                 workflow.logger.warning("commitment mirror failed for source %s", source)
                 report.results.append(CommitmentSyncResult(source=source))
+                failure = exc
+            if await outage.should_stop(failure):
+                report.skipped = list(sources[position + 1 :])
+                outage.stopped(report.skipped)
+                break
         return report
 
 
