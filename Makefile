@@ -189,7 +189,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set mcpFace.route.host=chemclaw-read.apps.example --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -234,7 +234,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
 	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
 	@# promtool parses every alert and dashboard query; kubeconform only sees a string. The third render
-	@# states retention windows, the only shape that renders ChemclawRetentionNotSweeping.
+	@# states retention windows, the only shape that renders ChemclawRetentionNotSweeping; the fourth
+	@# is the Postgres chart's backup alerts.
 	@set -e; \
 	  work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
 	  printf '%s\n' "$$PROMQL_FROM_RENDER" > "$$work/extract.py"; \
@@ -255,6 +256,12 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	    --set retention.artifactGrowthAccepted=true \
 	    --set allowNonSemanticEmbeddings=true \
 	    --set temporal.namespace=chemclaw \
+	    > "$$work/render.yaml"; \
+	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
+	  promtool check rules "$$work/rules.yaml"; \
+	  helm template chemclaw-pg deploy/helm/chemclaw-postgres \
+	    --set imageName=registry.example/pgvector:16 --set backup.destinationPath=s3://chemclaw-backups/prod \
+	    --set targets.rpoSeconds=900 --set targets.rtoSeconds=14400 \
 	    > "$$work/render.yaml"; \
 	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	  promtool check rules "$$work/rules.yaml"

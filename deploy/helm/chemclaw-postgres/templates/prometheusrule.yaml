@@ -1,0 +1,144 @@
+{{- /* Alerts on the backup itself. A failing archiver keeps WAL on the WAL volume until it fills and
+       the database stops, and a base backup that stops being taken is invisible until a restore
+       needs it; nothing in the application chart reads either, because these series come from the
+       instances, not from Chemclaw's processes.
+
+       The series and their meaning are taken from CloudNativePG 1.30.1 (`docs/src/monitoring.md`,
+       the `pg_stat_archiver` query of `config/manager/default-monitoring.yaml`) and the Barman Cloud
+       plugin 0.15.1 (`web/docs/observability.md`); confirm them against the versions you run. The
+       operator's own `cnpg_collector_*_backup_*` gauges are not read: deprecated since 1.26, they
+       stay zero for plugin backups. `ChemclawBackupMonitoringBlind` is what fires when a version
+       stops exporting a name.
+
+       Thresholds are values, never literals here: the RPO is `targets.rpoSeconds`, every wait is
+       `monitoring.alerts.*`. Each rule is scoped to this cluster's instance pods, so a restored
+       cluster alerts under its own name. Kept on uninstall with the Cluster it watches; not
+       rendered for a rehearsal, which archives nothing. */ -}}
+{{- if and .Values.monitoring.alerts.enabled (not .Values.recovery.rehearsal) }}
+{{- $name := include "chemclaw-postgres.name" . }}
+{{- $instances := include "chemclaw-postgres.instances" . }}
+{{- $alerts := .Values.monitoring.alerts }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "chemclaw-postgres.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" . | nindent 4 }}
+spec:
+  groups:
+    - name: chemclaw.backup
+      rules:
+        {{- /* The primary's `pg_stat_archiver`: the newest attempt failed and nothing has been
+               archived since. A single failure the archiver then retried past clears itself. */}}
+        - alert: ChemclawWalArchivingFailing
+          expr: >-
+            cnpg_pg_stat_archiver_last_failed_time{ {{- $instances -}} }
+            > cnpg_pg_stat_archiver_last_archived_time{ {{- $instances -}} }
+          for: {{ int $alerts.archiveFailingSeconds }}s
+          labels:
+            severity: warning
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawwalarchivingfailing
+            summary: WAL archiving to the object store is failing
+            description: >-
+              The primary's newest attempt to archive a WAL segment failed and none has succeeded
+              since. Unarchived WAL stays on the WAL volume, which stops the database when it
+              fills, and what it holds is not recoverable from the object store. The `pod` label
+              names the primary; its log says why the upload failed.
+
+        {{- /* WAL is waiting AND the newest archived segment is older than the RPO the site stated:
+               the data a lost cluster would cost is already past the target. Waiting WAL is what
+               tells this from a quiet database, whose last archival ages without anything at risk. */}}
+        - alert: ChemclawRecoveryPointObjectiveMissed
+          expr: >-
+            (time() - cnpg_pg_stat_archiver_last_archived_time{ {{- $instances -}} })
+            > {{ int .Values.targets.rpoSeconds }}
+            and on (namespace, pod)
+            cnpg_collector_pg_wal_archive_status{ {{- $instances -}} ,value="ready"} > 0
+          for: {{ int $alerts.archiveBacklogSeconds }}s
+          labels:
+            severity: critical
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawrecoverypointobjectivemissed
+            summary: WAL is waiting to be archived past the recovery point objective
+            description: >-
+              WAL segments are waiting on the primary and nothing has reached the object store for
+              longer than targets.rpoSeconds ({{ int .Values.targets.rpoSeconds }} s). Losing the
+              cluster now loses more than this site agreed to.
+
+        {{- /* The plugin's view of the ObjectStore, the same on every instance, so one alert per
+               cluster rather than one per pod. */}}
+        - alert: ChemclawBaseBackupFailed
+          expr: >-
+            max by (namespace) (barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{ {{- $instances -}} })
+            > max by (namespace) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{ {{- $instances -}} })
+          for: 0m
+          labels:
+            severity: warning
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawbasebackupfailed
+            summary: The newest base backup failed
+            description: >-
+              A base backup of {{ $name }} failed after the newest one that completed. Restores
+              still work from the older backup and the archived WAL, and take longer the older it
+              gets. `oc get backup` names the failed Backup and its status says why.
+
+        - alert: ChemclawBaseBackupTooOld
+          expr: >-
+            time() - max by (namespace) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{ {{- $instances -}} })
+            > {{ int $alerts.baseBackupMaxAgeSeconds }}
+            and max by (namespace) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{ {{- $instances -}} }) > 0
+          for: 0m
+          labels:
+            severity: warning
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawbasebackuptooold
+            summary: No base backup has completed for longer than the schedule allows
+            description: >-
+              The newest completed base backup of {{ $name }} is older than
+              monitoring.alerts.baseBackupMaxAgeSeconds ({{ int $alerts.baseBackupMaxAgeSeconds }} s)
+              against the schedule "{{ .Values.backup.schedule }}". A restore replays every WAL
+              segment since that backup.
+
+        - alert: ChemclawNoRecoveryPoint
+          expr: >-
+            max by (namespace) (barman_cloud_cloudnative_pg_io_first_recoverability_point{ {{- $instances -}} }) == 0
+          for: {{ int $alerts.firstBackupGraceSeconds }}s
+          labels:
+            severity: critical
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawnorecoverypoint
+            summary: Nothing in the object store can restore this cluster
+            description: >-
+              {{ $name }} has no first recoverability point: no base backup has completed, so no
+              point in time can be restored, however much WAL is archived.
+
+        {{- /* `absent()` is the only shape that fires on nothing being there: no PodMonitor, a
+               scrape the NetworkPolicy drops, a plugin release that exports no backup series, or
+               an operator release that renamed one. Each other alert here is silent in all four. */}}
+        - alert: ChemclawBackupMonitoringBlind
+          expr: >-
+            absent(cnpg_collector_up{ {{- $instances -}} })
+            or absent(cnpg_pg_stat_archiver_last_archived_time{ {{- $instances -}} })
+            or absent(barman_cloud_cloudnative_pg_io_first_recoverability_point{ {{- $instances -}} })
+          for: {{ int $alerts.metricsAbsentSeconds }}s
+          labels:
+            severity: warning
+            cnpg_cluster: {{ $name }}
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawbackupmonitoringblind
+            summary: The series the backup alerts read are not being collected
+            description: >-
+              At least one of the instance, archiver and backup series of {{ $name }} is missing,
+              so the other backup alerts cannot fire whatever happens to the archive.
+{{- end }}

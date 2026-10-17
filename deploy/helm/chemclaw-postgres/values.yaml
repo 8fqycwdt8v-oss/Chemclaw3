@@ -1,5 +1,6 @@
 # The Postgres under a Chemclaw release: a CloudNativePG Cluster, the Barman Cloud ObjectStore it
-# archives WAL to, and a ScheduledBackup. docs/guides/runbook.md § "Backup, restore and PITR" is the
+# archives WAL to, a ScheduledBackup, and the PodMonitor and alerts that watch the backup.
+# docs/guides/runbook.md § "Backup, restore and PITR" is the
 # procedure; D-2026-10-15-postgres-is-backed-up-by-wal-archiving-to-an-object-store the reason.
 #
 # **A release of its own**, installed before `deploy/helm/chemclaw`. The application's migrate hook
@@ -115,6 +116,38 @@ backup:
   dataCompression: gzip
   # Server-side encryption of what is stored: "", AES256 or aws:kms.
   encryption: ""
+
+# Watching the backup: a PodMonitor that collects every instance's exporter (port `metrics`), and
+# alerts on what it exports about WAL archiving and base backups (runbook § "Backup, restore and
+# PITR"). Both need the Prometheus operator's CRDs (OpenShift user-workload monitoring has them);
+# neither renders for a rehearsal, which archives nothing.
+monitoring:
+  # Off when the site already scrapes the instances by other means; the alerts read the same series.
+  podMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+  additionalLabels: {}
+  alerts:
+    enabled: true
+    runbookBaseUrl: https://github.com/8fqycwdt8v-oss/Chemclaw3/blob/main/docs/guides/runbook.md
+    # How long the newest WAL archive attempt may stay a failure, with nothing archived since,
+    # before ChemclawWalArchivingFailing warns. In seconds, like every threshold here.
+    archiveFailingSeconds: 600
+    # How long WAL may wait unarchived while the newest archived segment is older than
+    # `targets.rpoSeconds` before ChemclawRecoveryPointObjectiveMissed pages: room for a healthy
+    # archiver to ship the segment a database that was idle has just closed.
+    archiveBacklogSeconds: 300
+    # The oldest the newest completed base backup may be before ChemclawBaseBackupTooOld warns: one
+    # period of `backup.schedule` plus the time a backup takes. The default is the default
+    # schedule's day plus half a day; move it with the schedule.
+    baseBackupMaxAgeSeconds: 129600
+    # How long the cluster may have no recoverability point at all (no completed base backup)
+    # before ChemclawNoRecoveryPoint pages; the first backup, taken at install, must finish in it.
+    firstBackupGraceSeconds: 21600
+    # How long the series these alerts read may be missing before ChemclawBackupMonitoringBlind
+    # warns that every other alert here is blind.
+    metricsAbsentSeconds: 900
 
 # Carry an EXISTING database over: bootstrap this cluster by a logical import (pg_dump | pg_restore)
 # from the Postgres the application runs on today. The import is a copy of the source at the moment it

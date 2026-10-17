@@ -197,7 +197,8 @@ removes or breaks them:
 - `connectors.<name>.replicas` (or `serverReplicas`/`workerReplicas`) for every rendered half, and
   `interactive.replicas` + `interactive.maxConcurrentActivities` for every `interactive:` entry.
 - `workers.background.documentParseMemoryBytes` a positive whole byte count (`320Mi` is refused).
-- Only when switched on: `mcpFace.route.enabled` needs `mcpFace.ingressNamespaces`;
+- Only when switched on: `mcpFace.route.enabled` needs `mcpFace.ingressNamespaces` and
+  `mcpFace.route.host` (the face admits only the hosts it is told, `CHEMCLAW_MCP_FACE_URLS`);
   `monitoring.alertmanager.enabled` needs `monitoring.alerts.enabled`, `receivers`, and a
   `defaultReceiver` (and any `criticalReceiver`) naming one of them.
 

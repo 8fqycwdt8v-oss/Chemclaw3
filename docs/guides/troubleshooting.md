@@ -143,6 +143,7 @@ dotenv file).
 | `rollout.maxSurgePods must be a whole number of pods` / `… is <n>; a negative surge …` | Integer ≥ 0. |
 | `monitoring.alertmanager.enabled is true but …` (receivers empty, defaultReceiver empty or undeclared, alerts not rendered) | Declare receivers and a default; enable `monitoring.alerts`. |
 | `mcpFace.route.enabled is true but mcpFace.ingressNamespaces is empty` | Name the namespaces allowed in. |
+| `mcpFace.route.enabled is true but mcpFace.route.host is empty` | Name the host the Route publishes the face at. |
 | `workers.background.documentParseMemoryBytes must be a positive whole byte count` | Bytes, not `320Mi`. |
 | `config.CHEMCLAW_<X> must be set: … is derived from it` (turn timeout, health timeout, graceful shutdown, calc timeouts, knowledge dir, max concurrent turns) | Restore the key in `config:`. |
 | `connectors.<name>: server pods need serverReplicas or replicas` / `worker pods need workerReplicas or replicas` / `….interactive.replicas is required` / `….interactive.maxConcurrentActivities is required` / `….interactive.maxReplicas is required when keda.enabled` | Fill the connector entry. |
@@ -273,6 +274,7 @@ Every model call goes to `CHEMCLAW_LLM_BASE_URL` (OpenAI-compatible) with `CHEMC
 | `chemclaw_connectors_unhealthy` > 0, `/readyz` `connectors_unhealthy` > 0 | `/healthz` sweep failed | it only sees `/healthz`; a green value does not prove `/mcp` works |
 | MCP server log `server <name> refused an unauthenticated request to /mcp` (core sees 401) | token differs between core and server, or unset on the server (fails closed) | the manifest's `token_env` must hold the same value on both sides; restart both after rotation. The fleet Deployments read it from `chemclaw-secrets`, so a missing key shows as the server pod in `CreateContainerConfigError` rather than as a 401 |
 | core sees **421** from a `Chemclaw3-mcp` server, `/healthz` green | DNS-rebinding guard: the `Host` the caller sends is not allowed | add the Service `name:port` to the server's `MCP_ALLOWED_HOSTS` |
+| another agent sees **421** from the read-only MCP face | the same guard on the face: it admits loopback and `CHEMCLAW_MCP_FACE_URLS` only | the chart derives the list from the face's Service and `mcpFace.route.host`; a caller dialling any other name (an Ingress of the platform's) needs its URL in `mcpFace.extraUrls` |
 | core sees **503** + `Retry-After` from an MCP server | its session ceiling (`MCP_MAX_SESSIONS`) is full | scale the server, or raise its memory and ceiling |
 | MCP server `/healthz` 503 with a `reason` | corpus/backend failed to load | server log; the image's data |
 | tool result `isError` with `Error executing tool <name>: …` | the server raised | `chemclaw_tool_calls_total{tool,outcome="error"}` → [`ChemclawToolCallsFailing`](runbook.md#chemclawtoolcallsfailing) |

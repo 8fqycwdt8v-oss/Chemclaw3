@@ -60,6 +60,8 @@ from chemclaw.core.call_identity import IdentityPin, pin_connection_identity, tu
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.mcp_session import cancel_on_timeout
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -486,6 +488,7 @@ class ConnectorSessionPool:
                 self._checking.discard(kept)
                 raise
             if good:
+                _count_checkout(spec.name, "reused")
                 return self._lease(kept)
             self._checking.discard(kept)
             logger.info("connector %s: the kept session is gone; opening a fresh one", spec.name)
@@ -500,6 +503,10 @@ class ConnectorSessionPool:
         if not fresh.connected:
             self._checking.discard(fresh)
             return fresh
+        if not fresh.pooled:
+            _count_checkout(spec.name, "unpooled")
+        else:
+            _count_checkout(spec.name, "opened" if kept is None else "replaced")
         return self._lease(fresh)
 
     async def checkin(self, session: KeptConnectorSession) -> None:
@@ -645,7 +652,22 @@ class ConnectorSessionPool:
             self.expire()
 
 
+def _count_checkout(connector: str, outcome: str) -> None:
+    """Book how a turn came by its session; an unreachable connector books nothing here."""
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_connector_session_checkouts_total",
+            labels={"connector": connector, "outcome": outcome},
+        )
+    )
+
+
 _POOLS: dict[asyncio.AbstractEventLoop, ConnectorSessionPool] = {}
+
+# Bound at import, across every loop's pool, so any process that keeps sessions publishes it.
+METRICS.bind_gauge(
+    "chemclaw_connector_sessions_kept", lambda: float(sum(p.size for p in list(_POOLS.values())))
+)
 
 
 def active_pool() -> ConnectorSessionPool | None:

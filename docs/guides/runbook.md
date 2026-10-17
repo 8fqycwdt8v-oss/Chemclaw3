@@ -1538,7 +1538,8 @@ taken), the worker runs without it and counts
 
 Every rule carries a `runbook_url` pointing at its heading below, so an alert arrives with its own
 entry attached. The rules' own `description` annotations say what happened and are not repeated
-here; what follows is what to *do*, and what the alert does not mean.
+here; what follows is what to *do*, and what the alert does not mean. The Postgres chart's backup
+alerts (`chemclaw.backup`) are under §(xiii-b), "When a backup alert fires".
 
 Two things to know before reading any of them:
 
@@ -2933,8 +2934,10 @@ them by hand against a restored scratch instance.
 
 `make helm-validate` renders the Postgres chart in every shape it has (empty, Temporal's databases,
 own CA and pull secret, import as microservice and as monolith, restore, rehearsal) and
-checks each strictly against the CloudNativePG and Barman Cloud CRD schemas; the GitHub `chart` job
-runs that target, and `tests/test_postgres_cluster_chart.py` runs in `check`. Schema validation
+checks each strictly against the CloudNativePG, Barman Cloud and Prometheus operator CRD schemas,
+and `promtool` parses its backup alerts; the GitHub `chart` job runs that target, and
+`tests/test_postgres_cluster_chart.py` (which also evaluates each alert with `promtool test rules`)
+runs in `check`. Schema validation
 cannot see the operator's admission rules, so the chart refuses the ones that bite itself:
 `import.roles` or more than one database with a microservice import, a server certificate without
 its CA, an archive interval below 1 s, and a recovery under the source's own name; it never emits
@@ -3136,12 +3139,9 @@ set `retentionPolicy`, the lock and the lifecycle to N and accept the shorter re
 ### What breaks, and what to watch
 
 - **The archive stops** (object store unreachable, credentials expired, a full bucket). WAL then
-  accumulates on the WAL volume (`walStorage`), and when it fills the database stops. Watch the
-  operator's archiver and backup metrics — `cnpg_pg_stat_archiver_failed_count` rising,
-  `cnpg_collector_last_failed_backup_timestamp` newer than
-  `cnpg_collector_last_available_backup_timestamp`, `cnpg_collector_first_recoverability_point` not
-  advancing (names as the operator exports them; confirm against your version) — and size the WAL
-  volume for the longest object-store outage you accept. The charts ship no alert for these yet.
+  accumulates on the WAL volume (`walStorage`), and when it fills the database stops. The Postgres
+  chart alerts on it (next section); size the WAL volume for the longest object-store outage you
+  accept, because the alert buys time, not space.
 - **A backup that completed but cannot restore.** The only defence is the rehearsal.
 - **Uninstalling the Postgres release** removes nothing: every object it renders is kept
   (`helm.sh/resource-policy: keep`), so neither an uninstall nor a rollback nor turning a value off
@@ -3152,6 +3152,72 @@ set `retentionPolicy`, the lock and the lifecycle to N and accept the shorter re
   from. The chart prevents it: a recovery release with the source's own name is refused.
 - **A major-version upgrade** changes the data directory format; take a backup, run the drill on the
   new image, then upgrade.
+
+### When a backup alert fires
+
+The Postgres chart renders a PodMonitor over the instances (`monitoring.podMonitor`) and the rule
+group `chemclaw.backup` (`deploy/helm/chemclaw-postgres/templates/prometheusrule.yaml`), both kept on
+uninstall with the Cluster they watch: deleting a cluster deliberately is `oc delete
+cluster,podmonitor,prometheusrule -l app.kubernetes.io/instance=<postgres release>`. A restored
+cluster alerts under its own name, so after a cutover the original's alerts keep describing the
+original until it is decommissioned. They need user-workload monitoring and alert routing exactly as
+the application's do (§(x-b)). Every threshold is a value: the RPO is `targets.rpoSeconds`, the
+waits are `monitoring.alerts.*`.
+
+The series are the instance exporter's: `cnpg_pg_stat_archiver_last_archived_time` and
+`cnpg_pg_stat_archiver_last_failed_time` (the primary's `pg_stat_archiver`),
+`cnpg_collector_pg_wal_archive_status{value="ready"}` (segments waiting), `cnpg_collector_up`, and
+the Barman Cloud plugin's `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp`,
+`barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp` and
+`barman_cloud_cloudnative_pg_io_first_recoverability_point`. Names as CloudNativePG 1.30.1 and the
+plugin 0.15.1 document them; confirm against your versions. The operator's own
+`cnpg_collector_*_backup_*` gauges are deprecated since 1.26 and stay zero for plugin backups, so
+nothing reads them.
+
+#### ChemclawWalArchivingFailing
+`warning`. The primary's newest archive attempt failed and nothing has been archived since, for
+`monitoring.alerts.archiveFailingSeconds`. Read the primary's log (the `pod` label names it; the
+upload runs in the plugin's sidecar, so read every container: `oc logs <pod> --all-containers`) for
+the upload error: an expired or rotated credential
+(update the Secret `backup.credentialsSecret` names), an unreachable endpoint (the store, its CA in
+`backup.endpointCA`, an egress rule), or a bucket that refuses writes (quota, object lock, a
+lifecycle rule). Then watch `cnpg_collector_pg_wal_archive_status{value="ready"}` fall back to zero.
+Until it does, the WAL volume fills; if it is close, grow `walStorage.size` rather than deleting WAL
+by hand, which loses the only copy.
+
+#### ChemclawRecoveryPointObjectiveMissed
+`critical`. WAL is waiting on the primary and nothing has reached the object store for longer than
+`targets.rpoSeconds`: losing the cluster now loses more than the site agreed to. Fix the archiver as
+above, first. If it cannot be fixed quickly, whether the writers keep running is the data-protection
+owner's call: everything written until the archiver recovers exists only on the cluster's volumes.
+A quiet database does not fire this: with nothing waiting, an old last archival risks nothing.
+
+#### ChemclawBaseBackupFailed
+`warning`. The newest base backup failed after the newest that completed. `oc get backup -n <ns>`
+names it and its `status` says why (the same causes as the archiver, plus a replica that could not
+be backed up under `backup.target: prefer-standby`). Restores still work from the older backup plus
+WAL; take one on demand once the cause is fixed, and expect this to clear when it completes.
+
+#### ChemclawBaseBackupTooOld
+`warning`. No base backup has completed for `monitoring.alerts.baseBackupMaxAgeSeconds`. Check that
+the ScheduledBackup `<cluster>-base` exists and is not suspended, that `backup.schedule` is what you
+meant (six fields, seconds first), and the newest Backups' status. Move the threshold whenever you
+move the schedule: it is one schedule period plus the time a backup takes.
+
+#### ChemclawNoRecoveryPoint
+`critical`. The plugin reports no first recoverability point: no base backup of this cluster has
+ever completed, so nothing can be restored however much WAL is archived. On a fresh install or a
+restore it means the first backup (`immediate: true`) did not finish within
+`monitoring.alerts.firstBackupGraceSeconds`; on an established cluster it means the ObjectStore
+lost its backups (a bucket emptied or repointed). `oc get backup,objectstore -n <ns>`, then take a
+backup on demand and watch it complete before anything else.
+
+#### ChemclawBackupMonitoringBlind
+`warning`. One of the instance, archiver or backup series of this cluster is not collected, so the
+alerts above cannot fire. In order: the PodMonitor exists and matches (`oc get podmonitor`, the
+target under Observe -> Targets), the scrape reaches port `metrics` (a NetworkPolicy may drop it),
+the Cluster still names the plugin under `plugins` (a rehearsal does not, and renders no alerts),
+and the plugin or operator release still exports the names above.
 
 ## (xiv) Cut a release: pin the image to bytes
 

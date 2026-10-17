@@ -1,0 +1,28 @@
+{{- /* Collects every instance's exporter, the only source of what the backup alerts read: the
+       operator's archiver and WAL gauges and the Barman Cloud plugin's backup timestamps, which
+       the plugin publishes through the same endpoint. The operator no longer creates this itself
+       (`enablePodMonitor` is deprecated upstream), so without it the alerts read nothing and stay
+       green. Selected by the operator's `cnpg.io/cluster` label, so a restored cluster is scraped
+       under its own name. Kept on uninstall with the Cluster it watches. */ -}}
+{{- if and .Values.monitoring.podMonitor.enabled (not .Values.recovery.rehearsal) }}
+{{- $name := include "chemclaw-postgres.name" . }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "chemclaw-postgres.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- include "chemclaw-postgres.keep" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: {{ $name }}
+  podMetricsEndpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.podMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.monitoring.podMonitor.scrapeTimeout | quote }}
+{{- end }}

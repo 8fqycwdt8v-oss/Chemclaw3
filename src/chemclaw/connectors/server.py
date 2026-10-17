@@ -12,7 +12,7 @@ import asyncio
 import functools
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 from pathlib import Path
@@ -373,19 +373,20 @@ def _publishing(
 _LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 
 
-def _transport_security(name: str) -> TransportSecuritySettings:
-    """The Host/Origin allow-list for this connector's `/mcp`: loopback, plus its own address.
+def _transport_security(addresses: Sequence[str]) -> TransportSecuritySettings:
+    """The Host/Origin allow-list for a connector's `/mcp`: loopback, plus the addresses it is at.
 
     `FastMCP(name)` enables DNS-rebinding protection for loopback only, which answers 421 to every
     caller dialling a Service name while `/healthz` stays green. The guard stays on, admitting
-    loopback and `connector_urls[name]`; with no URL configured it is FastMCP's default.
+    loopback and the host of each URL in `addresses`; with none it is FastMCP's default.
     """
     hosts = list(_LOOPBACK_HOSTS)
     origins = [f"http://{host}" for host in _LOOPBACK_HOSTS]
-    address = urlsplit(settings.connector_urls.get(name, ""))
-    if address.netloc:
-        hosts.append(address.netloc)
-        origins.append(f"{address.scheme}://{address.netloc}")
+    for url in addresses:
+        address = urlsplit(url)
+        if address.netloc:
+            hosts.append(address.netloc)
+            origins.append(f"{address.scheme}://{address.netloc}")
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
     )
@@ -397,15 +398,17 @@ def connector_app(
     name: str,
     on_start: Callable[[], Coroutine[Any, Any, None]] | None = None,
     token_env: str | None = None,
+    addresses: Sequence[str] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
     Every tool `server` serves is reachable by anything that can reach the pod, so
     `connector-validate` refuses one the manifest does not declare. `name` must match the bundle
-    folder and manifest `name`. `token_env` names the bearer-token variable for a surface with no
-    `connector.yaml` (core's read-only MCP face); omitted, the manifest decides. `on_start` is an
-    optional diagnostic coroutine started, not awaited, at startup; it must swallow its own
-    failures.
+    folder and manifest `name`. `token_env` and `addresses` (the URLs callers dial it at, admitted
+    by the DNS-rebinding guard) are for a surface with no `connector.yaml` or `connector_urls`
+    entry (core's read-only MCP face); omitted, the manifest and `connector_urls[name]` decide.
+    `on_start` is an optional diagnostic coroutine started, not awaited, at startup; it must
+    swallow its own failures.
 
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /livez`, `GET /metrics`, and the MCP endpoint
@@ -417,7 +420,9 @@ def connector_app(
     # Innermost of the three: it runs inside the tool body's own frame, where the result is still
     # the model it was declared as. See `_publish_tool_results`.
     _publish_tool_results(server, name=name)
-    server.settings.transport_security = _transport_security(name)
+    server.settings.transport_security = _transport_security(
+        [settings.connector_urls.get(name, "")] if addresses is None else addresses
+    )
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager

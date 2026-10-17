@@ -180,6 +180,14 @@ mcpFace:
     # surface whose entire authorization is "holds one bearer token". They are different decisions
     # and a deployment states them separately.
     enabled: false
+    # The host the Route publishes the face at, required with `enabled`. The face's `/mcp` admits
+    # only the hosts it is configured with (`CHEMCLAW_MCP_FACE_URLS`, derived from this and the
+    # face's Service) and answers 421 to any other, so a host the router generated would be
+    # published and refused.
+    host: ""
+  # Further URLs callers dial the face at that this chart does not render, such as an Ingress the
+  # platform owns (`https://<host>/mcp`). Each one's host is admitted beside the Service and Route.
+  extraUrls: []
   # Namespaces whose pods may reach the face, as label selectors — deliberately *not* shared with
   # `networkPolicy.ingressNamespaces`, which names the router namespace that may reach the chat
   # front door. Empty means this release's own pods only.
