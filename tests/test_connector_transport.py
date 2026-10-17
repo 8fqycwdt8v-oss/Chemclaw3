@@ -60,7 +60,7 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.mcp_session import cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
-from tests.conftest import _free_port
+from tests.conftest import _free_port, timeout_scale
 from tests.served import ServerThread
 
 
@@ -417,6 +417,75 @@ def test_oversized_body_is_rejected_before_the_mcp_handler_runs(
     with ServerThread(app, port):
         response = httpx.post(f"http://127.0.0.1:{port}/mcp", content=b"x" * 1000, headers=headers)
     assert response.status_code == 413
+
+
+_MCP_HEADERS = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+_INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "session-bounds-probe", "version": "1"},
+    },
+}
+
+
+def test_a_connector_refuses_a_session_past_its_configured_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connector_server_max_sessions` is the served transport's session ceiling, not upstream's.
+
+    A handshake past it is refused with 503 before a session exists. Were the setting not reaching
+    the session manager, upstream's own default would admit the second handshake.
+    """
+    monkeypatch.setattr(settings, "connector_server_max_sessions", 1)
+    app = connector_app(FastMCP("session-ceiling-probe"), name="session-ceiling-probe")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}/mcp"
+    with ServerThread(app, port):
+        first = httpx.post(url, json=_INITIALIZE, headers=_MCP_HEADERS)
+        second = httpx.post(url, json=_INITIALIZE, headers=_MCP_HEADERS)
+    assert first.status_code == 200 and first.headers.get("mcp-session-id"), first.text
+    assert second.status_code == 503, second.text
+
+
+def test_a_connector_closes_a_session_idle_past_its_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connector_server_session_idle_timeout_seconds` is how long the served transport keeps one.
+
+    Past it the session's id answers 404, while before it the same request is served. Were the
+    setting not reaching the session manager, upstream's own default would keep it far longer than
+    this test waits.
+    """
+    idle = 0.5
+    monkeypatch.setattr(settings, "connector_server_session_idle_timeout_seconds", idle)
+    app = connector_app(FastMCP("session-idle-probe"), name="session-idle-probe")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}/mcp"
+    initialized = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    with ServerThread(app, port):
+        opened = httpx.post(url, json=_INITIALIZE, headers=_MCP_HEADERS)
+        session = {**_MCP_HEADERS, "mcp-session-id": opened.headers["mcp-session-id"]}
+        httpx.post(url, json=initialized, headers=session)
+        served = httpx.post(url, json=ping, headers=session)
+        time.sleep(idle * 4 * timeout_scale())
+        expired = httpx.post(url, json=ping, headers=session)
+    assert served.status_code == 200, served.text
+    assert expired.status_code == 404, expired.text
+
+
+def test_zero_switches_either_served_session_bound_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 is this config's "off" for both bounds, which upstream spells `None`, not 0 seconds."""
+    monkeypatch.setattr(settings, "connector_server_session_idle_timeout_seconds", 0.0)
+    monkeypatch.setattr(settings, "connector_server_max_sessions", 0)
+    server = FastMCP("session-bounds-off-probe")
+    connector_app(server, name="session-bounds-off-probe")
+    assert server.session_manager.session_idle_timeout is None
+    assert server.session_manager.max_sessions is None
 
 
 def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
