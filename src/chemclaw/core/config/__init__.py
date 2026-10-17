@@ -786,6 +786,27 @@ class Settings(
                 )
         return self
 
+    @model_validator(mode="after")
+    def _a_served_session_outlives_the_pool_that_keeps_it(self) -> Self:
+        """The idle reaper on the connectors this release serves fires after the pool's keep time.
+
+        `connectors/session_pool.py` keeps an idle session for `connector_session_ttl_seconds`
+        before reusing it; a server that reaped it first would answer that reuse with 404, turning
+        every kept session into a replaced one. Strictly greater, because equality is the defect.
+        Either value at 0 switches its half off, and then there is nothing to order.
+        """
+        idle = self.connector_server_session_idle_timeout_seconds
+        keep = self.connector_session_ttl_seconds
+        if idle and keep and idle <= keep:
+            raise ValueError(
+                f"connector_server_session_idle_timeout_seconds={idle} does not outlast "
+                f"connector_session_ttl_seconds={keep}: a connector this release serves would "
+                "close a session the pool is still keeping for its next turn, so every reuse "
+                "would find it gone and open a fresh one. Raise the idle timeout above the keep "
+                "time, or lower the keep time."
+            )
+        return self
+
     def template_step_ceilings(self) -> dict[str, tuple[float, str]]:
         """The longest one step of each kind may take, and the words that name the budget.
 

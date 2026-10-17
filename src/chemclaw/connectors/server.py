@@ -418,6 +418,12 @@ def connector_app(
     # the model it was declared as. See `_publish_tool_results`.
     _publish_tool_results(server, name=name)
     server.settings.transport_security = _transport_security(name)
+    # Read by `streamable_http_app()` when it builds the session manager, so set before it; 0 is
+    # this config's "off", which upstream spells `None`.
+    server.settings.session_idle_timeout = (
+        settings.connector_server_session_idle_timeout_seconds or None
+    )
+    server.settings.max_sessions = settings.connector_server_max_sessions or None
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager
