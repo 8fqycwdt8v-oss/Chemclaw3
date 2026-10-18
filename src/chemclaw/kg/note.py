@@ -45,7 +45,11 @@ def strip_links(text: str) -> str:
     outgoing edge the report never cited. Reduces to the target via `split_link`, so a typed edge
     does not leak its relation prefix into prose.
     """
-    return WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
+    # To a fixpoint: removing the inner link of `[[[[x]]]]` leaves a live `[[x]]` behind. Each pass
+    # that changes the text shortens it, so the loop ends.
+    while (stripped := WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)) != text:
+        text = stripped
+    return text
 
 
 def as_cell(text: str) -> str:
