@@ -76,8 +76,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **A finished calculation is thrown away when its cache write fails** [S] — a `store.put` error fails the leader and every waiter with the database's error; return the payload and
-  count the unstored write, as `publish_stored_result` argues for itself; `science/calc/store.py::cached_compute`.
 - [ ] **A sink's refusal spends the whole attempt budget before dead-lettering** [S] — `_drain_one` books a `SinkRejectedError` like any refusal and `mark_failed` retires it only at the
   last attempt, against `publish/driver.py::SinkRejectedError`'s own contract; retire on refusal; `durable/publish_results.py::_drain_one`, `publish/outbox.py::mark_failed`.
 - [ ] **`request_timeout` has no ceiling, and `calc` declares the turn deadline itself** [S] — which bound fires first is a race, so the recoverable transport error may never arrive;

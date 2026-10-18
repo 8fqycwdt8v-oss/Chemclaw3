@@ -439,7 +439,8 @@ async def cached_compute(
     waiter and clears the slot; a holder killed mid-computation hands the key to exactly one
     waiter once its lease lapses. The result is shape-checked (`checked_payload`) before it
     becomes permanent. A hit costs one read and no claim. Metered by
-    `chemclaw_calc_cache_total{outcome}` (`hit`, `miss`, `shared`) and, across processes,
+    `chemclaw_calc_cache_total{outcome}` (`hit`, `miss`, `shared`, `unstored` for a computed result
+    whose cache write failed and was returned anyway) and, across processes,
     `chemclaw_calc_claims_total`.
 
     Args:
@@ -501,18 +502,26 @@ async def cached_compute(
         # recompute (the outbox de-duplicates), whereas persist-first would make every later call a
         # hit that never publishes.
         await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
-        await store.put(
-            StoredResult(
-                key=key,
-                result=result,
-                compute_seconds=elapsed,
-                structure_id=structure_id,
-                # The epoch folded into `key` from the same constant. Stamped here rather than
-                # defaulted on the model, so rows read back from before migration 090 stay
-                # "unrecorded".
-                epoch=CALCULATION_EPOCH,
+        try:
+            await store.put(
+                StoredResult(
+                    key=key,
+                    result=result,
+                    compute_seconds=elapsed,
+                    structure_id=structure_id,
+                    # The epoch folded into `key` from the same constant. Stamped here rather than
+                    # defaulted on the model, so rows read back from before migration 090 stay
+                    # "unrecorded".
+                    epoch=CALCULATION_EPOCH,
+                )
             )
-        )
+        except Exception:
+            # The answer is already paid for: failing the leader and every waiter with the
+            # database's error would discard it. The next lookup misses and recomputes.
+            logger.warning("calc result computed but not cached: %s", slot, exc_info=True)
+            record_metric(
+                lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "unstored"})
+            )
         return result, elapsed
 
     async def _persisted() -> tuple[ResultPayload, float] | None:

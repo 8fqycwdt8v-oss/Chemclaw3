@@ -685,9 +685,11 @@ _COUNTERS: dict[str, str] = {
     # persisted result is never recomputed" is the largest cost lever in the system; this shows it
     # working.
     "chemclaw_calc_cache_total": (
-        "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
-        "miss on one key that `cached_compute` single-flighted onto another caller's computation, "
-        "in this process or in another (`chemclaw_calc_claims_total` separates the two)."
+        "Calculation-cache lookups, by outcome (hit / shared / miss / unstored) — `shared` is a "
+        "concurrent miss on one key that `cached_compute` single-flighted onto another caller's "
+        "computation, in this process or in another (`chemclaw_calc_claims_total` separates the "
+        "two); `unstored` is a computed result whose cache write failed, so the next lookup "
+        "misses again."
     ),
     # The value, not the count: compute seconds avoided, read from `StoredResult.compute_seconds` on
     # each hit. One avoided CREST search outweighs a thousand avoided lookups.
