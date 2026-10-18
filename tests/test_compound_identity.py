@@ -428,12 +428,16 @@ _METAL_HYDRIDES = {
 }
 
 
-def _metal_hydrogens(smiles: str) -> list[int]:
-    """The hydrogen count on each metal atom of `smiles`, in atom order."""
+def _metal_hydrogens(smiles: str) -> list[tuple[int, int]]:
+    """`(atomic number, hydrogens)` per metal atom; standardization reorders fragments."""
     from chemclaw.core.chem import _METALS
 
     molecule = Chem.MolFromSmiles(smiles)
-    return [a.GetTotalNumHs() for a in molecule.GetAtoms() if a.GetAtomicNum() in _METALS]
+    return sorted(
+        (a.GetAtomicNum(), a.GetTotalNumHs())
+        for a in molecule.GetAtoms()
+        if a.GetAtomicNum() in _METALS
+    )
 
 
 @pytest.mark.parametrize("name", sorted(_METAL_HYDRIDES))
