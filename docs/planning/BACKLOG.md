@@ -28,8 +28,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Answers that are wrong without saying so
 
-- [ ] **A metal hydride standardizes to its metal without the hydride** [S] — `[PdH]Cl` → `[Cl-].[Pd+]`, so hydride and salt share a
-  `compound_id`; trace the dropping step in `core/chem.py::_cleaned` / `core/chem.py::standardize`.
+- [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
+  `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **An external vector store cites cross-model neighbours after an embedding-model swap** [S] — its dense read binds no `embedding_key`, so stale vectors resolve and look correct
   until a reindex; keep only ids catalogued under the live key, notes and documents alike; `retrieval/external_note_index.py::ExternalVectorNoteIndex.search_dense`, `ingest/documents/external_index.py::ExternalVectorDocumentIndex._resolve`.
 - [ ] **A reaction fingerprint whose record write has not landed is served at full similarity** [S] — the unfiltered path drops withheld records, not absent ones, so `gather_evidence`

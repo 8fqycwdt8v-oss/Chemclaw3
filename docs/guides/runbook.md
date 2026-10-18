@@ -987,8 +987,12 @@ current beside the new one. **Run `make rekey-compounds` once after upgrading pa
 previews the per-kind counts; `make rekey-compounds APPLY=1` writes them. It supersedes each moved
 compound note by the note under its new id (the old one is retired, never deleted, and its id keeps
 resolving through `expand_note`), and re-fingerprints the shelved rows of both indexes from what
-each row stores, so the full ELN re-sync below is no longer needed for a bump. It is idempotent: a
-second run reports nothing left to write. Run it where the note writer runs — it commits through
+each row stores, so the full ELN re-sync below is no longer needed for a bump — **except one that
+keeps what the old standard form dropped**: `std13` keeps a metal's hydride and an ate complex's
+charge, which a `std12` note's stored structure no longer holds, so the re-key reports those
+compounds unchanged and only an ELN re-sync from the epoch (§(v)) files them under their own ids
+(`tests/test_compound_rekey.py::test_a_bump_that_keeps_what_the_old_standard_form_dropped_moves_no_note`).
+It is idempotent: a second run reports nothing left to write. Run it where the note writer runs — it commits through
 the same dedicated checkout (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`).
 In a cluster that is the background worker, whose image has no `make`:
 `kubectl exec deploy/chemclaw-background-worker -- python -m chemclaw.cli.rekey_compounds`
