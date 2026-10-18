@@ -60,6 +60,9 @@ _BAD_DATA_TYPES = [
     # A sweep over the registered tenants that would pass `tenancy_sweep_max_tenants`; the registry
     # does not shrink between attempts.
     "TenantSweepError",
+    # The erasure ledger unset, unreadable, or holding a line that is not a record
+    # (`core/erasure_ledger.py`); none of that changes between attempts.
+    "LedgerError",
     # An activity result over `activity_result_max_bytes` (`durable/interceptor.py`); the result is
     # deterministic in the arguments, so a retry is the same size.
     "ActivityResultTooLarge",
@@ -292,22 +295,13 @@ _POLICIES = {
 }
 
 
-def child_workflow_retry() -> RetryPolicy:
-    """Bounded restarts of a child workflow that is small and independent of its siblings.
-
-    Used by the fan-out and by the hypothesis calculation child. The attempt bound is what acts: a
-    child failing through its activity surfaces as a child failure whose outermost type is the
-    child's, not the activity's error, so the bad-data list classifies only a failure raised by the
-    child's own code.
-    """
-    return RetryPolicy(
-        maximum_attempts=settings.activity_max_attempts,
-        non_retryable_error_types=list(_BAD_DATA_TYPES),
-    )
-
-
 def child_workflow_once() -> RetryPolicy:
-    """One attempt for a child whose activities already carry the retry, so a rerun only repeats."""
+    """One attempt for every child workflow: its activities carry the retry, so a rerun repeats.
+
+    A restart re-runs every activity the child already spent its attempts on, multiplying the
+    class bound by the restart bound. Nor can a restart classify: a child failing through its
+    activity surfaces with the child's failure outermost, so the bad-data list never matches.
+    """
     return RetryPolicy(maximum_attempts=1)
 
 

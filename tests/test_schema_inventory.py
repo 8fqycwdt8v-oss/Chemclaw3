@@ -73,9 +73,13 @@ _TOUCHES = (
     re.compile(rf"^INSERT INTO\s+({_NAME})", re.I),
     re.compile(rf"^UPDATE\s+({_NAME})\s", re.I),
     # An anonymous block, credited to the table its first `ALTER TABLE` acts on — the shape `108`
-    # has, a guarded `ADD CONSTRAINT`. A block that altered no table would match nothing here and
-    # fail `test_every_migration_statement_is_one_the_rule_understands` rather than pass unread.
+    # has, a guarded `ADD CONSTRAINT`. A block that neither altered nor updated a table would match
+    # nothing here and fail `test_every_migration_statement_is_one_the_rule_understands` rather than
+    # pass unread.
     re.compile(rf"^DO\s+\$\$.*?\bALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
+    # A block that alters no table but updates rows, credited to the table its first `UPDATE` acts
+    # on — the shape `135` has, a backfill run once per tenant.
+    re.compile(rf"^DO\s+\$\$.*?\bUPDATE\s+({_NAME})\s", re.I),
 )
 # A block that scopes tables from a list rather than naming one in an `ALTER TABLE`: `131`'s
 # `scoped` array (every table given the tenant column and policy) and `widened` array (every table
@@ -308,6 +312,7 @@ def test_every_migration_statement_is_one_the_rule_understands() -> None:
         "COMMENT ON COLUMN public.audit_events.a IS 'x'",
         "INSERT INTO public.audit_events (a) VALUES ('x')",
         "UPDATE public.audit_events SET a = 'x'",
+        "DO $$ BEGIN UPDATE public.audit_events SET a = 'x'; END $$",
     ],
 )
 def test_a_table_is_recognised_however_it_is_spelled(statement: str) -> None:

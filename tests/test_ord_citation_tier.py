@@ -20,7 +20,7 @@ from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.core.config import settings
 from chemclaw.durable import memory_jobs
-from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry
 from chemclaw.ingest.eln.ord import (
     Component,
     OrdReaction,
@@ -133,7 +133,7 @@ class _Stores:
         self.records = InMemoryReactionRecordStore()
         self.labels = InMemoryLabelIndex()
 
-    async def sync(self, adapter: OrdJsonAdapter) -> Any:
+    async def sync(self, adapter: ElnAdapter) -> Any:
         """Run the production `sync_entries` over `adapter` from the epoch."""
         return await sync_entries(
             adapter,
@@ -737,3 +737,217 @@ async def test_the_durable_store_answers_the_disclosure_as_the_reference_does() 
     # `%` as a LIKE wildcard would have matched every record: here it matches only its own text.
     wildcard = await store.citation_only("C%10")
     assert note_id_for_reaction("disc-cited", source) not in wildcard.examples
+
+
+# --- the label row and the draft-time precedent follow the entry -----------------------------
+#
+# `reaction_labels` and `reaction_fingerprints` cannot be deleted from by the app role, so an entry
+# amended out of the structured tier, or withdrawn, keeps both rows. The facet tools read the label
+# row and `uncited_precedent` the fingerprint; neither may serve such a run, and both serve it again
+# once the source puts it back.
+
+_RECORDED = datetime(2023, 4, 1, 9, tzinfo=UTC)
+
+
+class _Exporting:
+    """An ORD source re-exporting each payload, with the source's withdrawal where one is given."""
+
+    def __init__(self, *entries: tuple[dict[str, Any], datetime | None]) -> None:
+        """Serve these exports on every fetch, as an overlap replay would."""
+        self._entries = [
+            RawEntry(
+                entry_id=str(payload["reactionId"]),
+                created_at=_RECORDED,
+                payload=payload,
+                retracted_at=retracted_at,
+            )
+            for payload, retracted_at in entries
+        ]
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """Every entry, every time."""
+        return self._entries
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        """The production ORD mapping; a withdrawal is not in the reaction."""
+        return OrdJsonAdapter("/nonexistent").map_to_ord(raw)
+
+
+def _drawn(reaction_id: str, *, amended: str | None = None) -> dict[str, Any]:
+    """A fully drawn flow-Suzuki on 6-chloroquinoline, stamped as amended at `amended` if given."""
+    payload = _flow_suzuki(
+        reaction_id, partner_smiles=_PARTNER_SMILES, product_smiles=_PRODUCT_SMILES
+    )
+    if amended is not None:
+        payload["provenance"]["recordModified"] = [{"time": {"value": amended}}]
+    return payload
+
+
+def _half_drawn(reaction_id: str, amended: str) -> dict[str, Any]:
+    """The same run after the source took the partner's and the product's structures away."""
+    payload = _flow_suzuki(reaction_id)
+    payload["provenance"]["recordModified"] = [{"time": {"value": amended}}]
+    return payload
+
+
+def _label_everything(stores: _Stores) -> None:
+    """Stamp every stale label row current with the source's coarse roles, as an empty pass does.
+
+    The production merge with no server answer, so the roles the frequency roll-up counts are the
+    ones a real pass would store.
+    """
+    from chemclaw.ingest.labels.merge import merge
+    from chemclaw.science.labels.policy import LabelPolicy
+
+    async def _run() -> None:
+        for row in await stores.labels.stale("v-test", 100):
+            await stores.labels.store_labels(merge(row, LabelPolicy(), None, None), "v-test")
+
+    asyncio.run(_run())
+
+
+def _facets(stores: _Stores, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], int, int]:
+    """What the facet tools answer about the quinoline: precedents, reactions counted, agents."""
+    from chemclaw.core.chem import standard_smiles
+
+    _molfp, rxnfp = _tools_over(stores, monkeypatch)
+    precedent = _payload(rxnfp, "substrate_precedent", {"smiles": standard_smiles(_QUINOLINE)})
+    frequency = _payload(rxnfp, "reagent_frequency", {})
+    return (
+        [hit["citation"] for hit in precedent["hits"]],
+        frequency["reactions_in_scope"],
+        len(frequency["agents"]),
+    )
+
+
+def test_an_entry_amended_to_citation_only_leaves_every_facet_answer_until_it_is_drawn_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The amend path, from the sync to the MCP payload: counted while drawn, gone once half-drawn.
+
+    The control is the same entry before the amendment and after a second one that draws it again,
+    so the empty answer in between is the tier's doing and not the query's.
+    """
+    stores = _Stores()
+    cited = note_id_for_reaction("suzuki-amended", _SOURCE)
+    asyncio.run(stores.sync(_Exporting((_drawn("suzuki-amended"), None))))
+    _label_everything(stores)
+    drawn = _facets(stores, monkeypatch)
+    assert drawn[0] == [cited] and drawn[1] == 1 and drawn[2] > 0, drawn
+
+    half = _half_drawn("suzuki-amended", "2023-05-01T09:00:00Z")
+    summary = asyncio.run(stores.sync(_Exporting((half, None))))
+    assert summary.citation_only == ["suzuki-amended"]
+    assert asyncio.run(stores.labels.count()) == 1, "the precondition: the old label row is there"
+    assert _facets(stores, monkeypatch) == ([], 0, 0)
+
+    redrawn = _drawn("suzuki-amended", amended="2023-06-01T09:00:00Z")
+    asyncio.run(stores.sync(_Exporting((redrawn, None))))
+    # The same reaction as before, so the derived phase it kept is current again without a pass.
+    assert _facets(stores, monkeypatch) == drawn
+
+
+def test_a_withdrawn_entry_leaves_every_facet_answer_and_a_republication_restores_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withdrawal re-records the label row withheld, and re-publishing clears it."""
+    stores = _Stores()
+    cited = note_id_for_reaction("suzuki-pulled", _SOURCE)
+    asyncio.run(stores.sync(_Exporting((_drawn("suzuki-pulled"), None))))
+    _label_everything(stores)
+    served = _facets(stores, monkeypatch)
+    assert served[0] == [cited] and served[1] == 1, served
+
+    asyncio.run(
+        stores.sync(_Exporting((_drawn("suzuki-pulled"), datetime(2024, 1, 1, tzinfo=UTC))))
+    )
+    assert asyncio.run(stores.records.retracted([(_SOURCE, "suzuki-pulled")])), "the precondition"
+    assert _facets(stores, monkeypatch) == ([], 0, 0)
+
+    asyncio.run(stores.sync(_Exporting((_drawn("suzuki-pulled"), None))))
+    assert _facets(stores, monkeypatch) == served
+
+
+def test_a_draft_is_offered_no_run_its_source_withdrew_or_took_the_structure_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uncited_precedent` over the stale fingerprints both changes leave, from the sync.
+
+    The first call is the control: all three runs are offered while each is drawn and current.
+    """
+    from chemclaw.agent import protocol_design_tools as tools
+    from chemclaw.protocols.models import ExperimentDesign, ExperimentRequest
+
+    monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
+    stores = _Stores()
+    monkeypatch.setattr(tools, "default_reaction_store", lambda: stores.reactions)
+    monkeypatch.setattr(tools, "default_record_store", lambda: stores.records)
+    design = ExperimentDesign(
+        request=ExperimentRequest(title="SM-3", goal="couple it", reaction_smiles=_drawn_query())
+    )
+    runs = ("suzuki-kept", "suzuki-amended", "suzuki-pulled")
+    asyncio.run(stores.sync(_Exporting(*((_drawn(run), None) for run in runs))))
+    assert sorted(one.id for one in asyncio.run(tools.uncited_precedent(design))) == sorted(runs)
+
+    asyncio.run(
+        stores.sync(
+            _Exporting(
+                (_drawn("suzuki-kept"), None),
+                (_half_drawn("suzuki-amended", "2023-05-01T09:00:00Z"), None),
+                (_drawn("suzuki-pulled"), datetime(2024, 1, 1, tzinfo=UTC)),
+            )
+        )
+    )
+    assert {r.id for r in asyncio.run(stores.reactions.all_records())} == set(runs), (
+        "the precondition: both stale fingerprints are still in the index"
+    )
+    assert [one.id for one in asyncio.run(tools.uncited_precedent(design))] == ["suzuki-kept"]
+
+
+async def test_migration_135_derives_every_eln_rows_flag_from_its_record() -> None:
+    """The backfill's rule, driven by the migration's own statements over rows in both wrong states.
+
+    A pre-135 row was never withheld, and a row a rolled-back image re-recorded keeps a stale flag,
+    so the file — idempotent, and the documented restore — must both set and clear. A corpus row has
+    no record and is left as it is.
+    """
+    from chemclaw.core import db
+    from chemclaw.science.labels.store import PostgresLabelIndex
+    from tests.test_label_index import _label
+
+    await migrated_db_or_skip()
+    records, labels = PostgresReactionRecordStore(), PostgresLabelIndex()
+    source = "bf135-source"
+    withdrawn = record_from_ord_reaction(_map(_drawn("bf135-withdrawn"))).model_copy(
+        update={"retracted_at": datetime(2024, 1, 1, tzinfo=UTC)}
+    )
+    half = record_from_ord_reaction(_map(_flow_suzuki("bf135-half")))
+    current = record_from_ord_reaction(_map(_drawn("bf135-current")))
+    await records.record([withdrawn, half, current], source)
+    for rid, flag in (("bf135-withdrawn", False), ("bf135-half", False), ("bf135-current", True)):
+        await labels.record(_label(rid).model_copy(update={"source": source, "withheld": flag}))
+    corpus = _label("bf135-corpus").model_copy(update={"source": "bf135-corpus", "withheld": True})
+    await labels.record(corpus)
+
+    migration = Path(__file__).parents[1] / "infra" / "sql" / "135_reaction_label_withheld.sql"
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT current_setting('app.tenant', true)")
+            before = await cur.fetchone()
+            await cur.execute(migration.read_text(encoding="utf-8"))
+            await cur.execute(
+                "SELECT reaction_id, withheld FROM reaction_labels "
+                "WHERE source IN ('bf135-source', 'bf135-corpus') ORDER BY reaction_id"
+            )
+            flags = await cur.fetchall()
+            await cur.execute("SELECT coalesce(current_setting('app.tenant', true), '')")
+            after = await cur.fetchone()
+        await conn.commit()
+
+    assert flags == [
+        ("bf135-corpus", True),
+        ("bf135-current", False),
+        ("bf135-half", True),
+        ("bf135-withdrawn", True),
+    ]
+    assert after is not None and before is not None and after[0] == (before[0] or "")

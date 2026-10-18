@@ -290,13 +290,14 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
 
 
 # On the background queue, so the background worker registers it.
-@durable_activity("background", ActivityClass.REMOTE)
+@durable_activity("background", ActivityClass.GOVERNED)
 @activity.defn
 async def run_tool_step(step: ToolStepInput) -> Any:
     """Call one tool as the run's actor, through the same audit + authz chain a chat turn uses.
 
     The tool is found by name on the assembled surface (`_capability_tools` plus `connector_specs`),
-    the same answer to "which tools exist" a conversation uses. No agent is built.
+    the same answer to "which tools exist" a conversation uses. No agent is built. `GOVERNED`, as
+    `run_computable_check` is: a re-run repeats the governed call and its audit row.
     """
     capability_tools, connector_specs = _agent_surface()
     with _acting_as(step.identity):

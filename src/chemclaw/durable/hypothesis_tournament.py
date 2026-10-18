@@ -63,7 +63,7 @@ from chemclaw.durable.publish import (
     publish_note_best_effort,
     queue_wait_timeout,
 )
-from chemclaw.durable.retry import child_workflow_once, child_workflow_retry, retry_for
+from chemclaw.durable.retry import child_workflow_once, retry_for
 
 # How many evidence chunks ride into one prompt. Small on purpose: a comparison prompt carries two
 # hypotheses' evidence, so this is doubled there, and the budget that matters is the endpoint's.
@@ -225,8 +225,12 @@ class _FieldLimits(BaseModel):
 
 
 def _route() -> Any:
-    """The chat model for tournament work, on its own route so a deployment can price it apart."""
-    return build_chat_model("hypothesis")
+    """The chat model for tournament work, on its own route so a deployment can price it apart.
+
+    No SDK retries: every caller is a `REMOTE` activity, whose Temporal attempts are the one retry
+    of the call, spaced and jittered; the SDK's on top would multiply them.
+    """
+    return build_chat_model("hypothesis", max_retries=0)
 
 
 async def _structured(model: type[_ModelT], prompt: str) -> _ModelT:
@@ -1870,8 +1874,12 @@ class HypothesisTournamentWorkflow:
                         correlation_id=request.correlation_id,
                     ),
                     id=f"{workflow.info().workflow_id}-calc-{check.hypothesis_id}",
-                    task_queue=plan.task_queue,
-                    retry_policy=child_workflow_retry(),
+                    # No `task_queue`: the wrapper runs on this workflow's own queue, where core's
+                    # worker serves it. `plan.task_queue` is the bundle's, which the wrapper hands
+                    # to the job it starts and whose worker does not know the wrapper.
+                    # One attempt, as on the two other paths into the wrapper: the job's own
+                    # activities carry the retry, and a restart here would re-run the whole job.
+                    retry_policy=child_workflow_once(),
                     result_type=ConnectorJobResult,
                 )
                 for check, plan in launches

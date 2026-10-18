@@ -19,7 +19,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.registry import ActivityClass, durable_activity
 
-from chemclaw.durable.retry import child_workflow_retry, retry_for
+from chemclaw.durable.retry import child_workflow_once, retry_for
 
 
 @durable_activity("background", ActivityClass.IO)
@@ -131,9 +131,8 @@ async def fan_out(
     results: list[Any] = []
     # Batches rather than a semaphore: deterministic under replay, same concurrency bound.
     #
-    # Children run on core's `background-jobs` queue under `child_workflow_retry` (bounded;
-    # Temporal's default retries forever); acceptable because fan-out children are small and
-    # independent.
+    # Children run on core's `background-jobs` queue, once each: a child's activities carry its
+    # retry class, and a restart would repeat attempts they already spent.
     for batch in _batches(indexed, limit):
         settled = await asyncio.gather(
             *(
@@ -144,7 +143,7 @@ async def fan_out(
                     id_prefix=id_prefix,
                     parent_id=parent_id,
                     task_queue=settings.background_task_queue,
-                    retry_policy=child_workflow_retry(),
+                    retry_policy=child_workflow_once(),
                     execution_timeout=child_timeout,
                 )
                 for index, payload in batch

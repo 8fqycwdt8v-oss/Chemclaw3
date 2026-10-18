@@ -3,11 +3,17 @@
 Not the record of truth: both tables can be dropped and refilled from `reaction_records` or the
 source table, and nothing reads a label as evidence without its citation.
 
-Two write paths, kept apart:
+Three write paths, kept apart:
 
-* `record()` writes only the record phase; the upsert names its columns so re-ingesting an amended
-  entry does not discard derived labels.
+* `record()` writes only the record phase, `withheld` with it; the upsert names its columns so
+  re-ingesting an amended entry does not discard derived labels.
 * `store_labels()` writes only the derived phase and stamps `labeller_version`.
+* `withhold()` sets `withheld` alone, for an entry amended to citation-only, which has no record
+  phase to write.
+
+Every read skips a withheld row (`select`, `coverage`, `stale()`). The app role cannot delete a row,
+so this is how an entry withdrawn or amended out of the structured tier stops answering, until a
+structured, current re-ingest clears it.
 
 `stale()` returns rows whose `labeller_version` is NULL or differs from the current one, so nothing
 has to remember to mark work. A row the labelling server could not answer for is stamped with
@@ -79,7 +85,18 @@ class LabelIndex:
     """
 
     async def record(self, label: ReactionLabel) -> None:
-        """Insert or update the record phase of one reaction, leaving any derived phase intact."""
+        """Insert or update the record phase of one reaction, leaving any derived phase intact.
+
+        `label.withheld` is written with it, so a re-ingest also clears a withdrawal it reverses.
+        """
+        raise NotImplementedError
+
+    async def withhold(self, source: str, reaction_id: str) -> None:
+        """Keep one reaction's row out of every read, leaving both phases as they are.
+
+        For an entry amended to citation-only, which writes no record phase. A no-op when the index
+        holds no row for the key.
+        """
         raise NotImplementedError
 
     async def stale(
@@ -170,20 +187,30 @@ class InMemoryLabelIndex(LabelIndex):
         species = [_carry_species(new, existing.species) for new in label.species]
         self._rows[key] = label.model_copy(update={**carried, "species": species})
 
+    async def withhold(self, source: str, reaction_id: str) -> None:
+        """Flag the held row, if there is one; both phases stay as they are."""
+        key = (source, reaction_id)
+        existing = self._rows.get(key)
+        if existing is not None:
+            self._rows[key] = existing.model_copy(update={"withheld": True})
+
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
     ) -> list[ReactionLabel]:
         """Rows whose stamp differs from `version`, in key order, capped at `limit`.
 
         An underived stamp at this version also counts as done, or an unlabellable batch would be
-        re-read on every pass.
+        re-read on every pass. A withheld row is skipped: nothing serves it, and an amended entry's
+        old reaction is not one to derive from.
         """
         allowed = frozenset(sources) if sources is not None else None
         current = {version, underived_stamp(version)}
         rows = [
             row
             for row in self._rows.values()
-            if row.labeller_version not in current and (allowed is None or row.source in allowed)
+            if row.labeller_version not in current
+            and not row.withheld
+            and (allowed is None or row.source in allowed)
         ]
         rows.sort(key=lambda r: (r.source, r.reaction_id))
         return rows[:limit]
@@ -224,11 +251,12 @@ class InMemoryLabelIndex(LabelIndex):
     async def coverage(
         self, version: str, reaction_keys: Iterable[tuple[str, str]] | None = None
     ) -> CorpusCoverage:
-        """Labelled-vs-total over the given keys, or over everything."""
+        """Labelled-vs-total over the given keys, or over everything, withheld rows left out."""
         if reaction_keys is None:
-            rows = list(self._rows.values())
+            held = list(self._rows.values())
         else:
-            rows = [self._rows[k] for k in reaction_keys if k in self._rows]
+            held = [self._rows[k] for k in reaction_keys if k in self._rows]
+        rows = [r for r in held if not r.withheld]
         return CorpusCoverage(
             labelled=sum(1 for r in rows if r.labeller_version == version),
             total=len(rows),
@@ -325,14 +353,15 @@ class PostgresLabelIndex(LabelIndex):
 
     # Record phase. `ON CONFLICT` names only the record columns, so a re-ingest keeps the derived
     # phase, unless `record_smiles` changed: then the derived phase is cleared and
-    # `labeller_version` reset to NULL, returning the row to `stale()`.
+    # `labeller_version` reset to NULL, returning the row to `stale()`. `withheld` is refreshed with
+    # them, so a re-publication clears it.
     _RECORD = """
         INSERT INTO reaction_labels (
             source, reaction_id, record_smiles, citation, performed_on,
-            temperature_c, time_h, yield_percent, workup_text
+            temperature_c, time_h, yield_percent, workup_text, withheld
         ) VALUES (
             %(source)s, %(reaction_id)s, %(record_smiles)s, %(citation)s, %(performed_on)s,
-            %(temperature_c)s, %(time_h)s, %(yield_percent)s, %(workup_text)s
+            %(temperature_c)s, %(time_h)s, %(yield_percent)s, %(workup_text)s, %(withheld)s
         )
         ON CONFLICT ON CONSTRAINT reaction_labels_pkey DO UPDATE SET
             record_smiles = EXCLUDED.record_smiles,
@@ -342,6 +371,7 @@ class PostgresLabelIndex(LabelIndex):
             time_h = EXCLUDED.time_h,
             yield_percent = EXCLUDED.yield_percent,
             workup_text = EXCLUDED.workup_text,
+            withheld = EXCLUDED.withheld,
             mapped_smiles = CASE WHEN reaction_labels.record_smiles = EXCLUDED.record_smiles
                 THEN reaction_labels.mapped_smiles END,
             named_reaction = CASE WHEN reaction_labels.record_smiles = EXCLUDED.record_smiles
@@ -383,8 +413,15 @@ class PostgresLabelIndex(LabelIndex):
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal >= %(kept)s
     """
 
+    # The one write `withhold()` makes; the phases are left as they are.
+    _WITHHOLD = """
+        UPDATE reaction_labels SET withheld = true
+        WHERE source = %(source)s AND reaction_id = %(reaction_id)s
+    """
+
     # `IS DISTINCT FROM`, not `<>`, so NULL (never derived) rows are stale. The underived stamp for
-    # this version is also not stale, or the row would be re-read every pass.
+    # this version is also not stale, or the row would be re-read every pass. A withheld row is
+    # skipped (see the in-memory twin).
     _STALE = """
         SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c,
                time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class,
@@ -392,6 +429,7 @@ class PostgresLabelIndex(LabelIndex):
         FROM reaction_labels
         WHERE labeller_version IS DISTINCT FROM %(version)s
           AND labeller_version IS DISTINCT FROM %(underived)s
+          AND NOT withheld
           AND (%(sources)s::text[] IS NULL OR source = ANY(%(sources)s::text[]))
         ORDER BY source, reaction_id
         LIMIT %(limit)s
@@ -427,20 +465,21 @@ class PostgresLabelIndex(LabelIndex):
     """
 
     # The one coverage projection (labelled at this version, total, sources present); each coverage
-    # read appends its own scope.
+    # read appends its own scope, and every scope leaves withheld rows out.
     _COVERAGE_COLUMNS = """
         SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*),
                array_agg(DISTINCT source)
         FROM reaction_labels
     """
 
-    _COVERAGE_ALL = _COVERAGE_COLUMNS
+    _COVERAGE_ALL = _COVERAGE_COLUMNS + " WHERE NOT withheld"
 
     _COVERAGE_KEYS = (
         _COVERAGE_COLUMNS
         + """
         JOIN unnest(%(sources)s::text[], %(ids)s::text[]) AS k(s, i)
           ON source = k.s AND reaction_id = k.i
+        WHERE NOT withheld
     """
     )
 
@@ -492,6 +531,12 @@ class PostgresLabelIndex(LabelIndex):
                     "kept": len(label.species),
                 },
             )
+            await conn.commit()
+
+    async def withhold(self, source: str, reaction_id: str) -> None:
+        """Flag one row by its key; an absent row updates nothing."""
+        async with self._connection() as conn:
+            await conn.execute(self._WITHHOLD, {"source": source, "reaction_id": reaction_id})
             await conn.commit()
 
     async def stale(
@@ -618,7 +663,7 @@ class PostgresLabelIndex(LabelIndex):
             "time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class, "
             "rxno_id, confidence, method, labeller_version, labelled_at "
             "FROM reaction_labels r "
-            f"WHERE labeller_version = %(version)s{where} "
+            f"WHERE labeller_version = %(version)s AND NOT r.withheld{where} "
             "ORDER BY source, reaction_id LIMIT %(limit)s"
         )
         async with self._connection() as conn, conn.cursor() as cur:
@@ -668,7 +713,7 @@ class PostgresLabelIndex(LabelIndex):
         between backends.
         """
         params: dict[str, Any] = {"version": version}
-        clauses: list[str] = []
+        clauses: list[str] = ["NOT withheld"]
         if facet.sources:
             params["sources"] = sorted(facet.sources)
             clauses.append("source = ANY(%(sources)s::text[])")
@@ -753,8 +798,10 @@ def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
     """Whether this row belongs to the facet's *denominator* — the coverage question.
 
     Narrower than `_matches`: only narrowings an unlabelled row can answer count, so unlabelled
-    reactions are not hidden from the coverage warning.
+    reactions are not hidden from the coverage warning. A withheld row is in no scope at all.
     """
+    if row.withheld:
+        return False
     if facet.sources and row.source not in facet.sources:
         return False
     # In scope because it reads the reaction's own key, which an unlabelled row has; without it the
@@ -858,11 +905,15 @@ def _record_params(label: ReactionLabel) -> dict[str, Any]:
         "time_h": label.time_h,
         "yield_percent": label.yield_percent,
         "workup_text": label.workup_text,
+        "withheld": label.withheld,
     }
 
 
 def _label_from_row(row: Sequence[Any], species: list[SpeciesLabel]) -> ReactionLabel:
-    """Rebuild a `ReactionLabel` from one `_STALE` row plus its species."""
+    """Rebuild a `ReactionLabel` from one `_STALE` row plus its species.
+
+    `withheld` is not selected and keeps its default: every read returning rows skips withheld ones.
+    """
     return ReactionLabel(
         source=str(row[0]),
         reaction_id=str(row[1]),

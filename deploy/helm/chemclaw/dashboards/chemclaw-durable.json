@@ -809,6 +809,62 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 19,
+      "type": "graph",
+      "title": "Where retrying gave up",
+      "description": "Activities that failed on the last attempt their retry class allows, by class, and per-item loops that stopped because consecutive items each failed after their whole retry window. `chemclaw_activity_failures_total` counts every attempt; these count the moment the retrying stopped. `io` climbing beside a stopped loop is Postgres; `remote` alone is a dependency outside the worker.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (activity_class) (increase(chemclaw_activity_retries_exhausted_total[1h]))",
+          "legendFormat": "{{activity_class}} out of attempts",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (workflow) (increase(chemclaw_loop_outage_stops_total[1h]))",
+          "legendFormat": "{{workflow}} stopped",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

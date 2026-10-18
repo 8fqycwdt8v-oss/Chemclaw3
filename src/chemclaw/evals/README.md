@@ -27,6 +27,11 @@ answer served it), `live.py` asks a running front door those questions and recor
 `live_judge.py` grades an answer against its probe's `direction` with a model as judge,
 `tool_utility.py` turns two graded answers into the tool-utility A/B, `delegation_run.py` is the run
 half of the delegation experiment, and `phoenix.py` publishes an archived probe run to Phoenix.
+`compliance.py` scores, with no judge, whether an answer recommends a solvent a standing preference
+prohibits — the instrument `make live-compliance` runs — and `compliance_run.py` is its run half: a
+control arm with nothing on file, then the same probes with the prohibition seeded through the
+preference store, refused before a turn is paid for when either arm cannot be shown to be what its
+name says.
 `autonomy.py` scores whether the *harness* behaved over a scripted transcript. `model_text.py` is the
 ship rule for a batch of model-text edits as pure code: the six metrics, the control's spread as the
 noise floor, and the table a pull request carries (`cli/model_text_eval.py` drives the runs).

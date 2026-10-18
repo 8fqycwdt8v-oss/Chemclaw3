@@ -332,6 +332,13 @@ _COUNTERS: dict[str, str] = {
         "Fan-out children that failed their retries and were dropped; their work is missing from "
         "an otherwise successful parent."
     ),
+    # A best-effort per-item loop that stopped because consecutive items each spent their whole
+    # retry window (`durable/loop_outage.py`); the run completes, so nothing else says it was short.
+    "chemclaw_loop_outage_stops_total": (
+        "Runs of a per-item loop that stopped early because several items in a row each failed "
+        "after their whole retry window, by workflow; the items not reached are left to the next "
+        "run."
+    ),
     # A turn whose connectors did not come up still answers from the remaining tools,
     # indistinguishably in the transcript. Counted per unreachable connector so one dark connector
     # and a dark fleet differ.
@@ -671,6 +678,12 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_activity_failures_total": (
         "Temporal activity attempts that failed, by activity — one row per attempt, so a retry "
         "storm is visible as a rate rather than only in the broker's own history."
+    ),
+    "chemclaw_activity_retries_exhausted_total": (
+        "Activities that failed on the last attempt their retry class allows, by class — one row "
+        "per activity that Temporal gave up on, where the failures counter has one per attempt. "
+        "A refusal of bad data ends an activity by classification and is not counted, nor is a "
+        "last attempt that times out, which ends on the server rather than failing in the worker."
     ),
     "chemclaw_worker_activities_cancelled_on_drain_total": (
         "In-flight activities cancelled because a worker's graceful-shutdown budget expired. Not "
@@ -1013,6 +1026,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_turn_resume_refused_total": ("reason",),
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
+    # A closed set fixed in source: `durable/registry.ActivityClass`, plus `unclassified`.
+    "chemclaw_activity_retries_exhausted_total": ("activity_class",),
     # A bundle name from the connector registry, matching the `chemclaw_connector_unhealthy` gauge's
     # label, so alerts can say which connector went dark.
     "chemclaw_connectors_unreachable_total": ("connector",),
@@ -1029,6 +1044,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_embedding_calls_total": ("outcome",),
     "chemclaw_db_query_failures_total": ("kind",),
     "chemclaw_job_lock_skipped_total": ("job",),
+    # A workflow type name fixed in source: the workflows that construct a `LoopOutage`.
+    "chemclaw_loop_outage_stops_total": ("workflow",),
 }
 
 # The most label sets one counter may hold. Label values come from configuration and possibly

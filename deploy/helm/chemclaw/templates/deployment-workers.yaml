@@ -110,6 +110,7 @@ spec:
               {{- end }}
               value: {{ $digits | quote }}
             {{- end }}
+            {{- include "chemclaw.erasureLedgerEnv" . | nindent 12 }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
@@ -123,6 +124,7 @@ spec:
             {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
             {{- include "chemclaw.extraSinkMounts" . | nindent 12 }}
             {{- include "chemclaw.documentShareMount" . | nindent 12 }}
+            {{- include "chemclaw.erasureLedgerMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       {{- /* The clone before the publish — see `deployment-service.yaml`. */}}
       initContainers:
@@ -132,3 +134,4 @@ spec:
         {{- include "chemclaw.volumes" . | nindent 8 }}
         {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}
         {{- include "chemclaw.documentShareVolume" . | nindent 8 }}
+        {{- include "chemclaw.erasureLedgerVolume" . | nindent 8 }}

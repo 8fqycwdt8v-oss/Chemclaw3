@@ -1,4 +1,4 @@
-"""Settings for the memory layers: synthesis, observations, retention and attachments.
+"""Settings for the memory layers: synthesis, observations, retention, erasure and attachments.
 
 One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
 owns the env prefix, `.env` loading and cross-section validators.
@@ -95,6 +95,12 @@ class MemorySettings(BaseSettings):
     # deleted nothing, every attempt; too small multiplies round trips. Sized against this schema's
     # worst row; a knob because row size and timeout are deployment facts.
     retention_delete_batch_rows: int = Field(default=10_000, gt=0)
+    # The erasure ledger (`core/erasure_ledger.py`): the file every applied erasure appends its
+    # record to, on a volume backed up apart from the database, because a restore rewinds any record
+    # kept inside it. Unset, an applied erasure is refused unless `erasure_ledger_kept_by_hand`
+    # states that the operator records each one; the CLI then prints the record to copy.
+    erasure_ledger_path: str = ""
+    erasure_ledger_kept_by_hand: bool = False
     # Mid-turn durable-job resume: a turn that launches a job waits this long for its result and
     # continues with it. Off by default since a held turn holds an admission permit; must stay below
     # `service_turn_timeout_seconds`.

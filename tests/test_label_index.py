@@ -13,6 +13,7 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.science.labels.facets import Facet
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import (
     InMemoryLabelIndex,
@@ -422,5 +423,58 @@ def test_a_version_that_already_carries_the_marker_is_refused_in_both_backends()
         await index.record(_label(rid))
         with pytest.raises(LabelIndexError, match="indistinguishable"):
             await index.store_labels(_derived(_label(rid)), underived_stamp(_VERSION))
+
+    _both_backends(_body)
+
+
+def test_a_withheld_row_answers_nothing_until_a_current_record_clears_it() -> None:
+    """A withheld row is in no selection, no coverage and no stale scan, and a re-record clears it.
+
+    `withhold` is the one write an entry amended to citation-only makes, and `withheld=True` on the
+    record phase is a withdrawn entry's; both rows stay in the table, which the app role cannot
+    delete from. The served control sits in the same scope, so an empty answer cannot pass by the
+    facet matching nothing.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        served, amended, withdrawn, pending = (
+            f"{tag}-wh-served",
+            f"{tag}-wh-amended",
+            f"{tag}-wh-withdrawn",
+            f"{tag}-wh-pending",
+        )
+        for rid in (served, amended):
+            await index.record(_label(rid))
+            await index.store_labels(_derived(_label(rid)), _VERSION)
+        await index.record(_label(withdrawn).model_copy(update={"withheld": True}))
+        await index.store_labels(_derived(_label(withdrawn)), _VERSION)
+        await index.record(_label(pending))
+        # The unscoped coverage read too, asserted by delta since the durable index is shared.
+        whole = (await index.coverage(_VERSION)).total
+        await index.withhold(_SOURCE, amended)
+        assert (await index.coverage(_VERSION)).total == whole - 1
+        await index.withhold(_SOURCE, pending)
+        before = await index.count()
+        await index.withhold(_SOURCE, f"{tag}-wh-never-recorded")
+        assert await index.count() == before, "withholding an absent row created one"
+
+        keys = frozenset((_SOURCE, rid) for rid in (served, amended, withdrawn, pending))
+        selection = await index.select(Facet(reaction_keys=keys), _VERSION, limit=50)
+        assert [row.reaction_id for row in selection.rows] == [served]
+        assert (selection.coverage.labelled, selection.coverage.total) == (1, 1)
+        coverage = await index.coverage(_VERSION, sorted(keys))
+        assert (coverage.labelled, coverage.total) == (1, 1)
+        # Under a newer version every derived row is stale again, so only withholding keeps one out.
+        stale = await index.stale("rxnlabel@2:roles1", limit=500, sources=[_SOURCE])
+        ids = {rid for _, rid in keys}
+        assert {row.reaction_id for row in stale} & ids == {served}, "a withheld row was handed on"
+
+        # A structured, current re-ingest of the same reaction serves it again, and the derived
+        # phase it already had comes back with it rather than being re-derived.
+        await index.record(_label(amended))
+        await index.record(_label(withdrawn))
+        selection = await index.select(Facet(reaction_keys=keys), _VERSION, limit=50)
+        assert [row.reaction_id for row in selection.rows] == sorted([served, amended, withdrawn])
+        assert all(row.named_reaction == "Buchwald-Hartwig amination" for row in selection.rows)
 
     _both_backends(_body)
