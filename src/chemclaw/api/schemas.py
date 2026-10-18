@@ -149,14 +149,32 @@ class QueuedMessageOut(BaseModel):
     mine: bool
 
 
-class SessionQueueOut(BaseModel):
-    """A session's line, first in line first, and whether a turn is running ahead of it here.
+class RunningTurnOut(BaseModel):
+    """The turn a session's line waits on — `SessionQueueOut.running_turn`.
 
-    `running` is this replica's view: the turn's pump lives in one process, so another replica
-    answers `false` for a turn it cannot see — the same scope `POST /sessions/{id}/turn/stop` has.
+    `sender` is whose turn it is, `started_at` when it took the session (for a resumed turn, when
+    it was resumed), and `question` what it asked — `None` while not yet recorded: a durable
+    deployment reads it from the transcript, which the turn writes once admitted, so a turn still
+    waiting for capacity has none yet. Any participant may read it, as they may the transcript.
+    """
+
+    sender: str
+    question: str | None
+    started_at: datetime
+
+
+class SessionQueueOut(BaseModel):
+    """A session's line, first in line first, and the turn running ahead of it.
+
+    `running` says whether a turn holds the session and `running_turn` whose it is (`None` exactly
+    when `running` is false). Both are the deployment's answer, the same on every replica: where
+    sessions are durable they are read from the shared turn claim, not from the memory of the
+    process that runs the turn. A hold that excludes a turn (a fork or a delete in progress) is not
+    a running turn.
     """
 
     running: bool
+    running_turn: RunningTurnOut | None = None
     waiting: list[QueuedMessageOut]
 
 

@@ -81,6 +81,11 @@ function applyEvent(evt, answerEl) {
       // Before it existed the same wait was a blank page followed by a 503.
       add("trace", "⏸ waiting for a free turn slot…");
       return answerEl;
+    case "turn_started":
+      // A message that waited in a shared session's line has taken the turn; it is no longer
+      // withdrawable, only stoppable.
+      add("trace", "▶ your message is running now");
+      return answerEl;
     case "plan":
       add("trace", "Plan:\n- " + (evt.todos || []).join("\n- "));
       return answerEl;

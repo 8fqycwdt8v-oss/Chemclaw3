@@ -1,8 +1,9 @@
 """A busy shared session is a line, every participant can watch a turn, and the inbox finds members.
 
-- The line: a message sent during another turn waits in order and runs as its own sender; only
-  the sender or owner may withdraw it, a removed member's message does not run, a full line is a
-  409, and a stranger can neither join nor read it.
+- The line: a message sent during another turn waits in order and runs as its own sender, saying
+  when it takes the turn; only the sender or owner may withdraw it, and a withdrawal that races the
+  hand-over wins; a removed member's message does not run, a full line is a 409, a stranger can
+  neither join nor read it, and the line names the running turn.
 - Fan-out: each participant follows the turn on its own buffer; a stalled watcher is cut off
   with `stream_lagged`, and leaving never stops the turn.
 - The inbox: `GET /plans/pending` lists a plan the caller authored in a session they are a
@@ -18,6 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -104,9 +106,9 @@ def _by_header(request: Request) -> Principal:
     return _PEOPLE[request.headers["x-test-user"]]
 
 
-def _served(agent: _Ledger) -> _Served:
+def _served(agent: _Ledger, **stores: Any) -> _Served:
     """The production app, principals by header, durable ownership faked, model faked."""
-    app = _app(agent, owner_store=_FakeOwnerStore())
+    app = _app(agent, owner_store=_FakeOwnerStore(), **stores)
     app.dependency_overrides[require_principal] = _by_header
     return _Served(app)
 
@@ -225,6 +227,17 @@ def test_a_message_sent_during_anothers_turn_waits_in_order_and_runs_as_its_send
     cat_places = [e["position"] for e in cat[1] if e["type"] == "queued" and e["ticket"]]
     assert ben_places == [0], ben[1]
     assert cat_places[0] == 1 and cat_places[-1] == 0, cat[1]
+    # The hand-over is said, once, between the last place and anything the turn itself sends; a
+    # turn that never waited does not say it.
+    assert not any(e["type"] == "turn_started" for e in ana[1]), ana[1]
+    for _status, events in (ben, cat):
+        kinds = [e["type"] for e in events]
+        ticket = next(e["ticket"] for e in events if e["type"] == "queued" and e["ticket"])
+        started = kinds.index("turn_started")
+        assert kinds.count("turn_started") == 1, kinds
+        assert events[started]["ticket"] == ticket, events
+        assert set(kinds[:started]) == {"queued"}, kinds
+        assert not any(e["type"] == "queued" and e["ticket"] for e in events[started:]), events
 
 
 async def _started(agent: _Ledger, count: int) -> bool:
@@ -312,6 +325,170 @@ def test_only_the_sender_or_the_owner_withdraws_a_waiting_message() -> None:
     assert [message for message, _actor, _roles in agent.ran] == ["hold ana"], (
         "a withdrawn message ran anyway"
     )
+
+
+async def _is_set(event: threading.Event) -> bool:
+    """Whether `event` is set, as an `_until` predicate."""
+    return event.is_set()
+
+
+def test_a_withdrawal_that_lands_during_the_hand_over_wins_and_the_message_never_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ben's message is at the head, mid-re-check, when he withdraws it: 204, and it never runs.
+
+    The re-check at the head is held open so the withdrawal lands after the waiter last saw its
+    ticket and before it takes the turn — the window in which a 204 used to be followed by the
+    message running anyway. Afterwards the ticket is gone, so a second withdrawal is a 404.
+    """
+    armed, entered, go = threading.Event(), threading.Event(), threading.Event()
+
+    async def _held_at_the_head(request: Request, principal: Principal) -> Principal:
+        if armed.is_set() and principal.oid == _BEN.oid:
+            entered.set()
+            while not go.is_set():
+                await asyncio.sleep(0.01)
+        return await _reauthorize_by_header(request, principal)
+
+    monkeypatch.setattr(turns_module, "reauthorize", _held_at_the_head)
+    agent = _Ledger()
+
+    async def _run() -> tuple[Any, ...]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_post(client, _BEN, session_id, "ben asks"))
+                await _until(lambda: _waiting(client, session_id, 1))
+                (entry,) = await _line(client, session_id)
+                armed.set()
+                await _until(lambda: _is_set(entered))
+                _ran(agent, served, session_id)
+                await ana
+                withdraw = f"/sessions/{session_id}/queue/{entry['ticket']}"
+                withdrawn = (await client.delete(withdraw, headers=_as(_BEN))).status_code
+                go.set()
+                status, events = await ben
+                again = (await client.delete(withdraw, headers=_as(_BEN))).status_code
+                await _until(lambda: _quiet(served))
+                return withdrawn, status, events, again, dict(served.app.state.queue_waiters)
+
+    withdrawn, status, events, again, left = asyncio.run(_run())
+    assert withdrawn == 204 and status == 200, (withdrawn, status)
+    assert [message for message, _actor, _roles in agent.ran] == ["hold ana"], (
+        "a message ran after its withdrawal was answered 204"
+    )
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "queue_cancelled", events
+    assert not any(event["type"] == "turn_started" for event in events), events
+    assert again == 404
+    assert left == {}, f"a withdrawn message kept its place in the process ledger: {left}"
+
+
+def test_the_line_names_the_running_turn_its_sender_its_question_and_its_start() -> None:
+    """While Ana's turn runs, Ben reads whose it is, what it asked and since when; then nothing."""
+    agent = _Ledger()
+
+    async def _run() -> tuple[dict[str, Any], dict[str, Any], float, float]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                before = time.time()
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                path = f"/sessions/{session_id}/queue"
+                during = (await client.get(path, headers=_as(_BEN))).json()
+                after_start = time.time()
+                _ran(agent, served, session_id)
+                await ana
+                after = (await client.get(path, headers=_as(_BEN))).json()
+                return during, after, before, after_start
+
+    during, after, before, after_start = asyncio.run(_run())
+    running = during["running_turn"]
+    assert during["running"] is True and running is not None, during
+    assert (running["sender"], running["question"]) == (_ANA.oid, "hold ana"), running
+    started = datetime.fromisoformat(running["started_at"]).timestamp()
+    assert before <= started <= after_start, (before, started, after_start)
+    assert (after["running"], after["running_turn"]) == (False, None), after
+
+
+class _ParkedClaims:
+    """The durable turn claim, in memory, whose claims on `park` wait until `go` is set.
+
+    Stands in for the database round trip a hand-over awaits between taking the process's slot and
+    holding the session — the moment a message could count as both a waiter and a turn.
+    """
+
+    def __init__(self) -> None:
+        """Nothing claimed, nothing parked."""
+        self.held: dict[str, str] = {}
+        self.park: str | None = None
+        self.parked = threading.Event()
+        self.go = threading.Event()
+
+    async def claim(
+        self, session_id: str, holder: str, lease_seconds: float, *, actor: str | None = None
+    ) -> bool:
+        """Take the session unless it is held, after parking if it is the one being watched."""
+        if session_id == self.park:
+            self.parked.set()
+            while not self.go.is_set():
+                await asyncio.sleep(0.01)
+        if session_id in self.held:
+            return False
+        self.held[session_id] = holder
+        return True
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """An in-memory claim does not lapse; it is ours while we hold it."""
+        return self.held.get(session_id) == holder
+
+    async def release(self, session_id: str, holder: str) -> None:
+        """Give the session back, only if this holder has it."""
+        if self.held.get(session_id) == holder:
+            del self.held[session_id]
+
+
+def test_a_message_taking_the_turn_counts_once_against_its_senders_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mid-hand-over, Ben's message is one turn: with a cap of two, his next message elsewhere runs.
+
+    The hand-over is held inside its durable claim. A message counted there both as a waiter and
+    as the turn it is becoming would put Ben at two and refuse his other session 429.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)
+    agent = _Ledger()
+    claims = _ParkedClaims()
+
+    async def _run() -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+        with _served(agent, turn_claims=claims) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                bens = str((await client.post("/sessions", headers=_as(_BEN))).json()["session_id"])
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_post(client, _BEN, session_id, "ben asks"))
+                await _until(lambda: _waiting(client, session_id, 1))
+                claims.park = session_id
+                agent.gate.set()
+                await ana
+                await _until(lambda: _is_set(claims.parked))
+                status, elsewhere = await _post(client, _BEN, bens, "ben elsewhere")
+                claims.go.set()
+                _status, queued = await ben
+                served.wait_for_slot_release(session_id)
+                return status, elsewhere, queued
+
+    status, elsewhere, queued = asyncio.run(_run())
+    assert status == 200 and elsewhere[-1]["type"] == "answer", (status, elsewhere)
+    assert queued[-1]["type"] == "answer", queued
+    assert sorted(message for message, _actor, _roles in agent.ran) == [
+        "ben asks",
+        "ben elsewhere",
+        "hold ana",
+    ]
 
 
 def test_a_member_removed_while_waiting_does_not_have_their_message_run() -> None:
@@ -790,8 +967,9 @@ async def _exercise(queue: TurnQueue, session_id: str) -> None:
     assert await queue.position(session_id, first, lease) == 0
     assert await queue.position(session_id, second, lease) == 1
     assert [entry.sender for entry in await queue.waiting(session_id)] == ["ben", "cat"]
-    await queue.leave(session_id, first)
-    await queue.leave(session_id, first)  # idempotent
+    # Idempotent, and only the call that removed the ticket says so: the hand-over's decision.
+    assert await queue.leave(session_id, first) is True
+    assert await queue.leave(session_id, first) is False
     assert await queue.position(session_id, first, lease) is None
     assert await queue.position(session_id, second, lease) == 0
     # A lapsed place stops counting as ahead of anybody, and the next enqueue sweeps it.
@@ -800,6 +978,7 @@ async def _exercise(queue: TurnQueue, session_id: str) -> None:
     await asyncio.sleep(0.2)
     assert await queue.position(session_id, fourth, lease) == 1  # only `second` is ahead
     assert await queue.position(session_id, third, lease) is None
+    assert await queue.leave(session_id, third) is False, "a swept ticket was left twice"
     await queue.leave(session_id, second)
     await queue.leave(session_id, fourth)
     assert await queue.waiting(session_id) == []

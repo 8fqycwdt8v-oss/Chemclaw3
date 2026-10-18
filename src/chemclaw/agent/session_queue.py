@@ -64,8 +64,12 @@ class TurnQueue(Protocol):
         """Live tickets ahead of this one (0 = next), refreshing it; `None` once it is gone."""
         ...
 
-    async def leave(self, session_id: str, ticket: int) -> None:
-        """Take `ticket` out of the line (idempotent)."""
+    async def leave(self, session_id: str, ticket: int) -> bool:
+        """Take `ticket` out of the line (idempotent); whether this call removed it while live.
+
+        The answer decides a hand-over: a waiter taking the turn and a withdrawal both leave, and
+        only the one that removed the ticket goes on. A lapsed ticket is already out of the line.
+        """
         ...
 
     async def waiting(self, session_id: str) -> list[QueuedMessage]:
@@ -95,7 +99,12 @@ _POSITION = (
     "        WHERE q.session_id = %s AND q.ticket < mine.ticket AND q.lease_until > now()) "
     "FROM mine"
 )
-_LEAVE = "DELETE FROM session_turn_queue WHERE session_id = %s AND ticket = %s"
+# Deletes a lapsed row too, but reports only a live one as removed: a lapsed ticket is already out
+# of the line (`_POSITION`), so leaving it decides nothing.
+_LEAVE = (
+    "DELETE FROM session_turn_queue WHERE session_id = %s AND ticket = %s "
+    "RETURNING lease_until > now()"
+)
 _WAITING = (
     "SELECT ticket, sender, enqueued_at FROM session_turn_queue "
     "WHERE session_id = %s AND lease_until > now() ORDER BY ticket"
@@ -146,12 +155,14 @@ class SessionTurnQueue:
             await conn.commit()
         return None if row is None else int(row[0])
 
-    async def leave(self, session_id: str, ticket: int) -> None:
-        """Delete this ticket; a ticket already gone is not an error."""
+    async def leave(self, session_id: str, ticket: int) -> bool:
+        """Delete this ticket; one already gone or lapsed is not an error, and answers `False`."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_LEAVE, (session_id, ticket))
+                row = await cur.fetchone()
             await conn.commit()
+        return row is not None and bool(row[0])
 
     async def waiting(self, session_id: str) -> list[QueuedMessage]:
         """The live line, first in line first."""
@@ -229,13 +240,15 @@ class InMemoryTurnQueue:
                 return index
         return None
 
-    async def leave(self, session_id: str, ticket: int) -> None:
-        """Drop this ticket; a ticket already gone is not an error."""
-        line = [entry for entry in self._live(session_id) if entry.ticket != ticket]
+    async def leave(self, session_id: str, ticket: int) -> bool:
+        """Drop this ticket; one already gone or lapsed is not an error, and answers `False`."""
+        live = self._live(session_id)
+        line = [entry for entry in live if entry.ticket != ticket]
         if line:
             self._lines[session_id] = line
         else:
             self._lines.pop(session_id, None)
+        return len(line) < len(live)
 
     async def waiting(self, session_id: str) -> list[QueuedMessage]:
         """The live line, first in line first."""

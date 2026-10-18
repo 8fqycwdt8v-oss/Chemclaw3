@@ -8,7 +8,8 @@ are driven at the routes a client calls:
 - a Stop sent to B ends the turn on A, and its question settles `stopped`;
 - the sender-or-owner rule and the session gate hold on B: a member cannot stop somebody else's
   turn (403), and a non-participant can neither follow nor stop it (404);
-- an unload stop sent to B is deferred on A, and the sender reattaching on B cancels it.
+- an unload stop sent to B is deferred on A, and the sender reattaching on B cancels it;
+- the session's line names the same running turn — sender, question, start — on A and on B.
 """
 
 import asyncio
@@ -298,6 +299,53 @@ def test_an_unload_stop_sent_to_another_replica_waits_and_the_senders_reattach_c
     assert deferred.json() == {"stopped": False, "deferred": True}
     assert events[-1]["type"] == "answer", "the reattach on B did not cancel the unload stop on A"
     assert watched[-1] == events[-1]
+
+
+def test_every_replica_names_the_running_turn_from_the_shared_claim(
+    two_replicas: Callable[[], tuple[_Gated, Any]],
+) -> None:
+    """Ana's turn runs on A; Ben reads the same running turn on A and on B; then neither has one."""
+    agent, (a, b) = two_replicas()
+
+    async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        with a, b:
+            async with (
+                httpx.AsyncClient(base_url=a.base, timeout=30) as on_a,
+                httpx.AsyncClient(base_url=b.base, timeout=30) as on_b,
+            ):
+                session_id = await _shared_session(on_a)
+                sender = asyncio.create_task(_post(on_a, session_id, "hold ana", _as(_ANA)))
+                await _until(lambda: agent.started == ["hold ana"])
+                assert session_id not in b.app.state.active_turns, "the turn must be A's alone"
+                path = f"/sessions/{session_id}/queue"
+                during = [
+                    (await client.get(path, headers=_as(_BEN))).json() for client in (on_a, on_b)
+                ]
+                agent.gate.set()
+                await sender
+                # The durable claim is released just after the process's slot; read until both
+                # replicas have seen it go, or the deadline, and let the assertion say which.
+                deadline = asyncio.get_running_loop().time() + 15
+                while True:
+                    after = [
+                        (await client.get(path, headers=_as(_BEN))).json()
+                        for client in (on_a, on_b)
+                    ]
+                    if not any(line["running"] for line in after):
+                        break
+                    if asyncio.get_running_loop().time() > deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                return during, after
+
+    during, after = asyncio.run(_run())
+    on_a, on_b = during
+    assert on_a == on_b, "two replicas named different running turns"
+    assert on_b["running"] is True, on_b
+    running = on_b["running_turn"]
+    assert (running["sender"], running["question"]) == (_ANA.oid, "hold ana"), running
+    assert running["started_at"], running
+    assert all((line["running"], line["running_turn"]) == (False, None) for line in after), after
 
 
 def test_a_follow_and_a_stop_on_the_holding_replica_are_unchanged(

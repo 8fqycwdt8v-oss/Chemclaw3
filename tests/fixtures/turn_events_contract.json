@@ -139,6 +139,9 @@
       "result_ref": "str",
       "tool": "str",
       "values": "list[ResultValue]"
+    },
+    "turn_started": {
+      "ticket": "int"
     }
   }
 }

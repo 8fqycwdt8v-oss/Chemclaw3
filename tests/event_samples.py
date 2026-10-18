@@ -29,12 +29,14 @@ from chemclaw.api.events import (
     ToolFailedEvent,
     ToolQueuedEvent,
     ToolResultEvent,
+    TurnStartedEvent,
 )
 
 #: Keyed `<type>/<shape>`; the type is the SSE `event:` name and the `data:` discriminator.
 SAMPLES: dict[str, Event] = {
     "queued/full": QueuedEvent(ticket=7, position=2),
     "queued/minimal": QueuedEvent(),
+    "turn_started/full": TurnStartedEvent(ticket=7),
     "plan/full": PlanEvent(todos=["screen bases", "run DoE"], plan_hash="ab12", scope=["calc"]),
     "plan/minimal": PlanEvent(todos=[]),
     "tool_call/full": ToolCallEvent(

@@ -29,6 +29,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from chemclaw.api.events import ErrorEvent, sse_frame
@@ -127,6 +128,8 @@ class DetachableTurn:
         survive_disconnect: bool = True,
         on_detach: Callable[[], None] | None = None,
         correlation_id: str = "",
+        sender: str | None = None,
+        question: str = "",
     ) -> None:
         """Start pumping `source` immediately; the turn is running from this moment.
 
@@ -138,10 +141,15 @@ class DetachableTurn:
         sender's reader is gone and the turn continues, to give back what was held for the reader
         (see `chemclaw.api.routes.turns`); it runs inside a cancellation and must not raise or
         block. `correlation_id` is the starting request's, so a reattaching page can tell its turn
-        from a later one (`TURN_CORRELATION_HEADER`).
+        from a later one (`TURN_CORRELATION_HEADER`). `sender` and `question` are whose turn it is
+        and what it asks; with `started_at` (stamped by `RunningTurns.register`) they describe the
+        running turn where no shared store does.
         """
         self._session_id = session_id
         self.correlation_id = correlation_id
+        self.sender = sender
+        self.question = question
+        self.started_at: datetime | None = None
         self._survive_disconnect = survive_disconnect
         self._on_detach = on_detach
         self._sender = _Reader()
@@ -466,7 +474,8 @@ class RunningTurns:
         self._waiters: dict[str, list[asyncio.Future[None]]] = {}
 
     def register(self, session_id: str, turn: DetachableTurn) -> None:
-        """Track `turn` as the session's running turn until its pump finishes."""
+        """Track `turn` as the session's running turn until its pump finishes; stamp its start."""
+        turn.started_at = datetime.now(UTC)
         self._turns[session_id] = turn
         turn._task.add_done_callback(lambda _t: self._forget(session_id, turn))
         for waiter in self._waiters.pop(session_id, []):

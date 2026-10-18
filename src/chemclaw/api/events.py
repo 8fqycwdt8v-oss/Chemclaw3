@@ -40,6 +40,22 @@ class QueuedEvent(BaseModel):
     position: int | None = None
 
 
+class TurnStartedEvent(BaseModel):
+    """A message that waited in the session's line has taken the turn and is about to run.
+
+    (`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`.) Sent once, as the
+    turn's first frame, the moment the message's place became the running turn; it is for the
+    message's own stream, and a participant already watching sees it too. From here the message is
+    no longer in the line: `DELETE /sessions/{id}/queue/{ticket}` answers 404 and `POST
+    /sessions/{id}/turn/stop` is what ends it. A withdrawal that removed the ticket first wins
+    instead, and the stream ends on `queue_cancelled`; a stream carries one of the two, never both.
+    A turn that never waited does not send it. `ticket` is the place the message held.
+    """
+
+    type: Literal["turn_started"] = "turn_started"
+    ticket: int
+
+
 class PlanEvent(BaseModel):
     """The agent's current plan/todo list (harness mode) — rendered as a checklist.
 
@@ -702,6 +718,7 @@ class ExhibitDraftEvent(BaseModel):
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
     QueuedEvent
+    | TurnStartedEvent
     | PlanEvent
     | ToolCallEvent
     | TokenEvent
