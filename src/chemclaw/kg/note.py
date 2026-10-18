@@ -21,6 +21,8 @@ from chemclaw.kg import relations
 # [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only. Public because
 # the report layer strips the same markup from evidence excerpts — one pattern, no drift.
 WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+_STRIP_PASSES = 4
+_BRACKET_RUN = re.compile(r"\[{2,}|\]{2,}")
 
 
 def split_link(target: str) -> tuple[str, str]:
@@ -45,11 +47,15 @@ def strip_links(text: str) -> str:
     outgoing edge the report never cited. Reduces to the target via `split_link`, so a typed edge
     does not leak its relation prefix into prose.
     """
-    # To a fixpoint: removing the inner link of `[[[[x]]]]` leaves a live `[[x]]` behind. Each pass
-    # that changes the text shortens it, so the loop ends.
-    while (stripped := WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)) != text:
+    # Removing the inner link of `[[[[x]]]]` leaves a live `[[x]]`, so strip again; a few passes
+    # cover honest nesting. Deeper nesting peels one layer per pass (quadratic in its depth), so
+    # what survives the passes has its bracket runs collapsed: no `[[` is left to be a link.
+    for _ in range(_STRIP_PASSES):
+        stripped = WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
+        if stripped == text:
+            return text
         text = stripped
-    return text
+    return _BRACKET_RUN.sub(lambda match: match.group(0)[0], text)
 
 
 def as_cell(text: str) -> str:
