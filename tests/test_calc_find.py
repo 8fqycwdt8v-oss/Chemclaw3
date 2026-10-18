@@ -83,6 +83,13 @@ def test_a_molecule_filter_is_refused_on_a_structure_keyed_family() -> None:
     """
     with pytest.raises(ValueError, match="keyed by 3-D structure"):
         CalculationQuery(smiles="CCO", calc_type="xtb.energy")
+    # The bare family name addresses no stored type either, so it is the same refusal rather than
+    # an empty answer.
+    for bare in ("xtb", "geometry"):
+        with pytest.raises(ValueError, match="keyed by 3-D structure"):
+            CalculationQuery(smiles="CCO", calc_type=bare)
+    # A type that merely begins with the letters is a different family.
+    assert CalculationQuery(smiles="CCO", calc_type="xtbfoo").calc_type == "xtbfoo"
     # Without a molecule filter the same family is perfectly queryable.
     assert CalculationQuery(calc_type="xtb.energy").calc_type == "xtb.energy"
 

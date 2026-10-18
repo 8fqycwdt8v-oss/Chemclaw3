@@ -277,7 +277,9 @@ class CalculationQuery(BaseModel):
         """Refuse a molecule filter on a family a molecule cannot address."""
         if self.smiles is None or self.calc_type is None:
             return self
-        if self.calc_type.startswith(STRUCTURE_KEYED_PREFIXES):
+        # The dot is appended so a bare family name (`xtb`) is refused like `xtb.energy`; no stored
+        # type is a bare family, so it would otherwise answer empty.
+        if f"{self.calc_type}.".startswith(STRUCTURE_KEYED_PREFIXES):
             raise ValueError(
                 f"{self.calc_type!r} is keyed by 3-D structure, not by molecule, so it cannot be "
                 "found by SMILES. Give a `structure_id` instead — the st_... address a geometry "
