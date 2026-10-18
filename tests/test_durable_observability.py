@@ -75,6 +75,7 @@ from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
     ResultPayload,
+    StoredResult,
     cached_compute,
 )
 from tests.pg import migrated_db_or_skip
@@ -608,6 +609,39 @@ def test_the_cache_separates_a_hit_a_miss_and_a_shared_computation() -> None:
         f"two avoided computations of ~0.05 s each credited {saved:.4f} s — a cache hit is "
         "counted and never valued"
     )
+
+
+def test_a_finished_calculation_survives_its_cache_write_failing() -> None:
+    """The computed value is returned, and the unstored write is counted, not raised.
+
+    The answer is the expensive part; losing it to the database's error would also fail every
+    waiter that joined the computation. The next lookup misses and recomputes, which is the price.
+    """
+
+    class _BrokenPut(InMemoryStore):
+        async def put(self, entry: StoredResult) -> None:
+            raise ConnectionError("the database went away")
+
+    metrics = Metrics()
+    store = _BrokenPut()
+    started = asyncio.Event()
+
+    async def _compute() -> ResultPayload:
+        started.set()
+        await asyncio.sleep(0.01)
+        return {"energy": 1.0}
+
+    async def _run() -> list[tuple[ResultPayload, bool]]:
+        leader = asyncio.create_task(cached_compute(store, _key("b"), _compute))
+        await started.wait()
+        waiter = asyncio.create_task(cached_compute(store, _key("b"), _compute))
+        return list(await asyncio.gather(leader, waiter))
+
+    with _using(metrics):
+        results = asyncio.run(_run())
+
+    assert results == [({"energy": 1.0}, False), ({"energy": 1.0}, True)]
+    assert 'chemclaw_calc_cache_total{outcome="unstored"} 1' in metrics.render()
 
 
 # --------------------------------------------------------------------------------------------
