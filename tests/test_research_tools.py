@@ -403,3 +403,38 @@ def test_gather_evidence_records_the_kept_half_of_the_source_metric_pair(
         "gather_evidence did not move chemclaw_evidence_source_kept_total — the metric has no "
         "producer on its one production path"
     )
+
+
+def test_a_share_authors_wikilink_reaches_the_model_as_its_target_only(tmp_path: Path) -> None:
+    """A `[[note-id]]` in a share document is stripped like a note excerpt's, not passed verbatim.
+
+    The evidence envelope is read by a model that could be steered by a link it takes for a real
+    graph edge; a share's author is not the knowledge graph's.
+    """
+    from chemclaw.ingest.documents.binding import load_binding
+    from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+    from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+    from chemclaw.ingest.documents.sync import sync_share
+
+    mount = tmp_path / "share" / "Docs"
+    mount.mkdir(parents=True)
+    (mount / "report.md").write_text(
+        "The yield was measured; see [[reaction-secret]] and [[supports:reaction-other]].",
+        encoding="utf-8",
+    )
+    binding = {
+        "mount": str(tmp_path / "share"),
+        "roots": [{"path": "Docs"}],
+        "extensions": [".md"],
+        "public": True,
+    }
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share("sharedrive", load_binding(binding), index))
+    share = ShareDocumentRetriever(binding=binding, name="sharedrive", index=index)
+
+    chunks = asyncio.run(share.retrieve("yield measured", {}))
+
+    assert chunks, "the fixture must retrieve the document"
+    text = " ".join(chunk.content for chunk in chunks)
+    assert "[[" not in text, text
+    assert "reaction-secret" in text and "reaction-other" in text

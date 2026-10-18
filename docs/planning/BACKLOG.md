@@ -23,8 +23,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   refuse it at construction (at least under `entra_required`); `publish/drivers/http.py::HttpResultSink`.
 - [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
   which holds only for bundles this repo serves; frame or mark it, or correct the claim; `agent/tool_authz.py::answered_failure`.
-- [ ] **Share-document chunks reach the model with their wikilinks intact** [S] — note excerpts and report cells strip links, share chunks do not, so a share author's `[[note-id]]`
-  arrives verbatim inside the envelope; strip as `retrieval/retrievers.py::_excerpt` does; `ingest/documents/retriever.py::ShareDocumentRetriever._chunks`.
 
 ### Answers that are wrong without saying so
 
