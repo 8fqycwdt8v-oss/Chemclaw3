@@ -195,8 +195,8 @@ def read_records(path: Path) -> list[ErasureRecord]:
         except (ValueError, LedgerError) as exc:
             raise LedgerError(
                 f"{path} line {number} is not an erasure record ({exc}): {text[:200]!r}. A line "
-                "cut short by a crash belongs to an erasure that committed: re-run that erasure (it "
-                "is idempotent and records itself), then delete the line"
+                "cut short by a crash belongs to an erasure that committed: re-run that erasure "
+                "(it is idempotent and records itself), then delete the line"
             ) from exc
     return records
 

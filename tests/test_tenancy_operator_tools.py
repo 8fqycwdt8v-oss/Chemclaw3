@@ -111,7 +111,8 @@ async def test_erasing_a_person_can_cover_every_tenant(
 ) -> None:
     """A person who works in two tenants is erased from both by `--all-tenants`.
 
-    Recorded once per tenant, because a replay re-applies each record in the tenant it names.
+    Recorded once per registered tenant, `default` included (the migration seeds it), because a
+    replay re-applies each record in the tenant it names.
     """
 
     async def scenario(database: TenancyDatabase) -> None:
@@ -121,6 +122,7 @@ async def test_erasing_a_person_can_cover_every_tenant(
         records = erasure_ledger.read_records(ledger)
         assert sorted((r.actor, r.tenant) for r in records) == [
             ("alice", "acme"),
+            ("alice", "default"),
             ("alice", "globex"),
         ]
 
