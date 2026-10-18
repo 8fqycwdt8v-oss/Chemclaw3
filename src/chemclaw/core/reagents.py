@@ -149,8 +149,12 @@ _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
 }
 
 
-def _normalize(name: str) -> str:
-    """Fold a written name to its lookup key: case, whitespace, and separator punctuation."""
+def spelling_key(name: str) -> str:
+    """Fold a written name to its lookup key: case, whitespace, and separator punctuation.
+
+    Public so a reader scanning free text (`evals/compliance.py`) folds a span exactly as this table
+    folds its keys, and `synonyms_of` spellings compare equal to it.
+    """
     folded = name.strip().lower()
     for noise in (" ", "-", "_", "'", "’"):
         folded = folded.replace(noise, "")
@@ -162,7 +166,7 @@ def _build_table() -> dict[str, tuple[str, str]]:
     table: dict[str, tuple[str, str]] = {}
     for key, (smiles, display) in _RAW_SYNONYMS.items():
         try:
-            table[_normalize(key)] = (require_canonical_smiles(smiles), display)
+            table[spelling_key(key)] = (require_canonical_smiles(smiles), display)
         except InvalidSmilesError as exc:  # pragma: no cover - a table typo, caught at import
             raise ValueError(f"reagent table entry {key!r} has unparseable SMILES: {exc}") from exc
     return table
@@ -224,7 +228,7 @@ def resolve_compound_name(name: str) -> ResolvedCompound | None:
     Returns `None` rather than guessing: a fabricated structure is strictly worse than an honest
     miss.
     """
-    lookup = _TABLE.get(_normalize(name))
+    lookup = _TABLE.get(spelling_key(name))
     if lookup is not None:
         smiles, display = lookup
         return ResolvedCompound(query=name, smiles=smiles, name=display, source="synonym")

@@ -53,7 +53,7 @@ SHELL := bash
   kind-smoke synthesize reindex reindex-full reembed share-estimate share-sync rekey-compounds user-erase \
   openapi sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
-  live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
+  live-jobs live-probes live-ab live-delegation live-compliance live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe live-replicas \
   retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval \
@@ -426,6 +426,10 @@ live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and co
 
 live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
+
+live-compliance:  ## Prohibited-solvent compliance: a control arm, then a preference seeded (real gateway).
+	CHEMCLAW_SESSION_STORE=$${CHEMCLAW_SESSION_STORE:-postgres} \
+	  uv run python -m chemclaw.cli.live_probes --suite compliance $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)

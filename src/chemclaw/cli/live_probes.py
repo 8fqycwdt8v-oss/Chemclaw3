@@ -6,9 +6,11 @@ printed beside the verdict counts, never folded into them.
 
 `--suite` selects what is asked; the default is the corpus. The M12 suites (`plan-gate`,
 `degradation`) each run their own probe file from `settings.live_m12_probe_dir` and are scored
-mechanically. They share this entry point's client and transcript discipline so harnesses cannot
-disagree about what a turn did. Every suite exits non-zero on a failed check or one it could not
-take: a measurement that did not happen is not one that passed.
+mechanically, as is `compliance`, which asks `compliance.PATH_PROBES` in a control arm and again
+with a prohibition seeded through the preference store. They share this entry point's client and
+transcript discipline so harnesses cannot disagree about what a turn did. Every suite exits non-zero
+on a failed check or one it could not take: a measurement that did not happen is not one that
+passed.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.markdown import render_table
-from chemclaw.evals import delegation_run
+from chemclaw.evals import compliance, compliance_run, delegation_run
 from chemclaw.evals.ab import ABSummary, TaskScores
 from chemclaw.evals.delegation import (
     BASELINE_ARM,
@@ -727,8 +729,9 @@ async def _drive_delegation_arm(
     """
     records: list[delegation_run.ArmRepeat] = []
     asked = [_marked(probe, behaviour) if mock else probe for probe in probes]
-    for repeat in range(1, args.repeats + 1):
-        logger.info("delegation arm %s, repeat %d/%d", spec.arm, repeat, args.repeats)
+    repeats = args.repeats or MINIMUM_REPEATS
+    for repeat in range(1, repeats + 1):
+        logger.info("delegation arm %s, repeat %d/%d", spec.arm, repeat, repeats)
         outcomes = await run_probes(
             asked,
             base_url=args.base_url,
@@ -910,11 +913,79 @@ async def _run_delegation(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_compliance(args: argparse.Namespace) -> int:
+    """Suite C — whether a prohibited solvent stays out of the answers, against a control arm.
+
+    Exits 3 when nothing reached the front door; 2 when an arm could not be prepared, the gateway
+    was the scripted mock, the run is below `compliance.MINIMUM_REPEATS`, a path is blind (its
+    control never recommended the species) or the seed did not hold — each after writing what it
+    measured; 0 otherwise. The pass rate is a measurement, so a low one is not a failure.
+    """
+    probes = compliance_run.path_probes(load_probes(args.probe_dir))
+    repeats = args.repeats or compliance.MINIMUM_REPEATS
+    directory = _suite_dir(args.transcript_dir, "compliance")
+    try:
+        async with _client(args.base_url) as client:
+            run = await compliance_run.run_arms(
+                probes, repeats, client=client, base_url=args.base_url, directory=directory
+            )
+    except compliance_run.ArmRefused as exc:
+        logger.error("%s", exc)
+        return 2
+    except httpx.HTTPError as exc:
+        logger.error("could not open a session on the front door to learn its actor: %s", exc)
+        return 3
+    if not any(record.session_id for record in run.records):
+        logger.error("not one of the %d turn(s) reached the front door", len(run.records))
+        return 3
+
+    provenance = [
+        _gateway_line(),
+        f"actor `{run.owner}`; preference arm seeded `{compliance.PROHIBITION.key}` = "
+        f"{compliance.PROHIBITION.value!r} through the preference store, control arm with nothing "
+        "on file naming it",
+        f"{repeats} repeat(s) per arm and path"
+        + (
+            ""
+            if repeats >= compliance.MINIMUM_REPEATS
+            else f" — **below the floor of {compliance.MINIMUM_REPEATS}, a reading, not a rate**"
+        ),
+        f"transcripts in `{directory}`",
+    ]
+    if not run.seed_held:
+        provenance.append(
+            "**the seed was no longer on file when the preference arm ended**: a turn removed it, "
+            "so that arm's later repeats ran as a second control"
+        )
+    report = compliance.render_report(run.records, provenance)
+    print(report)
+    _write_suite(
+        directory,
+        report,
+        {"owner": run.owner, "records": [record.model_dump() for record in run.records]},
+    )
+    blind = compliance.blind_paths(compliance.tally(run.records))
+    problems = [
+        "the gateway was the scripted mock" if _scripted_gateway() else "",
+        "the run is below the repeat floor" if repeats < compliance.MINIMUM_REPEATS else "",
+        f"blind on {', '.join(blind)}" if blind else "",
+        "the seed did not hold" if not run.seed_held else "",
+    ]
+    if any(problems):
+        logger.error(
+            "this run measured less than it reports: %s", "; ".join(p for p in problems if p)
+        )
+        return 2
+    return 0
+
+
 async def _main(args: argparse.Namespace) -> int:
     if args.suite == "ab":
         return await _run_ab(args)
     if args.suite == "delegation":
         return await _run_delegation(args)
+    if args.suite == "compliance":
+        return await _run_compliance(args)
     if args.suite in _M12_SUITES:
         runner = {
             "plan-gate": _run_plan_gate,
@@ -1027,12 +1098,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         default="corpus",
-        choices=["corpus", "ab", "delegation", *sorted(_M12_SUITES)],
+        choices=["corpus", "ab", "delegation", "compliance", *sorted(_M12_SUITES)],
         help=(
             "corpus (the default single-arm run), ab (the same probes in both arms, the baseline "
             "one being a profile that swaps the prompt as well as the tools), delegation (the "
-            "delegation experiment's arms over the delegation corpus), or one M12 re-validation "
-            "suite"
+            "delegation experiment's arms over the delegation corpus), compliance (one probe per "
+            "answer path, with and without a prohibited solvent seeded as a preference, scored "
+            "mechanically), "
+            "or one M12 re-validation suite"
         ),
     )
     parser.add_argument(
@@ -1046,11 +1119,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--repeats",
         type=_positive,
-        default=MINIMUM_REPEATS,
+        default=None,
         help=(
-            "--suite delegation only: repeats per (task, arm). Defaults to "
-            "`evals.delegation.MINIMUM_REPEATS`, which is where the floor is argued; the "
-            "comparator's own floor is not lowered by this flag."
+            "--suite delegation and compliance: repeats per (task, arm). Defaults to the suite's "
+            "own floor — `evals.delegation.MINIMUM_REPEATS` or `evals.compliance.MINIMUM_REPEATS`, "
+            "which is where each is argued; neither floor is lowered by this flag."
         ),
     )
     parser.add_argument(
