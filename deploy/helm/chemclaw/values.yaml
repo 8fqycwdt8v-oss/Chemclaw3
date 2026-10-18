@@ -265,6 +265,26 @@ documentShare:
   accessMode: ""
   mountPath: "/mnt/sharedrive"
 
+# The erasure ledger (`core/erasure_ledger.py`; runbook § Backup, restore and PITR): every applied
+# `erase_actor` appends one line (the actor id, its commit time, its scope) to a file a database
+# restore cannot rewind, and after a restore `erase_actor --replay-since <recovery point>` re-applies
+# every line newer than the point. **Provide the PersistentVolumeClaim yourself, on storage backed up
+# apart from the database**: a ledger restored from the database's own snapshot is rewound with it,
+# which is the gap it exists to close. Mounted read-write on the background worker alone — the pod
+# the runbook runs `erase_actor` in — and named to it as CHEMCLAW_ERASURE_LEDGER_PATH.
+#
+# Off, an applied erasure is refused until the release states the other posture in `config`:
+# `CHEMCLAW_ERASURE_LEDGER_KEPT_BY_HAND: "true"`, meaning the operator records every erasure.
+erasureLedger:
+  enabled: false
+  claimName: "chemclaw-erasure-ledger"
+  # The access mode of the claim above, as you created it. With more than one background worker it
+  # must be ReadWriteMany: every worker mounts the claim and appends to the one file, under a POSIX
+  # record lock (honoured by NFS and CephFS). Unchecked at one worker.
+  accessMode: ""
+  mountPath: "/var/lib/chemclaw/erasure-ledger"
+  fileName: "erasures.jsonl"
+
 # The knowledge graph is a Git-backed Markdown tree that every reader resolves as a plain local
 # directory, so a pod only sees a merged note once something writes it to that pod's filesystem
 # (gap DEP-1). `sync` is that something: an init container fills the tree before the pod serves

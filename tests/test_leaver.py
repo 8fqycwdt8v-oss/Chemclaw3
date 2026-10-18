@@ -9,9 +9,11 @@ while an id that merely contains theirs is not. Postgres-backed; skipped without
 
 import asyncio
 import contextlib
+import errno
 import io
 import math
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -38,15 +40,27 @@ from chemclaw.agent.session_store import (
     SessionTurnClaims,
     _session_delete_statements,
 )
+from chemclaw.cli.erase_actor import EXIT_UNRECORDED
 from chemclaw.cli.erase_actor import main as erase_actor_main
+from chemclaw.core import erasure_ledger
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.core.erasure_ledger import ErasureRecord
 from chemclaw.durable.digest import digest_channel
 from chemclaw.exhibits.models import parse_spec
 from chemclaw.exhibits.store import PostgresExhibitStore
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An erasure ledger in a directory of its own, configured for the CLI's applied runs."""
+    path = tmp_path / "erasures.jsonl"
+    monkeypatch.setattr(settings, "erasure_ledger_path", str(path))
+    monkeypatch.setattr(settings, "erasure_ledger_kept_by_hand", False)
+    return path
 
 
 def _runbook_section(text: str, heading: str) -> str:
@@ -928,7 +942,7 @@ def test_the_finish_says_what_it_leaves_behind() -> None:
         assert len(why.split()) >= 8, f"{table} is named without a reason a reader can act on"
 
 
-def test_the_cli_finishes_a_residue_and_says_so_in_its_exit_code() -> None:
+def test_the_cli_finishes_a_residue_and_says_so_in_its_exit_code(ledger: Path) -> None:
     """The CLI finishes a residue and says so in its exit code.
 
     The actor run exits `2` and prints the residual session ids; the finish run over exactly those
@@ -1151,3 +1165,189 @@ async def test_a_members_artefact_in_someone_elses_session_is_reported_and_finda
             await cur.execute(query, {"id": _BEN})
             rows = await cur.fetchall()
     assert (session, made.exhibit_id) in {(row[0], row[1]) for row in rows}
+
+
+# --- The erasure ledger: every applied erasure is recorded where a restore cannot rewind it. -----
+
+
+def _cli(*argv: str) -> tuple[int, str, str]:
+    """`erase_actor`'s real entry point, with what it printed on each stream."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = erase_actor_main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+async def _database_clock() -> datetime:
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT clock_timestamp()")
+            row = await cur.fetchone()
+    assert row is not None
+    instant: datetime = row[0]
+    return instant
+
+
+def _instant(at: datetime) -> str:
+    """An instant as an operator passes it, in Postgres's own spelling."""
+    return at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f+00")
+
+
+def test_an_applied_erasure_with_no_ledger_is_refused_by_name_and_erases_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal comes before the deletion: an erasure a restore cannot find is the defect."""
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-iris-{uuid4().hex[:8]}"
+    asyncio.run(_seed(actor, f"sess-{actor}"))
+    monkeypatch.setattr(settings, "erasure_ledger_path", "")
+    monkeypatch.setattr(settings, "erasure_ledger_kept_by_hand", False)
+
+    code, _, err = _cli(actor, "--apply")
+    assert code == 1
+    assert "CHEMCLAW_ERASURE_LEDGER_PATH" in err and "CHEMCLAW_ERASURE_LEDGER_KEPT_BY_HAND" in err
+    assert asyncio.run(_count("session_owners", "owner", actor)) == 1, "it erased anyway"
+    # A dry run writes nothing, so it needs no ledger.
+    assert _cli(actor)[0] == 0
+
+
+def test_an_applied_erasure_is_recorded_on_the_database_clock_and_a_dry_run_is_not(
+    ledger: Path,
+) -> None:
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-iris-{uuid4().hex[:8]}"
+    asyncio.run(_seed(actor, f"sess-{actor}"))
+
+    assert _cli(actor)[0] == 0
+    assert not ledger.exists(), "a dry run recorded an erasure that did not happen"
+
+    before = asyncio.run(_database_clock())
+    code, out, _ = _cli(actor, "--apply")
+    after = asyncio.run(_database_clock())
+    assert code == 0, out
+    assert f"Recorded in the erasure ledger {ledger}" in out
+    (record,) = erasure_ledger.read_records(ledger)
+    assert (record.actor, record.tenant, record.route) == (actor, "default", "actor")
+    assert before < record.at < after, "stamped after the commit, by the database's clock"
+    assert asyncio.run(_count("session_owners", "owner", actor)) == 0
+
+
+def test_with_the_record_kept_by_hand_an_erasure_prints_the_line_to_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-iris-{uuid4().hex[:8]}"
+    asyncio.run(_seed(actor, f"sess-{actor}"))
+    monkeypatch.setattr(settings, "erasure_ledger_path", "")
+    monkeypatch.setattr(settings, "erasure_ledger_kept_by_hand", True)
+
+    code, out, _ = _cli(actor, "--apply")
+    assert code == 0, out
+    (line,) = [text for text in out.splitlines() if text.startswith("RECORD THIS ERASURE")]
+    record = ErasureRecord.parse(line.split(": ", 1)[1])
+    assert (record.actor, record.tenant) == (actor, "default")
+
+
+def test_an_erasure_whose_record_cannot_be_written_says_it_committed_and_how_to_record_it(
+    ledger: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 3, never "erasure failed": the rows are gone, and re-running records it."""
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-iris-{uuid4().hex[:8]}"
+    asyncio.run(_seed(actor, f"sess-{actor}"))
+
+    def full_disk(_path: Path, _record: ErasureRecord) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    real_append = erasure_ledger.append
+    monkeypatch.setattr(erasure_ledger, "append", full_disk)
+    code, _, err = _cli(actor, "--apply")
+    assert code == EXIT_UNRECORDED
+    assert "COMMITTED" in err and "erasure failed" not in err
+    (line,) = [text for text in err.splitlines() if text.startswith('{"actor"')]
+    assert ErasureRecord.parse(line).actor == actor, "the line to record by hand"
+    assert asyncio.run(_count("session_owners", "owner", actor)) == 0
+
+    monkeypatch.setattr(erasure_ledger, "append", real_append)
+    assert _cli(actor, "--apply")[0] == 0, "the remedy the message names"
+    assert [r.actor for r in erasure_ledger.read_records(ledger)] == [actor]
+
+
+def test_a_replay_re_applies_what_the_ledger_records_after_the_point_and_only_that(
+    ledger: Path,
+) -> None:
+    """Restore, then replay: the person's rows go again; a replay twice is a replay once.
+
+    The restore is stood in for by writing the person's rows back under the same session id, which
+    is what a restore to before the erasure leaves.
+    """
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-jonas-{uuid4().hex[:8]}"
+    session = f"sess-{actor}"
+    asyncio.run(_seed(actor, session))
+    assert _cli(actor, "--apply")[0] == 0
+    (erased,) = erasure_ledger.read_records(ledger)
+    asyncio.run(_seed(actor, session))
+
+    code, out, _ = _cli("--replay-since", _instant(erased.at + timedelta(seconds=1)))
+    assert code == 0 and "nothing to re-apply" in out
+    point = _instant(erased.at - timedelta(microseconds=1))
+    code, out, _ = _cli("--replay-since", point)
+    assert code == 0 and "WOULD RE-APPLY 1 erasure(s)" in out
+    assert asyncio.run(_count("session_owners", "owner", actor)) == 1, "a dry run wrote"
+
+    code, out, _ = _cli("--replay-since", point, "--apply")
+    assert code == 0, out
+    assert asyncio.run(_count("session_owners", "owner", actor)) == 0
+    assert asyncio.run(_count("session_messages", "session_id", session)) == 0
+    assert asyncio.run(_count("user_preferences", "owner", actor)) == 0
+    # The re-applied erasure is recorded too, so a restore to before this replay finds it.
+    first, replayed = erasure_ledger.read_records(ledger)
+    assert replayed.actor == actor and replayed.at > first.at
+
+    code, out, _ = _cli("--replay-since", point, "--apply")
+    assert code == 0 and "RE-APPLIED 1 erasure(s)" in out, "a repeat is re-applied once"
+
+
+def test_a_replay_finishes_a_residue_the_restore_brought_back(ledger: Path) -> None:
+    """A finish is recorded and replayed by session id, after the actor erasure it finished.
+
+    The restore is stood in for by writing the residue again: a restore to between the actor run
+    and its finish holds the orphaned rows and no ownership row.
+    """
+    asyncio.run(migrated_db_or_skip())
+    actor = f"oid-kai-{uuid4().hex[:8]}"
+    session = f"sess-{actor}"
+    asyncio.run(_seed(actor, session))
+    assert _cli(actor, "--apply")[0] == 0
+    asyncio.run(_write_racing_rows(session, messages=1))
+    assert _cli("--finish", session, "--apply")[0] == 0
+    erased, finished = erasure_ledger.read_records(ledger)
+    assert (finished.actor, finished.sessions, finished.route) == (None, (session,), "finish")
+
+    asyncio.run(_write_racing_rows(session, messages=1))
+    code, out, _ = _cli("--replay-since", _instant(erased.at), "--apply")
+    assert code == 0, out
+    assert "RE-APPLIED 1 erasure(s)" in out, "only the finish is after the actor run"
+    assert asyncio.run(_count("session_messages", "session_id", session)) == 0
+
+
+def test_a_replay_refuses_without_a_ledger_to_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ledger configured, or none at the path: a refusal, never "nothing to re-apply"."""
+    monkeypatch.setattr(settings, "erasure_ledger_path", "")
+    code, _, err = _cli("--replay-since", "2026-10-14 09:41:00+00")
+    assert code == 1 and "nothing to replay from" in err
+
+    absent = tmp_path / "erasures.jsonl"
+    monkeypatch.setattr(settings, "erasure_ledger_path", str(absent))
+    code, _, err = _cli("--replay-since", "2026-10-14 09:41:00+00", "--apply")
+    assert code == 1 and "create it empty" in err
+    assert not absent.exists(), "the replay created the ledger it was refusing to read"
+
+    code, _, err = _cli("--replay-since", "2026-10-14 09:41:00")
+    assert code == 1 and "no UTC offset" in err
+    with pytest.raises(SystemExit) as refused:
+        erase_actor_main(["--replay-since", "2026-10-14 09:41:00+00", "--tenant", "acme"])
+    assert refused.value.code == 2, "a record names its tenant"

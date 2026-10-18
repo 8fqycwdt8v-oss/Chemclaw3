@@ -15,10 +15,19 @@ from pathlib import Path
 import pytest
 
 from chemclaw.cli import erase_actor
+from chemclaw.core import erasure_ledger
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.tenant_registry import forget_registered_tenants
 from tests.tenancy_db import TenancyDatabase, enable_tenancy, tenancy_database
+
+
+@pytest.fixture
+def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The erasure ledger an applied erasure needs before it runs."""
+    path = tmp_path / "erasures.jsonl"
+    monkeypatch.setattr(settings, "erasure_ledger_path", str(path))
+    return path
 
 
 @pytest.fixture
@@ -68,7 +77,10 @@ async def _seed_sessions(database: TenancyDatabase) -> None:
 
 
 async def test_erasing_a_person_with_no_tenant_refuses_instead_of_reporting_success(
-    tenancy_on: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tenancy_on: None,
+    ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The repro: `--apply` with no tenant printed all zeros and exited 0."""
 
@@ -82,7 +94,7 @@ async def test_erasing_a_person_with_no_tenant_refuses_instead_of_reporting_succ
 
 
 async def test_erasing_a_person_acts_for_the_named_tenant_only(
-    tenancy_on: None, monkeypatch: pytest.MonkeyPatch
+    tenancy_on: None, ledger: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--tenant acme` removes acme's session and leaves the same person's globex session."""
 
@@ -95,20 +107,33 @@ async def test_erasing_a_person_acts_for_the_named_tenant_only(
 
 
 async def test_erasing_a_person_can_cover_every_tenant(
-    tenancy_on: None, monkeypatch: pytest.MonkeyPatch
+    tenancy_on: None, ledger: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A person who works in two tenants is erased from both by `--all-tenants`."""
+    """A person who works in two tenants is erased from both by `--all-tenants`.
+
+    Recorded once per registered tenant, `default` included (the migration seeds it), because a
+    replay re-applies each record in the tenant it names.
+    """
 
     async def scenario(database: TenancyDatabase) -> None:
         await _seed_sessions(database)
         assert await _main(erase_actor.main, "alice", "--apply", "--all-tenants") == 0
         assert await _sessions(database) == {}
+        records = erasure_ledger.read_records(ledger)
+        assert sorted((r.actor, r.tenant) for r in records) == [
+            ("alice", "acme"),
+            ("alice", "default"),
+            ("alice", "globex"),
+        ]
 
     await _in_two_tenants(monkeypatch, scenario)
 
 
 async def test_a_tenant_that_is_not_registered_is_refused(
-    tenancy_on: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tenancy_on: None,
+    ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A mistyped tenant is not a quiet run over nothing."""
 
