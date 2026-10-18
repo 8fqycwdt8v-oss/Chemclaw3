@@ -5,17 +5,20 @@ rounds, rating, stage failures), through a real Temporal worker, since those def
 once Temporal sequences the activities.
 """
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
 import pytest
 from temporalio import activity, workflow
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.durable import hypothesis_tournament as ht
+from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
 from chemclaw.durable.hypothesis_tournament import (
     HypothesisTournamentWorkflow,
     TournamentRequest,
@@ -714,6 +717,74 @@ async def test_a_template_check_runs_the_reviewed_procedure_and_reports_it() -> 
     assert "defaults: solvent" in row["outcome"]["ran"]
 
 
+#: Every start of the stand-in `ConnectorJobWorkflow`, as `(attempt, task queue)`. Module level for
+#: the reason `_TEMPLATE_RUNS` is.
+_JOB_ATTEMPTS: list[tuple[int, str]] = []
+
+
+@workflow.defn(name="ConnectorJobWorkflow", sandboxed=False)
+class _FailingConnectorJobWorkflow:
+    """Stands in for the connector-job wrapper and fails as a lost job would: retryably."""
+
+    @workflow.run
+    async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
+        info = workflow.info()
+        _JOB_ATTEMPTS.append((info.attempt, info.task_queue))
+        raise ApplicationError(f"{job.job} lost its worker")
+
+
+async def test_a_job_check_runs_its_wrapper_once_on_the_queue_that_serves_it() -> None:
+    """A job check runs its wrapper once, on the queue that serves it.
+
+    The wrapper is core's workflow, so it must start where core's worker polls, not on the bundle
+    queue its job runs on; and it gets one attempt, as on the chat and template paths, because the
+    job's activities already carry the retry and a restart would re-run the whole job.
+    """
+    _JOB_ATTEMPTS.clear()
+
+    @activity.defn(name="ground_check_job")
+    async def ground(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> ht._GroundedJob:
+        return _grounded(
+            connector="calc",
+            job="compare_solvents",
+            job_workflow="CompareSolventsWorkflow",
+            task_queue="connector-calc",
+            payload={"reactants": ["CCO"]},
+            ran="compare_solvents(reactants=[[compound-x]])",
+        )
+
+    @activity.defn(name="read_check_result")
+    async def read(
+        check: DiscriminatingCheck, result: str, requested_by: str = "", correlation_id: str = ""
+    ) -> ht._CheckVerdict:
+        return ht._CheckVerdict(verdict="inconclusive")
+
+    field = [_hypothesis("a", "the first explanation")]
+    call = CheckCall(job="compare_solvents", subjects={"reactants": ["compound-x"]})
+    result = await asyncio.wait_for(
+        _run_with(
+            [ground, read],
+            _stubs(field=field, check_kind="computable", check_call=call),
+            _request("q-job-once"),
+            children=[_FailingConnectorJobWorkflow],
+        ),
+        # A wrapper started on a queue nobody serves never runs; bounded so that is a failure.
+        timeout=60,
+    )
+
+    assert _JOB_ATTEMPTS == [(1, _QUEUE)], (
+        f"the wrapper was started as {_JOB_ATTEMPTS}; it must run exactly once, on {_QUEUE!r}"
+    )
+    outcome = result.data["ranked"][0]["outcome"]
+    assert outcome["refusal_code"] == "calculation-failed"
+    assert outcome["verdict"] == "inconclusive"
+
+
 async def test_a_template_check_that_cannot_be_grounded_is_reported_not_dropped() -> None:
     """A refusal is an outcome carrying its code, the same as on the other two halves."""
 
@@ -819,7 +890,6 @@ async def test_a_failed_evidence_sweep_costs_its_evidence_and_not_the_run() -> N
     A Temporal-level failure (timeout, lost worker) arrives as `ActivityError`; the tournament ranks
     on prose rather than discarding paid-for angles and generation.
     """
-    from temporalio.exceptions import ApplicationError
 
     @activity.defn(name="gather_hypothesis_evidence")
     async def gather(
@@ -888,8 +958,6 @@ async def test_a_check_that_names_nothing_does_not_spend_the_calculation_budget(
 
 async def test_a_tool_check_temporal_could_not_complete_is_reported_not_dropped() -> None:
     """Mirrors `_settle_jobs`: a dispatched check that failed has an outcome and a code."""
-    from temporalio.exceptions import ApplicationError
-
     attempts: list[str] = []
 
     @activity.defn(name="run_computable_check")
@@ -1046,3 +1114,36 @@ async def test_a_model_authored_hypothesis_id_is_bounded_where_it_enters(
     ids = [h.id for h in batch.hypotheses]
     assert ids[0] == "x" * ht._MAX_HYPOTHESIS_ID
     assert ids[1] == f"h-{stable_hash(['an unsafe one'])}"
+
+
+async def test_a_model_call_is_asked_once_per_activity_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tournament model call is asked once per activity attempt.
+
+    Each model activity is `REMOTE`, so Temporal retries it, spaced and jittered; the SDK's own
+    `llm_max_retries` inside each attempt would multiply the two. Counted on the wire, against a
+    gateway that is down, with the SDK's setting left above zero.
+    """
+    import httpx
+
+    asked: list[str] = []
+
+    def _down(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        # `retry-after-ms` keeps an SDK retry, if one happened, from waiting out its own backoff.
+        return httpx.Response(503, headers={"retry-after-ms": "1"}, json={"error": "down"})
+
+    transport = httpx.MockTransport(_down)
+    clients = (httpx.Client(transport=transport), httpx.AsyncClient(transport=transport))
+    monkeypatch.setattr("chemclaw.agent.llm_provider._tls_http_clients", lambda: clients)
+    monkeypatch.setattr(settings, "llm_max_retries", 3)
+    monkeypatch.setattr(settings, "llm_fallback_base_url", "")
+
+    with pytest.raises(Exception, match="503"):
+        await ht.draft_angles(_request("q-gateway-down"))
+
+    assert len(asked) == 1, (
+        f"one activity attempt asked the gateway {len(asked)} times; Temporal's attempts are the "
+        "retry, and the SDK's on top multiply them"
+    )

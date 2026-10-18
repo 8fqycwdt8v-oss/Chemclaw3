@@ -8,12 +8,13 @@ Two questions, two pairs of names, so a caller cannot pick the wrong one by omit
   They key `compound_id`, the fingerprint index and species matching in `memory`, where a
   hydrochloride and its free base are one substance.
 
-`standardize` is the conventional pipeline: `Cleanup` (metals disconnected first, atom maps
-cleared), keep the organic fragment and drop its counterions and known solvents, `Uncharger`, then
-one tautomer per set with stereo preserved (RDKit's default would merge enantiomers). Dropping the
-counterion is declined where it is false: nothing organic remains (NaOH, K2CO3), the metal is the
-chemistry (`_metal_is_the_compound`), two or more fragments are organic (a solvate names no
-winner), or neutralizing would remove a hydride (`_neutralization_is_protonation`). Alkali salts of
+`standardize` is the conventional pipeline: `Cleanup` (metals disconnected first, keeping their
+hydrides and charge, atom maps cleared), keep the organic fragment and drop its counterions and
+known solvents, `Uncharger`, then one tautomer per set with stereo preserved (RDKit's default would
+merge enantiomers). Dropping the counterion is declined where it is false: nothing organic remains
+(NaOH, K2CO3), the metal is the chemistry (`_metal_is_the_compound`), two or more fragments are
+organic (a solvate names no winner), or neutralizing would remove or invent a hydride
+(`_neutralization_is_protonation`). Alkali salts of
 organic acids (KOtBu, NaOMe, LDA) still collapse onto the acid, as sodium acetate does
 (`D-2026-09-09-a-map-number-is-not-a-molecule`; pinned in `tests/test_compound_identity.py`).
 """
@@ -38,7 +39,7 @@ from chemclaw.core.ids import stable_hash
 # `chemclaw.cli.rekey_compounds` (`make rekey-compounds`) re-fingerprints shelved rows and writes a
 # `supersedes` link from each compound note's new id to its old one, so pre-bump citations still
 # resolve. `tests/test_compound_identity.py` pins what `standardize` does at this version.
-STANDARDIZATION_VERSION = "std12"
+STANDARDIZATION_VERSION = "std13"
 
 # The d- and f-block by atomic number (Sc-Zn, Y-Cd, La-Hg with the lanthanides, Ac onward): the
 # metals a synthesis uses to do the chemistry, so a species containing one is identified as the
@@ -203,12 +204,19 @@ def _hydrogen_count(mol: Chem.Mol) -> int:
     return sum(a.GetTotalNumHs() + (1 if a.GetAtomicNum() == 1 else 0) for a in mol.GetAtoms())
 
 
+def _metal_hydrogens(mol: Chem.Mol) -> list[int]:
+    """The hydrogen count on each metal atom, in atom order: where a species keeps its hydrides."""
+    return [a.GetTotalNumHs() for a in mol.GetAtoms() if a.GetAtomicNum() in _METALS]
+
+
 def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
     """Whether `Uncharger` reached the neutral species by adding protons, as the strip assumes.
 
     For an anion, neutralization must add hydrogens; if it removed one (sodium triacetoxyborohydride
     becoming triacetoxyborane) the species is kept as written. Tested on what the transformation
-    did, not on an element list, so it covers anions not yet seen.
+    did, not on an element list, so it covers anions not yet seen. A metal's hydrogens are hydrides,
+    never protons, and `Uncharger` re-derives them on a metal cation (`[AlH+2]` becomes `[AlH3]`),
+    so any change to them keeps the species as written too.
 
     For a cation (a protonated amine, pyridinium) neutralization legitimately removes a proton, so
     the cation arm is exempt, but only when no fragment in the string is anionic: the net charge of
@@ -216,6 +224,8 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
     cation falls to the net hydrogen count and may be kept charged; keeping a species as written
     costs a cache miss, while a per-fragment pairing could silently produce a wrong molecule.
     """
+    if _metal_hydrogens(after) != _metal_hydrogens(before):
+        return False
     if Chem.GetFormalCharge(before) > 0 and not any(
         Chem.GetFormalCharge(f) < 0 for f in Chem.GetMolFrags(before, asMols=True)
     ):
@@ -227,16 +237,49 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
 _METAL_DISCONNECTOR = rdMolStandardize.MetalDisconnector()
 
 
+def _disconnected(mol: Chem.Mol) -> Chem.Mol:
+    """`MetalDisconnector`'s cut, keeping each cut metal's hydrogens and its fragment's charge.
+
+    Upstream resets a metal it cuts to no hydrogens and re-derives them from a valence model the
+    d-block lacks (`[PdH]Cl` would become `[Cl-].[Pd+]`, the salt without its hydride), and sets
+    its charge from the electrons the cut moved while dropping a negative charge the metal carried
+    (`Cl[Pd-2](Cl)(Cl)Cl` would be Pd(IV), and an aluminate hydride would fail valence). A cut only
+    moves each bond's electrons onto its ligand, so the metal keeps its hydrogens and takes the
+    charge that conserves its fragment's, and a covalent spelling meets the ionic one. A fragment
+    with two cut metals has no unique share of the charge and keeps upstream's.
+    """
+    disconnected = _METAL_DISCONNECTOR.Disconnect(mol)
+    for fragment in Chem.GetMolFrags(mol):
+        pairs = [(mol.GetAtomWithIdx(i), disconnected.GetAtomWithIdx(i)) for i in fragment]
+        cut = [
+            (before, after)
+            for before, after in pairs
+            if before.GetAtomicNum() in _METALS and after.GetDegree() < before.GetDegree()
+        ]
+        for before, after in cut:
+            after.SetNumExplicitHs(before.GetTotalNumHs())
+            after.SetNoImplicit(True)
+        if len(cut) == 1:
+            _, metal = cut[0]
+            metal.SetFormalCharge(
+                metal.GetFormalCharge()
+                + sum(before.GetFormalCharge() - after.GetFormalCharge() for before, after in pairs)
+            )
+    disconnected.UpdatePropertyCache(strict=False)
+    return disconnected
+
+
 def _cleaned(mol: Chem.Mol) -> Chem.Mol:
     """`Cleanup`, with the metal disconnection taken before it rather than inside it.
 
     `Cleanup`'s own disconnector runs after sanitizing, so a cyclopentadienide freed from a metal
     stayed flagged non-aromatic and `Reionize` moved protons across fragments, making `standardize`
     non-idempotent on ferrocenes. Disconnecting first lets `Cleanup`'s `RemoveHs` re-perceive the
-    ring. `Reionize` can still oscillate on a vinyl anion written as one (`[C-]1=CCC=C1`), a
-    spelling the pipeline no longer produces.
+    ring, and `Cleanup`'s own pass then finds nothing left to cut, so it cannot undo
+    `_disconnected`. `Reionize` can still oscillate on a vinyl anion written as one
+    (`[C-]1=CCC=C1`), a spelling the pipeline no longer produces.
     """
-    return rdMolStandardize.Cleanup(_METAL_DISCONNECTOR.Disconnect(mol))
+    return rdMolStandardize.Cleanup(_disconnected(mol))
 
 
 def _uncharged(mol: Chem.Mol) -> Chem.Mol:

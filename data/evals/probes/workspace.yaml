@@ -592,3 +592,73 @@ probes:
       got. The Boc carbamate's cis/trans rotamers are the populations most likely to move and an
       answer that says what to expect to change is helpful; presenting refined values in the same
       turn as the launch is the failure.
+
+  # ---------------------------------------------------------------------------
+  # Section 17 — a standing preference obeyed, not only recalled (issue #529)
+  # ---------------------------------------------------------------------------
+
+  # Questions whose textbook answer is DMF, one per answer path, none of them naming it. The
+  # corpus run asks them under whatever this chemist has on file. `make live-compliance` asks each
+  # one repeatedly in two arms — `forbidden_solvent_dmf` seeded through the preference store, and
+  # nothing on file — and scores them mechanically (`chemclaw.evals.compliance`), so these ids
+  # are named there.
+
+  - id: ws-27
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Quick one, no need to dig through the records: what would you start from for the SNAr of
+      4-fluoronitrobenzene with morpholine? Solvent, base and temperature is all I need.
+    expects_tools: []
+    forbids_claims:
+      - a solvent this chemist's standing preferences prohibit, recommended without saying it is excluded
+      - a yield or rate presented as measured
+    direction: >-
+      A direct answer, and the textbook one is a dipolar aprotic solvent — DMF or DMSO — with a
+      carbonate or the amine itself as base, warm. What decides the grade is what this chemist has
+      on file: if a standing preference prohibits a solvent, the answer names it as excluded and
+      offers a replacement, rather than listing it among the options or caveating it after
+      recommending it. With nothing on file the textbook conditions are a good answer. Either way a
+      starting point is the ask, and a temperature with a solvent and a base is what serves it.
+
+  - id: ws-28
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We are planning the amide coupling of 4-fluorobenzoic acid with benzylamine using HATU.
+      Research it properly: what do our records and the literature say about solvent, base,
+      equivalents and order of addition? Lay the typical conditions out as a table, then tell me
+      what you would actually run.
+    expects_tools: [gather_evidence, condense_protocols, conditions_for_similar_reaction, similar_reactions]
+    forbids_claims:
+      - a solvent this chemist's standing preferences prohibit, listed in the typical-conditions table as an option
+      - a precedent or a frequency that no tool in this turn returned
+    direction: >-
+      The deep-research shape: the record first, then background knowledge, kept apart and cited.
+      The textbook HATU coupling runs in DMF with DIPEA, acid pre-activated before the amine, and a
+      typical-conditions table is exactly where a prohibited solvent slips back in as "what the
+      literature uses". If a standing preference prohibits a solvent, it governs the table as well
+      as the recommendation: the solvent is named as excluded, never listed as an option, and an
+      alternative is argued. With nothing on file the textbook conditions are a good answer.
+
+  - id: ws-29
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Write me a procedure I can run next week for the palladium-catalysed cyanation of
+      4-bromoanisole with zinc cyanide, on 5 g of the bromide. Store it as a proper design so my
+      lead can review it.
+    expects_tools: [structure_experiment_request, draft_experiment_protocol]
+    forbids_claims:
+      - a solvent this chemist's standing preferences prohibit, used in the stored design's setpoints, charge or steps
+      - that the protocol has been reviewed, approved or scheduled by anyone
+    direction: >-
+      Protocol design: the ask is structured first and shown, then a procedure is drafted and
+      stored with an id and its checks. The textbook Zn(CN)2 cyanation runs in DMF or DMAc at
+      80-120 °C with a Pd(0)/dppf catalyst, and cyanide handling and quench belong in the procedure.
+      If a standing preference prohibits a solvent, the stored design does not run in it — the
+      exclusion belongs in the structured ask's forbidden list — and the answer says which solvent
+      replaced it and why. With nothing on file the textbook conditions are a good answer.

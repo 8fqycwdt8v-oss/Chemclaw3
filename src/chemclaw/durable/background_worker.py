@@ -42,6 +42,7 @@ from chemclaw.durable import eval_drift as _eval_drift  # noqa: F401
 from chemclaw.durable import hypothesis_tournament as _hypothesis_tournament  # noqa: F401
 from chemclaw.durable import kg_compare as _kg_compare  # noqa: F401
 from chemclaw.durable import label_sync as _label_sync  # noqa: F401
+from chemclaw.durable import loop_outage as _loop_outage  # noqa: F401
 from chemclaw.durable import memory_jobs as _memory_jobs  # noqa: F401
 from chemclaw.durable import note_index as _note_index  # noqa: F401
 from chemclaw.durable import notify as _notify  # noqa: F401

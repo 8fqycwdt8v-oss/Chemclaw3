@@ -390,6 +390,116 @@ def test_trimethylaluminium_survives_its_own_metal_disconnection() -> None:
     assert compound_id("C[Al](C)C.Cc1ccccc1") != compound_id("Cc1ccccc1")
 
 
+_PPH3 = "P(c1ccccc1)(c1ccccc1)c1ccccc1"
+_PCY3 = "P(C1CCCCC1)(C1CCCCC1)C1CCCCC1"
+_CP = "c1ccc[cH-]1"
+
+#: Metal hydrides as catalogues and ELNs draw them (the hydride on the metal, phosphines and
+#: pyridines dative), each beside the same species without its hydride.
+_METAL_HYDRIDES = {
+    "palladium hydride chloride": ("[PdH]Cl", "Cl[Pd]"),
+    "nickel hydride chloride": ("Cl[NiH]", "Cl[Ni]"),
+    "titanium hydride trichloride": ("[TiH](Cl)(Cl)Cl", "Cl[Ti](Cl)Cl"),
+    "zinc hydride chloride": ("[ZnH]Cl", "Cl[Zn]"),
+    "Schwartz's reagent": (f"Cl[Zr]([H])({_CP}){_CP}", f"Cl[Zr]({_CP}){_CP}"),
+    "carbonylchlorohydridotris(triphenylphosphine)ruthenium": (
+        f"[H][Ru](Cl)(=C=O)(<-{_PPH3})(<-{_PPH3})<-{_PPH3}",
+        f"Cl[Ru](=C=O)(<-{_PPH3})(<-{_PPH3})<-{_PPH3}",
+    ),
+    "hydridotris(triphenylphosphine)rhodium": (
+        f"[H][Rh](<-{_PPH3})(<-{_PPH3})<-{_PPH3}",
+        f"[Rh](<-{_PPH3})(<-{_PPH3})<-{_PPH3}",
+    ),
+    "a Crabtree-type iridium dihydride": (
+        f"[IrH2+](<-n1ccccc1)<-{_PCY3}.F[P-](F)(F)(F)(F)F",
+        f"[Ir+](<-n1ccccc1)<-{_PCY3}.F[P-](F)(F)(F)(F)F",
+    ),
+    "Stryker's reagent, as its monomer": (f"[CuH]<-{_PPH3}", f"[Cu]<-{_PPH3}"),
+    "pentacarbonylhydridomanganese": (
+        "[H][Mn](=C=O)(=C=O)(=C=O)(=C=O)=C=O",
+        "[Mn](=C=O)(=C=O)(=C=O)(=C=O)=C=O",
+    ),
+    "lithium tri-tert-butoxyaluminium hydride": (
+        "[Li+].CC(C)(C)O[AlH-](OC(C)(C)C)OC(C)(C)C",
+        "[Li+].CC(C)(C)O[Al-](OC(C)(C)C)OC(C)(C)C",
+    ),
+    "Red-Al": ("[Na+].[AlH2-](OCCOC)OCCOC", "[Na+].[Al-](OCCOC)OCCOC"),
+    "DIBAL-H": ("CC(C)C[AlH]CC(C)C", "CC(C)C[Al]CC(C)C"),
+}
+
+
+def _metal_hydrogens(smiles: str) -> list[tuple[int, int]]:
+    """`(atomic number, hydrogens)` per metal atom; standardization reorders fragments."""
+    from chemclaw.core.chem import _METALS
+
+    molecule = Chem.MolFromSmiles(smiles)
+    return sorted(
+        (a.GetAtomicNum(), a.GetTotalNumHs())
+        for a in molecule.GetAtoms()
+        if a.GetAtomicNum() in _METALS
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_METAL_HYDRIDES))
+def test_a_metal_hydride_is_not_its_metal_without_the_hydride(name: str) -> None:
+    """A metal hydride keeps its hydride, so it is not the same compound as its metal salt.
+
+    `MetalDisconnector` re-derives a metal's hydrogens once it cuts a bond to it, and the d-block
+    has no valence model to derive them from; `Uncharger` re-derives them on a metal cation.
+    Asserted on the note an ingest writes and on the id a similarity hit cites.
+    """
+    hydride, without = _METAL_HYDRIDES[name]
+    note = compound_note(hydride)
+    assert note.id != compound_note(without).id, (
+        f"{name} shares a compound id with the same species minus its hydride: "
+        f"{note.compound_smiles!r}"
+    )
+    assert _metal_hydrogens(note.compound_smiles or "") == _metal_hydrogens(hydride), (
+        f"{name}: {hydride!r} standardizes to {note.compound_smiles!r}"
+    )
+    store = _indexed(standard_smiles(hydride), standard_smiles(without))
+    hits = asyncio.run(find_similar_molecules(store, hydride, top_k=1, threshold=1.0)).hits
+    assert [hit.compound_note_id for hit in hits] == [note.id]
+
+
+def test_a_hydride_drawn_on_its_metal_is_the_hydride_drawn_ionic() -> None:
+    """Cutting the metal-chloride bond leaves the hydride on the metal, as an ion pair writes it."""
+    assert compound_id("[PdH]Cl") == compound_id("[PdH+].[Cl-]")
+    assert compound_id("Cl[NiH]") == compound_id("[NiH+].[Cl-]")
+    assert compound_id("Cl[PdH]Cl") == compound_id("[PdH+2].[Cl-].[Cl-]")
+    # and the salts the hydrides were merged into are still themselves
+    assert compound_id("Cl[Pd]") == compound_id("[Pd+].[Cl-]")
+    assert compound_id("Cl[Pd]Cl") == compound_id("[Pd+2].[Cl-].[Cl-]")
+
+
+@pytest.mark.parametrize(
+    ("covalent", "ionic"),
+    [
+        ("[Na+].[Na+].Cl[Pd-2](Cl)(Cl)Cl", "[Na+].[Na+].[Pd+2].[Cl-].[Cl-].[Cl-].[Cl-]"),
+        ("[K+].[K+].Cl[Pt-2](Cl)(Cl)Cl", "[K+].[K+].[Pt+2].[Cl-].[Cl-].[Cl-].[Cl-]"),
+        ("[Na+].Cl[Au-](Cl)(Cl)Cl", "[Na+].[Au+3].[Cl-].[Cl-].[Cl-].[Cl-]"),
+        ("[Li+].[Li+].Cl[Cu-2](Cl)(Cl)Cl", "[Li+].[Li+].[Cu+2].[Cl-].[Cl-].[Cl-].[Cl-]"),
+        (
+            "[K+].[K+].[K+].N#C[Fe-3](C#N)(C#N)(C#N)(C#N)C#N",
+            "[K+].[K+].[K+].[Fe+3].[C-]#N.[C-]#N.[C-]#N.[C-]#N.[C-]#N.[C-]#N",
+        ),
+        # the control: upstream's charge was already right here, so conservation must agree
+        ("Cl[Al-](Cl)(Cl)Cl", "[Al+3].[Cl-].[Cl-].[Cl-].[Cl-]"),
+    ],
+)
+def test_an_anionic_metal_drawn_covalently_keeps_its_oxidation_state(
+    covalent: str, ionic: str
+) -> None:
+    """An ate complex drawn with bonds to its metal is the same compound as its ion spelling.
+
+    The cut moves each bond's electrons onto its ligand and conserves the fragment's charge, so
+    sodium tetrachloropalladate is Pd(II) however it is drawn, not Pd(IV).
+    """
+    assert compound_id(covalent) == compound_id(ionic), (
+        f"{standard_smiles(covalent)!r} against {standard_smiles(ionic)!r}"
+    )
+
+
 def test_a_group_1_or_2_counterion_is_still_a_spectator() -> None:
     """The constraint the metal rule had to satisfy: sodium benzoate *is* benzoic acid.
 
@@ -676,6 +786,19 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("[CH-]1C=CC=C1", "C1=CCC=C1"),
     ("CC(C)(C)P(C(C)(C)C)[C-]1C=CC=C1", "CC(C)(C)P(C1C=CC=C1)C(C)(C)C"),
     (_DPPF_PD_G3, _DPPF_PD_G3_STANDARD),
+    # `std13`: a metal keeps its hydrides through the disconnection and the neutralisation, and a
+    # metal drawn with bonds takes the charge that conserves its fragment's. Under `std12` the
+    # first two lost their hydride, the aluminium ones gained or lost one, and the palladate was
+    # Pd(IV). See `test_a_metal_hydride_is_not_its_metal_without_the_hydride`.
+    ("[PdH]Cl", "[Cl-].[PdH+]"),
+    (f"[CuH]<-{_PPH3}", "[CuH].c1ccc(P(c2ccccc2)c2ccccc2)cc1"),
+    (
+        "[Li+].CC(C)(C)O[AlH-](OC(C)(C)C)OC(C)(C)C",
+        "CC(C)(C)[O-].CC(C)(C)[O-].CC(C)(C)[O-].[AlH+2].[Li+]",
+    ),
+    ("CC(C)C[AlH]CC(C)C", "[AlH+2].[CH2-]C(C)C.[CH2-]C(C)C"),
+    ("[AlH](OC)OC", "C[O-].C[O-].[AlH+2]"),
+    ("[Na+].[Na+].Cl[Pd-2](Cl)(Cl)Cl", "[Cl-].[Cl-].[Cl-].[Cl-].[Na+].[Na+].[Pd+2]"),
 )
 
 
@@ -958,7 +1081,7 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     `tests/test_label_enrichment.py`. A bump permanently doubles the fingerprint tables
     (`durable/retention.py`); recovery is `make rekey-compounds` (`tests/test_compound_rekey.py`).
     """
-    assert STANDARDIZATION_VERSION == "std12", (
+    assert STANDARDIZATION_VERSION == "std13", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"

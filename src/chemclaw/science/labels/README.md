@@ -36,6 +36,11 @@ fingerprint, fatal for an index whose whole job is to answer *which solvent, whi
 base*. And `ElnAdapter` offers `fetch_new_entries(since)` and nothing that reads one entry back by
 id, so there is no second chance to ask the source.
 
+`withheld` belongs to neither phase: it follows the ELN entry the row records. The ingest writes it
+with every record phase, and sets it alone (`LabelIndex.withhold`) when the entry is amended to name
+a species without its structure, because the app role cannot delete the row. Every read skips a
+withheld row, and a structured, current re-ingest clears it.
+
 ## Staleness is a query, not a flag
 
 `labeller_version` NULL means never derived; a value below the current one means derived by a

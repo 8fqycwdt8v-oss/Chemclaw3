@@ -753,6 +753,34 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
+{{- /* The erasure ledger: read-write on the background worker alone, the pod an operator runs
+       `erase_actor` in. Every worker appends to the one file, so two workers need a claim both can
+       attach — the same refusal as the share above, with ReadOnlyMany refused too. */ -}}
+{{- define "chemclaw.erasureLedgerEnv" -}}
+{{- if .Values.erasureLedger.enabled }}
+- name: CHEMCLAW_ERASURE_LEDGER_PATH
+  value: {{ printf "%s/%s" (trimSuffix "/" .Values.erasureLedger.mountPath) .Values.erasureLedger.fileName | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.erasureLedgerMount" -}}
+{{- if .Values.erasureLedger.enabled }}
+- name: erasure-ledger
+  mountPath: {{ .Values.erasureLedger.mountPath }}
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.erasureLedgerVolume" -}}
+{{- if .Values.erasureLedger.enabled }}
+{{- if and (gt (int .Values.workers.background.replicas) 1) (ne .Values.erasureLedger.accessMode "ReadWriteMany") }}
+{{- fail (printf "erasureLedger is mounted read-write on every background worker, and workers.background.replicas is %v: state erasureLedger.accessMode as ReadWriteMany (the access mode of the claim %q). A ReadWriteOnce claim attaches to one node, so the second worker would stay Pending and the PodDisruptionBudget would block node drains. Use a shareable volume, or set workers.background.replicas to 1." .Values.workers.background.replicas .Values.erasureLedger.claimName) }}
+{{- end }}
+- name: erasure-ledger
+  persistentVolumeClaim:
+    claimName: {{ .Values.erasureLedger.claimName }}
+{{- end }}
+{{- end -}}
+
 {{- define "chemclaw.tlsMount" -}}
 {{- if .Values.secrets.temporalTls.enabled }}
 - name: temporal-tls

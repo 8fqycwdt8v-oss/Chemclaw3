@@ -8,9 +8,10 @@ by `GET /digests` for the authenticated caller only.
 
 The watermark advances on the mailbox write, not on the chemist reading it: a crash before the
 handover must cause a re-report, not a skip, and an unread mailbox row is never pruned. It must
-not advance after a swallowed delivery, so acknowledgement is conditional on
-`notify_session_best_effort` returning True. Each subscription is delivered independently, so
-one broken query does not stop the others.
+not advance after a swallowed delivery, so acknowledgement is conditional on the mailbox write
+succeeding. Each subscription is delivered independently, so one broken query does not stop the
+others, while an outage failing every mailbox write stops the run (`durable/loop_outage.py`) and
+leaves the rest to the next one.
 """
 
 import asyncio
@@ -35,7 +36,8 @@ from chemclaw.durable.deliver_message import (
     deliver_best_effort,
     deliver_message_activity,
 )
-from chemclaw.durable.notify import notify_session_best_effort
+from chemclaw.durable.loop_outage import LoopOutage
+from chemclaw.durable.notify import notify_session_or_failure
 from chemclaw.durable.publish import queue_wait_timeout
 from chemclaw.durable.retry import retry_for
 
@@ -272,9 +274,10 @@ class DigestWorkflow:
             retry_policy=retry_for(collect_digests),
         )
         delivered = 0
-        for item in digests:
+        outage = LoopOutage("digest-stops-on-an-outage")
+        for position, item in enumerate(digests):
             # Best-effort per subscriber: one broken mailbox must not stop everyone else's digest.
-            sent = await notify_session_best_effort(
+            failure = await notify_session_or_failure(
                 digest_channel(item.owner),
                 DIGEST_KIND,
                 {
@@ -284,10 +287,14 @@ class DigestWorkflow:
                     "headlines": item.headlines,
                 },
             )
+            # Unacknowledged, the subscribers not reached keep their watermarks for the next run.
+            if await outage.should_stop(failure):
+                outage.stopped([str(rest.subscription_id) for rest in digests[position + 1 :]])
+                break
             # Only after a successful mailbox delivery — see the module docstring. Acknowledging a
             # swallowed failure would advance the watermark past notes the subscriber never
             # received.
-            if not sent:
+            if failure is not None:
                 continue
             await workflow.execute_activity(
                 acknowledge_digest,

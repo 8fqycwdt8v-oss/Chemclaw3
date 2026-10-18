@@ -4,7 +4,9 @@ For one canonical reaction: (1) validate structure and mass balance, refusing an
 index the reaction (DRFP) and each distinct molecule it names, compounds and identified impurities
 (ECFP4); (3) write the transcription to the reaction record store, which a structure hit expands
 into. Step (2) runs only for a structured record; a citation-only record is stored and citable but
-indexed nowhere a structure search looks.
+indexed nowhere a structure search looks. The label row follows the entry: withheld while the source
+withdraws it or names a species without its structure, served again once it is structured and
+current.
 
 All of these are deterministic serving indexes: nothing here infers anything, so nothing needs
 review (D-2026-08-25-an-eln-transcription-is-data-not-a-claim). Stores are injected, and every write
@@ -58,10 +60,20 @@ async def ingest_reaction(
         raise IngestError(f"reaction {reaction.reaction_id!r} invalid: {'; '.join(problems)}")
 
     if reaction.tier is RecordTier.STRUCTURED:
-        await _index_structure(reaction, reaction_store, molecule_store, label_index, source)
-    # A citation-only record writes nothing to any structural index (no DRFP, molecule or label
-    # row), only the record: a fingerprint of the structured subset would describe a reaction nobody
-    # ran, and the labeller would infer from a partial structure.
+        await _index_structure(
+            reaction,
+            reaction_store,
+            molecule_store,
+            label_index,
+            source,
+            withheld=retracted_at is not None,
+        )
+    else:
+        # A citation-only record writes nothing to any structural index (no DRFP, molecule or label
+        # row), only the record: a fingerprint of the structured subset would describe a reaction
+        # nobody ran, and the labeller would infer from a partial structure. The label row of an
+        # entry amended into the tier cannot be deleted, so it is withheld instead.
+        await label_index.withhold(source, reaction.reaction_id)
 
     # The withdrawal is stamped here, not in `record_from_ord_reaction`: it is something the source
     # said about the entry (`RawEntry`), and keeping the mapping pure keeps it a deterministic
@@ -79,8 +91,14 @@ async def _index_structure(
     molecule_store: FingerprintStore,
     label_index: LabelIndex,
     source: str,
+    *,
+    withheld: bool,
 ) -> None:
-    """Write a structured reaction's three structural index rows: DRFP, ECFP4 and its label."""
+    """Write a structured reaction's three structural index rows: DRFP, ECFP4 and its label.
+
+    `withheld` is whether the source withdrew the entry. The label row carries it because a facet
+    question reads no record; the structure searches ask the record (`structurally_withheld`).
+    """
     # `transformation_smiles`, never `reaction_smiles`: DRFP folds the agent slot back onto the
     # reactants. The source is set on the record rather than passed to the builder, which knows only
     # the fingerprint.
@@ -93,7 +111,8 @@ async def _index_structure(
     # The label index's record phase: the facets a hit is found by, derived from the same validated
     # record; `reaction_records` holds what a hit expands into, and neither is reconstructible from
     # the other.
-    await label_index.record(record_phase(reaction, source))
+    label = record_phase(reaction, source).model_copy(update={"withheld": withheld})
+    await label_index.record(label)
 
 
 async def _index_impurities(reaction: OrdReaction, molecule_store: FingerprintStore) -> None:

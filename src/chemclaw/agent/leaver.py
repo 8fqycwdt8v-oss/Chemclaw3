@@ -17,9 +17,11 @@ against the spellings of one id (`_actor_forms`), never a pattern. The default i
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 import psycopg
 
@@ -491,7 +493,9 @@ async def _residue_for(sessions: list[str]) -> tuple[dict[str, int], list[str]]:
     return residue, sorted(holding)
 
 
-async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
+async def erase_actor(
+    actor: str, *, apply: bool = False, on_commit: Callable[[datetime], None] | None = None
+) -> ErasureReport:
     """Count — and, with `apply`, delete — one actor's conversational rows.
 
     One transaction, so a dry run (real DELETEs, rolled back) shows exactly what an apply would do
@@ -503,6 +507,10 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         actor: The Entra `oid` (or dev actor id) to erase, matched by exact equality against its two
             spellings (`_actor_forms`); either spelling may be given.
         apply: Commit the deletion. The default counts and rolls back.
+        on_commit: Called once the deletion has committed, before anything else can fail, with an
+            instant no earlier than the commit (`_committed_at`). How the CLI records every applied
+            erasure in the ledger a restore re-applies (`core/erasure_ledger.py`); an exception it
+            raises propagates with the erasure already committed.
 
     Returns:
         The per-table counts for both tiers, and `residue` — empty on every clean run.
@@ -526,7 +534,7 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
     except psycopg.Error as exc:
         raise ErasureError(f"the database refused the erasure: {exc}") from exc
     async with _sessions_held(sessions + shared):
-        await _erase_within_claims(actors, report, apply=apply)
+        await _erase_within_claims(actors, report, apply=apply, on_commit=on_commit)
     if apply and sessions:
         try:
             report.residue, report.residue_sessions = await _residue_for(sessions)
@@ -669,7 +677,36 @@ async def _keep_claims_alive(
             )
 
 
-async def _erase_within_claims(actors: list[str], report: ErasureReport, *, apply: bool) -> None:
+async def _committed_at(conn: psycopg.AsyncConnection[Any]) -> datetime:
+    """An instant no earlier than the commit just made, on the clock a recovery target is read on.
+
+    Read after the commit on the server that took it, so a record stamped with it is newer than any
+    recovery point the commit is not inside. The host clock stands in, with a warning, only when
+    that read fails: it is as good as the two clocks' agreement, and no erasure goes unstamped.
+    """
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT clock_timestamp()")
+            row = await cur.fetchone()
+        if row is not None:
+            instant: datetime = row[0]
+            return instant
+    except psycopg.Error:
+        logger.warning(
+            "could not read the database clock after the erasure committed; stamping it with this "
+            "host's clock, which a replay compares with the database's recovery point",
+            exc_info=True,
+        )
+    return datetime.now(UTC)
+
+
+async def _erase_within_claims(
+    actors: list[str],
+    report: ErasureReport,
+    *,
+    apply: bool,
+    on_commit: Callable[[datetime], None] | None,
+) -> None:
     """The sweep itself: count both tiers and delete the conversational one, in one transaction.
 
     Raises:
@@ -723,6 +760,8 @@ async def _erase_within_claims(actors: list[str], report: ErasureReport, *, appl
                     report.erased[table] = cur.rowcount if cur.rowcount > 0 else 0
             if apply:
                 await conn.commit()
+                if on_commit is not None:
+                    on_commit(await _committed_at(conn))
             else:
                 # The whole point of the dry run: the deletes above really ran, so the counts are
                 # the database's answer rather than a second query hoping to predict it.
@@ -773,7 +812,12 @@ class ResidueReport:
 _STILL_OWNED = "SELECT session_id FROM session_owners WHERE session_id = ANY(%(sessions)s)"
 
 
-async def finish_erasure(sessions: list[str], *, apply: bool = False) -> ResidueReport:
+async def finish_erasure(
+    sessions: list[str],
+    *,
+    apply: bool = False,
+    on_commit: Callable[[datetime], None] | None = None,
+) -> ResidueReport:
     """Delete an interrupted erasure's residue by session id, and prove it is gone.
 
     Runs `session_store._session_delete_statements()`, which never reads `session_owners`. A session
@@ -784,6 +828,7 @@ async def finish_erasure(sessions: list[str], *, apply: bool = False) -> Residue
     Args:
         sessions: The session ids to clear — `ErasureReport.residue_sessions`, verbatim.
         apply: Commit. The default counts and rolls back.
+        on_commit: As for `erase_actor`; not called when every named session is refused.
 
     Returns:
         A `ResidueReport`: what went, what is still there afterwards, and any session refused
@@ -813,7 +858,7 @@ async def finish_erasure(sessions: list[str], *, apply: bool = False) -> Residue
     if not targets:
         return report
     async with _sessions_held(targets):
-        await _delete_orphaned_sessions(targets, report, apply=apply)
+        await _delete_orphaned_sessions(targets, report, apply=apply, on_commit=on_commit)
     if apply:
         try:
             report.remaining, _ = await _residue_for(targets)
@@ -842,7 +887,11 @@ async def finish_erasure(sessions: list[str], *, apply: bool = False) -> Residue
 
 
 async def _delete_orphaned_sessions(
-    sessions: list[str], report: ResidueReport, *, apply: bool
+    sessions: list[str],
+    report: ResidueReport,
+    *,
+    apply: bool,
+    on_commit: Callable[[datetime], None] | None,
 ) -> None:
     """Run the per-session deletes for every named session, in one transaction.
 
@@ -864,6 +913,8 @@ async def _delete_orphaned_sessions(
                         report.removed[table] += max(cur.rowcount, 0)
             if apply:
                 await conn.commit()
+                if on_commit is not None:
+                    on_commit(await _committed_at(conn))
             else:
                 await conn.rollback()
     except psycopg.Error as exc:

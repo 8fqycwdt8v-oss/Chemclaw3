@@ -1,9 +1,10 @@
 """A `STANDARDIZATION_VERSION` bump that moves a compound's id re-keys it rather than orphaning it.
 
 `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. The corpus is built under the
-previous version for real (`std11` is `std12` without `_IONISABLE_NEUTRAL_ACIDS`, so emptying that
-table and clearing the cache reproduces it), then carried across by the production entry point
-`rekey_standardization`, writing through `kg.record.record_note`.
+previous version for real (on these metal-free salts `std11` is today's pipeline without
+`_IONISABLE_NEUTRAL_ACIDS`, so emptying that table and clearing the cache reproduces it), then
+carried across by the production entry point `rekey_standardization`, writing through
+`kg.record.record_note`.
 """
 
 import asyncio
@@ -174,11 +175,11 @@ def _tree(root: Path) -> dict[str, str]:
 
 
 def test_the_bump_moved_exactly_the_spellings_the_table_names(corpus: dict[str, str]) -> None:
-    """The precondition, measured: `std12` puts both perchlorate spellings on the free base's id.
+    """The precondition, measured: since `std12` both perchlorate spellings take the free base's id.
 
     Without it every later assertion is about a corpus in which nothing moved.
     """
-    assert STANDARDIZATION_VERSION == "std12"
+    assert STANDARDIZATION_VERSION == "std13"
     assert compound_id(_NEUTRAL) == compound_id(_IONIC) == compound_id("CCN") == corpus["ionic"]
     assert compound_id(_BORIC) != corpus["boric"]
 
@@ -554,3 +555,25 @@ def test_a_cycle_of_moves_is_left_alone() -> None:
     b = Note(id=compound_id("CCO"), type="compound", compound_smiles="CCN", created_by="agent")
     plan = plan_compound_rekey([a, b], _RETIRED_ON)
     assert plan.rekeys == [] and plan.cyclic == 2
+
+
+def test_a_bump_that_keeps_what_the_old_standard_form_dropped_moves_no_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`std13` keeps a metal's hydride, which a `std12` note's stored structure no longer holds.
+
+    `std12` filed a palladium hydride under its chloride's id, and re-standardizing that stored
+    form cannot bring the hydride back, so the re-key reports the note unchanged; only the source
+    structure, read again, reaches the hydride's own id (runbook §(vi-a)).
+    """
+    chem._standardized.cache_clear()
+    monkeypatch.setattr(chem, "_disconnected", chem._METAL_DISCONNECTOR.Disconnect)
+    try:
+        merged = compound_note("[PdH]Cl")
+    finally:
+        monkeypatch.undo()
+        chem._standardized.cache_clear()
+    assert merged.id == compound_id("Cl[Pd]"), "the stored note has to hold the merge std13 undoes"
+    plan = plan_compound_rekey([merged], _RETIRED_ON)
+    assert (plan.unchanged, plan.rekeys) == (1, [])
+    assert compound_note("[PdH]Cl").id != merged.id

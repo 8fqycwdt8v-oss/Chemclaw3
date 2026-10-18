@@ -8,15 +8,17 @@ skips, named and counted by `tests/conftest.py`, where no Docker daemon answers.
 import re
 import signal
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 import yaml
 
 from chemclaw.cli import restore_drill as drill
+from chemclaw.core import erasure_ledger
 from chemclaw.core import restore_check as db
 from chemclaw.core.config import settings
+from chemclaw.core.erasure_ledger import ErasureRecord
 from chemclaw.core.restore_check import Check, Snapshot
 from chemclaw.kg.note import _CALC_REF
 from chemclaw.science.calc.store import CalculationKey
@@ -360,3 +362,76 @@ def test_the_restore_time_is_checked_against_a_stated_rto_and_labelled_as_a_fixt
     assert ok.status == "pass" and over.status == "fail"
     assert "53 MB fixture" in over.detail and "not on the site's data" in over.detail
     assert "restore_time" not in drill.REQUIRED_CHECKS
+
+
+_TARGET = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
+_PERSON = {"session_owners": 1, "session_messages": 2, "user_preferences": 1}
+_GONE = dict.fromkeys(_PERSON, 0)
+
+
+def _replayed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    restored: dict[str, int],
+    after_replay: dict[str, int],
+    second_replay_changes: bool = False,
+    stamped_after_target: bool = True,
+    erased: int = 0,
+) -> tuple[Check, list[tuple[str, ...]]]:
+    """`erasure_replay_check` with the restored database and the CLI stood in for.
+
+    Returns the check and the arguments each replay ran with.
+    """
+    ledger = tmp_path / "erasures.jsonl"
+    at = _TARGET + timedelta(seconds=2 if stamped_after_target else 0)
+    erasure_ledger.append(ledger, ErasureRecord(at=at, tenant="default", actor=db.LEAVER))
+    rows = iter([restored, after_replay])
+    monkeypatch.setattr(db, "person_rows", lambda _dsn, _actor: next(rows))
+    counts = iter([{"session_owners": 7}, {"session_owners": 8 if second_replay_changes else 7}])
+    monkeypatch.setattr(db, "snapshot", lambda _dsn: _snapshot(counts=next(counts)))
+    replays: list[tuple[str, ...]] = []
+
+    def erase(_dsn: str, _ledger: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        replays.append(args)
+        return subprocess.CompletedProcess(["erase_actor"], 0, "", "")
+
+    monkeypatch.setattr(drill, "erase", erase)
+    first = subprocess.CompletedProcess(["erase_actor"], erased, "", "refused: no ledger")
+    return drill.erasure_replay_check("dsn", ledger, _TARGET, first), replays
+
+
+def test_the_erasure_replay_passes_when_the_restore_brings_the_person_back_and_it_removes_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    check, replays = _replayed(monkeypatch, tmp_path, restored=_PERSON, after_replay=_GONE)
+    assert check.status == "pass", check.detail
+    assert check.name in drill.REQUIRED_CHECKS
+    expected = ("--replay-since", drill.format_recovery_target(_TARGET), "--apply")
+    assert replays == [expected, expected], "replayed from the target, twice"
+
+
+def test_the_erasure_replay_proves_nothing_unless_the_restore_brought_the_person_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control: a restore that did not rewind the erasure would pass any replay."""
+    check, replays = _replayed(monkeypatch, tmp_path, restored=_GONE, after_replay=_GONE)
+    assert check.status == "fail" and "does not hold the erased person's rows" in check.detail
+    assert replays == [], "nothing to replay against"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ({"after_replay": _PERSON}, "left"),
+        ({"after_replay": _GONE, "second_replay_changes": True}, "a second replay"),
+        ({"after_replay": _GONE, "stamped_after_target": False}, "no record stamped after"),
+        ({"after_replay": _GONE, "erased": 1}, "the erasure after the target exited 1"),
+    ],
+    ids=["rows-left", "not-idempotent", "record-not-after-target", "erasure-refused"],
+)
+def test_each_way_the_erasure_replay_can_fall_short_fails_it_by_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: dict[str, object], expected: str
+) -> None:
+    check, _ = _replayed(monkeypatch, tmp_path, restored=_PERSON, **case)  # type: ignore[arg-type]
+    assert check.status == "fail" and expected in check.detail, check.detail

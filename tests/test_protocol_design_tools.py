@@ -23,6 +23,7 @@ from chemclaw.core.turn_text import (
     reset_current_user_texts,
     set_current_user_texts,
 )
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.protocols.models import (
     ChargeLine,
     EvidenceRef,
@@ -1072,6 +1073,8 @@ def test_a_precedent_the_design_already_cites_is_not_reported_as_uncited(
         ],
     )
     monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
+    # Holds neither run, so neither is withheld: what is dropped here is the citation alone.
+    monkeypatch.setattr(tools, "default_record_store", InMemoryReactionRecordStore)
     monkeypatch.setattr(
         tools,
         "find_similar_reactions",

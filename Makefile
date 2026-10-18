@@ -50,10 +50,10 @@ SHELL := bash
   eval-baseline eln-validate skill-validate connector-validate datasource-validate sink-validate \
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply tenant-add tenant-assign tenant-list connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
-  kind-smoke synthesize reindex reindex-full reembed share-estimate share-sync rekey-compounds user-erase \
+  kind-smoke synthesize reindex reindex-full reembed share-estimate share-sync rekey-compounds user-erase user-erase-replay \
   openapi sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
   live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
-  live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
+  live-jobs live-probes live-ab live-delegation live-compliance live-plan-gate live-degradation live-turn-cost \
   live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
   live-soak-report live-leak-probe live-replicas \
   retrieval-arms hypothesis-recovery phoenix-publish explain model-text model-text-eval \
@@ -189,7 +189,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set documentShare.accessMode=ReadWriteMany --set erasureLedger.enabled=true --set erasureLedger.accessMode=ReadWriteMany --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -372,6 +372,14 @@ user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. 
 	esac
 	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
 
+user-erase-replay:  ## After a restore, re-apply every erasure the ledger records after SINCE=<recovery point> [APPLY=1]. Dry run by default.
+	@test -n "$(SINCE)" || { echo "usage: make user-erase-replay SINCE='2026-10-14 09:41:00+00' [APPLY=1]"; exit 64; }
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "user-erase-replay: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
+	esac
+	uv run python -m chemclaw.cli.erase_actor --replay-since '$(SINCE)' $(if $(filter 1,$(APPLY)),--apply,)
+
 openapi:  ## Regenerate schema/api/openapi.json, the published API contract (offline; review the diff).
 	uv run python -m chemclaw.cli.openapi
 
@@ -426,6 +434,10 @@ live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and co
 
 live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
+
+live-compliance:  ## Prohibited-solvent compliance: a control arm, then a preference seeded (real gateway).
+	CHEMCLAW_SESSION_STORE=$${CHEMCLAW_SESSION_STORE:-postgres} \
+	  uv run python -m chemclaw.cli.live_probes --suite compliance $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)

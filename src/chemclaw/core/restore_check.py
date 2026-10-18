@@ -42,6 +42,12 @@ APP_ROLE = "chemclaw_app"
 #: Tables the wave after the target changes, so a restore that ignored the target is visible.
 POST_TARGET_TABLES = ("session_messages", "audit_events", "calculation_results", "session_owners")
 
+#: The person the drill erases after the target: the restore brings their rows back, and replaying
+#: the erasure ledger must take them away again. One session, so the wave after the target still
+#: adds more ownership rows than the erasure removes (`post_target_check`).
+LEAVER = "drill-leaver"
+_LEAVER_SESSION = f"{LEAVER}-session"
+
 #: Width of `molecule_fingerprints.bits` and of `note_index.embedding` (migrations 002 and 012).
 _FINGERPRINT_BITS = 2048
 _EMBEDDING_DIMENSIONS = 1536
@@ -355,6 +361,43 @@ def _load_rows(conn: psycopg.Connection[Any], tag: str, rows: int, seed: int) ->
     conn.commit()
 
 
+def _load_person(conn: psycopg.Connection[Any], actor: str) -> None:
+    """One session `actor` owns, with a two-message exchange, and one preference of theirs."""
+    conn.execute(
+        "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s)", (_LEAVER_SESSION, actor)
+    )
+    for turn in ("human", "ai"):
+        conn.execute(
+            "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+            (_LEAVER_SESSION, json.dumps({"type": turn, "content": actor})),
+        )
+    conn.execute(
+        "INSERT INTO user_preferences (owner, key, value) VALUES (%s, 'units', 'SI')", (actor,)
+    )
+    conn.commit()
+
+
+def _person_rows(conn: psycopg.Connection[Any], actor: str) -> dict[str, int]:
+    """What `_load_person` wrote that is still there, per table.
+
+    Messages are counted by their session id, not through `session_owners`: an erasure deletes the
+    ownership row too, and a join through it would count a message left behind as gone.
+    """
+    queries = {
+        "session_owners": ("SELECT count(*) FROM session_owners WHERE owner = %s", actor),
+        "session_messages": (
+            "SELECT count(*) FROM session_messages WHERE session_id = %s",
+            _LEAVER_SESSION,
+        ),
+        "user_preferences": ("SELECT count(*) FROM user_preferences WHERE owner = %s", actor),
+    }
+    counts: dict[str, int] = {}
+    for table, (query, value) in queries.items():
+        row = conn.execute(query, (value,)).fetchone()
+        counts[table] = int(row[0]) if row else 0
+    return counts
+
+
 def _knowledge_tables(conn: psycopg.Connection[Any]) -> list[str]:
     """The `kg_*` tables this schema has; empty until the knowledge graph moves into Postgres."""
     return [
@@ -573,6 +616,18 @@ def load_wave(dsn: str, tag: str, rows: int, seed: int) -> list[str]:
     with _connect(dsn) as conn:
         _load_rows(conn, tag, rows, seed)
         return _knowledge_tables(conn)
+
+
+def load_person(dsn: str, actor: str) -> None:
+    """Give `actor` a session, messages and a preference, for an erasure to remove."""
+    with _connect(dsn) as conn:
+        _load_person(conn, actor)
+
+
+def person_rows(dsn: str, actor: str) -> dict[str, int]:
+    """Per table, how many of the rows `load_person` wrote for `actor` are there."""
+    with _connect(dsn) as conn:
+        return _person_rows(conn, actor)
 
 
 def change_wave(dsn: str, tag: str) -> None:

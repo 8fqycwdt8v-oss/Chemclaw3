@@ -62,10 +62,9 @@ class TemporalSettings(BaseSettings):
     # so a killed run restarts from page one.
     schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
 
-    # Attempts under the retry classes that wait on something slow: `COMPUTE`, `REMOTE` and `CALC`,
-    # and the restarts of a fan-out child and of the hypothesis calculation child
-    # (`durable/retry.py::child_workflow_retry`). Bad data is non-retryable by type; this caps
-    # transient retries so an unclassified deterministic failure gives up, not pinning a worker.
+    # Attempts under the retry classes that wait on something slow: `COMPUTE`, `REMOTE` and `CALC`.
+    # Bad data is non-retryable by type; this caps transient retries so an unclassified
+    # deterministic failure gives up, not pinning a worker.
     activity_max_attempts: int = Field(default=5, ge=1)
 
     # The `IO` class: short Postgres and in-process work, where a fault clears in seconds. Many
@@ -80,9 +79,16 @@ class TemporalSettings(BaseSettings):
     slow_retry_initial_seconds: float = Field(default=10.0, gt=0)
     slow_retry_max_interval_seconds: float = Field(default=300.0, gt=0)
 
-    # Attempts of a `GOVERNED` activity (`durable/retry.py`): a template's agent step or a
-    # hypothesis check; 1 = none. A retry replays the whole turn and re-runs its side-effecting
-    # tools, while the provider SDK already retries a 503 in-process (`llm_max_retries`). A long
+    # Consecutive items of a best-effort per-item loop (a digest's subscribers, a mirror's sources)
+    # that may each fail after their whole retry window before the loop stops and leaves the rest to
+    # the next run (`durable/loop_outage.py`). Each such failure costs a window, so in a hard
+    # outage an unbounded loop costs one per item and can outlive `schedule_run_timeout_seconds`.
+    loop_outage_consecutive_failures: int = Field(default=3, ge=1)
+
+    # Attempts of a `GOVERNED` activity (`durable/retry.py`): a template's agent or tool step, or a
+    # hypothesis check; 1 = none. A retried agent step replays the whole turn and re-runs its
+    # side-effecting tools, while the provider SDK already retries a 503 in-process
+    # (`llm_max_retries`); a retried tool step repeats the governed call and its audit row. A long
     # outage therefore fails the step; raise this only knowing what each attempt may duplicate.
     agent_step_max_attempts: int = Field(default=1, ge=1)
 

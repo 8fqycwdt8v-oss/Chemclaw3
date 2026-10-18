@@ -1541,6 +1541,44 @@ def test_a_shared_document_volume_is_required_before_a_second_worker_mounts_it()
     assert single.returncode == 0, "one worker may mount any claim"
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_erasure_ledger_is_a_writable_claim_on_the_background_worker_and_nowhere_else() -> None:
+    """The pod the runbook runs `erase_actor` in gets the claim read-write and the path to it.
+
+    No other pod mounts it or is told the path, a release without it renders no trace of it, and
+    two workers appending to one file need a claim both can attach.
+    """
+    default = _render()
+    assert default.returncode == 0, default.stderr
+    assert "erasure-ledger" not in default.stdout
+    assert "CHEMCLAW_ERASURE_LEDGER_PATH" not in default.stdout
+
+    on = ("--set", "erasureLedger.enabled=true", "--set", "erasureLedger.accessMode=ReadWriteMany")
+    rendered = _render(*on, "--set", "erasureLedger.mountPath=/ledger/")
+    assert rendered.returncode == 0, rendered.stderr
+    holders: dict[str, tuple[list[Any], list[Any], list[Any]]] = {}
+    for owner, spec in _pod_specs(rendered.stdout):
+        for container in spec["containers"] + spec.get("initContainers", []):
+            mounts = [m for m in container.get("volumeMounts", []) if m["name"] == "erasure-ledger"]
+            env = [
+                e for e in container.get("env", []) if e["name"] == "CHEMCLAW_ERASURE_LEDGER_PATH"
+            ]
+            volumes = [v for v in spec.get("volumes", []) if v["name"] == "erasure-ledger"]
+            if mounts or env:
+                holders[f"{owner}/{container['name']}"] = (mounts, env, volumes)
+    assert list(holders) == ["chemclaw-background-worker/background-worker"], holders
+    ((mount,), (env,), (volume,)) = holders["chemclaw-background-worker/background-worker"]
+    assert mount == {"name": "erasure-ledger", "mountPath": "/ledger/"}, "mounted read-write"
+    assert env["value"] == "/ledger/erasures.jsonl"
+    assert volume["persistentVolumeClaim"] == {"claimName": "chemclaw-erasure-ledger"}
+
+    for refused in ("", "ReadWriteOnce", "ReadOnlyMany"):
+        result = _render(on[0], on[1], "--set", f"erasureLedger.accessMode={refused}")
+        assert result.returncode != 0 and "erasureLedger.accessMode" in result.stderr, refused
+    single = _render(on[0], on[1], "--set", "workers.background.replicas=1")
+    assert single.returncode == 0, "one worker may mount any claim"
+
+
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
     """The connection ceiling needs a runtime check, as the turn ceiling does.
 
@@ -3888,6 +3926,8 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
     # A posture: every background worker mounts the share, so with two the chart asks for the
     # claim's access mode.
     "documentShare.enabled": ("--set", "documentShare.accessMode=ReadWriteMany"),
+    # The same posture for the erasure ledger, which every background worker appends to.
+    "erasureLedger.enabled": ("--set", "erasureLedger.accessMode=ReadWriteMany"),
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",

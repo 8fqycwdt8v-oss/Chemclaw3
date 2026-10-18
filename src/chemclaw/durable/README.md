@@ -64,7 +64,7 @@ store, so a retry walks straight through the work it already did.
 
 | Concern | Modules |
 | --- | --- |
-| The worker and its plumbing | `background_worker`, `serve` (run a worker so a pod termination drains rather than loses work), `registry`, `interceptor` (every activity says it ran and how it ended), `heartbeat`, `job_metrics`, `schedules` (the Temporal Schedules `make schedules-apply` writes) |
+| The worker and its plumbing | `background_worker`, `serve` (run a worker so a pod termination drains rather than loses work), `registry`, `interceptor` (every activity says it ran and how it ended), `heartbeat`, `loop_outage` (a best-effort per-item loop stops when an outage, not an item, is failing it), `job_metrics`, `schedules` (the Temporal Schedules `make schedules-apply` writes) |
 | Connector jobs | `connector_job`, `governed_launch` (a launch through the same governed chain a turn's goes through), `job_record` + `job_record_store`, `orchestrator` (child-workflow fan-out) |
 | Ingest and indexes | `eln_sync`, `document_sync`, `corpus_sync`, `label_sync`, `commitment_sync`, `note_index`, `reembed` (on demand: bring every stored vector to a new embedding model or width; a separate request empties the old width's vectors) |
 | Knowledge and memory | `publish` (the durable note write), `memory_jobs`, `observation_jobs`, `hypothesis_tournament`, `kg_compare` (while `kg_store=dual`: compare the notes tree with Postgres nightly) |

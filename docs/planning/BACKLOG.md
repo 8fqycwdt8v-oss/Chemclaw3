@@ -28,8 +28,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Answers that are wrong without saying so
 
-- [ ] **A metal hydride standardizes to its metal without the hydride** [S] — `[PdH]Cl` → `[Cl-].[Pd+]`, so hydride and salt share a
-  `compound_id`; trace the dropping step in `core/chem.py::_cleaned` / `core/chem.py::standardize`.
+- [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
+  `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **An external vector store cites cross-model neighbours after an embedding-model swap** [S] — its dense read binds no `embedding_key`, so stale vectors resolve and look correct
   until a reindex; keep only ids catalogued under the live key, notes and documents alike; `retrieval/external_note_index.py::ExternalVectorNoteIndex.search_dense`, `ingest/documents/external_index.py::ExternalVectorDocumentIndex._resolve`.
 - [ ] **A reaction fingerprint whose record write has not landed is served at full similarity** [S] — the unfiltered path drops withheld records, not absent ones, so `gather_evidence`
@@ -63,8 +63,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   a payload-free `LISTEN` wake-up before the same rows needs one session-mode connection per replica (`science/calc/flight.py::_Listener`, the `tests/test_db.py` allow-list, `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`); then `api/turn_relay.py::TurnRelay.run`, `agent/session_queue.py` can poll rarely.
 - [ ] **No alert fires on a stopped WAL archive or a missing base backup** [M] — a failing archiver fills the WAL volume and stops the database; add rules on the operator's archiver/backup metrics with runbook sections;
   `deploy/helm/chemclaw/templates/prometheusrule.yaml::ChemclawDatabaseUnavailable`, `docs/guides/runbook.md` § Backup, restore and PITR.
-- [ ] **An erasure is not recorded where a restore can find it** [M] — "erasure applies on restore" needs the `make user-erase` runs since the backup, kept outside the database; the command keeps none (the runbook asks the operator to log them);
-  `src/chemclaw/cli/erase_actor.py::main`.
 - [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
   `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/core/restore_check.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
@@ -78,12 +76,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **A template tool step retries a governed tool call** [S] — `run_tool_step` is REMOTE (5 attempts) while `run_computable_check`, the same
-  `invoke_governed` path, is GOVERNED (1): a retry repeats the call and its audit row; decide one; `durable/template_activities.py::run_tool_step`, `D-2026-10-14-an-activity-states-its-retry-class`.
-- [ ] **A hypothesis calculation child restarts whole, and a model call retries twice over** [S] — the `ConnectorJobWorkflow` child restarts up to `activity_max_attempts`
-  times on top of its CALC attempts (a child failure is not in the bad-data list), and each LLM activity multiplies Temporal attempts by `llm_max_retries`; `durable/hypothesis_tournament.py::HypothesisTournamentWorkflow._settle_jobs`.
-- [ ] **A hard Postgres outage makes each per-item swallowed write cost the whole IO window** [M] — ~91 s a subscriber in `DigestWorkflow` (about 950 pass `schedule_run_timeout_seconds`
-  = 86400 s), same shape in the `CommitmentSyncWorkflow` and `ReactionCorpusWorkflow` source loops; stop a loop after N consecutive failures; `durable/digest.py::DigestWorkflow`.
 - [ ] **A finished calculation is thrown away when its cache write fails** [S] — a `store.put` error fails the leader and every waiter with the database's error; return the payload and
   count the unstored write, as `publish_stored_result` argues for itself; `science/calc/store.py::cached_compute`.
 - [ ] **A sink's refusal spends the whole attempt budget before dead-lettering** [S] — `_drain_one` books a `SinkRejectedError` like any refusal and `mark_failed` retires it only at the
@@ -116,10 +108,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Knowledge and records
 
-- [ ] **A citation-only record can be cited and cannot be found** [M] — carry structured species on its label row;
-  `ingest/eln/ingest.py::ingest_reaction`, `science/labels/records.py`, `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`.
-- [ ] **An entry amended to citation-only keeps its old label row** [S] — `connectors/rxnfp/server/tools.py::reagent_frequency` still
-  counts it; `agent/protocol_design_tools.py::uncited_precedent` checks neither withheld nor retracted.
+- [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
+  structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
 
 - [ ] **A note view is read in several steps, not one snapshot** [S] — `expand_note` awaits `edges`, `neighborhood`, `get_many` and
   `current_successors` separately, so a write between them can show a neighbour its links do not yet name; the Postgres store answers it with one transaction (`kg/store.py::NoteStore`).
@@ -147,7 +137,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Everything else
 
-- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — retry-exhaustion counter, note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
+- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
 - [ ] **A failure returned inside a `Command` is invisible to audit and the failure observers** [S] — no tool returns one today; add the absence test (or unwrap `update["messages"]`)
   before one does; `agent/audit.py::returned_failure`.
 - [ ] **The read/write partition test sees only registered tools, not the middleware verbs a graph binds** [S] — `task`, `write_todos`, the scratchpad verbs and handoffs are classified by
