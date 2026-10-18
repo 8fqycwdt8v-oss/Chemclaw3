@@ -38,8 +38,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   merge and both `gather_evidence_max_*` caps, and render the cut; `retrieval/harness.py::gather_section`, `agent/research_tools.py::_interleave_dedup`.
 - [ ] **A declared tool the server stopped advertising is dropped without a word** [S] — the plan gate, the skills backend and `skill-validate` still count it, so a skill is offered for
   a tool that cannot be called; log and count the gap per open; `connectors/transport.py::_allowed`, `connectors/session_pool.py::tools_for`.
-- [ ] **`find_calculations` with `calc_type="xtb"` and a SMILES answers empty instead of refusing** [S] — no type is a bare `xtb`, so the structure-keyed refusal never fires; refuse a bare
-  family name; the docstring's `xtb`/`dft`/`descriptors` examples change only behind a live eval; `science/calc/store.py::CalculationQuery._molecule_filter_addresses_the_type`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
