@@ -476,7 +476,7 @@ async def test_the_running_turn_is_read_off_the_live_claim_and_the_question_it_c
     successor = await history.running_turn(session_id)
     assert successor is not None, "a successor's claim read as idle"
     assert (successor.sender, successor.question) == ("bob-sender", None), successor
-    assert successor.started_at > running.started_at
+    assert successor.started_at > admitted.started_at
     await claims.release(session_id, "second")
     assert await history.running_turn(session_id) is None, "a released claim read as a turn"
 

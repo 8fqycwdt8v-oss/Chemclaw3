@@ -5237,7 +5237,7 @@
         ]
       },
       "TurnStartedEvent": {
-        "description": "A message that waited in the session's line has taken the turn\n(`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`).\n\nSent once, on the waiting message's own stream, the moment its place became the running turn\nand before anything the turn sends. From here the message is no longer in the line: `DELETE\n/sessions/{id}/queue/{ticket}` answers 404 and `POST /sessions/{id}/turn/stop` is what ends it.\nA withdrawal that removed the ticket first wins instead, and the stream ends on\n`queue_cancelled`; a stream carries one of the two, never both. A turn that never waited does\nnot send it. `ticket` is the place the message held.",
+        "description": "A message that waited in the session's line has taken the turn and is about to run.\n\n(`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`.) Sent once, as the\nturn's first frame, the moment the message's place became the running turn; it is for the\nmessage's own stream, and a participant already watching sees it too. From here the message is\nno longer in the line: `DELETE /sessions/{id}/queue/{ticket}` answers 404 and `POST\n/sessions/{id}/turn/stop` is what ends it. A withdrawal that removed the ticket first wins\ninstead, and the stream ends on `queue_cancelled`; a stream carries one of the two, never both.\nA turn that never waited does not send it. `ticket` is the place the message held.",
         "properties": {
           "ticket": {
             "title": "Ticket",
