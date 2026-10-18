@@ -55,6 +55,7 @@ from chemclaw.connectors.transport import (
     _interceptors,
     _record_schema_cost,
     _stamped,
+    note_unadvertised,
 )
 from chemclaw.core.call_identity import IdentityPin, pin_connection_identity, turn_headers
 from chemclaw.core.config import settings
@@ -363,6 +364,7 @@ class KeptConnectorSession(HeldConnectorSession):
             self._listed_at = self._listings.put(name, key, advertised)
         self._generation = self._listings.generation(name)
         self._mcp_tools = {tool.name: tool for tool in advertised}
+        note_unadvertised(name, self._spec.allowed_tools, self._mcp_tools)
         interceptors = _interceptors(self._spec)
         self._templates = _stamped(
             [

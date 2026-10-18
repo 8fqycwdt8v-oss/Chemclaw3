@@ -1111,3 +1111,28 @@ def test_a_servers_tool_description_is_bounded_before_it_is_bound() -> None:
     tool = _served_by_a_hostile_server("Z" * 400_000)
     assert len(tool.description) <= settings.connector_max_tool_description_chars
     assert "cut by the system" in tool.description
+
+
+def test_a_declared_tool_the_server_did_not_advertise_is_logged_and_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gap between a manifest and its server is reported at the open, per connector.
+
+    The plan gate and the skills still count a declared tool, so without this a skill is offered
+    for a tool that cannot be called and nothing says why.
+    """
+    from chemclaw.connectors.transport import note_unadvertised
+    from chemclaw.core.metrics import METRICS
+
+    def booked() -> float:
+        return METRICS.value("chemclaw_connector_declared_tools_unadvertised_total")
+
+    before = booked()
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.transport"):
+        note_unadvertised("gapprobe", ("a", "b", "c"), iter(("a", "extra")))
+    assert "b, c" in caplog.text and "gapprobe" in caplog.text
+    assert booked() - before == 2
+
+    caplog.clear()
+    note_unadvertised("gapprobe", ("a",), ("a", "extra"))
+    assert not caplog.records and booked() - before == 2, "an advertised declaration is silent"

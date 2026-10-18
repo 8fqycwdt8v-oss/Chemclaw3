@@ -16,6 +16,7 @@ unreachable the same way. A call that exceeds `request_timeout` is cancelled on 
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from types import TracebackType
 
@@ -34,6 +35,7 @@ from chemclaw.connectors.reachability import recently_unreachable, record_reacha
 from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -271,11 +273,10 @@ class HeldConnectorSession:
         for the turn (`core.mcp_session.cancel_on_timeout`).
         """
         cancel_on_timeout(session)
+        advertised = await load_mcp_tools(session, tool_interceptors=_interceptors(self._spec))
+        note_unadvertised(self._spec.name, self._spec.allowed_tools, (t.name for t in advertised))
         return _stamped(
-            _allowed(
-                await load_mcp_tools(session, tool_interceptors=_interceptors(self._spec)),
-                self._spec.allowed_tools,
-            ),
+            _allowed(advertised, self._spec.allowed_tools),
             connector=self._spec.name,
             revision=handshake.serverInfo.version,
         )
@@ -322,6 +323,29 @@ def _allowed(tools: list[BaseTool], allowed: tuple[str, ...]) -> list[BaseTool]:
     """
     keep = set(allowed)
     return [tool for tool in tools if tool.name in keep]
+
+
+def note_unadvertised(connector: str, allowed: Iterable[str], advertised: Iterable[str]) -> None:
+    """Say so when a declared tool is one the server did not advertise at this open.
+
+    The plan gate, the skills backend and `skill-validate` count a declared tool, so a skill can be
+    offered for one that cannot be called; the only trace of that gap is here, once per open.
+    """
+    missing = sorted(set(allowed) - set(advertised))
+    if not missing:
+        return
+    logger.warning(
+        "connector %s declares tools its server did not advertise: %s",
+        connector,
+        ", ".join(missing),
+    )
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_connector_declared_tools_unadvertised_total",
+            len(missing),
+            labels={"connector": connector},
+        )
+    )
 
 
 #: Metadata key `_stamped` writes and `agent/audit.py::_served_by` reads; one constant so the
