@@ -37,6 +37,8 @@ class LlmSettings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    # The provider SDK's own retries of one call, in process. A caller whose call another layer
+    # already retries (the tournament's `REMOTE` activities) builds its model with none instead.
     llm_max_retries: int = Field(default=3, ge=0)
 
     # Ask the endpoint to report token usage while streaming. `ChatOpenAI` skips this with a custom

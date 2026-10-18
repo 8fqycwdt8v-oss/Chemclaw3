@@ -78,12 +78,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **A template tool step retries a governed tool call** [S] — `run_tool_step` is REMOTE (5 attempts) while `run_computable_check`, the same
-  `invoke_governed` path, is GOVERNED (1): a retry repeats the call and its audit row; decide one; `durable/template_activities.py::run_tool_step`, `D-2026-10-14-an-activity-states-its-retry-class`.
-- [ ] **A hypothesis calculation child restarts whole, and a model call retries twice over** [S] — the `ConnectorJobWorkflow` child restarts up to `activity_max_attempts`
-  times on top of its CALC attempts (a child failure is not in the bad-data list), and each LLM activity multiplies Temporal attempts by `llm_max_retries`; `durable/hypothesis_tournament.py::HypothesisTournamentWorkflow._settle_jobs`.
-- [ ] **A hard Postgres outage makes each per-item swallowed write cost the whole IO window** [M] — ~91 s a subscriber in `DigestWorkflow` (about 950 pass `schedule_run_timeout_seconds`
-  = 86400 s), same shape in the `CommitmentSyncWorkflow` and `ReactionCorpusWorkflow` source loops; stop a loop after N consecutive failures; `durable/digest.py::DigestWorkflow`.
 - [ ] **A finished calculation is thrown away when its cache write fails** [S] — a `store.put` error fails the leader and every waiter with the database's error; return the payload and
   count the unstored write, as `publish_stored_result` argues for itself; `science/calc/store.py::cached_compute`.
 - [ ] **A sink's refusal spends the whole attempt budget before dead-lettering** [S] — `_drain_one` books a `SinkRejectedError` like any refusal and `mark_failed` retires it only at the
@@ -147,7 +141,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Everything else
 
-- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — retry-exhaustion counter, note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
+- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
 - [ ] **A failure returned inside a `Command` is invisible to audit and the failure observers** [S] — no tool returns one today; add the absence test (or unwrap `update["messages"]`)
   before one does; `agent/audit.py::returned_failure`.
 - [ ] **The read/write partition test sees only registered tools, not the middleware verbs a graph binds** [S] — `task`, `write_todos`, the scratchpad verbs and handoffs are classified by

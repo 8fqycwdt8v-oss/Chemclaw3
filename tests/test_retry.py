@@ -33,7 +33,6 @@ from chemclaw.durable.retry import (
     _BAD_DATA_TYPES,
     _DECLARED_RETRYABLE,
     child_workflow_once,
-    child_workflow_retry,
     policy_for,
     retry_for,
 )
@@ -415,11 +414,14 @@ def test_the_slow_classes_back_off_from_seconds_to_minutes(activity_class: Activ
     assert sum(waits, timedelta()) >= timedelta(minutes=2)
 
 
-def test_the_child_workflow_policies_are_the_two_the_fan_out_and_the_job_wrapper_use() -> None:
-    """A fan-out child is bounded like an activity; a job's child gets one attempt."""
-    assert child_workflow_retry().maximum_attempts == settings.activity_max_attempts
-    assert child_workflow_retry().non_retryable_error_types == list(_BAD_DATA_TYPES)
+def test_a_child_workflow_gets_one_attempt_because_its_activities_carry_the_retry() -> None:
+    """A child workflow gets one attempt, because its activities carry the retry.
+
+    The only child policy there is, so the walk below that holds every child start to it holds
+    every child to one attempt.
+    """
     assert child_workflow_once().maximum_attempts == 1
+    assert _CHILD_POLICIES == {"child_workflow_once"}
 
 
 def test_a_first_interval_longer_than_the_longest_is_refused_at_startup() -> None:
@@ -529,7 +531,7 @@ def _dispatch_offences(tree: ast.Module, where: str) -> tuple[int, list[str]]:
 
 # The calls that start a child workflow: a child given no policy runs on the server's default.
 _CHILD_NAMES = {"execute_child_workflow", "start_child_workflow"}
-_CHILD_POLICIES = {"child_workflow_retry", "child_workflow_once"}
+_CHILD_POLICIES = {"child_workflow_once"}
 
 
 def _call_name(call: ast.Call) -> str:
@@ -595,7 +597,7 @@ def _policy_offences(tree: ast.Module, where: str) -> list[str]:
 
 
 def _child_offences(tree: ast.Module, where: str) -> list[str]:
-    """Child-workflow starts that state neither of the two child policies nor a forwarded one."""
+    """Child-workflow starts that state neither the child policy nor a forwarded one."""
     enclosing = _enclosing_parameters(tree)
     offences = []
     for call in ast.walk(tree):
@@ -732,9 +734,7 @@ _ACCEPTED = [
     _TEMPLATE.format(
         call="execute_child_workflow", args="W.run, retry_policy=child_workflow_once()"
     ),
-    _TEMPLATE.format(
-        call="start_child_workflow", args="W.run, retry_policy=child_workflow_retry()"
-    ),
+    _TEMPLATE.format(call="start_child_workflow", args="W.run, retry_policy=child_workflow_once()"),
     # The helper that forwards its caller's policy: the parameter is its own.
     "async def run_child(retry_policy):\n"
     "    return await workflow.execute_child_workflow(W.run, retry_policy=retry_policy)\n",
@@ -839,8 +839,9 @@ _PINNED_MEMBERS = {
     # Re-running one repeats an expensive, metered calculation (a persisted result is never
     # recomputed).
     ActivityClass.CALC: {"evaluate_candidates", "run_xtb_calculation"},
-    # Re-running one repeats audited side effects: an agent turn's tools, a governed check.
-    ActivityClass.GOVERNED: {"run_agent_step", "run_computable_check"},
+    # Re-running one repeats audited side effects: an agent turn's tools, a governed check, a
+    # template's governed tool call.
+    ActivityClass.GOVERNED: {"run_agent_step", "run_computable_check", "run_tool_step"},
     # Retried against a full server until the call's own deadline; the only unbounded class.
     ActivityClass.QUEUED_TOOL: {"call_queued_tool"},
     # A call to a system outside the worker and Postgres. The model gateway is the costly one: a
@@ -864,7 +865,6 @@ _PINNED_MEMBERS = {
         "reembed_document_batch",
         "reembed_stale_documents",
         "retrieve_section",
-        "run_tool_step",
         "sync_document_share",
         "sync_eln_entries",
     },
@@ -1054,3 +1054,70 @@ def test_bad_data_costs_one_attempt_and_a_transient_failure_is_retried_to_the_bo
         assert transient["retry_state"] == "MAXIMUM_ATTEMPTS_REACHED", (activity_class, transient)
         assert transient["cause_type"] == "ConnectionError", (activity_class, transient)
         assert "failed on purpose" in transient["message"], (activity_class, transient)
+
+
+@pytest.mark.timeout(300)
+def test_an_activity_is_counted_once_when_its_class_runs_out_of_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An activity is counted once, by class, when its class runs out of attempts.
+
+    Through the worker interceptor production installs, on a real server: a transient failure in
+    every bounded class books one `chemclaw_activity_retries_exhausted_total` row on its last
+    attempt, however many attempts preceded it, and a `ValueError` books none, because
+    classification ended it. `GOVERNED` at one attempt is the case where the first attempt is
+    also the last, which only the refused `ValueError` distinguishes.
+    """
+    from unittest import mock
+
+    from chemclaw.core.metrics import Metrics
+    from chemclaw.durable.interceptor import ChemclawWorkerInterceptor
+
+    for name, value in {
+        "io_retry_max_attempts": 3,
+        "io_retry_initial_seconds": 0.05,
+        "io_retry_max_interval_seconds": 0.1,
+        "slow_retry_initial_seconds": 0.05,
+        "slow_retry_max_interval_seconds": 0.1,
+        "activity_max_attempts": 3,
+        "note_write_max_attempts": 2,
+        "agent_step_max_attempts": 1,
+        "calc_server_timeout_seconds": 0.4,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    metrics = Metrics()
+
+    async def _run() -> None:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="retry-exhaustion",
+                workflows=[_RetryClassProbe],
+                activities=list(_PROBES.values()),
+                interceptors=[ChemclawWorkerInterceptor()],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                for activity_class in _BOUNDED:
+                    for error in ("ValueError", "ConnectionError"):
+                        await client.execute_workflow(
+                            _RetryClassProbe.run,
+                            args=[activity_class.value, error],
+                            id=f"exhaustion-{activity_class.value}-{error}",
+                            task_queue="retry-exhaustion",
+                        )
+
+    with mock.patch("chemclaw.core.metrics_bridge.METRICS", metrics):
+        asyncio.run(_run())
+
+    rendered = metrics.render()
+    for activity_class in _BOUNDED:
+        series = f'chemclaw_activity_retries_exhausted_total{{activity_class="{activity_class}"}}'
+        assert f"{series} 1" in rendered, (
+            f"{activity_class}: one activity ran out of attempts and one exhausted-retries "
+            f"row was expected; the registry rendered:\n"
+            + "\n".join(line for line in rendered.splitlines() if "exhausted" in line)
+        )
+    assert metrics.value("chemclaw_activity_retries_exhausted_total") == len(_BOUNDED), (
+        "a refused ValueError, or an attempt before the last, was counted as exhaustion"
+    )
