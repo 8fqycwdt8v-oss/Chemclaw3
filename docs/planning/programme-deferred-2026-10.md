@@ -133,12 +133,14 @@ sessions that built this. Live arms use `claude-haiku-5-5` against `https://api.
 - **What.** `deploy/helm/chemclaw-postgres` (a separate chart, installed before the application
   chart) and `docs/guides/runbook.md` §(xiii-b) are schema-validated (`kubeconform` against the CRD
   catalogue) and render-tested; `make restore-drill` proves the procedure in containers. Never met a
-  real operator: the Barman Cloud plugin manifests, the `import` and `recovery` bootstraps, the CNPG
-  metric names in the runbook (written from memory, marked "confirm against your version"),
+  real operator: the Barman Cloud plugin manifests, the `import` and `recovery` bootstraps, the
+  metric names the `chemclaw.backup` alerts read (taken from CloudNativePG 1.30.1's and the plugin
+  0.15.1's documentation and source, evaluated by `promtool` on synthetic series, never scraped),
   `immediate: true` with `method: plugin`, `Database`/managed-role objects.
 - **Steps.** Install CNPG, cert-manager and the plugin; create a versioned bucket and a Secret
   `chemclaw-backup-keys`; install the chart; check the `Backup` completes and
-  `status.firstRecoverabilityPoint` is set; write rows, note a timestamp, write more, restore to that
+  `status.firstRecoverabilityPoint` is set and the PodMonitor's target exports every series
+  `ChemclawBackupMonitoringBlind` reads; write rows, note a timestamp, write more, restore to that
   `targetTime` in a scratch namespace (`recovery.rehearsal: true` writes nothing to the bucket); run
   the by-hand checks; time the restore against `rtoSeconds`.
 - **Decisions owed.** The data-protection owner confirms the 30-day default `retentionPolicy`.
@@ -164,7 +166,9 @@ from a session (the proxy rejects tag pushes).
 - **Fix (in `Chemclaw3-mcp`).** Run FastMCP with `stateless_http=True` (the kit's `sessions.py`
   anticipates it) or add `sessionAffinity: ClientIP` with `timeoutSeconds` above 300 to
   `servers/*/deploy/service.yaml`. **First step.** Measure the hit rate on a 2-replica kind
-  deployment. The same hazard already exists for parallel tool calls and the GET stream within a turn.
+  deployment: `chemclaw_connector_session_checkouts_total` by `outcome`, per connector (the
+  "Kept connector sessions" panel), `replaced` against `reused`. The same hazard already exists
+  for parallel tool calls and the GET stream within a turn.
 
 ### B7. W4.9 — delete the git knowledge path
 - **Gate.** `kg-validate --compare` clean for seven days under `kg_store=dual`, plus a restore drill
@@ -258,9 +262,8 @@ files and `ARCHITECTURE.md`).
   re-embed write cannot be made race-free across two systems; the note re-embed still reads through
   `reindex_notes` on the checkout until `kg_store=postgres`; the scheduled `reembed_stale_documents`
   duplicates spend with a running job (accepted, stated).
-- **Kept connector sessions.** No pool metric or dashboard (needs a Helm dashboard panel for
-  `test_every_declared_metric_has_a_consumer`); `traceparent` on a kept connection is the
-  turn-level span at checkout; a server dying mid-turn still fails that call after the request
+- **Kept connector sessions.** `traceparent` on a kept connection is the turn-level span at
+  checkout; a server dying mid-turn still fails that call after the request
   timeout; `connectors/server.py`, `queued_call.py` and the interactive worker build their own
   sessions.
 - **Backend RPC.** NaN/infinity: the request is refused client-side, the answer is serialised by the
@@ -269,10 +272,8 @@ files and `ARCHITECTURE.md`).
   it came (nothing says which leaf the caller meant); cancellation delivered during teardown with no
   body error still surfaces the lone leaf. `connectors/transport.py` and `core/mcp_session.py` each
   carry a `_leaves` helper (merge on a third caller).
-- **Backup.** No alert on a stopped WAL archive or a missing base backup
-  (`deploy/helm/chemclaw/templates/prometheusrule.yaml`); the archive is single-region; a platform
-  Temporal outside the cluster or with non-SQL visibility owes the same contract; PgBouncer as CNPG
-  `Pooler`s is not templated.
+- **Backup.** The archive is single-region; a platform Temporal outside the cluster or with non-SQL
+  visibility owes the same contract; PgBouncer as CNPG `Pooler`s is not templated.
 - **`spend/` (W5.6).** The four middleware (`enforce_loop_cap`, `enforce_spend_cap`,
   `AnswerAtTheCap`, `MeterTurnSpend`) are still four; folding them into one needs the four test files
   that run `enforce_loop_cap` stand-alone rewritten. No separate "per-request" limit exists in the

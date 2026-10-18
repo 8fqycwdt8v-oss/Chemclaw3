@@ -146,13 +146,19 @@ def create_face_app() -> FastAPI:
 
     `connector_app` already handles serving MCP correctly (session manager lifespan, route order,
     per-call caller binding, error sanitising, log configuration); a second transport would not.
+    Its host allow-list is `mcp_face_urls`, since no `connector_urls` entry may name the face.
     """
     logger.info(
         "mcp_face.serving: %d read-only tool(s): %s",
         len(advertised_tools()),
         ", ".join(advertised_tools()),
     )
-    return connector_app(build_face(), name=FACE_NAME, token_env=face_token_env())
+    return connector_app(
+        build_face(),
+        name=FACE_NAME,
+        token_env=face_token_env(),
+        addresses=settings.mcp_face_urls,
+    )
 
 
 def main() -> None:

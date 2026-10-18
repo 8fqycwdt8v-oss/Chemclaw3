@@ -239,3 +239,7 @@ class ServiceSettings(BaseSettings):
 
     # Env var holding the read-only MCP face's bearer; the middleware fails closed when it is unset.
     mcp_face_token_env: str = "CHEMCLAW_MCP_FACE_TOKEN"
+    # Every URL callers dial the read-only MCP face at: its `/mcp` admits each one's host beside
+    # loopback and answers 421 to any other. The chart derives it from the face's Service and
+    # Route. JSON in the env, e.g. CHEMCLAW_MCP_FACE_URLS='["https://chemclaw-mcp-face/mcp"]'.
+    mcp_face_urls: list[str] = Field(default_factory=list)

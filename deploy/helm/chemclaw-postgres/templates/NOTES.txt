@@ -22,4 +22,10 @@ This cluster archives under its own name. Cut the application over to it only af
 docs/guides/runbook.md § "Backup, restore and PITR" pass.
 {{- end }}
 
+{{- if and .Values.monitoring.alerts.enabled (not .Values.recovery.rehearsal) }}
+
+ALERTS: the PrometheusRule {{ include "chemclaw-postgres.name" . }}-backup watches the archiver and the base backups; they fire
+only once user-workload monitoring collects the instances (docs/guides/runbook.md § "When a backup alert fires").
+{{- end }}
+
 Everything this release created is kept if the release is uninstalled; deleting a database is a deliberate `oc delete`.

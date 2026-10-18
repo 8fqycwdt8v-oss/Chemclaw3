@@ -1109,6 +1109,67 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 27,
+      "type": "graph",
+      "title": "Kept connector sessions",
+      "description": "How each turn came by its connector session while sessions are kept. `reused` is the saving; `replaced` is a kept session the server no longer held (a restart, or a second server replica that never saw it); `unpooled` means the pool was full of busy sessions (`CHEMCLAW_CONNECTOR_SESSION_POOL_MAX`). `kept` is what this fleet holds, idle or lent.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 92
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_connector_session_checkouts_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (connector) (rate(chemclaw_connector_session_checkouts_total{outcome=\"replaced\"}[15m]))",
+          "legendFormat": "replaced, {{connector}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(chemclaw_connector_sessions_kept)",
+          "legendFormat": "kept",
+          "refId": "C"
+        }
+      ]
     }
   ],
   "refresh": "30s",

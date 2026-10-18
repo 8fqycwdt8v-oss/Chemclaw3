@@ -9,6 +9,7 @@ opened it would be visible here as a tool answering with someone else's name.
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack
@@ -38,6 +39,7 @@ from chemclaw.connectors.transport import ConnectorSpec, transport_failure
 from chemclaw.core.call_identity import IdentityPin, pin_connection_identity, turn_identity_hook
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import set_current_correlation_id, set_current_identity
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import set_current_session_id
 from chemclaw.core.turn_flags import set_dry_run
 from tests.conftest import _free_port
@@ -598,6 +600,66 @@ async def test_a_full_pool_of_busy_sessions_runs_the_next_turn_unpooled(
             release.set()
             assert (await busy).answers == [_expect("alice", "a")]
             assert pool.size == 1
+
+
+def _checkouts() -> dict[str, float]:
+    """The probe connector's checkouts by outcome, as a scrape of this process reads them."""
+    booked = re.findall(
+        r"^chemclaw_connector_session_checkouts_total"
+        r'\{connector="probe",outcome="(\w+)"\} (\S+)$',
+        METRICS.render(),
+        flags=re.MULTILINE,
+    )
+    return {outcome: float(value) for outcome, value in booked}
+
+
+def _kept() -> float:
+    """The kept-sessions gauge, as a scrape of this process reads it."""
+    match = re.search(r"^chemclaw_connector_sessions_kept (\S+)$", METRICS.render(), re.MULTILINE)
+    assert match is not None, "the kept-sessions gauge is not on the scrape"
+    return float(match.group(1))
+
+
+async def test_every_checkout_is_booked_by_how_the_turn_came_by_its_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opened, reused, replaced and unpooled are each booked once per turn; the size is a gauge.
+
+    Driven through the real open path against a server that restarts and a pool that fills, and
+    read off the scrape text, so a booking that never reaches `/metrics` fails here.
+    """
+    before = _checkouts()
+    port = _free_port()
+    first = ProbeServer(port).start()
+    spec = _spec(port)
+    async with pooling() as pool:
+        assert pool is not None
+        await run_turn([spec], actor="alice", correlation="opened")
+        await run_turn([spec], actor="alice", correlation="reused")
+        assert _kept() == 1
+        first.stop()
+        with ProbeServer(port):
+            await run_turn([spec], actor="alice", correlation="replaced")
+            monkeypatch.setattr(settings, "connector_session_pool_max", 1)
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def hold() -> None:
+                entered.set()
+                await release.wait()
+
+            busy = asyncio.create_task(
+                run_turn([spec], actor="alice", correlation="reused-again", between=hold)
+            )
+            await entered.wait()
+            overflow = await run_turn([spec], actor="bob", correlation="unpooled")
+            assert overflow.answers == [_expect("bob", "unpooled")]
+            release.set()
+            await busy
+            assert _kept() == 1
+    after = _checkouts()
+    booked = {outcome: after[outcome] - before.get(outcome, 0.0) for outcome in after}
+    assert booked == {"opened": 1, "reused": 2, "replaced": 1, "unpooled": 1}
+    assert _kept() == 0
 
 
 async def test_leaving_the_pooling_scope_closes_every_session() -> None:

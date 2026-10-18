@@ -346,6 +346,15 @@ _COUNTERS: dict[str, str] = {
         "Connectors that failed to come up when a turn or template step opened them, by connector; "
         "their tools were absent from that turn."
     ),
+    # How each turn came by its connector session while sessions are kept
+    # (`connectors/session_pool.py`): `reused` a kept one that answered, `replaced` a kept one that
+    # failed its checks, `opened` none kept for this actor, `unpooled` the pool full of busy
+    # sessions. Per connector, because a kept session lives in one server pod and a server behind
+    # several replicas loses it to the others.
+    "chemclaw_connector_session_checkouts_total": (
+        "Connector sessions handed to a turn while sessions are kept, by connector and by whether "
+        "a kept one was reused, replaced, newly opened or opened outside a full pool."
+    ),
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
@@ -1022,6 +1031,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # A bundle name from the connector registry, matching the `chemclaw_connector_unhealthy` gauge's
     # label, so alerts can say which connector went dark.
     "chemclaw_connectors_unreachable_total": ("connector",),
+    # A connector name, as above, and the outcome `ConnectorSessionPool.checkout` books.
+    "chemclaw_connector_session_checkouts_total": ("connector", "outcome"),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_claims_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
@@ -1092,6 +1103,12 @@ _GAUGES: dict[str, str] = {
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
+    # What the kept sessions hold against `connector_session_pool_max`; each is memory here and in
+    # a fleet pod (`connectors/session_pool.py`).
+    "chemclaw_connector_sessions_kept": (
+        "Connector sessions this process keeps across turns: idle, lent to a turn, or being "
+        "checked out."
+    ),
     # A process that cannot look at its databases cannot say they agree with its configuration; 1 is
     # the state to alert on, because the pod then serves unchecked (`core/deployment.py`).
     "chemclaw_deployment_unchecked": (

@@ -64,6 +64,9 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "mcp-face"
+            {{- /* Only this pod reads it, so it is not in the shared ConfigMap. */}}
+            - name: CHEMCLAW_MCP_FACE_URLS
+              value: {{ include "chemclaw.mcpFaceUrls" . | quote }}
             {{- include "chemclaw.otelResourceEnv" (dict "component" "mcp-face") | nindent 12 }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
@@ -178,6 +181,11 @@ spec:
 {{- if not .Values.mcpFace.ingressNamespaces }}
 {{- fail "mcpFace.route.enabled is true but mcpFace.ingressNamespaces is empty: the Route would publish an address the chart's own `mcp-face-ingress` NetworkPolicy drops, because that policy permits this release's own pods and the namespaces this list names, and the router is in neither. Name the router's namespace selector here (the front door's is `networkPolicy.ingressNamespaces`, and it is a separate list on purpose — this one governs a surface authorized by one bearer token), or set mcpFace.route.enabled=false and reach the face from inside the cluster." }}
 {{- end }}
+{{- /* The same shape one layer up: the face admits only the hosts `chemclaw.mcpFaceUrls` names, so a
+       host the router generates is an address the face answers 421. */ -}}
+{{- if not .Values.mcpFace.route.host }}
+{{- fail "mcpFace.route.enabled is true but mcpFace.route.host is empty: the face's /mcp admits only the hosts it is configured with (CHEMCLAW_MCP_FACE_URLS) and answers 421 to any other, so a Route whose host the router generates would publish an address the face refuses. Name the host the Route should publish the face at." }}
+{{- end }}
 ---
 {{- /* Publishing the face outside the cluster is opt-in and off by default. A partner agent
        reaching it is the point of the component, and it is still a surface serving this
@@ -192,6 +200,7 @@ metadata:
     {{- include "chemclaw.labels" . | nindent 4 }}
     app.kubernetes.io/component: mcp-face
 spec:
+  host: {{ .Values.mcpFace.route.host | quote }}
   to:
     kind: Service
     name: {{ include "chemclaw.name" . }}-mcp-face

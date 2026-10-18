@@ -3921,16 +3921,19 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
         "--set",
         "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
     ),
-    # The second is a posture: the chart refuses to publish the face until a deployment names who
-    # may reach it; stated here as the router's selector, as a real publishing release would.
     # A posture: every background worker mounts the share, so with two the chart asks for the
     # claim's access mode.
     "documentShare.enabled": ("--set", "documentShare.accessMode=ReadWriteMany"),
     # The same posture for the erasure ledger, which every background worker appends to.
     "erasureLedger.enabled": ("--set", "erasureLedger.accessMode=ReadWriteMany"),
+    # The other two are postures: the chart refuses to publish the face until a deployment names
+    # its host and who may reach it; stated here as the router's selector, as a real publishing
+    # release would.
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",
+        "--set",
+        "mcpFace.route.host=chemclaw-read.apps.example",
         "--set-json",
         'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]',
     ),
@@ -4785,9 +4788,12 @@ def test_every_alert_carries_a_runbook_url_that_resolves() -> None:
     """Every alert carries a `runbook_url` that resolves, and every runbook heading is reached.
 
     Both directions, because either alone rots: a link to a renamed heading, or a heading whose
-    alert lost its annotation.
+    alert lost its annotation. Over both charts' rules, since the runbook holds both sets.
     """
-    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    rule = "\n".join(
+        (chart / "templates" / "prometheusrule.yaml").read_text()
+        for chart in (CHART, DEPLOY / "helm" / "chemclaw-postgres")
+    )
     runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
     alerts = re.findall(r"- alert: (\w+)", rule)
     assert alerts, "no alerts found — the extraction is broken, not the rules"
@@ -5893,6 +5899,9 @@ def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None
 #: opposite sides of one assertion — one renders with it, the other without.
 _ROUTER_PEER = 'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]'
 
+#: The host a publishing release names for the face's Route.
+_FACE_HOST = "chemclaw-read.apps.example"
+
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
@@ -5923,6 +5932,8 @@ def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
         "mcpFace.enabled=true",
         "--set",
         "mcpFace.route.enabled=true",
+        "--set",
+        f"mcpFace.route.host={_FACE_HOST}",
         "--set-json",
         _ROUTER_PEER,
     )
@@ -5960,6 +5971,59 @@ def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
     assert ("Route", "chemclaw-mcp-face") not in names, (
         f"an unpublished face rendered a Route anyway: {sorted(names)}"
     )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_face_admits_every_address_the_chart_publishes_it_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The face is told every address the chart makes it reachable at, and parses the list.
+
+    Its `/mcp` answers 421 to a `Host` it is not configured with, so the Route's host and the
+    Service's names must each reach `CHEMCLAW_MCP_FACE_URLS` (issue #540). A Route whose host the
+    router would generate is refused, since no value could name it to the face.
+    """
+    from urllib.parse import urlsplit
+
+    from chemclaw.core.config import Settings
+
+    published = ("--set", "mcpFace.enabled=true", "--set", "mcpFace.route.enabled=true")
+    generated = _render(*published, "--set-json", _ROUTER_PEER)
+    assert generated.returncode != 0, "a Route with a generated host rendered"
+    assert "mcpFace.route.host" in generated.stderr, generated.stderr
+
+    render = _render(
+        *published,
+        "--set",
+        f"mcpFace.route.host={_FACE_HOST}",
+        "--set-json",
+        _ROUTER_PEER,
+        "--set-json",
+        'mcpFace.extraUrls=["https://face.platform.example/mcp"]',
+    )
+    assert render.returncode == 0, render.stderr
+    documents = {
+        (document["kind"], document["metadata"]["name"]): document
+        for document in yaml.safe_load_all(render.stdout)
+        if document
+    }
+    route = documents[("Route", "chemclaw-mcp-face")]["spec"]
+    service = documents[("Service", "chemclaw-mcp-face")]["spec"]
+    container = documents[("Deployment", "chemclaw-mcp-face")]["spec"]["template"]["spec"][
+        "containers"
+    ][0]
+    (rendered,) = [
+        env["value"] for env in container["env"] if env["name"] == "CHEMCLAW_MCP_FACE_URLS"
+    ]
+    # Parsed as the pod parses it: from the environment, where pydantic-settings decodes JSON.
+    monkeypatch.setenv("CHEMCLAW_MCP_FACE_URLS", rendered)
+    loaded = Settings(_env_file=None)  # type: ignore[call-arg]
+    hosts = {urlsplit(url).netloc for url in loaded.mcp_face_urls}
+    assert route["host"] == _FACE_HOST and _FACE_HOST in hosts
+    assert "face.platform.example" in hosts, "an address the platform owns was not admitted"
+    (port,) = [entry["port"] for entry in service["ports"]]
+    for name in ("chemclaw-mcp-face", "chemclaw-mcp-face.default.svc"):
+        assert f"{name}:{port}" in hosts, f"the Service address {name}:{port} is refused: {hosts}"
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")

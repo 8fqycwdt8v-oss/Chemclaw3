@@ -4,6 +4,12 @@
 {{- default .Release.Name .Values.name -}}
 {{- end -}}
 
+{{- /* The PromQL selector for this cluster's instance pods (`<name>-<serial>`, as the operator names
+       them), so a restored cluster's alerts never read the original's pods or the reverse. */ -}}
+{{- define "chemclaw-postgres.instances" -}}
+namespace="{{ .Release.Namespace }}",pod=~"{{ include "chemclaw-postgres.name" . }}-[0-9]+"
+{{- end -}}
+
 {{- define "chemclaw-postgres.labels" -}}
 app.kubernetes.io/name: chemclaw-postgres
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -71,6 +77,13 @@ helm.sh/resource-policy: keep
 {{- end }}
 {{- if and (eq .Values.import.type "monolith") (not .Values.import.databases) }}
 {{- fail "import.type monolith needs import.databases: name every database to carry over (the application's, and Temporal's if they live there)." }}
+{{- end }}
+{{- end }}
+{{- if .Values.monitoring.alerts.enabled }}
+{{- range $key := list "archiveFailingSeconds" "archiveBacklogSeconds" "baseBackupMaxAgeSeconds" "firstBackupGraceSeconds" "metricsAbsentSeconds" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (index $.Values.monitoring.alerts $key))) }}
+{{- fail (printf "monitoring.alerts.%s %v must be a whole number of seconds, at least 1: it is how long a backup alert waits, and 0 or less would page on the first scrape or never." $key (index $.Values.monitoring.alerts $key)) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if and .Values.recovery.rehearsal (not .Values.recovery.enabled) }}

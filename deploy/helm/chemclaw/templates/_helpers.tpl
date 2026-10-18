@@ -809,6 +809,24 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- toJson $urls -}}
 {{- end -}}
 
+{{- /* CHEMCLAW_MCP_FACE_URLS: every address a caller dials the read-only face at, which its `/mcp`
+       admits and nothing else. The face's Service by each name that resolves from another pod (the
+       short name in this namespace, then qualified for the namespaces `mcpFace.ingressNamespaces`
+       admits), the Route's host when it is published, and `mcpFace.extraUrls`. The face has no
+       `connector_urls` entry, so without this every non-loopback `Host` was answered 421 while
+       `/healthz` stayed green. */ -}}
+{{- define "chemclaw.mcpFaceUrls" -}}
+{{- $service := printf "%s-mcp-face" (include "chemclaw.name" .) -}}
+{{- $urls := list -}}
+{{- range $host := list $service (printf "%s.%s" $service .Release.Namespace) (printf "%s.%s.svc" $service .Release.Namespace) (printf "%s.%s.svc.cluster.local" $service .Release.Namespace) -}}
+{{- $urls = append $urls (printf "http://%s:%v/mcp" $host $.Values.service.port) -}}
+{{- end -}}
+{{- if .Values.mcpFace.route.enabled -}}
+{{- $urls = append $urls (printf "https://%s/mcp" .Values.mcpFace.route.host) -}}
+{{- end -}}
+{{- toJson (concat $urls .Values.mcpFace.extraUrls) -}}
+{{- end -}}
+
 {{- /* Which bundles the agent loads at all — `CHEMCLAW_CONNECTORS_ENABLED`, derived from the same
        block that renders the pods.
 

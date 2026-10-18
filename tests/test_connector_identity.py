@@ -878,6 +878,34 @@ def test_a_connector_answers_the_address_it_is_configured_at_and_refuses_others(
         )
 
 
+def test_the_read_only_face_answers_the_addresses_it_is_published_at_and_refuses_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read-only face answers the addresses it is published at and refuses others (#540).
+
+    The face has no `connector_urls` entry, so its guard admitted loopback only and a caller at its
+    Service or Route got 421. Driven through the face's own app with a valid bearer, so the request
+    reaches the guard rather than stopping at a 401 every `Host` would share.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.mcp_face import create_face_app, face_token_env
+
+    monkeypatch.setenv(face_token_env(), "face-token")
+    monkeypatch.setattr(
+        settings,
+        "mcp_face_urls",
+        ["http://chemclaw-mcp-face:8080/mcp", "https://chemclaw-read.apps.example/mcp"],
+    )
+    bearer = {"Authorization": "Bearer face-token"}
+    with TestClient(create_face_app()) as client:
+        for host in ("chemclaw-mcp-face:8080", "chemclaw-read.apps.example", "127.0.0.1:8080"):
+            answered = client.post("/mcp", json={}, headers={**bearer, "Host": host})
+            assert answered.status_code not in (401, 421), (host, answered.status_code)
+        refused = client.post("/mcp", json={}, headers={**bearer, "Host": "attacker.example"})
+        assert refused.status_code == 421
+
+
 def test_a_connector_pod_logs_the_caller_it_is_serving(monkeypatch: pytest.MonkeyPatch) -> None:
     """A connector pod logs the caller it is serving.
 
