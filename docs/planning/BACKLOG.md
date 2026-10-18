@@ -110,10 +110,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Knowledge and records
 
-- [ ] **A citation-only record can be cited and cannot be found** [M] — carry structured species on its label row;
-  `ingest/eln/ingest.py::ingest_reaction`, `science/labels/records.py`, `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`.
-- [ ] **An entry amended to citation-only keeps its old label row** [S] — `connectors/rxnfp/server/tools.py::reagent_frequency` still
-  counts it; `agent/protocol_design_tools.py::uncited_precedent` checks neither withheld nor retracted.
+- [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
+  structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
 
 - [ ] **A note view is read in several steps, not one snapshot** [S] — `expand_note` awaits `edges`, `neighborhood`, `get_many` and
   `current_successors` separately, so a write between them can show a neighbour its links do not yet name; the Postgres store answers it with one transaction (`kg/store.py::NoteStore`).
