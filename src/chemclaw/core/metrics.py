@@ -355,6 +355,11 @@ _COUNTERS: dict[str, str] = {
         "Connector sessions handed to a turn while sessions are kept, by connector and by whether "
         "a kept one was reused, replaced, newly opened or opened outside a full pool."
     ),
+    "chemclaw_connector_declared_tools_unadvertised_total": (
+        "Tools a connector's manifest declares that its server did not advertise when a session "
+        "opened, by connector. The tool is dropped, yet the plan gate and the skills still count "
+        "it, so a skill can be offered for a tool that cannot be called."
+    ),
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
@@ -1035,6 +1040,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_connectors_unreachable_total": ("connector",),
     # A connector name, as above, and the outcome `ConnectorSessionPool.checkout` books.
     "chemclaw_connector_session_checkouts_total": ("connector", "outcome"),
+    "chemclaw_connector_declared_tools_unadvertised_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_claims_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),

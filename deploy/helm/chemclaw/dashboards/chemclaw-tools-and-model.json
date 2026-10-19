@@ -647,6 +647,57 @@
         }
       ],
       "description": "Artefact revisions written, by author kind and op, against the writes refused, by reason. Agent creates with few human revisions is a pane nobody corrects; a climbing `invalid` refusal with flat writes is a model that cannot write the spec it is offered."
+    },
+    {
+      "type": "graph",
+      "title": "Declared tools a connector server did not advertise",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector) (rate(chemclaw_connector_declared_tools_unadvertised_total[1h]))",
+          "legendFormat": "{{connector}}",
+          "refId": "A"
+        }
+      ],
+      "id": 12,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "description": "A manifest's allowed_tools names a tool the server's tools/list did not return, so the model never sees it. Any non-zero rate is a typo in the manifest or a server that dropped the tool; the warning log names both."
     }
   ],
   "refresh": "30s",
