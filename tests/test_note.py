@@ -10,12 +10,14 @@ from pydantic import ValidationError
 import chemclaw.kg.note as note_module
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.note import (
+    WIKILINK,
     Note,
     NoteError,
     external_record_id,
     mentioned_ids,
     parse_note,
     read_note,
+    strip_links,
 )
 
 
@@ -383,3 +385,23 @@ def test_a_committed_note_carries_no_credential_a_driver_quoted_back_as_json() -
     for credential in ("W4rehousePw1", "sk_live_9f3a2b1c8d7"):
         assert credential not in content, content
     assert "CX-4711" in content, content
+
+
+@pytest.mark.parametrize(
+    "nested", ["[[[[x]]]]", "[[a[[b]]c]]", "[[[[[[x]]]]]]", "[[supports:[[b]]]]"]
+)
+def test_stripping_links_cannot_leave_a_link_assembled_from_the_pieces(nested: str) -> None:
+    """Removing an inner link must not join its neighbours into a live one."""
+    assert not WIKILINK.search(strip_links(nested)), strip_links(nested)
+    assert strip_links("see [[a]] and [[b]]") == "see a and b"
+
+
+def test_stripping_deeply_nested_links_is_linear_and_leaves_no_link() -> None:
+    """Nesting a hostile document can choose must not cost time quadratic in its depth."""
+    import time
+
+    hostile = "[" * 40_000 + "x" + "]" * 40_000
+    started = time.perf_counter()
+    stripped = strip_links(hostile)
+    assert time.perf_counter() - started < 2.0
+    assert not WIKILINK.search(stripped)

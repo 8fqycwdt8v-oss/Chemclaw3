@@ -23,8 +23,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   refuse it at construction (at least under `entra_required`); `publish/drivers/http.py::HttpResultSink`.
 - [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
   which holds only for bundles this repo serves; frame or mark it, or correct the claim; `agent/tool_authz.py::answered_failure`.
-- [ ] **Share-document chunks reach the model with their wikilinks intact** [S] — note excerpts and report cells strip links, share chunks do not, so a share author's `[[note-id]]`
-  arrives verbatim inside the envelope; strip as `retrieval/retrievers.py::_excerpt` does; `ingest/documents/retriever.py::ShareDocumentRetriever._chunks`.
 
 ### Answers that are wrong without saying so
 
@@ -36,8 +34,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   returns a hit `expand_note` refuses; treat an absent record as withheld; `retrieval/retrievers.py::FingerprintReactionRetriever.retrieve`, `ingest/eln/records.py::structurally_withheld`.
 - [ ] **A report section is bounded by neither evidence budget** [S] — `gather_section` dedups but concatenates legs in order with no chunk or character cap; reuse the conversational
   merge and both `gather_evidence_max_*` caps, and render the cut; `retrieval/harness.py::gather_section`, `agent/research_tools.py::_interleave_dedup`.
-- [ ] **`find_calculations` with `calc_type="xtb"` and a SMILES answers empty instead of refusing** [S] — no type is a bare `xtb`, so the structure-keyed refusal never fires; refuse a bare
-  family name; the docstring's `xtb`/`dft`/`descriptors` examples change only behind a live eval; `science/calc/store.py::CalculationQuery._molecule_filter_addresses_the_type`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`

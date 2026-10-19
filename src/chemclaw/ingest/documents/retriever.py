@@ -28,6 +28,7 @@ from chemclaw.ingest.documents.index import (
     require_schema_vector_width,
 )
 from chemclaw.ingest.documents.reassemble import join_chunks
+from chemclaw.kg.note import strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
 
@@ -188,7 +189,8 @@ class ShareDocumentRetriever:
         """Turn ranked index hits into citable evidence."""
         return [
             EvidenceChunk(
-                content=hit.content,
+                # Links stripped as a note excerpt's are: a share's `[[id]]` is not a graph edge.
+                content=strip_links(hit.content),
                 # Not a knowledge-graph note id: a share citation resolves to the file a reader can
                 # check.
                 source_note_id=f"{self.name}:{hit.doc_id}#{hit.ordinal}",
