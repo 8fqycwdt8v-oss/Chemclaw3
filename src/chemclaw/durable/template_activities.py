@@ -26,7 +26,7 @@ from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
 from chemclaw.agent.turn_ambient import turn_caps
-from chemclaw.connectors.jobs import prepare_job_launch
+from chemclaw.connectors.jobs import job_terms, prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
 from chemclaw.core import bookkeeping
@@ -40,6 +40,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.connector_job import JobTerms
 from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import ActivityClass, durable_activity
@@ -194,15 +195,16 @@ class JobStepInput(BaseModel):
     identity: StepIdentity
 
 
-class ResolvedJob(BaseModel):
-    """Where a declared job runs, and the payload it was authorized to run with.
+class ResolvedJob(JobTerms):
+    """Where a declared job runs, the payload it was authorized to run with, and its `JobTerms`.
 
     `payload` is here because resolution and authorization are one act, not two (D-168). The
     activity that resolves a job step is the same activity that validated its arguments, checked
     `authorize_trigger` against the requester and ran the job's declared precondition — so handing
     back the *validated* payload is what stops the workflow starting a child with the raw,
     unchecked arguments it happened to have. There is no representable state in which a caller
-    holds a `ResolvedJob` and has not passed the pre-flight.
+    holds a `ResolvedJob` and has not passed the pre-flight. The terms are inherited so a template
+    step launches a job exactly as the chat tool does, its declared effect included.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -211,14 +213,6 @@ class ResolvedJob(BaseModel):
     job: str
     workflow: str
     task_queue: str
-    publish_to_graph: bool
-    # The job's declared runtime ceiling (`JobSpec.timeout_seconds`), or `None`. Resolved here so a
-    # template step and a chat launch of the same job get the same ceiling.
-    timeout_seconds: float | None = None
-    # Whether the job waits on a person, so `child_execution_timeout` gives it no ceiling. Every
-    # field the job wrapper reads off a manifest must travel this model;
-    # `tests/test_template_job_step.py` derives that set from `JobSpec` and `ConnectorJobInput`.
-    awaits_answer: bool = False
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -282,10 +276,8 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         job=job.name,
         workflow=job.workflow,
         task_queue=bundle_queue(connector),
-        publish_to_graph=job.publish_to_graph,
-        timeout_seconds=job.timeout_seconds,
-        awaits_answer=job.awaits_answer,
         payload=payload,
+        **job_terms(job).terms(),
     )
 
 
