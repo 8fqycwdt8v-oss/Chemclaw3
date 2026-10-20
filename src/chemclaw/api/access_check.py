@@ -5,11 +5,11 @@ at boot makes it a deployment error. The tool set is every tool any discovered b
 (enabled or not), so a policy may name a bundle that is switched off here.
 """
 
-from chemclaw.agent.chemclaw_agent import registered_tool_names
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors import registry as connector_registry
 from chemclaw.core.access_policy import AccessPolicyError, active_policy
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.templates.registry import template_tool_names
 
 

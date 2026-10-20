@@ -391,7 +391,7 @@ def _policy_refusal(tool: str, arguments: Mapping[str, Any]) -> AuthorizationErr
     return AuthorizationError(
         routed(
             f"{_actor()} is not authorized to use {named}: none of the account's roles grants it",
-            code="tool_role_not_held",
+            code="tool_not_granted_by_policy",
             boundary="this deployment's access policy",
             who_can_act=f"an account whose role grants {named} in this deployment",
         )

@@ -27,6 +27,7 @@ from chemclaw.agent.tool_authz import (
     failure_detail,
     undeclared_write_refusal,
 )
+from chemclaw.core.access_policy import parse_policy
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
@@ -52,6 +53,7 @@ _HAS_NO_PATH = frozenset(
         "expensive_action_role_not_held",
         "expensive_action_unauthenticated",
         "privileged_role_not_held",
+        "tool_not_granted_by_policy",
         "tool_not_permitted_here",
         "tool_role_not_held",
     }
@@ -102,6 +104,13 @@ def _every_routed_refusal(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         refusals["expensive_action_unauthenticated"] = _refused_by(
             lambda: authorize_trigger("sample_conformers")
         )
+
+    # Under an access policy the grant decides; a role the file does not list holds nothing.
+    monkeypatch.setattr(
+        "chemclaw.agent.authz.active_policy", lambda: parse_policy("roles: {viewer: {tools: []}}")
+    )
+    with _as("u-1", frozenset({"viewer"})):
+        refusals["tool_not_granted_by_policy"] = _refused_by(lambda: authorize_tool("watch_for"))
 
     refusals["plan_not_approved"] = str(plan_approval_refusal("watch_for"))
     refusals["plan_scope_excludes_tool"] = str(
