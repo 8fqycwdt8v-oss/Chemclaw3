@@ -99,14 +99,51 @@ def failure_reason(exc: BaseException) -> str:
     return sentence_of(str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
 
 
-class ConnectorJobInput(BaseModel):
+class JobTerms(BaseModel):
+    """What a launch copies from the job's manifest and the deployment's configuration.
+
+    A workflow may read neither, so every launcher carries these to the wrapper. They are one model
+    so that no launcher can carry a subset: the chat tool, a template step and a tournament check
+    each fill them through `chemclaw.connectors.jobs.job_terms` and pass them on with `terms()`.
+    A dropped field is not an error but its default, which for `effect_reversal` means a job that
+    changes another system irreversibly runs without the approval it declared.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    publish_to_graph: bool = False
+    # The job's *declared* ceiling (`JobSpec.timeout_seconds`), or `None`. Carried unresolved so the
+    # `min` against the deployment setting is applied by `child_execution_timeout` when the child
+    # starts, and a lowered setting binds still-queued jobs.
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    # What this job changes in a system this deployment does not own. Empty means the job's writes
+    # are this system's own.
+    effect_system: str = ""
+    effect_reversal: str = ""
+    # Who may approve an irreversible effect. Empty means no approver role, which `_approve_effect`
+    # refuses.
+    effect_approver: str = ""
+    #: How long that approval stays open, fixed at launch so no timer count depends on `settings`
+    #: during replay.
+    effect_approval_days: float = 3.0
+    # Whether this job suspends on a person (`JobSpec.awaits_answer`). `True` means elapsed time is
+    # not cost; `child_execution_timeout` is where this and `timeout_seconds` meet.
+    awaits_answer: bool = False
+
+    def terms(self) -> dict[str, Any]:
+        """These fields alone, to pass on to the model the next hop is built from."""
+        return {name: getattr(self, name) for name in JobTerms.model_fields}
+
+
+class ConnectorJobInput(JobTerms):
     """What core needs to run one connector job: where the work lives, and the turn it came from.
 
     `workflow` comes straight from the manifest's `JobSpec` and `task_queue` is derived from
     `connector` at dispatch (`bundle_queue`, D-150); together they are the *only* thing binding
     this run to a connector — no import, no shared type. `payload` is the model-supplied
     arguments already validated against the job's generated params model, so the child receives a
-    plain, replay-stable mapping rather than a type core would have to know.
+    plain, replay-stable mapping rather than a type core would have to know. The inherited
+    `JobTerms` are defaulted because they cross the Temporal wire.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -134,26 +171,6 @@ class ConnectorJobInput(BaseModel):
     # Defaulted because the field crosses the Temporal wire.
     plan_step: str = ""
     plan_hash: str = ""
-    publish_to_graph: bool = False
-    # The job's *declared* ceiling (`JobSpec.timeout_seconds`), copied from the manifest at launch
-    # because a workflow may not read it. `None` means none declared. Carried unresolved so the
-    # `min` against the deployment setting is applied by `child_execution_timeout` when the child
-    # starts, and a lowered setting binds still-queued jobs. Defaulted for the wire.
-    timeout_seconds: float | None = Field(default=None, gt=0)
-    # What this job changes in a system this deployment does not own, copied from the manifest at
-    # launch. Empty means the job's writes are this system's own. Defaulted for the wire.
-    effect_system: str = ""
-    effect_reversal: str = ""
-    # Who may approve an irreversible effect, resolved from configuration at launch (a workflow may
-    # not read `settings`). Empty means no approver role, which `_approve_effect` refuses.
-    effect_approver: str = ""
-    #: How long that approval stays open, already clamped at launch so no timer count depends on
-    #: `settings` during replay.
-    effect_approval_days: float = 3.0
-    # Whether this job suspends on a person (`JobSpec.awaits_answer`), copied from the manifest at
-    # launch. `True` means elapsed time is not cost; `child_execution_timeout` is where this and
-    # `timeout_seconds` meet. Defaulted for the wire.
-    awaits_answer: bool = False
 
 
 class ConnectorJobResult(BaseModel):
