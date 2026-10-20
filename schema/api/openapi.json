@@ -6033,7 +6033,7 @@
     },
     "/profiles": {
       "get": {
-        "description": "The specialized agents a session may be started as.\n\nRead from the in-memory profile registry, not `load_profiles()`: that returns only newly\nregistered profiles (empty after startup) and does blocking file I/O. The registry is already\nsorted and includes `default`, which no file declares.",
+        "description": "The specialized agents a session may be started as.\n\nRead from the in-memory profile registry, not `load_profiles()`: that returns only newly\nregistered profiles (empty after startup) and does blocking file I/O. The registry is already\nsorted and includes `default`, which no file declares. Under an access policy only the profiles\nthe caller's roles open are listed.",
         "operationId": "profiles_profiles_get",
         "responses": {
           "200": {
