@@ -81,7 +81,9 @@ Entry: none. Size S–M. Repos: all three.
 
 - [ ] **W9.1** ADRs A–L (core) and F′, G′ (fleet), each with `## Options` and, for L, `Revisit
       when:`. Update `docs/decisions/CURRENT.md`. The owner signs off each before its wave.
-- [ ] **W9.2 Fix D1.** `durable/template_job.py::_run_job_step` passes `effect_system`,
+- [x] **W9.2 Fix D1.** *(Done in #630: `JobTerms`, filled once by `job_terms`, inherited by every
+      launcher's carrier; the tournament launcher had the same gap and is fixed too. The
+      `composed.py` refusal was not added, since the per-call approval now applies on every path.)* `durable/template_job.py::_run_job_step` passes `effect_system`,
       `effect_reversal`, `effect_approver`, `effect_approval_days`; `ResolvedJob`
       (`durable/template_activities.py:197`) carries them, filled by `authorize_job_step` exactly
       as `connectors/jobs.py:382-389` fills them. Fix the test, not just the code:
