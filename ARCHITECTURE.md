@@ -49,7 +49,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | --- | --- |
 | `knowledge/` | Layer 4's data: Markdown notes with frontmatter, one directory per note type. |
 | `skills/` | Layer 3: the global `SKILL.md` files not tied to one connector. |
-| `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/`, `templates/`, `profiles/`, `vendored/`, `eln-exports/`, `commitments/`. `data/README.md` names each setting. |
+| `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/`, `templates/`, `profiles/`, `vendored/`, `eln-exports/`, `commitments/`, `access/`. `data/README.md` names each setting. |
 | `tests/` | The suite, including the guards on declarations: packaging, the image, the Helm chart, the ADR ledger and the layering rules. |
 | `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations for this system's own database. |
 | `schema/` | Contracts this system publishes rather than runs. `result-store/`: schemas for databases it does **not** own, kept apart from `infra/sql/` because nothing here holds DDL on those stores. `api/`: the generated OpenAPI document the UI builds its types from, with its version rules. `model-text/`: the generated inventory of every string a model reads. |

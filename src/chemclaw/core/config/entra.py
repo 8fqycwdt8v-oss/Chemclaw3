@@ -74,6 +74,11 @@ class EntraSettings(BaseSettings):
     # app role of the same name. Off by default because the tenant must emit the optional claim; a
     # group assigned to an app role already arrives in `roles`.
     entra_group_claims_as_roles: bool = False
+    # The role-to-rights file (`core/access_policy.py`): which tools, datasources and profiles each
+    # role may use. Empty keeps the older gates (`tool_role_gates`, `entra_privileged_roles`);
+    # set, the policy decides and those privileged-role checks are not consulted. Enforced only
+    # under `entra_required`.
+    access_policy_file: str = ""
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:

@@ -23,6 +23,7 @@ from chemclaw.agent.session_store import owner_permits
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.middleware import bind_request_session, clip_for_log
 from chemclaw.api.state import LiveSession, SessionOwners, state
+from chemclaw.core.access_policy import active_policy
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
@@ -126,11 +127,15 @@ def require_owner(live: LiveSession, principal: Principal, session_id: str, act:
 def _is_reviewer(principal: Principal) -> bool:
     """Whether the caller may reach other people's jobs and experiment designs.
 
-    The same role set that guards every write tool (`entra_privileged_roles`). Dev is open, as in
-    `authorize_tool`; an enforced deployment naming no privileged role fails closed.
+    The access policy's `admin` roles, else the set that guards every write tool
+    (`entra_privileged_roles`). Dev is open, as in `authorize_tool`; an enforced deployment naming
+    no privileged role fails closed.
     """
     if not settings.entra_required:
         return True
+    policy = active_policy()
+    if policy is not None:
+        return policy.is_admin(principal.roles)
     return bool(principal.roles & settings.entra_privileged_role_set)
 
 

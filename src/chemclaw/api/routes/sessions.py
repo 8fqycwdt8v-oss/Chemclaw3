@@ -18,11 +18,12 @@ from chemclaw.agent.attachments import (
     default_attachment_store,
     parse_attachment_off_loop,
 )
-from chemclaw.agent.profiles import get_profile, registered_profile_names
+from chemclaw.agent.profiles import DEFAULT_PROFILE, get_profile, registered_profile_names
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_fork import SessionForkError, fork_session
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api import app as front_door
+from chemclaw.api.auth import Principal
 from chemclaw.api.deps import (
     CurrentSession,
     CurrentUser,
@@ -47,6 +48,7 @@ from chemclaw.api.state import (
     claim_holder,
     state,
 )
+from chemclaw.core.access_policy import active_policy
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 
@@ -82,6 +84,7 @@ async def create_session(
     front = state(request)
     session_id = uuid.uuid4().hex
     profile = body.profile if body is not None else None
+    _refuse_unentitled_profile(profile or DEFAULT_PROFILE.name, principal)
     if profile is not None:
         try:
             # Resolved against the registry here, so a test's injected factory cannot make an
@@ -95,6 +98,18 @@ async def create_session(
         await front.session_owners.record(session_id, principal.oid, profile)
     front.live_sessions.add(session_id, TurnSession(session_id=session_id), principal.oid, profile)
     return SessionOut(session_id=session_id)
+
+
+def _refuse_unentitled_profile(profile: str, principal: Principal) -> None:
+    """403 when the access policy opens `profile` to none of the caller's roles.
+
+    A profile only narrows an agent, so what it guards is the harness autonomy and the tool subset
+    a deployment chose to put behind it. The default profile is a name like any other.
+    """
+    policy = active_policy()
+    if settings.entra_required and policy is not None:
+        if not policy.permits_profile(principal.roles, profile):
+            raise HTTPException(status_code=403, detail="this profile is not open to your roles")
 
 
 async def fork_session_route(
@@ -324,9 +339,14 @@ async def profiles(
 
     Read from the in-memory profile registry, not `load_profiles()`: that returns only newly
     registered profiles (empty after startup) and does blocking file I/O. The registry is already
-    sorted and includes `default`, which no file declares.
+    sorted and includes `default`, which no file declares. Under an access policy only the profiles
+    the caller's roles open are listed.
     """
-    return registered_profile_names()
+    names = registered_profile_names()
+    policy = active_policy()
+    if settings.entra_required and policy is not None:
+        return [n for n in names if policy.permits_profile(principal.roles, n)]
+    return names
 
 
 def register(app: FastAPI) -> None:

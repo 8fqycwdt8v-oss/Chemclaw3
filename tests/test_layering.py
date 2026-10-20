@@ -411,6 +411,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # `_ALLOWED_MODULE_EDGES`. Exactly one originates in `chemclaw.core` (the connector registry);
 # `test_core_has_one_lazy_exception_and_the_dict_says_which` holds that.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.api", "chemclaw.ingest"): (
+        "`access_check` asks the data-source registry which sources exist, once at startup, to "
+        "refuse an access policy naming one that does not. Lazy because the front door otherwise "
+        "never imports the ingest package"
+    ),
     ("chemclaw.hypotheses", "chemclaw.core"): (
         "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
         "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "
