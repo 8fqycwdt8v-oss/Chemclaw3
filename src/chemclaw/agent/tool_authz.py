@@ -282,7 +282,7 @@ def _refusal_message(request: Any, text: str, *, marked: bool = False) -> ToolMe
 @wrap_tool_call
 async def enforce_tool_authz(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Block a tool call the turn's user is not authorized for, else run it unchanged."""
-    authorize_tool(request.tool_call["name"])
+    authorize_tool(request.tool_call["name"], request.tool_call.get("args") or {})
     return await handler(request)
 
 

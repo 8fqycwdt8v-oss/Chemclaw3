@@ -1,0 +1,37 @@
+# Who may do what. The key of each block is the Entra app-role value in the token; adding a role is
+# adding a block, with no code change. Enabled by CHEMCLAW_ACCESS_POLICY_FILE (unset keeps the older
+# tool_role_gates / entra_privileged_roles gates).
+#
+# A person's rights are the union over the roles they hold; a token carrying none of these roles
+# can do nothing. `deny` subtracts from the same block's `tools` only.
+#
+# tools: "*" | "tier:read" (changes nothing) | "tier:write" (side-effecting, plan-gated on top)
+#        | "connector:<bundle>" | "<tool name>"
+# sources / profiles: names, or "*".   admin: the reviewer acts (org skills, others' jobs).
+roles:
+  viewer:
+    description: Answers only — read-only tools and evidence, no writes, jobs or reports.
+    tools: [tier:read]
+    sources: [graph, lexical, vector]
+    profiles: [default, evidence, property-lookup]
+
+  chemist-development:
+    description: Process development chemists — all compute and process-safety work.
+    tools: [tier:read, tier:write]
+    deny: [connector:results]
+    sources: ["*"]
+    profiles: ["*"]
+
+  chemist-medchem:
+    description: Medicinal chemists — property, design and precedent work; no process-scale tools.
+    tools: [tier:read, tier:write]
+    deny: [connector:results, connector:thermalsafety, connector:unitops, connector:kinetics]
+    sources: [graph, lexical, vector, eln-json, eln-ord, eln-databricks, pistachio, vendored]
+    profiles: [default, evidence, property-lookup, design, computation, safety]
+
+  admin:
+    description: Everything, including publishing and the reviewer acts.
+    tools: ["*"]
+    sources: ["*"]
+    profiles: ["*"]
+    admin: true

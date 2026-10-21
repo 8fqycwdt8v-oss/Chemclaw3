@@ -599,6 +599,12 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
     return owner
 
 
+def tool_connector(name: str) -> str | None:
+    """The enabled bundle that serves tool or job `name`, or `None` for a first-party tool."""
+    owner = _declared_tool_names().get(name)
+    return None if owner is None else owner[0]
+
+
 def job_tools() -> list[CapabilityTool]:
     """The generated launcher for every job declared by an enabled connector.
 

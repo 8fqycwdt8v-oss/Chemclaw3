@@ -17,6 +17,7 @@ from typing import Any
 
 from chemclaw.agent.framing import safe_id
 from chemclaw.agent.refusal_route import routed
+from chemclaw.core.access_policy import active_policy
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 
@@ -368,7 +369,36 @@ def _has_required_role(required: frozenset[str]) -> bool:
     return bool(get_current_roles() & required)
 
 
-def authorize_tool(tool: str) -> None:
+def _policy_refusal(tool: str, arguments: Mapping[str, Any]) -> AuthorizationError | None:
+    """The refusal the access policy earns this call, or `None` when it grants it.
+
+    A tool the policy does not grant is refused whatever else is configured; the older gates are
+    not consulted afterwards, since the policy is what replaces them.
+    """
+    from chemclaw.connectors.registry import tool_connector
+
+    policy = active_policy()
+    if policy is None:
+        return None
+    if policy.permits_tool(
+        get_current_roles(),
+        tool,
+        connector=tool_connector(tool),
+        writes=side_effecting_call(tool, arguments),
+    ):
+        return None
+    named = safe_id(tool)
+    return AuthorizationError(
+        routed(
+            f"{_actor()} is not authorized to use {named}: none of the account's roles grants it",
+            code="tool_not_granted_by_policy",
+            boundary="this deployment's access policy",
+            who_can_act=f"an account whose role grants {named} in this deployment",
+        )
+    )
+
+
+def authorize_tool(tool: str, arguments: Mapping[str, Any] | None = None) -> None:
     """Authorize the current turn's user to invoke `tool`, or raise `AuthorizationError`.
 
     Consults `tool_role_gates` against the turn's roles. An ungated tool follows
@@ -380,8 +410,12 @@ def authorize_tool(tool: str) -> None:
     Refusals are relayed verbatim to the chemist, so each names who, which tool and why, with the
     routed footer declaring no sanctioned path; they never enumerate role names.
 
+    Under an access policy (`access_policy_file`) the policy alone decides, from the call's name
+    and, for the filesystem verbs, its arguments; the gates above are the policy-less posture.
+
     Args:
         tool: The tool's registered name (e.g. `"record_knowledge_note"`, `"gather_evidence"`).
+        arguments: The call's arguments, which decide whether a `/memories/` write is a write.
 
     Raises:
         AuthorizationError: When enforcement is on and the user may not call `tool` — its gate
@@ -389,6 +423,11 @@ def authorize_tool(tool: str) -> None:
     """
     if not settings.entra_required:
         return  # dev: no tenant, open gate
+    if active_policy() is not None:
+        refusal = _policy_refusal(tool, arguments or {})
+        if refusal is not None:
+            raise refusal
+        return
     # Only the message uses the sanitized name; decisions use `tool` verbatim. The name is
     # model-supplied and unvalidated here, so it must not be able to forge the refusal footer.
     named = safe_id(tool)
@@ -448,6 +487,8 @@ def authorize_trigger(action: str) -> None:
         return  # dev: no tenant, open gate
     if action not in expensive_actions():
         return  # not a gated action
+    if active_policy() is not None:
+        return  # the policy grants or refuses the launcher as a tool (`authorize_tool`)
     actor = get_current_actor()
     if actor is None:
         raise AuthorizationError(

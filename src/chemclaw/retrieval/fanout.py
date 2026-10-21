@@ -23,7 +23,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
+from chemclaw.core.access_policy import active_policy
+from chemclaw.core.config import settings
 from chemclaw.core.graph_durability import ignoring_inherited_durability
+from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.turn_signals import stream_writer_or_none
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
@@ -63,6 +66,20 @@ class FanState(TypedDict):
     skipped: Annotated[list[tuple[str, str]], operator.add]
 
 
+def _refuse_unentitled(name: str) -> None:
+    """Skip a source the access policy does not open to the turn's roles.
+
+    A skip, not a failure: the model is told the source was not asked, so it does not answer "no
+    precedent" from a source the caller may not read. Roles are empty in durable activities, so a
+    policy-gated deployment's background evidence sweeps ask no source.
+    """
+    policy = active_policy()
+    if not settings.entra_required or policy is None:
+        return
+    if not policy.permits_source(get_current_roles(), name):
+        raise RetrieverSkip(f"the {name} source is not open to this account's roles")
+
+
 async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     """Run one source and report what it contributed, on its own branch.
 
@@ -76,6 +93,7 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     name, retriever = sources[index]
     started = time.perf_counter()
     try:
+        _refuse_unentitled(name)
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
     except RetrieverSkip as skip:
         _record_seconds(name, time.perf_counter() - started)

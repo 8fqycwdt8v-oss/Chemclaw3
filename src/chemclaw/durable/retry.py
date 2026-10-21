@@ -33,6 +33,8 @@ _BAD_DATA_TYPES = [
     "ValueError",
     "ValidationError",
     "ChemclawError",
+    # An access-policy file that is unreadable or names something absent; a retry reads the same.
+    "AccessPolicyError",
     "InvalidSmilesError",
     "FingerprintError",
     # The argument was not fingerprintable; listed beside its parent because names, not the

@@ -39,6 +39,7 @@ from chemclaw.agent.subagents import refuse_an_unknown_roster
 from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
+from chemclaw.api.access_check import refuse_an_unknown_access_policy
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
 from chemclaw.api.contract import API_CONTRACT_VERSION, payload_schemas
 from chemclaw.api.deps import CurrentUser
@@ -211,6 +212,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Likewise the peer roster: one typo can make the mesh indistinguishable from the feature being
     # off.
     refuse_an_unknown_peer_roster(registered_profile_names())
+    # A policy naming a tool, source or profile nobody has grants nothing there, silently.
+    refuse_an_unknown_access_policy()
     # A candidate arm's overlay that applies nowhere would make it a second control.
     refuse_a_misapplied_overlay()
     # After logging is configured and profiles load, so a malformed profile fails first.
