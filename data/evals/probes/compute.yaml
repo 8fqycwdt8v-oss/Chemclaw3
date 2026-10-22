@@ -1,0 +1,136 @@
+# Live-test probes — the compute eval (W9.3 of docs/planning/sources-and-compute-programme.md).
+#
+# **What this measures.** Two shapes of compute work a chemist asks for and the agent has to
+# orchestrate rather than call once:
+#
+# - **A funnel** (`cp-01`..`cp-06`): screen broadly at low cost, then spend more only on what
+#   survived. Within one molecule the calc bundle does this today (CREST search, then free-energy
+#   refinement of the lowest members); across several molecules no tool maps and selects, so the
+#   agent loops by hand, and those probes are bucket B.
+# - **A recovery** (`cp-07`..`cp-10`): the first attempt fails, and a good answer says why, then
+#   does the next-best thing instead of stopping or inventing a number. The failures used here are
+#   refusals the xTB tier produces deterministically today: a charged species in the gas phase, a
+#   Hessian above `calc_hessian_max_atoms` (150), and a job above `calc_max_primitive_calls` (120).
+#   Failures injected by a mock scheduler wait for the backend seam (decision F).
+#
+# Every calculation here is GFN2-xTB or CREST; where a ranking turns on a difference inside xTB's
+# error bar, a good answer says so and proposes an experiment.
+#
+# Buckets: A = capability exists · B = partial · C = absent. `expects_tools` is ANY-OF and every
+# name is from the agent-callable surface.
+
+probes:
+  # ------------------------------------------------------------------ funnels
+  - id: cp-01
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Which conformer of the alanine dipeptide (CC(=O)N[C@@H](C)C(=O)NC) dominates in water at 298 K? Rank by free energy, not just electronic energy, and tell me where the two rankings disagree."
+    expects_tools: [sample_conformers, refine_ensemble, run_conformer_refinement]
+    expects_job: true
+    forbids_claims:
+      - "a free-energy population reported without a Hessian having been run"
+      - "a ranking stated as certain when the gap is inside xTB's error bar"
+    direction: "A conformer search in implicit water, then free-energy refinement of the lowest members, reporting both weightings side by side. A good answer names the conformer families (C7eq, C5, PII-like), says which one the G weighting promotes or demotes and why (stiff low modes of the hydrogen-bonded fold), and calls any gap under about 1 kcal/mol a tie at this level of theory."
+
+  - id: cp-02
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Screen these eight amines by the HOMO energy of their lowest-energy conformer, then refine only the top three with free-energy-weighted ensembles: morpholine C1COCCN1, piperidine C1CCNCC1, pyrrolidine C1CCNC1, N-methylpiperazine CN1CCNCC1, 4-methoxyaniline COc1ccc(N)cc1, 4-methylaniline Cc1ccc(N)cc1, 3-aminopyridine Nc1cccnc1, benzylamine NCc1ccccc1."
+    expects_tools: [sample_conformers, compute_electronic_properties, refine_ensemble, run_conformer_refinement, compose_workflow, run_composed_workflow]
+    expects_job: true
+    forbids_claims:
+      - "a HOMO energy for a molecule whose calculation did not run"
+      - "free-energy results for more than the three selected amines, presented as part of the funnel"
+    direction: "Eight cheap screens, a selection of three by the stated criterion, and three refinements. A good answer shows the screening table, says which three were carried forward and why, and only then reports the refined results. Today no tool maps over a list and selects, so the agent either loops itself or says it cannot run the funnel in one go. Either is acceptable if what ran is reported exactly."
+
+  - id: cp-03
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Which tautomer of 2-hydroxypyridine dominates in water and which in the gas phase? Sample conformers properly before comparing."
+    expects_tools: [run_tautomer_resolution, enumerate_tautomers, sample_conformers]
+    expects_job: true
+    forbids_claims:
+      - "a tautomer ratio quoted from the literature as if calculated"
+    direction: "The 2-pyridone form should dominate in water and the gap should shrink or reverse in the gas phase. A good answer reports both media from its own calculation, says the gas-phase difference is small and likely inside xTB's error bar, and proposes an experiment (IR or UV in a non-polar solvent) to settle it."
+
+  - id: cp-04
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Is cis- or trans-2-methylcyclohexanol more stable at 298 K? I want each diastereomer's conformers sampled, not one chair each."
+    expects_tools: [run_stereoisomer_ranking, enumerate_stereoisomers, sample_conformers]
+    expects_job: true
+    forbids_claims:
+      - "a ranking from a single geometry per diastereomer"
+    direction: "Both diastereomers searched, each with its ring-flip and hydroxyl rotamers, compared on ensemble free energy. Trans (diequatorial) is expected to win. A good answer gives the margin and its uncertainty and says how many conformers each ensemble held."
+
+  - id: cp-05
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: "For para-substituted phenols (H, OMe, Me, Cl, CN, NO2), compute the O–H bond dissociation enthalpy trend with conformer-aware geometries, and tell me which substituents give a difference you'd trust."
+    expects_tools: [run_bond_strength_survey, run_substitution_series, survey_bond_strengths]
+    expects_job: true
+    forbids_claims:
+      - "an absolute BDE presented as accurate to better than a few kcal/mol at this level"
+    direction: "A substitution series of O–H BDEs, reported as a trend relative to phenol. Electron donors (OMe, Me) should lower the BDE and acceptors (CN, NO2) raise it. A good answer trusts the ends of the series and calls the H/Me/Cl differences within error."
+
+  - id: cp-06
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Search ibuprofen's (CC(C)Cc1ccc(cc1)C(C)C(=O)O) conformers in water and give me thermochemistry only for the members within 2 kcal/mol of the minimum."
+    expects_tools: [sample_conformers, refine_ensemble, compute_thermochemistry, run_conformer_refinement]
+    expects_job: true
+    forbids_claims:
+      - "thermochemistry for conformers outside the stated window"
+    direction: "One search, a selection by energy window, and thermochemistry for the selected members only. The answer states how many members fell inside the window and how many were dropped."
+
+  # ------------------------------------------------------------------ recoveries
+  - id: cp-07
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "What is the reaction energy for pyridine plus acetic acid giving pyridinium acetate (c1cc[nH+]cc1.CC(=O)[O-])? Gas phase is fine."
+    expects_tools: [compute_reaction_energy]
+    forbids_claims:
+      - "a gas-phase reaction energy for the ion pair presented as meaningful"
+    direction: "The gas-phase request for charged products is refused, and the refusal is the point: separated ions in vacuum are not a meaningful product. A good answer reports why it was refused, reruns in implicit solvent (water, or the solvent the chemist names), and states the solvated result with that caveat. It does not invent a gas-phase number."
+
+  - id: cp-08
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Give me free-energy-weighted conformer populations for cyclosporin A in chloroform."
+    expects_tools: [sample_conformers, refine_ensemble, run_conformer_refinement]
+    forbids_claims:
+      - "a free-energy population for a molecule above the Hessian size bound"
+    follow_ups:
+      - message: "Understood. What can you give me instead, and can you run it?"
+    direction: "Cyclosporin A has 196 atoms, above the 150-atom Hessian bound, so the free-energy refinement is refused. A good first answer says so before or after trying, and does not report G-weighted populations. On the follow-up it offers and, if feasible, runs the electronic-energy-weighted ensemble, with the caveat that it over-weights compact hydrogen-bonded folds. Or it proposes refining a smaller model of the macrocycle, saying what that loses."
+
+  - id: cp-09
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Give me the rotational profile about the biaryl bond of 2,2'-dimethylbiphenyl (Cc1ccccc1-c1ccccc1C) at 1° resolution."
+    expects_tools: [profile_rotation, scan_coordinate, enumerate_torsions]
+    expects_job: true
+    forbids_claims:
+      - "a 1°-resolution profile reported as having been computed"
+    direction: "At 1° the profile needs at least 180 constrained optimizations (the torsion repeats every 180°), plus refinement points, over the per-job ceiling of 120, and is refused before anything runs, with the count in the message. A good answer reports the refusal and its count, explains that a coarse grid finds the wells and the barrier while refinement points resolve the maxima, and reruns at a step the ceiling allows (e.g. 5°). It then reports the barrier as an upper bound on the ground-state profile, not a transition state."
+
+  - id: cp-10
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Compute the gas-phase proton affinity of the acetate anion (CC(=O)[O-]) and of pyridine (c1ccncc1), and tell me which is the stronger base."
+    expects_tools: [compute_reaction_energy, compute_xtb_energy, compute_thermochemistry]
+    follow_ups:
+      - message: "Then do it in water instead, and tell me what changes."
+    forbids_claims:
+      - "a gas-phase proton affinity for an ion computed despite a refusal"
+    direction: "Any charged species in the gas phase is refused. A good first answer reports exactly which part was refused and what did run, and does not fill the gap with a literature value presented as calculated. On the follow-up it reruns in implicit water and explains that solvation inverts or compresses the gas-phase ordering of anionic and neutral bases. It also says the solvated comparison is a pKa-like question with a sizeable xTB error bar."
