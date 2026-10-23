@@ -1367,8 +1367,17 @@ async def test_a_publication_added_mid_delivery_is_not_marked_delivered_unsent(
         await _reset(conn)
 
     def _for(actor: str) -> ResultRecord:
-        return _record("shared").model_copy(
-            update={"publications": [Publication(actor=actor, session_id=f"s-{actor}")]}
+        return ResultRecord(
+            calc_ref="shared",
+            calc_type="pka",
+            subject=Subject(
+                kind="molecule",
+                members=[SubjectMember(ordinal=0, role="subject", smiles="CCO")],
+                label="CCO",
+            ),
+            conditions=Conditions(),
+            level=TheoryLevel(method="GFN2-xTB"),
+            publications=[Publication(actor=actor, session_id=f"s-{actor}")],
         )
 
     assert await outbox.enqueue([_for("alice")]) == 1
