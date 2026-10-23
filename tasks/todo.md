@@ -421,7 +421,7 @@ Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smalle
       → retirements), now in **one transaction**. That gives the order a stronger guarantee than git
       gave it.
 - [ ] **W4.5 Graph queries in SQL.** `related` and `current_successor` are indexed lookups;
-      `neighborhood(hops)` is a recursive CTE with a hop limit. Keep NetworkX only for the analytics
+      `neighborhood(hops)` walks one level per statement up to a hop limit. Keep NetworkX only for the analytics
       that need a whole-graph algorithm (`kg/analytics.py`, `hypotheses/`), loaded on demand in the
       background worker and never per request.
 - [ ] **W4.6 Backfill and dual-write.** A `cli/kg_import` command loads the git corpus (42 notes

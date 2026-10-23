@@ -15,6 +15,7 @@ import hashlib
 import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Iterable
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,9 @@ from chemclaw.kg.store import (
 )
 from tests.note_store_harness import STORES, Harness, changed, empty_note_tables
 from tests.pg import planned_index
+
+#: A search limit above any corpus here, so a search returns every hit.
+_ALL = 1000
 
 _SHIPPED = Path(__file__).resolve().parents[1] / "knowledge"
 
@@ -180,10 +184,10 @@ async def _same_answers(left: NoteStore, right: NoteStore, notes: list[Note]) ->
     spread = days[:: max(1, len(days) // 4)]
     for index, terms in enumerate(queries):
         for as_of in days if index < 3 else spread:
-            assert await left.search(terms, as_of) == await right.search(terms, as_of), (
-                terms,
-                as_of,
-            )
+            for limit in (_ALL, 2):
+                assert await left.search(terms, as_of, limit) == await right.search(
+                    terms, as_of, limit
+                ), (terms, as_of, limit)
 
 
 async def test_the_committed_corpus_is_answered_alike_by_both_stores(
@@ -663,6 +667,11 @@ async def test_every_read_names_its_tenant_when_the_same_ids_and_a_link_target_a
     with pytest.raises(KeyError):
         await store.neighborhood("extra-b")
     assert await other.neighborhood("extra-b") == {"p"}
+    near, far = await store.vicinity("p", 2, _DAY), await other.vicinity("p", 2, _DAY)
+    assert near is not None and set(near.found) == {"shared", "p2", "q"} and near.successors == {}
+    assert far is not None and set(far.found) == {"shared", "extra-b", "p2", "q"}
+    assert far.successors == {"p2": None}, "`p2` ended in February there"
+    assert await store.vicinity("only-b", 1, _DAY) is None
     assert sorted((e.src, e.dst) for e in await store.edges("shared")) == [("p", "shared")]
     assert sorted((e.src, e.dst) for e in await other.edges("shared")) == [
         ("p", "shared"),
@@ -675,13 +684,13 @@ async def test_every_read_names_its_tenant_when_the_same_ids_and_a_link_target_a
     batch = await store.current_successors(["p", "q", "only-b"], _DAY)
     assert batch["p"] is not None and batch["q"] is None and batch["only-b"] is None
     assert set((await other.current_successors(["p", "q"], _DAY)).values()) == {None}
-    own = await store.search(["unique-a"], _DAY)
+    own = await store.search(["unique-a"], _DAY, _ALL)
     assert (own.searched, [(c, n.id) for c, n in own.matches]) == (2, [(1, "p2")])
-    their_search = await other.search(["unique-a"], _DAY)
+    their_search = await other.search(["unique-a"], _DAY, _ALL)
     assert (their_search.searched, their_search.matches) == (3, [])
-    beta = await other.search(["beta"], _DAY)
+    beta = await other.search(["beta"], _DAY, _ALL)
     assert [(c, n.id) for c, n in beta.matches] == [(1, "q")]
-    assert (await store.search(["beta"], _DAY)).matches == []
+    assert (await store.search(["beta"], _DAY, _ALL)).matches == []
     mine_graph, their_graph = await store.graph(), await other.graph()
     assert set(mine_graph.nodes) == {"p", "p2", "q", "shared"}
     assert set(their_graph.nodes) == {"p", "p2", "q", "only-b", "only-b2", "shared", "extra-b"}
@@ -744,7 +753,7 @@ async def test_every_write_touches_only_its_tenant(store: PostgresNoteStore) -> 
     await store.put(NoteUnit(mine))
     assert [await _rows(sql) for sql in snapshots] == before
     assert await store.related("p2", "cites") == ["q"]
-    assert [n.id for _, n in (await store.search(["unique-a2"], _DAY)).matches] == ["p2"]
+    assert [n.id for _, n in (await store.search(["unique-a2"], _DAY, _ALL)).matches] == ["p2"]
     assert await store.related("p", "cites") == []
     assert await other.related("p", "cites") == ["extra-b", "shared"]
     closed, kept = await store.get("q"), await other.get("q")
@@ -761,12 +770,12 @@ async def test_an_identical_write_repairs_what_is_derived_from_the_content_and_a
     await _exec("UPDATE kg_notes SET search_text = '' WHERE id = 'derived'")
     await _exec("DELETE FROM kg_edges WHERE src = 'derived'")
     await _exec("INSERT INTO kg_edges (src, rel, dst) VALUES ('derived', 'cites', 'stray')")
-    assert (await store.search(["suzuki"], _DAY)).matches == []
+    assert (await store.search(["suzuki"], _DAY, _ALL)).matches == []
     assert await store.related("derived", "cites") == ["stray"]
     signature = await store.signature()
     outcome = await store.put(NoteUnit(note))
     assert (outcome.written, outcome.revisions) == ((), {"derived": 1})
-    assert [n.id for _, n in (await store.search(["suzuki"], _DAY)).matches] == ["derived"]
+    assert [n.id for _, n in (await store.search(["suzuki"], _DAY, _ALL)).matches] == ["derived"]
     assert await store.related("derived", "cites") == ["beta"]
     assert await store.signature() == signature
     assert await _rows("SELECT count(*) FROM kg_note_revisions") == [(1,)]
@@ -1033,3 +1042,110 @@ async def test_a_retirement_copy_keeps_its_sentence_only_on_the_note_it_was_made
     )
     named = await store.get("a")
     assert named is not None and named.body == "Original.\n\nSuperseded by b."
+
+
+# --- A view is one snapshot, and a walk ends when the graph does --------------------------------
+
+
+async def test_a_vicinity_does_not_see_a_write_made_while_it_reads(
+    store: PostgresNoteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note linked to the anchor after the view's first read is in neither part of that view.
+
+    The write lands between the edges read and the walk; read separately, the walk would find a
+    neighbour the edges do not name.
+    """
+    await store.put(NoteUnit(_note("anchor", "Anchor.")))
+    real_edges = PostgresNoteStore._edges_on
+    wrote: list[str] = []
+
+    async def edges_then_a_write(self: PostgresNoteStore, conn: Any, note_id: str) -> Any:
+        found = await real_edges(self, conn, note_id)
+        if not wrote:
+            wrote.append("late")
+            await PostgresNoteStore().put(NoteUnit(_note("late", "Cites [[anchor]].")))
+        return found
+
+    monkeypatch.setattr(PostgresNoteStore, "_edges_on", edges_then_a_write)
+    during = await store.vicinity("anchor", 1, _DAY)
+    assert wrote == ["late"], "the write did not happen inside the view's read"
+    assert during is not None and during.edges == [] and during.found == {}
+    after = await store.vicinity("anchor", 1, _DAY)
+    assert after is not None and set(after.found) == {"late"}
+    assert [(e.src, e.dst) for e in after.edges] == [("late", "anchor")]
+
+
+class _Statements:
+    """Every statement a store's reads run, with how many rows each returned."""
+
+    def __init__(self) -> None:
+        self.ran: list[tuple[str, int]] = []
+
+    def of(self, query: str) -> list[int]:
+        """The row counts of the runs of `query`."""
+        return [rows for ran, rows in self.ran if ran == query]
+
+
+@pytest.fixture
+def statements(monkeypatch: pytest.MonkeyPatch) -> _Statements:
+    """Record the statements `PostgresNoteStore`'s reads run, and the rows each fetched."""
+    seen = _Statements()
+    real = PostgresNoteStore._read
+
+    class Cursor:
+        def __init__(self, cursor: Any, query: str) -> None:
+            self._cursor, self._query = cursor, query
+
+        async def fetchall(self) -> Any:
+            rows = await self._cursor.fetchall()
+            seen.ran.append((self._query, len(rows)))
+            return rows
+
+        async def fetchone(self) -> Any:
+            row = await self._cursor.fetchone()
+            seen.ran.append((self._query, int(row is not None)))
+            return row
+
+    class Connection:
+        def __init__(self, conn: Any) -> None:
+            self._conn = conn
+
+        async def execute(self, query: Any, params: Any = None) -> Any:
+            return Cursor(await self._conn.execute(query, params), query)
+
+    @asynccontextmanager
+    async def recording(self: PostgresNoteStore, *, consistent: bool = False) -> Any:
+        async with real(self, consistent=consistent) as conn:
+            yield Connection(conn)
+
+    monkeypatch.setattr(PostgresNoteStore, "_read", recording)
+    return seen
+
+
+async def test_a_walk_stops_at_the_last_level_that_reaches_something_new(
+    store: PostgresNoteStore, statements: _Statements
+) -> None:
+    """A two-note graph asked for fifty hops costs two level statements, not fifty."""
+    from chemclaw.kg.postgres_store import _NEXT_LEVEL
+
+    await store.put(NoteUnit(_note("left", "Cites [[right]].")))
+    await store.put(NoteUnit(_note("right", "Cites [[left]].")))
+    assert await store.neighborhood("left", 50) == {"right"}
+    assert len(statements.of(_NEXT_LEVEL)) == 2
+    statements.ran.clear()
+    around = await store.vicinity("left", 50, _DAY)
+    assert around is not None and set(around.found) == {"right"}
+    assert len(statements.of(_NEXT_LEVEL)) == 2
+
+
+async def test_a_search_for_a_common_term_returns_only_the_limit_from_the_database(
+    store: PostgresNoteStore, statements: _Statements
+) -> None:
+    """Thirty notes match; three rows leave the database, and the tally still counts thirty."""
+    for i in range(30):
+        await store.put(NoteUnit(_note(f"common-{i:02d}", "A suzuki run.")))
+    found = await store.search(["suzuki"], _DAY, 3)
+    assert [n.id for _, n in found.matches] == ["common-00", "common-01", "common-02"]
+    assert found.coverages == {1: 30}
+    (rows,) = [rows for _, rows in statements.ran]
+    assert rows == 3

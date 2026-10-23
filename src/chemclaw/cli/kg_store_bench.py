@@ -145,7 +145,7 @@ async def _queries(store: PostgresNoteStore, total: int, repeats: int) -> dict[s
 
 
 async def _search(store: PostgresNoteStore, term: str) -> object:
-    return await store.search([term], _AS_OF)
+    return await store.search([term], _AS_OF, settings.graph_max_results)
 
 
 def _rss_in_a_new_process(dsn: str) -> dict[str, float]:
@@ -166,8 +166,8 @@ def _rss_in_a_new_process(dsn: str) -> dict[str, float]:
 async def _rss_child() -> None:
     """Print resident memory before the store, after it answered a read, and after a search.
 
-    The search is last and separate: its answer is every note that matches, so a common term
-    holds the corpus in memory for as long as the caller holds the result.
+    The search is last and separate: it matches every note, and its answer is the
+    `graph_max_results` best of them, so what it holds does not grow with the corpus.
     """
     before = _rss_mb()
     async with pooling():
@@ -176,7 +176,7 @@ async def _rss_child() -> None:
         with contextlib.suppress(KeyError):  # an empty corpus defines no note
             await store.neighborhood("bench-000002", 2)
         after_reads = _rss_mb()
-        await store.search(["suzuki"], _AS_OF)
+        await store.search(["suzuki"], _AS_OF, settings.graph_max_results)
     print(
         json.dumps(
             {
