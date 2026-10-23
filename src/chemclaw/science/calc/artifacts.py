@@ -21,6 +21,7 @@ from chemclaw.science.calc.flight import ClaimsProvider, PostgresClaims
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
+    FlightScoped,
     ResultStore,
     StoredResult,
 )
@@ -262,6 +263,12 @@ class ArrayOffloadingStore:
         self._results = results
         self._artifacts = artifacts
         self._fields = fields
+
+    def flight_scope(self) -> str:
+        """The wrapped store's scope, marked: built per call, so equal wrappers share a flight."""
+        inner = self._results
+        scope = inner.flight_scope() if isinstance(inner, FlightScoped) else str(id(inner))
+        return f"offloaded:{scope}"
 
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the result with its arrays put back, or `None` if any of them is gone."""

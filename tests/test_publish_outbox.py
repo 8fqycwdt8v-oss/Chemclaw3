@@ -711,6 +711,34 @@ async def test_a_claim_takes_its_limit_and_no_more_whatever_plan_runs_it(
     assert len(claimed) == 2, f"a claim with LIMIT 2 took {len(claimed)} rows"
 
 
+async def test_rows_enqueued_together_are_claimed_in_the_order_they_were_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One enqueue's rows share `enqueued_at`, so the claim breaks the tie by `id`, not the heap.
+
+    The last two rows are given the lowest ids, which rewrites their tuples behind the others: the
+    order a scan without the tie-break hands out is then the opposite of the id order.
+    """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(f"tie-{index}") for index in range(4)])
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT count(DISTINCT enqueued_at) FROM result_publications WHERE sink = 'alpha'"
+        )
+        assert await cursor.fetchone() == (1,), "the batch no longer shares a timestamp"
+        await conn.execute(
+            "UPDATE result_publications SET id = id - 1000000 WHERE calc_ref IN ('tie-2', 'tie-3')"
+        )
+        await conn.commit()
+
+    claimed = await outbox.claim("alpha", 2)
+
+    assert [row.calc_ref for row in claimed] == ["tie-2", "tie-3"]
+
+
 async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -143,21 +143,40 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
 
 
 @cache
-def _discovered_in(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ConnectorManifest]]:
-    """Every bundle found under `dirs`, by name, with its directory: validated, cached on `dirs`.
+def _loaded_in(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ConnectorManifest | str]]:
+    """Every bundle found under `dirs`, by name, with its directory and its manifest or load error.
 
-    Cached because discovery parses every manifest on disk; keyed on the directories because they
-    are its only input, so a repointed directory is simply a different entry.
+    A malformed manifest is kept as its error text rather than raised, so one bad file cannot break
+    an enable-list that never names it: `discovered` raises it (the validators' view), `enabled`
+    only for a bundle the deployment names. Logged here, once per discovery, not once per turn.
+    Cached on `dirs`, its only input; `forget_discovered` clears it.
     """
-    return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs(dirs)}
+    loaded: dict[str, tuple[Path, ConnectorManifest | str]] = {}
+    for bundle in _bundle_dirs(dirs):
+        try:
+            loaded[bundle.name] = (bundle, _load_manifest(bundle))
+        except ConnectorError as exc:
+            logger.warning("connector bundle %r cannot be loaded: %s", bundle.name, exc)
+            loaded[bundle.name] = (bundle, str(exc))
+    return loaded
+
+
+def _loaded() -> dict[str, tuple[Path, ConnectorManifest | str]]:
+    """`_loaded_in` over the configured directories, read outside the cache so a repoint is seen."""
+    return _loaded_in(tuple(settings.connectors_dirs))
 
 
 def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     """Every discovered bundle by name, with its directory: validated, regardless of enablement.
 
-    Reads the settings outside the cache, so a changed `connectors_dir` is seen on the next call.
+    The validators' view, so any malformed bundle raises its `ConnectorError` here.
     """
-    return _discovered_in(tuple(settings.connectors_dirs))
+    found: dict[str, tuple[Path, ConnectorManifest]] = {}
+    for name, (bundle, manifest) in _loaded().items():
+        if isinstance(manifest, str):
+            raise ConnectorError(manifest)
+        found[name] = (bundle, manifest)
+    return found
 
 
 def forget_discovered() -> None:
@@ -167,7 +186,7 @@ def forget_discovered() -> None:
     repointing `connectors_dir` is a different key. A named function, matching the repo's other
     `forget_*` test-isolation resets, so callers type-check.
     """
-    _discovered_in.cache_clear()
+    _loaded_in.cache_clear()
     # The directory walk is cached on the same key and goes stale the same way.
     _bundle_dirs_by_name.cache_clear()
 
@@ -197,16 +216,64 @@ def enabled() -> list[ConnectorManifest]:
     opt-in bundle becomes reachable. A listed name no bundle provides is a loud error, not a
     capability that silently stops working.
     """
-    found = discovered()
+    loaded = _loaded()
     names = settings.connectors_enabled_list
     if not names:
-        return [manifest for _, manifest in found.values() if manifest.default_enabled]
-    unknown = sorted(set(names) - found.keys())
+        # A malformed bundle cannot say whether it is `default_enabled`; it is skipped here and
+        # reported by `unusable`.
+        return [
+            manifest
+            for _, manifest in loaded.values()
+            if not isinstance(manifest, str) and manifest.default_enabled
+        ]
+    unknown = sorted(set(names) - loaded.keys())
     if unknown:
         raise ConnectorError(
-            f"connectors_enabled names unknown connector(s) {unknown}; discovered: {sorted(found)}"
+            f"connectors_enabled names unknown connector(s) {unknown}; discovered: {sorted(loaded)}"
         )
-    return [found[name][1] for name in names]
+    chosen: list[ConnectorManifest] = []
+    for name in names:
+        manifest = loaded[name][1]
+        if isinstance(manifest, str):
+            raise ConnectorError(manifest)
+        chosen.append(manifest)
+    return chosen
+
+
+def _refusal(name: str, endpoint: Endpoint | None) -> str | None:
+    """Why this deployment cannot open connector `name`'s endpoint, or None when it can.
+
+    A `stdio` endpoint is refused unless the deployment enables it: `command` executes in the chat
+    process, so a manifest written to `connectors_dir` would otherwise be code execution under the
+    identity holding every connector token. Checked here, not at parse time, so `StdioEndpoint`
+    stays constructible.
+    """
+    if isinstance(endpoint, StdioEndpoint) and not settings.connector_stdio_enabled:
+        return (
+            f"connector {name!r} declares `transport: stdio`, which launches "
+            f"{endpoint.command!r} in this process; it is disabled by default because a "
+            "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
+        )
+    return None
+
+
+def unusable() -> dict[str, str]:
+    """Each bundle this deployment would use but cannot, by name, with the reason.
+
+    A malformed manifest an empty enable-list would otherwise consider, and an enabled endpoint
+    `_refusal` refuses. Turns skip them (`mcp_connections`); the health sweep reports them, so the
+    loss is visible rather than a raise out of every turn.
+    """
+    reasons: dict[str, str] = {}
+    if not settings.connectors_enabled_list:
+        for name, (_, manifest) in _loaded().items():
+            if isinstance(manifest, str):
+                reasons[name] = manifest
+    for manifest in enabled():
+        reason = _refusal(manifest.name, manifest.endpoint)
+        if reason is not None:
+            reasons[manifest.name] = reason
+    return reasons
 
 
 def server_tools_module(connector: str) -> ModuleType | None:
@@ -263,17 +330,31 @@ def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     return settings.connector_urls.get(connector, endpoint.url)
 
 
+def request_timeout_ceiling() -> float:
+    """The longest any connector call may take: early enough that the turn hears why it ended.
+
+    A call bounded at or past `service_turn_timeout_seconds` races the turn's own deadline, so the
+    session's recoverable timeout error may never reach the model. Below it by the httpx grace, so
+    even the backstop read bound (`connector_http_client`) ends inside the turn; half the turn when
+    the turn is shorter than twice the grace, so the ceiling stays positive.
+    """
+    turn = settings.service_turn_timeout_seconds
+    return max(turn - _READ_TIMEOUT_GRACE_SECONDS, turn / 2)
+
+
 def request_timeout_seconds(endpoint: Endpoint) -> float:
     """How long one call to this endpoint may take: the single derivation of that number.
 
     Both the MCP session's `read_timeout_seconds` and the httpx read timeout derive from it and must
     keep a fixed relationship, so neither reads the manifest itself. Public so a test can compare
     the same number. A stdio endpoint gets the same default, since a hung subprocess hangs a turn
-    too.
+    too. Never above `request_timeout_ceiling`; `make connector-validate` refuses a manifest that
+    declares more, and this holds where a deployment lowers the turn timeout after validation.
     """
+    declared = _DEFAULT_REQUEST_TIMEOUT_SECONDS
     if isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None:
-        return float(endpoint.request_timeout)
-    return _DEFAULT_REQUEST_TIMEOUT_SECONDS
+        declared = float(endpoint.request_timeout)
+    return min(declared, request_timeout_ceiling())
 
 
 def _session_kwargs(endpoint: Endpoint) -> dict[str, Any]:
@@ -377,16 +458,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
             request_timeout=request_timeout_seconds(endpoint),
         )
     if isinstance(endpoint, StdioEndpoint):
-        # Refused unless the deployment enables it: `command` executes in the chat process, so a
-        # manifest written to `connectors_dir` would otherwise be code execution under the identity
-        # holding every connector token. Checked here, not at parse time, so `StdioEndpoint` stays
-        # constructible.
-        if not settings.connector_stdio_enabled:
-            raise ConnectorError(
-                f"connector {manifest.name!r} declares `transport: stdio`, which launches "
-                f"{endpoint.command!r} in this process; it is disabled by default because a "
-                "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
-            )
+        refused = _refusal(manifest.name, endpoint)
+        if refused is not None:
+            raise ConnectorError(refused)
         # No identity headers: a subprocess runs under our own identity, with no outbound request.
         return ConnectorSpec(
             name=manifest.name,
@@ -429,12 +503,13 @@ def mcp_connections() -> list[ConnectorSpec]:
     """One connection spec per enabled connector that declares an endpoint (unopened).
 
     The deployment's whole surface; `chemclaw.agent.chemclaw_agent.connector_specs` narrows it per
-    turn, so a profile can never widen what the deployment enabled.
+    turn, so a profile can never widen what the deployment enabled. A bundle `_refusal` refuses is
+    skipped, not raised, so it cannot break every turn; `unusable` reports it to the health sweep.
     """
     return [
         _with_contract(_mcp_connection(manifest, manifest.endpoint), manifest)
         for manifest in enabled()
-        if manifest.endpoint is not None
+        if manifest.endpoint is not None and _refusal(manifest.name, manifest.endpoint) is None
     ]
 
 

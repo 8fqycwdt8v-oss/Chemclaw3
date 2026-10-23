@@ -44,9 +44,12 @@ from chemclaw.connectors.calc.remote import (
     remote_version,
     wire_structure,
 )
+from chemclaw.connectors.manifest import HttpEndpoint
+from chemclaw.connectors.registry import discovered, request_timeout_seconds
 from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.mcp_session import READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.units import reconcile
 from chemclaw.science.calc.artifacts import split_ref
 from chemclaw.science.calc.calibration import (
@@ -1000,6 +1003,22 @@ async def compute_electronic_properties(
     return ElectronicProperties.model_validate(payload)
 
 
+def _within_the_hop(seconds: float) -> float:
+    """`seconds`, lowered so the backend wait ends before the call that reached this tool is cut.
+
+    Every tool here is reached through `calc`'s own endpoint, whose `request_timeout` bounds the
+    queued activity and the direct session alike, and which cancels the tool when it fires: a
+    longer backend wait is then cut mid-run and stores nothing, with no error the caller can read.
+    Ending first by the read grace (half the hop, if shorter) makes the timeout this tool's own,
+    named, failure.
+    """
+    endpoint = discovered()["calc"][1].endpoint
+    if not isinstance(endpoint, HttpEndpoint):
+        raise TypeError(f"the calc bundle's endpoint is {type(endpoint).__name__}, not HTTP")
+    hop = request_timeout_seconds(endpoint)
+    return min(seconds, max(hop - READ_TIMEOUT_GRACE_SECONDS, hop / 2))
+
+
 @server.tool()
 async def compute_atomic_descriptors(
     smiles: str, solvent: str | None = None
@@ -1031,9 +1050,9 @@ async def compute_atomic_descriptors(
     payload, _ = await cached_remote(
         default_store(),
         ComputeAtomicDescriptorsRequest(smiles=smiles, solvent=solvent),
-        # Pinned to the `xtb` binary (see above), whose own timeout can run to 3600 s — see
-        # `calc_atomic_timeout_seconds`'s docstring for why the client must wait at least that long.
-        timeout_seconds=settings.calc_atomic_timeout_seconds,
+        # Pinned to the `xtb` binary (see above), whose own bound is longer than the call reaching
+        # this tool may wait; see `_within_the_hop`.
+        timeout_seconds=_within_the_hop(settings.calc_atomic_timeout_seconds),
     )
     return AtomicDescriptorResult.model_validate(payload)
 
@@ -1065,8 +1084,8 @@ async def compute_surface_potential(
     payload, _ = await cached_remote(
         default_store(),
         ComputeSurfacePotentialRequest(smiles=smiles, solvent=solvent),
-        # Pinned to the `xtb` binary (see above); see `calc_atomic_timeout_seconds`'s docstring.
-        timeout_seconds=settings.calc_atomic_timeout_seconds,
+        # Pinned to the `xtb` binary (see above); see `_within_the_hop`.
+        timeout_seconds=_within_the_hop(settings.calc_atomic_timeout_seconds),
     )
     return SurfacePotentialResult.model_validate(payload)
 

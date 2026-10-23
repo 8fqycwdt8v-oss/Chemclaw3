@@ -64,17 +64,22 @@ async def test_electronic_properties_tool_returns_the_populated_result(
     assert server.count("compute_electronic_properties") == 1
 
 
-async def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
+async def test_the_two_binary_only_calculators_wait_no_longer_than_the_hop_that_reaches_them(
     server: FakeCalcServer,
 ) -> None:
-    """The binary-only calculators get the `xtb` binary's own, longer wait budget.
+    """The binary-only calculators wait for the backend less than the `calc` endpoint's own bound.
 
-    Their server-side timeout can exceed `calc_server_timeout_seconds`; waiting less abandons a
-    running calculation and the retried activity doubles the cost. The fake does not implement these
-    tools, so the calls fail; what is asserted is the session's read bound, recorded before
-    dispatch.
+    The `xtb` binary's budget (`calc_atomic_timeout_seconds`) is longer than the `request_timeout`
+    of the call reaching these tools, which cancels them when it fires; a backend wait past it is
+    cut with no error to read. The fake does not implement these tools, so the calls fail; what is
+    asserted is the session's read bound, recorded before dispatch.
     """
-    assert settings.calc_atomic_timeout_seconds >= settings.calc_server_timeout_seconds
+    from chemclaw.connectors.registry import discovered, request_timeout_seconds
+
+    endpoint = discovered()["calc"][1].endpoint
+    assert endpoint is not None
+    hop = request_timeout_seconds(endpoint)
+    assert settings.calc_atomic_timeout_seconds > hop, "the clamp is only exercised past the hop"
 
     for call in (
         calc_tools.compute_atomic_descriptors,
@@ -83,10 +88,9 @@ async def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
         with pytest.raises(Exception):  # noqa: B017 - the fake server has no handler for either
             await call("O")
 
-    assert server.timeouts[-2:] == [
-        settings.calc_atomic_timeout_seconds,
-        settings.calc_atomic_timeout_seconds,
-    ]
+    waits = server.timeouts[-2:]
+    assert len(waits) == 2
+    assert all(wait is not None and 0 < wait < hop for wait in waits), (waits, hop)
 
 
 async def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
