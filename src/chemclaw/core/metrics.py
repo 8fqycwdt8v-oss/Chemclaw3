@@ -222,6 +222,11 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_result_projection_failures_total": (
         "Stored payloads this release could not project into a record (a code gap, not an outage)."
     ),
+    # A live hook handed a shape no projector reads: deliberate for a BO campaign, a gap for a new
+    # bundle's composite. Labelled by `calc_type` so the two read apart.
+    "chemclaw_results_unprojected_total": (
+        "Produced results a publish hook skipped because no projector reads their shape."
+    ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."
     ),
@@ -968,6 +973,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
+    # Bounded by code and the enabled bundles: a calculator's `calc_type` or a composite's
+    # `<connector>.<job>` route, never a caller's string.
+    "chemclaw_results_unprojected_total": ("calc_type",),
     # A source name is an operator-configured registry entry, never a caller's string. Attachment
     # evictions carry no label: the only candidate, a session id, is unbounded.
     "chemclaw_ingest_rejections_evicted_total": ("source",),

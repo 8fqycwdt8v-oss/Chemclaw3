@@ -2,10 +2,10 @@
 
 `publish/outbox.py` writes a projected record locally when a result is produced; this job carries
 those rows to their destination, retries what fails, and gives up loudly once a row has spent its
-attempt budget. One activity pass per sink, since each destination is its own failure domain. A
-failed batch leaves its rows `pending` and the run still succeeds: `result_publications` already
-records the failure, and failing the workflow would add a second backoff. The run returns a
-per-sink account.
+attempt budget, or at once when the sink refuses its content. One activity pass per sink, since
+each destination is its own failure domain. A failed batch leaves its rows `pending` and the run
+still succeeds: `result_publications` already records the failure, and failing the workflow would
+add a second backoff. The run returns a per-sink account.
 """
 
 import logging
@@ -19,7 +19,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.publish import outbox
-    from chemclaw.publish.driver import ResultSink, SinkUnavailableError
+    from chemclaw.publish.driver import (
+        ResultSink,
+        SinkMisconfiguredError,
+        SinkRejectedError,
+        SinkUnavailableError,
+    )
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
@@ -88,9 +93,9 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
 
     try:
         await sink.deliver(records)
-    except SinkUnavailableError as exc:
-        # An outage is batch-wide: the whole claim spends one attempt and stays claimable. Never
-        # re-raised; `result_publications.last_error` records it.
+    except (SinkUnavailableError, SinkMisconfiguredError) as exc:
+        # An outage or a misconfigured sink is batch-wide: the whole claim spends one attempt and
+        # stays claimable. Never re-raised; `result_publications.last_error` records it.
         await outbox.mark_failed(leases, str(exc))
         outcome.failed += len(leases)
         outcome.reason = str(exc)[:500]
@@ -100,27 +105,36 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         # poison record must not mark its neighbours failed or hold the head of the queue.
         # Re-sending a record that already landed is a no-op, because every far-side write is an
         # upsert onto a content hash.
+        # A `SinkRejectedError` will be refused identically on every retry, so its row is retired
+        # at once rather than spending the rest of its budget; any other error keeps its budget.
         outcome.reason = str(exc)[:500]
         delivered: list[outbox.Lease] = []
-        refused: list[outbox.Lease] = []
-        for lease, record in zip(leases, records, strict=True):
+        rejected: list[outbox.Lease] = []
+        retryable: list[outbox.Lease] = []
+        rejected_reason = ""
+        for index, (lease, record) in enumerate(zip(leases, records, strict=True)):
             try:
                 await sink.deliver([record])
-            except SinkUnavailableError as outage:
+            except (SinkUnavailableError, SinkMisconfiguredError) as outage:
                 # The destination went away mid-replay: everything not yet delivered is the
                 # outage's, not the poison's, and must stay claimable.
-                refused.extend(leases[len(delivered) + len(refused) :])
+                retryable.extend(leases[index:])
                 outcome.reason = str(outage)[:500]
                 break
-            except Exception as refusal:
-                refused.append(lease)
-                outcome.reason = str(refusal)[:500]
+            except SinkRejectedError as refusal:
+                rejected.append(lease)
+                rejected_reason = outcome.reason = str(refusal)[:500]
+            except Exception as failure:
+                retryable.append(lease)
+                outcome.reason = str(failure)[:500]
             else:
                 delivered.append(lease)
-        if refused:
-            await outbox.mark_failed(refused, outcome.reason)
+        if rejected:
+            await outbox.mark_failed(rejected, rejected_reason, retire=True)
+        if retryable:
+            await outbox.mark_failed(retryable, outcome.reason)
         leases = delivered
-        outcome.failed += len(refused)
+        outcome.failed += len(rejected) + len(retryable)
 
     await outbox.mark_delivered(leases)
     outcome.delivered = len(leases)

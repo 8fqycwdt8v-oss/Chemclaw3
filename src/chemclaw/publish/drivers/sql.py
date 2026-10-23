@@ -25,7 +25,12 @@ from chemclaw.publish.dialect import (
     rows_for,
     upsert_statement,
 )
-from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
+from chemclaw.publish.driver import (
+    SinkMisconfiguredError,
+    SinkRejectedError,
+    SinkUnavailableError,
+)
+from chemclaw.publish.properties import REGISTRY
 from chemclaw.publish.record import ResultRecord
 
 logger = logging.getLogger(__name__)
@@ -68,6 +73,8 @@ class SqlResultSink:
         self._schema = str(self._connection_binding.get("schema") or "")
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
+        # A probe that refused the store, kept like `_columns` so a replay does not re-probe.
+        self._probe_refusal: SinkMisconfiguredError | None = None
         # Optional columns already reported absent, per table, so a lag is reported once per pass.
         self._reported: dict[str, set[str]] = {}
 
@@ -80,6 +87,7 @@ class SqlResultSink:
         warehouse = self._warehouse
         self._warehouse = None
         self._columns = None
+        self._probe_refusal = None
         self._reported = {}
         closer = getattr(warehouse, "aclose", None)
         if closer is not None:
@@ -101,9 +109,24 @@ class SqlResultSink:
         return self._warehouse
 
     async def _known_columns(self, warehouse: Warehouse) -> dict[str, set[str]]:
-        """The columns the site's schema actually has, probed once per sink and cached."""
+        """The columns the site's schema actually has, probed once per sink and cached.
+
+        A refusal is cached too, until `aclose`: the store does not change within a pass.
+        """
+        if self._probe_refusal is not None:
+            raise self._probe_refusal
         if self._columns is not None:
             return self._columns
+        try:
+            found = await self._probe(warehouse)
+        except SinkMisconfiguredError as exc:
+            self._probe_refusal = exc
+            raise
+        self._columns = found
+        return found
+
+    async def _probe(self, warehouse: Warehouse) -> dict[str, set[str]]:
+        """Read the site's columns and registry, refusing a store this release cannot write to."""
         # Qualified by the schemas on the search path the writes resolve through, so a same-named
         # table elsewhere (an archive, another tenant) cannot answer for the target. Split on commas
         # because `schema:` may name several.
@@ -137,7 +160,7 @@ class SqlResultSink:
                 found.setdefault(table, set()).add(column)
         missing = [table for table in TABLE_ORDER if table not in found]
         if missing:
-            raise SinkRejectedError(
+            raise SinkMisconfiguredError(
                 f"result sink {self._name!r}: the target has no {', '.join(missing)}. "
                 "Run `python -m chemclaw.cli.sink_schema` and apply the printed DDL."
             )
@@ -146,36 +169,43 @@ class SqlResultSink:
         for table, required in sorted(REQUIRED_COLUMNS.items()):
             absent = sorted(required - found[table])
             if absent:
-                raise SinkRejectedError(
+                raise SinkMisconfiguredError(
                     f"result sink {self._name!r}: {table} lacks {', '.join(absent)}, which "
                     "carry the measurement rather than describe it — a row written without them "
                     "would assert less than it claims. Run `python -m chemclaw.cli.sink_schema` "
                     "and apply the printed DDL."
                 )
-        await self._refuse_an_unseeded_registry(warehouse)
-        self._columns = found
+        await self._refuse_a_registry_behind_this_release(warehouse)
         return found
 
-    async def _refuse_an_unseeded_registry(self, warehouse: Warehouse) -> None:
-        """Refuse a store whose `property_definition` is empty, before any row is written.
+    async def _refuse_a_registry_behind_this_release(self, warehouse: Warehouse) -> None:
+        """Refuse a store whose `property_definition` lacks a property this release publishes.
 
-        The DDL in `schema/result-store/` ships no registry rows (those come from
-        `sink_schema --seed`), so an unseeded store accepts every spine row and refuses every fact
-        row, leaving calculation rows with zero facts that read as "produced nothing". Writes are
-        autocommit with no rollback, so the only clean place to refuse is ahead of the first
-        statement.
+        The DDL ships no registry rows (those come from `sink_schema --seed`), and a fact row naming
+        an absent property fails its foreign key after its spine row has landed, leaving a
+        calculation with missing facts that read as "not measured". Writes are autocommit with no
+        rollback, so the only clean place to refuse is ahead of the first statement.
         """
         async with warehouse.cursor() as cursor:
-            await cursor.execute("SELECT count(*) AS n FROM property_definition", [])
+            await cursor.execute("SELECT property FROM property_definition", [])
             rows = await cursor.fetchall()
-        count = int(next(iter(rows[0].values())) if rows else 0)
-        if count == 0:
-            raise SinkRejectedError(
-                f"result sink {self._name!r}: property_definition is empty, so every fact row "
-                "would be refused by its foreign key while the spine rows landed — leaving "
-                "calculations with no measurements. Run "
-                "`python -m chemclaw.cli.sink_schema --seed` and apply it."
-            )
+        # The column name comes back upper-cased on Snowflake and Oracle, lower on Postgres.
+        seeded = {str(next(iter(row.values()))) for row in rows}
+        absent = sorted(set(REGISTRY) - seeded)
+        if not absent:
+            return
+        what = (
+            "is empty"
+            if not seeded
+            else f"lacks {len(absent)} propert{'y' if len(absent) == 1 else 'ies'} this release "
+            f"publishes ({', '.join(absent[:10])}{', ...' if len(absent) > 10 else ''})"
+        )
+        raise SinkMisconfiguredError(
+            f"result sink {self._name!r}: property_definition {what}, so those fact rows would be "
+            "refused by their foreign key while the spine rows landed — leaving calculations "
+            "with missing measurements. Run `python -m chemclaw.cli.sink_schema --seed` and "
+            "apply it."
+        )
 
     def _report_dropped(self, table: str, dropped: set[str]) -> None:
         """Say once per table what this site's schema cannot hold, not once per row.

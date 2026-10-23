@@ -119,6 +119,7 @@ _BAD_DATA_TYPES = [
     # `SinkUnavailableError` is a `ConnectionError` and stays retryable.
     "ResultSinkError",
     "SinkRejectedError",
+    "SinkMisconfiguredError",
     "SinkConnectionError",
     "ProjectionError",
     "UnknownPropertyError",
