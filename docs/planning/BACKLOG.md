@@ -89,16 +89,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 ### Everything else
 
 - [ ] **Follow-ups the architecture programme's reviews recorded** [M] — note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
-- [ ] **A failure returned inside a `Command` is invisible to audit and the failure observers** [S] — no tool returns one today; add the absence test (or unwrap `update["messages"]`)
-  before one does; `agent/audit.py::returned_failure`.
-- [ ] **The read/write partition test sees only registered tools, not the middleware verbs a graph binds** [S] — `task`, `write_todos`, the scratchpad verbs and handoffs are classified by
-  special cases nothing enumerates; `agent/authz.py::side_effecting_call`, `tests/test_authz.py::test_every_advertised_tool_is_classified_write_or_read`.
-- [ ] **A capped evidence pack drops a session's newest effects** [S] — `assemble` reads `effects` oldest first and only flags `truncated`; read newest first (latent while no shipped job
-  declares an effect); `operations/evidence_pack.py::assemble`.
 - [ ] **deepagents 0.7.31 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and
   `edit_file` text, so it ships behind `docs/guides/model-text-evaluation.md`, which needs a gateway; the code is ready on `deps/deepagents-0.7.31`.
-- [ ] **Agent tests that prove less than they say** [S] — the framer-order test reads back a literal list, the positive authz tests pass with the gate deleted, and a plan-gate docstring
-  claims an unchecked fail-closed; `tests/test_tool_framing.py::test_the_framer_sits_inside_the_converters_and_outside_the_trail`, `tests/test_plan_gate.py::test_spending_never_raises_when_the_store_is_unreachable`.
 
 ## Upstream watch
 

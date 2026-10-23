@@ -35,15 +35,28 @@ def _privileged_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_dev_mode_gate_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With enforcement off, every trigger is allowed (local dev, no tenant)."""
+    """With enforcement off, every trigger is allowed (local dev, no tenant).
+
+    The control turns enforcement on with nobody signed in, so the switch is what opens it.
+    """
+    _privileged_env(monkeypatch)
     monkeypatch.setattr(settings, "entra_required", False)
     authorize_trigger("sample_conformers")  # does not raise
+    monkeypatch.setattr(settings, "entra_required", True)
+    with pytest.raises(AuthorizationError):
+        authorize_trigger("sample_conformers")
 
 
 def test_non_expensive_action_always_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An action not declared expensive is allowed even under enforcement."""
+    """An action not declared expensive is allowed even under enforcement.
+
+    The control declares the same action expensive, under which the unprivileged caller is refused.
+    """
     _privileged_env(monkeypatch)
     authorize_trigger("find_notes")  # not in the expensive set → allowed
+    monkeypatch.setattr(settings, "entra_expensive_actions", "find_notes")
+    with pytest.raises(AuthorizationError):
+        authorize_trigger("find_notes")
 
 
 def test_privileged_role_authorizes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,6 +65,13 @@ def test_privileged_role_authorizes(monkeypatch: pytest.MonkeyPatch) -> None:
     token = set_current_identity("u-1", frozenset({"compute"}))
     try:
         authorize_trigger("sample_conformers")  # does not raise
+    finally:
+        reset_current_identity(token)
+    # The control: the same call without the role is refused, so the role is what admitted it.
+    token = set_current_identity("u-1", frozenset({"reader"}))
+    try:
+        with pytest.raises(AuthorizationError):
+            authorize_trigger("sample_conformers")
     finally:
         reset_current_identity(token)
 
@@ -240,6 +260,44 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
     )
     assert not (advertised & STATE_CHANGING_TOOLS & READ_ONLY_TOOLS), (
         "a tool cannot be both a write and a read"
+    )
+
+
+def test_every_tool_a_compiled_graph_binds_is_classified() -> None:
+    """The write gates see what a graph binds, not only what the registry holds.
+
+    Middleware verbs never reach the registry, so the test above cannot see them; each is
+    classified by a special case in `side_effecting_call`, `repeatable_call` or
+    `changes_the_conversation`. Enumerated here by the functions those cases read, so a new
+    middleware verb fails this test rather than passing every gate as a read. Each class must bind
+    at least one tool, or its arm asserts nothing.
+    """
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.authz import changes_the_conversation, side_effecting_tools
+    from chemclaw.agent.chemclaw_agent import harness_tool_names, subagent_tool_names
+    from chemclaw.agent.handoff import handoff_tools
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.scratchpad import scratchpad_tools
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    peer = AgentProfile(name="safety", description="The safety agent.", tool_names=None)
+    handoffs = handoff_tools([(peer, frozenset())], current="root", menu_tools=12, max_handoffs=3)
+    graph = build_langgraph_agent(
+        ScriptedChatModel(["unused"]), audit_sink=NullAuditSink(), connectors=[], handoffs=handoffs
+    )
+    bound = set(graph.nodes["tools"].bound.tools_by_name)
+    special: dict[str, set[str]] = {
+        "the plan harness (ungated: it produces the plan)": set(harness_tool_names()),
+        "the scratchpad (a /memories write is a write by path)": set(scratchpad_tools()),
+        "the helper spawn (its own calls are gated)": set(subagent_tool_names()),
+        "a handoff (dry-run's concern)": {name for name in bound if changes_the_conversation(name)},
+    }
+    for label, names in special.items():
+        assert names & bound, f"{label} binds nothing on this graph, so its arm asserts nothing"
+    classified = side_effecting_tools() | READ_ONLY_TOOLS | set[str]().union(*special.values())
+    assert bound - classified == set(), (
+        "a compiled graph binds tools no gate classifies, so every write gate treats them as reads"
     )
 
 

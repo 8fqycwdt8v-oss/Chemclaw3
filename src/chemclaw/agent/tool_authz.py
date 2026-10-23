@@ -27,6 +27,7 @@ from chemclaw.agent.authz import (
 )
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.refusal_route import routed, sentence_of
+from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -420,8 +421,13 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
             return _refusal_message(request, transport_error_result(request.tool_call["name"], exc))
         logger.exception("tool %s raised an unhandled error", request.tool_call["name"])
         return _refusal_message(request, unexpected_error_result())
-    failed = returned_failure(result)
-    return result if failed is None else answered_failure(failed)
+    if returned_failure(result) is None:
+        return result
+    # Rewritten in place, so a failure carried inside a `Command` keeps the command's other
+    # channels (a helper's spend) instead of being replaced by the bare message.
+    return rewritten_tool_messages(
+        result, lambda message: answered_failure(message) if message.status == "error" else message
+    )
 
 
 @wrap_tool_call

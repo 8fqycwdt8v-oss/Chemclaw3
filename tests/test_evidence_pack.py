@@ -114,6 +114,54 @@ def test_the_pack_draws_from_every_store_that_holds_part_of_the_record() -> None
     asyncio.run(_clear())
 
 
+def test_a_capped_section_keeps_the_newest_rows_in_the_order_they_happened() -> None:
+    """A capped section drops the session's oldest rows, never its latest external change.
+
+    Three effects and three calls an hour apart, read with room for two: the pack shows the last
+    two of each, oldest first, and names both sections as truncated. Timestamps are explicit, so
+    insertion order cannot stand in for time.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            for hour, name in enumerate(("DEV-1", "DEV-2", "DEV-3")):
+                at = f"2026-10-01T0{hour}:00:00Z"
+                await conn.execute(
+                    "INSERT INTO effects (effect_id, connector, job, system, reversal,"
+                    " requested_by, session_id, approved_by, state, external_ref, attempted_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        f"cap-{name}",
+                        "qms",
+                        "file_deviation",
+                        "the QMS",
+                        "irreversible",
+                        "u-1",
+                        SESSION,
+                        "u-qa",
+                        "applied",
+                        name,
+                        at,
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                    " outcome, detail, latency_ms, ts) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    ("c-cap", SESSION, "u-1", f"tool_{hour}", "{}", "ok", "", 1.0, at),
+                )
+            await conn.commit()
+        pack = await assemble(SESSION, limit=2)
+
+        assert [effect.external_ref for effect in pack.effects] == ["DEV-2", "DEV-3"]
+        assert [call.tool for call in pack.tool_calls] == ["tool_1", "tool_2"]
+        assert {"effects", "tool_calls"} <= set(pack.truncated)
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
 def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
     """A refusal is part of the record rather than a fault.
 

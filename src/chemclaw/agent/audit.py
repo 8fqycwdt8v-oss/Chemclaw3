@@ -31,7 +31,7 @@ from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.plan_link import plan_link_for_call
-from chemclaw.agent.tool_result_shape import returned_nothing
+from chemclaw.agent.tool_result_shape import returned_nothing, tool_messages
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.authorship import UNNAMED_AGENT
 from chemclaw.core.config import settings
@@ -243,12 +243,12 @@ def returned_failure(result: object) -> ToolMessage | None:
 
     MCP tools never raise: `langchain_mcp_adapters` converts `isError=True` into a
     `ToolMessage(status="error")` return. In-process tools raise, so this returns `None` for them.
-    `isinstance`, not a class-name test, so `ToolMessageChunk` is caught. Returns the message so
-    callers needing its text need not re-test the type.
+    A `Command` (what `task` and the state-writing verbs return) is read through its
+    `update["messages"]`, so a failure carried there is not audited as success. `isinstance`, not a
+    class-name test, so `ToolMessageChunk` is caught. Returns the message so callers needing its
+    text need not re-test the type.
     """
-    if isinstance(result, ToolMessage) and result.status == "error":
-        return result
-    return None
+    return next((m for m in tool_messages(result) if m.status == "error"), None)
 
 
 def _served_by(request: Any) -> str:
