@@ -8,7 +8,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
@@ -299,7 +299,9 @@ async def test_fingerprint_retriever_cites_reaction_records() -> None:
     """The fingerprint retriever cites reaction records for structurally similar reactions."""
     store = InMemoryFingerprintStore()
     await store.add(record_for_reaction("eln-1", _ESTER))
-    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+    records = InMemoryReactionRecordStore()
+    await records.record([ReactionRecord(reaction_id="eln-1", body="Esterification.", source="eln:test")], "eln-json")
+    retriever = FingerprintReactionRetriever(store, records)
 
     hits = await retriever.retrieve(_ESTER, {})
     assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record

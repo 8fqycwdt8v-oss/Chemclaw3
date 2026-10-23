@@ -45,16 +45,16 @@ async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
     return store
 
 
-async def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
-    """An unfiltered search is unchanged, including a hit whose record is not stored yet.
+async def test_an_unfiltered_search_drops_a_hit_whose_record_has_not_landed() -> None:
+    """A fingerprint whose record write has not landed is not cited, filter or no filter.
 
-    The fingerprint index is written at ingestion separately from the record, so such a hit still
-    yields a citation.
+    The fingerprint index is written separately from the record, and evidence citing an id with no
+    record names a `reaction-` note `expand_note` refuses. The recorded neighbour is still served.
     """
-    store = await _indexed({"r1": _QUERY})
-    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+    store = await _indexed({"r1": _QUERY, "r2": "CCO.CC(=O)Cl>>CCOC(C)=O.Cl"})
+    retriever = FingerprintReactionRetriever(store, await _records(r2=None))
     chunks = await retriever.retrieve(_QUERY, {})
-    assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # no record stored
+    assert [c.source_note_id for c in chunks] == ["reaction-r2"]
 
 
 async def test_a_tag_filter_narrows_to_the_records_that_carry_it() -> None:

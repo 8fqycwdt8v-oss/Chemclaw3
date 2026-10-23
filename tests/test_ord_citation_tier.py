@@ -530,6 +530,10 @@ async def test_the_durable_store_keeps_the_tier_and_withholds_it_from_structure_
     refs = [(source, "tier-cited"), (source, "tier-drawn"), ("", "tier-cited")]
     assert await store.structurally_withheld(refs) == {(source, "tier-cited"), ("", "tier-cited")}
     assert await store.retracted(refs) == set(), "citation-only is not a withdrawal"
+    absent = (source, "tier-never-recorded")
+    assert await store.servable([*refs, absent]) == {(source, "tier-drawn")}, (
+        "only a held, structured, current record may stand behind a cited structure hit"
+    )
 
     # An amendment that draws the partner moves the row back, through the same upsert.
     await store.record([cited.model_copy(update={"tier": RecordTier.STRUCTURED})], source)
