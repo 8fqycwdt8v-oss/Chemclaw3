@@ -82,6 +82,7 @@ class composed — and the cross-section startup rules enforced — in its `__in
 | Module | What it is |
 | --- | --- |
 | `aio`, `executor` | async primitives that survive several event loops in one process; the one sized thread pool every `asyncio.to_thread` shares |
+| `heap` | the startup heap frozen out of the cyclic collector once a front door or worker is about to serve |
 | `asgi`, `worker_http` | shared pure-ASGI middleware; the scrape and probe surface for a process that is not the front door |
 | `bookkeeping` | the writes a turn owes the record once it has acted: tracked in one registry, awaited once and bounded, never fatal |
 | `bounded` | the one bounded LRU map for every cache keyed by an unbounded identity |

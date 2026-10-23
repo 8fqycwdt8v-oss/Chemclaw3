@@ -90,7 +90,7 @@ from chemclaw.api.turn_relay import TurnRelay
 from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
-from chemclaw.core import backend_rpc, bookkeeping, db
+from chemclaw.core import backend_rpc, bookkeeping, db, heap
 from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY
 from chemclaw.core.config import settings
 from chemclaw.core.deployment import (
@@ -246,6 +246,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
         await warming
+        # Last before serving: everything above is built and lives as long as the process.
+        heap.freeze_startup_heap("front-door")
         relay: TurnRelay | None = app.state.turn_relay
         serving = asyncio.create_task(relay.run(), name="turn-relay") if relay else None
         try:
