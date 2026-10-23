@@ -26,8 +26,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
   `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
-- [ ] **A report section is bounded by neither evidence budget** [S] — `gather_section` dedups but concatenates legs in order with no chunk or character cap; reuse the conversational
-  merge and both `gather_evidence_max_*` caps, and render the cut; `retrieval/harness.py::gather_section`, `agent/research_tools.py::_interleave_dedup`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`

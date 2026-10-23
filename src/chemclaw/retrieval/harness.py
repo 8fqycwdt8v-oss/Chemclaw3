@@ -17,6 +17,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, as_cell, require_note_slug, split_link
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.hybrid import Truncation, interleave_dedup, within_budget
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
 # (episodic) and transferred generalization (semantic) structurally apart, not just by prose.
@@ -135,6 +136,10 @@ class SynthesizedSection(BaseModel):
     failed_sources: list[str] = Field(default_factory=list)
     #: The sources that declined, mapped to the reason each stated. A re-run cannot fix these.
     skipped_sources: dict[str, str] = Field(default_factory=dict)
+    #: Which evidence budget cut the merged ranking (`gather_evidence_max_*`), or `None`.
+    truncated_by: Truncation = None
+    #: How many merged chunks the budget left out; rendered so the cut is never silent.
+    cut: int = Field(default=0, ge=0)
 
     @property
     def supported(self) -> bool:
@@ -176,8 +181,10 @@ async def gather_section(
     This is the durable unit of the report workflow: one section, one activity.
 
     Goes through `sweep_sources`, the conversational path's fan-out, so a dead source costs only its
-    own leg and the healthy legs' evidence is kept. Lists are deduplicated on `(note, content)`
-    (as `_interleave_dedup` does) so a note several legs return is cited once, without re-ranking.
+    own leg and the healthy legs' evidence is kept. The legs are merged as the conversational
+    `graph` mode merges them (`interleave_dedup`: round-robin, deduplicated on `(note, content)`)
+    and cut by both `gather_evidence_max_*` budgets (`within_budget`), so one leg cannot crowd out
+    the rest and the section cannot grow without bound; the cut is recorded for the renderer.
     `retrieval_failed` is set by any failed source, so an incomplete sweep never reads as empty.
     """
     ranked_lists, failed, skipped = await sweep_sources(
@@ -185,15 +192,8 @@ async def gather_section(
         section.query,
         section.filters,
     )
-    seen: set[tuple[str, str]] = set()
-    evidence: list[EvidenceChunk] = []
-    for chunks in ranked_lists:
-        for chunk in chunks:
-            key = (chunk.source_note_id, chunk.content)
-            if key in seen:
-                continue
-            seen.add(key)
-            evidence.append(chunk)
+    merged = interleave_dedup(ranked_lists)
+    evidence, truncated_by = within_budget(merged)
     # A skip counts as incompleteness here: a signed report swept without a source covers less than
     # the whole corpus, whatever the reason.
     return SynthesizedSection(
@@ -204,6 +204,8 @@ async def gather_section(
         # Carried apart: a raise and a decline need different remedies (see `SynthesizedSection`).
         failed_sources=list(failed),
         skipped_sources=dict(skipped),
+        truncated_by=truncated_by,
+        cut=len(merged) - len(evidence),
     )
 
 
@@ -356,6 +358,12 @@ def report_note(report: Report, *, drafted_on: date | None = None) -> Note:
                     "notes disagree; do not read this and a conflicting note as two independent "
                     "confirmations."
                 )
+        if section.cut:
+            budget = "chunk" if section.truncated_by == "count" else "character"
+            lines.append(
+                f"_{section.cut} further evidence chunk(s) were cut by the section's {budget} "
+                "budget; narrow the section's query or filters to see them._"
+            )
         lines.append("")
     return Note(
         id=_report_id(report.title),
