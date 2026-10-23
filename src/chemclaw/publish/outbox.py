@@ -24,7 +24,7 @@ from psycopg.rows import TupleRow
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
-from chemclaw.core.logging import log_event
+from chemclaw.core.logging import attributed_caller, log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.tenant_registry import for_each_tenant
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
@@ -63,12 +63,40 @@ def _lease_columns(leases: Sequence[Lease]) -> tuple[list[int], list[int]]:
     return [lease.row_id for lease in leases], [lease.attempt for lease in leases]
 
 
-# `ON CONFLICT DO NOTHING` on the identity index makes every enqueue path idempotent: call sites
-# need no coordination, a retried activity cannot double-queue, and the backfill can run twice.
+# Idempotent on the identity index: call sites need no coordination, a retried activity cannot
+# double-queue, and the backfill can run twice. A calculation's identity excludes its requester, so
+# a later enqueue carrying a publication the row does not hold yet (by the far side's key for
+# `calculation_publication`: tenant, session, job) adds it rather than being dropped: appended to
+# an undelivered row, or replacing the publications of a delivered one (those already landed) and
+# returning it to the queue with a fresh budget. Every far-side write is an upsert, so the
+# re-delivery changes nothing but the new publication. Resetting `attempts` also fences off a pass
+# delivering the older document (see `Lease`), so it cannot mark delivered a row whose new
+# publication it never sent. A dead letter keeps its state.
 _ENQUEUE = """
-    INSERT INTO result_publications (sink, calc_ref, document, schema_version)
+    INSERT INTO result_publications AS p (sink, calc_ref, document, schema_version)
     VALUES (%s, %s, %s, %s)
-    ON CONFLICT ON CONSTRAINT result_publications_identity DO NOTHING
+    ON CONFLICT ON CONSTRAINT result_publications_identity DO UPDATE
+    SET document = jsonb_set(
+            p.document,
+            '{publications}',
+            CASE WHEN p.state = 'delivered' THEN '[]'::jsonb
+                 ELSE COALESCE(p.document -> 'publications', '[]'::jsonb) END
+            || (EXCLUDED.document -> 'publications')
+        ),
+        state = CASE WHEN p.state = 'failed' THEN 'failed' ELSE 'pending' END,
+        attempts = CASE WHEN p.state = 'failed' THEN p.attempts ELSE 0 END,
+        last_error = CASE WHEN p.state = 'failed' THEN p.last_error ELSE '' END
+    WHERE EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(EXCLUDED.document -> 'publications', '[]'::jsonb)) AS n
+        WHERE NOT COALESCE(p.document -> 'publications', '[]'::jsonb) @> jsonb_build_array(
+            jsonb_build_object(
+                'tenant_id', n -> 'tenant_id',
+                'session_id', n -> 'session_id',
+                'job_id', n -> 'job_id'
+            )
+        )
+    )
 """
 
 # "Nobody is working on this row": never claimed, released by a mark, or claimed by a drain past
@@ -351,8 +379,9 @@ async def enqueue_payload(
     projector is skipped and counted in `chemclaw_results_unprojected_total`.
 
     `payload_kind` routes a composite, whose `calc_type` is a `<connector>.<job>` route; empty
-    falls back to prefix inference for cached primitives. A zero cannot say why; callers that care
-    use `project_payload` and `enqueue`.
+    falls back to prefix inference for cached primitives. With no `publication`, the record names
+    the caller this context is attributed to (`attributed_caller`), when there is one. A zero
+    cannot say why; callers that care use `project_payload` and `enqueue`.
     """
     if not publishing_enabled():
         return 0
@@ -381,11 +410,22 @@ async def enqueue_payload(
         compute_seconds=compute_seconds,
         computed_at=computed_at,
         depends_on=depends_on,
-        publication=publication,
+        publication=publication or _ambient_publication(),
     )
     if records is None:
         return 0
     return await enqueue(records)
+
+
+def _ambient_publication() -> Publication | None:
+    """Who this context's work is attributed to, as a publication; None when nobody is bound.
+
+    `tenant_id` is left empty for the sink's manifest to fill, as every live hook does.
+    """
+    actor, session_id, correlation_id = attributed_caller()
+    if not (actor or session_id):
+        return None
+    return Publication(actor=actor, session_id=session_id, correlation_id=correlation_id)
 
 
 async def claim(sink: str, limit: int) -> list[ClaimedRow]:
