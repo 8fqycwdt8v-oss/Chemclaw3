@@ -90,6 +90,7 @@ from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import backend_rpc, bookkeeping, db
+from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY
 from chemclaw.core.config import settings
 from chemclaw.core.deployment import (
     bind_deployment_gauges,
@@ -309,6 +310,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
         lifespan=_lifespan,
+        telemetry=NO_FRAMEWORK_TELEMETRY,
     )
     # First, which makes it innermost (`add_middleware` prepends): inside `_SecurityHeaders`, so its
     # 500 carries them, and outside FastAPI's `ExceptionMiddleware`, so handler 4xx responses are

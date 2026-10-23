@@ -835,8 +835,9 @@ def test_the_value_stamp_does_not_refuse_a_healthy_thread() -> None:
 def test_a_checkpoint_written_before_the_value_stamp_resumes() -> None:
     """A checkpoint written before the value stamp resumes.
 
-    Rolling deploys keep writing unstamped checkpoints. The key and the blobs are both removed, so
-    resuming proves the guard read the absent stamp rather than getting lucky.
+    Rolling deploys keep writing unstamped checkpoints. The key, the blobs and the writes are all
+    removed (LangGraph rebuilds a reducer channel whose blob is gone by replaying the thread's
+    writes), so resuming empty proves the guard read the absent stamp rather than getting lucky.
     """
 
     async def _run() -> list[str]:
@@ -850,6 +851,9 @@ def test_a_checkpoint_written_before_the_value_stamp_resumes() -> None:
                     (ckpt.CHECKPOINT_VALUES_KEY, "sess-values-unstamped"),
                 )
                 rewritten = cur.rowcount
+                await cur.execute(
+                    "DELETE FROM checkpoint_writes WHERE thread_id = %s", ("sess-values-unstamped",)
+                )
                 await conn.commit()
             assert rewritten > 0, "no checkpoint row was rewritten"
             await _delete_blobs("sess-values-unstamped")

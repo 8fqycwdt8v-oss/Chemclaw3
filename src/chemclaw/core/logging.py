@@ -383,6 +383,8 @@ def _trace_config(trace_config: Any) -> Any:
         hide_choices=True,
         hide_llm_invocation_parameters=True,
         hide_llm_tools=True,
+        # A retrieved document is a note's body, the same content a prompt carries.
+        hide_retrieval_documents=True,
         # `hide_embeddings_text` matters most: embedded text is a chemist's question or a note's
         # body. `hide_embedding_vectors` and `hide_embeddings_vectors` are upstream's spelling and
         # its alias; both are set because a given release may read either.
