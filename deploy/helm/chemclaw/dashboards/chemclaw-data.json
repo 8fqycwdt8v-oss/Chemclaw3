@@ -544,6 +544,11 @@
           "expr": "histogram_quantile(0.95, sum by (le, sink) (rate(chemclaw_sink_delivery_seconds_bucket[30m])))",
           "legendFormat": "{{sink}} delivery p95",
           "refId": "E"
+        },
+        {
+          "expr": "sum by (calc_type) (rate(chemclaw_results_unprojected_total[30m]))",
+          "legendFormat": "{{calc_type}} no projector",
+          "refId": "F"
         }
       ]
     },
