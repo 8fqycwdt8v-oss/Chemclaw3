@@ -25,6 +25,8 @@ from tests.note_store_harness import AUTUMN, SPRING, STORES, Harness, changed
 from tests.note_store_harness import corpus as _corpus
 
 _SPRING = SPRING
+#: A search limit above any corpus here, so a search returns every hit.
+_ALL = 1000
 _AUTUMN = AUTUMN
 
 
@@ -147,6 +149,54 @@ async def test_neighborhood_follows_links_both_ways_and_keeps_dangling_ids(
     assert await store.neighborhood("alpha", hops=0) == set()
 
 
+async def test_vicinity_is_what_the_separate_reads_answer_and_none_for_no_note(
+    harness: Harness,
+) -> None:
+    """The note, its edges, its neighbourhood as notes and their successors, as each read gives."""
+    store = await _loaded(harness)
+    for hops in (0, 1, 2):
+        around = await store.vicinity("alpha", hops, _SPRING)
+        assert around is not None
+        assert around.note == await store.get("alpha")
+        assert around.edges == await store.edges("alpha")
+        reached = await store.neighborhood("alpha", hops)
+        assert around.found == await store.get_many(reached)
+        retired = [n for n, note in around.found.items() if note and not note.is_current(_SPRING)]
+        assert around.successors == await store.current_successors(retired, _SPRING)
+    two = await store.vicinity("alpha", 2, _SPRING)
+    assert two is not None
+    # `old` ended in January and `future` has not begun: both get a successor walk, `old` to `mid`.
+    assert set(two.successors) == {"old", "future"}
+    assert two.successors["old"] is not None and two.successors["old"].id == "mid"
+    assert two.found["missing-note"] is None
+    assert await store.vicinity("missing-note", 1, _SPRING) is None, "cited, but no note"
+    assert await store.vicinity("no-such-id", 1, _SPRING) is None
+
+
+def _hit(note_id: str, body: str) -> Note:
+    return Note(id=note_id, type="reaction", created_by="agent", body=body)
+
+
+async def test_search_returns_the_best_hits_up_to_the_limit_and_tallies_every_hit(
+    harness: Harness,
+) -> None:
+    """Most terms first, then id order; the tally counts the hits the limit left out too."""
+    await harness.add(
+        *[
+            Note(id=f"hit-{i}", type="reaction", created_by="agent", body="suzuki")
+            for i in range(5)
+        ],
+        _hit("zz-both", "suzuki and solvent"),
+        _hit("aa-other", "solvent only"),
+    )
+    found = await harness.store.search(["suzuki", "solvent"], _SPRING, 3)
+    assert [(c, n.id) for c, n in found.matches] == [(2, "zz-both"), (1, "aa-other"), (1, "hit-0")]
+    assert found.coverages == {2: 1, 1: 6}
+    assert found.searched == 7
+    none = await harness.store.search(["absent"], _SPRING, 3)
+    assert (none.matches, none.coverages, none.searched) == ([], {}, 7)
+
+
 async def test_current_successor_walks_a_supersede_chain_to_the_first_current_note(
     harness: Harness,
 ) -> None:
@@ -204,14 +254,14 @@ async def test_search_matches_current_notes_by_substring_and_counts_what_it_sear
 ) -> None:
     """Coverage counts matched terms; a note not current on the date is not searched at all."""
     store = await _loaded(harness)
-    found = await store.search(["suzuki", "solvent"], _SPRING)
+    found = await store.search(["suzuki", "solvent"], _SPRING, _ALL)
     assert [(coverage, note.id) for coverage, note in found.matches] == [(2, "alpha"), (1, "beta")]
     # alpha, beta, mid, loner and the two cyclic notes: `old` ended; `new`, `future` not begun.
     assert found.searched == 6
     # Substring, so `solv` finds `solvent`; and `future` is found once it is current.
-    later = await store.search(["solv"], date(2027, 6, 1))
+    later = await store.search(["solv"], date(2027, 6, 1), _ALL)
     assert [note.id for _, note in later.matches] == ["alpha", "future"]
-    assert (await store.search(["zzzz"], _SPRING)).matches == []
+    assert (await store.search(["zzzz"], _SPRING, _ALL)).matches == []
 
 
 async def test_search_matches_pattern_characters_as_text_and_refuses_nothing_it_cannot_store(
@@ -224,7 +274,7 @@ async def test_search_matches_pattern_characters_as_text_and_refuses_nothing_it_
     )
 
     async def hits(*terms: str) -> list[tuple[int, str]]:
-        found = await harness.store.search(list(terms), _SPRING)
+        found = await harness.store.search(list(terms), _SPRING, _ALL)
         return [(coverage, note.id) for coverage, note in found.matches]
 
     assert await hits("50%") == [(1, "literal")]
@@ -581,7 +631,8 @@ async def test_every_read_of_the_store_runs_off_the_event_loop(
     await store.edges("alpha")
     await store.current_successor("old", _SPRING)
     await store.current_successors(["old"], _SPRING)
-    await store.search(["suzuki"], _SPRING)
+    await store.search(["suzuki"], _SPRING, _ALL)
+    await store.vicinity("alpha", 2, _SPRING)
     await store.graph()
     await store.snapshot()
     await store.signature()
