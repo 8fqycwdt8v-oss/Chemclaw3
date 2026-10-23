@@ -400,7 +400,8 @@ apply_app_secret() {
     # every replica and every restart frames retrieved content under its own random nonce (the
     # front door warns as much at start).
     for var in CHEMCLAW_BO_MCP_TOKEN CHEMCLAW_CALC_MCP_TOKEN CHEMCLAW_MOLFP_MCP_TOKEN \
-      CHEMCLAW_RXNFP_MCP_TOKEN CHEMCLAW_FRAMING_ENVELOPE_SECRET; do
+      CHEMCLAW_RXNFP_MCP_TOKEN CHEMCLAW_FRAMING_ENVELOPE_SECRET \
+      CHEMCLAW_ROLE_CLAIM_SECRET; do
       printf '%s=%s\n' "$var" "$(existing_or_new chemclaw-secrets "$var")"
     done
     for name in "${FLEET[@]}"; do

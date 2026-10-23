@@ -1499,6 +1499,9 @@ secrets:
     # (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
     # The `BACKLOG.md` row this used to point at is gone.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+    # Signs the roles a background report carries (`core/role_claim.py`); the API and every worker
+    # must hold the same value. Unset, a policy-gated deployment's background sweeps ask no source.
+    roleClaimSecret: "CHEMCLAW_ROLE_CLAIM_SECRET"
     # The bearer token the read-only MCP face requires on `/mcp`
     # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
     # A Secret slot rather than a `config` entry for the reason above: `config` renders into a

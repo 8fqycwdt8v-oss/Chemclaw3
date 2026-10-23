@@ -405,6 +405,7 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 | `keys.knowledgeRepoToken` | the name that entry holds in `values.yaml` | every pod: **required** once `knowledge.sync.repoUrl` is set, `optional: true` without one | with a remote, `CreateContainerConfigError`; without, nothing (nothing pushes) |
 | `migrationKeys.postgresMigrationDsn` | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | migrate Job only | migrations run as `CHEMCLAW_POSTGRES_DSN` |
 | `optionalKeys.framingEnvelopeSecret` | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | every pod | a startup warning, and prompt-injection framing breaks across replicas and restarts. **Set it.** |
+| `optionalKeys.roleClaimSecret` | `CHEMCLAW_ROLE_CLAIM_SECRET` | every pod (the API signs, workers verify) | background report sweeps hold no roles and, under an access policy, ask no source. **Set it with a policy.** |
 | `optionalKeys.{boMcpToken,calcMcpToken,molfpMcpToken,rxnfpMcpToken}` | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | every pod (both ends of the chart's own connectors) | every call to that bundle is refused |
 | `optionalKeys.{chemToken,safetyToken,rxnpredictToken}` | `CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN` | every pod. **The matching fleet server needs the same value** (§6). | every call to that server is refused |
 | `optionalKeys.calcToken` | `CHEMCLAW_CALC_TOKEN` | every pod, plus `chemclaw-mcp-calc` | every SMILES-in calc tool and every durable calc job fails |
@@ -429,6 +430,7 @@ oc -n "$NS" create secret generic chemclaw-secrets \
   --from-literal=CHEMCLAW_POSTGRES_MIGRATION_DSN='postgresql://chemclaw_owner:<owner-password>@pg.example.com:5432/chemclaw_prod?sslmode=require' \
   --from-literal="${KREPO_KEY}=<git token, or empty if knowledge.sync.repoUrl is empty>" \
   --from-literal=CHEMCLAW_FRAMING_ENVELOPE_SECRET="$(rand)" \
+  --from-literal=CHEMCLAW_ROLE_CLAIM_SECRET="$(rand)" \
   --from-literal=CHEMCLAW_BO_MCP_TOKEN="$(rand)" \
   --from-literal=CHEMCLAW_CALC_MCP_TOKEN="$(rand)" \
   --from-literal=CHEMCLAW_MOLFP_MCP_TOKEN="$(rand)" \
