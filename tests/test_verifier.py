@@ -787,9 +787,13 @@ def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) ->
 
     Not a fake — `build_chat_model` is exactly what `agent.verifier._default_client` calls in
     production. Only `llm_base_url` is local; the client, the binding, and the HTTP call are real.
+    The process-scoped pool is dropped first: each test drives its own `asyncio.run` loop, and a
+    keep-alive connection from the previous test's loop fails with "Event loop is closed".
     """
     from chemclaw.agent.llm_provider import build_chat_model
+    from tests.test_llm_provider import _reset_gateway_clients
 
+    _reset_gateway_clients()
     monkeypatch.setattr(settings, "llm_base_url", base_url)
     monkeypatch.setattr(settings, "llm_model", "internal-test-model")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("test-key"))

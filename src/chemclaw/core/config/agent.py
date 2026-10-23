@@ -180,10 +180,11 @@ class AgentSettings(BaseSettings):
     # Supersteps one model call costs, for deriving `agent_recursion_limit`. The framework default
     # (9999) would let a turn run thousands of calls and then fail with `GraphRecursionError`,
     # losing the partial answer; the loop cap is the graceful stop and this ceiling sits just above
-    # it. A call costs several supersteps (one per hook-bearing middleware), so 6 includes headroom
-    # over the measured cost: re-measure multiplier and constant together whenever middleware
-    # changes.
-    agent_supersteps_per_model_call: int = Field(default=6, ge=2)
+    # it. A call costs several supersteps (one per hook-bearing middleware), so the default includes
+    # headroom over the measured cost: re-measure multiplier and constant together whenever
+    # middleware changes (`tests/test_cli.py::test_the_step_ceiling_never_fires_before_the_loop_cap`
+    # fails when the ceiling falls under the cost).
+    agent_supersteps_per_model_call: int = Field(default=9, ge=2)
 
     # Tool calls from one assistant message that may run at once, applied as LangGraph's
     # `max_concurrency` (`agent.state.turn_config`), so it bounds every superstep including helper
@@ -364,9 +365,9 @@ class AgentSettings(BaseSettings):
 
         Derived from `harness_max_loop_iterations` so the loop cap always fires first and the
         ceiling only catches a bug. `spend/guard.enforce_loop_cap` allows one wrap-up call past
-        the cap, hence `cap + 1` calls. Measured cost is `5 * N + 7` supersteps; the formula grants
-        `agent_supersteps_per_model_call * (cap + 1) + 8`, a margin that grows with the cap, because
-        an exact fit breaks the first time a middleware is added. Re-measure multiplier and constant
-        together.
+        the cap, hence `cap + 1` calls. The formula grants
+        `agent_supersteps_per_model_call * (cap + 1) + 8`, a margin over the measured cost that
+        grows with the cap, because an exact fit breaks the first time a middleware is added.
+        Re-measure multiplier and constant together.
         """
         return (self.harness_max_loop_iterations + 1) * self.agent_supersteps_per_model_call + 8

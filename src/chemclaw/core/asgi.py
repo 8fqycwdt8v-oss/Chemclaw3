@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Any
 
+from fastapi.telemetry import TelemetryConfig
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -15,6 +16,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
+
+#: Handed to every `FastAPI(telemetry=…)` this repository builds. FastAPI's own OpenTelemetry is on
+#: by default and records every request under the global provider, beside the first-party spans in
+#: `core/tracing.py`; what leaves this process is decided there and in `core/logging.py`, not by a
+#: framework default.
+NO_FRAMEWORK_TELEMETRY: TelemetryConfig = {"tracing": False, "metrics": False, "logs": False}
 
 
 class BodySizeLimit:

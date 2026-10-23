@@ -54,7 +54,7 @@ dependencies = [
     # (`docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`).
     "openai>=3.1",
     "drfp>=0.3.7",
-    "fastapi>=0.141.1",
+    "fastapi>=0.142",
     # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
@@ -322,12 +322,16 @@ explicit = true
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 # The other GPU runtime in the closure, with the same answer. xgboost (pulled in only by drfp)
-# depends on `nvidia-nccl-cu12` on Linux, ~400 MB of multi-GPU collectives. xgboost only loads
-# NCCL for distributed GPU training, and nothing here trains on a GPU. A marker that no platform
-# satisfies is uv's documented way to remove a transitive requirement. xgboost's CPU path, which
-# imports and fits without it, is asserted in tests/test_packaging.py.
+# depends on `nvidia-nccl-cu12` (newer releases: `-cu13`) on Linux, hundreds of MB of multi-GPU
+# collectives. xgboost only loads NCCL for distributed GPU training, and nothing here trains on a
+# GPU. A marker that no platform satisfies is uv's documented way to remove a transitive
+# requirement. xgboost's CPU path, which imports and fits without it, is asserted in
+# tests/test_packaging.py.
 [tool.uv]
-override-dependencies = ["nvidia-nccl-cu12 ; sys_platform == 'never'"]
+override-dependencies = [
+    "nvidia-nccl-cu12 ; sys_platform == 'never'",
+    "nvidia-nccl-cu13 ; sys_platform == 'never'",
+]
 
 [build-system]
 requires = ["hatchling"]

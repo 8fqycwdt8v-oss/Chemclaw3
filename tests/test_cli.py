@@ -434,7 +434,7 @@ def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
 # --- a capped turn stops printing as a finished one ----------------------------------------------
 
 
-def _capped_script(first: str) -> Iterator[AIMessage]:
+def _capped_script(first: str, tool_turns: int = 6) -> Iterator[AIMessage]:
     """A model that keeps calling `ls` and only eventually answers.
 
     `first` is the content of the tool-calling turns, so the same script covers both shapes the
@@ -447,7 +447,7 @@ def _capped_script(first: str) -> Iterator[AIMessage]:
             tool_calls=[{"name": "ls", "args": {"path": "."}, "id": f"c{index}"}],
             usage_metadata=usage,
         )
-        for index in range(6)
+        for index in range(tool_turns)
     ]
     answer = "FINAL: pKa 3.49, confirmed against ELN batch 12."
     done = AIMessage(content=answer, usage_metadata=usage)
@@ -455,7 +455,10 @@ def _capped_script(first: str) -> Iterator[AIMessage]:
 
 
 def _cli_turn(
-    monkeypatch: pytest.MonkeyPatch, cap: int, first: str = "Still checking; one more source."
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
+    first: str = "Still checking; one more source.",
+    tool_turns: int = 6,
 ) -> cli.CliTurn:
     """Drive `converse` on a real compiled graph at `cap`, and report the turn.
 
@@ -464,7 +467,7 @@ def _cli_turn(
     """
     monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
-    model = ScriptedChatModel(messages=_capped_script(first))
+    model = ScriptedChatModel(messages=_capped_script(first, tool_turns))
     monkeypatch.setattr("chemclaw.agent.langgraph_agent.build_chat_model", lambda *_a, **_k: model)
     agent = build_langgraph_agent(actor="chemist-1")
     return asyncio.run(cli.converse(agent, "what is the pKa of CCO?", session_id=f"cli-{cap}"))
@@ -484,6 +487,19 @@ def test_a_capped_cli_turn_says_so_and_a_whole_one_says_nothing(
     whole = _cli_turn(monkeypatch, 20)
     assert whole.answer == "FINAL: pKa 3.49, confirmed against ELN batch 12."
     assert whole.notice == ""
+
+
+def test_the_step_ceiling_never_fires_before_the_loop_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The step ceiling never fires before the loop cap, at a cap where the margin is thin.
+
+    `agent_recursion_limit` is derived from the cap so the cap is the graceful stop; a ceiling under
+    the real superstep cost raises `GraphRecursionError` instead, losing the partial answer. The
+    model keeps calling a tool past the cap, so only the cap can end the turn.
+    """
+    capped = _cli_turn(monkeypatch, 10, tool_turns=12)
+    assert capped.notice == "incomplete: the turn reached its model-call cap before it finished"
 
 
 def test_a_turn_that_answered_nothing_is_not_a_blank_line(

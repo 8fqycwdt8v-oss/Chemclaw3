@@ -1736,9 +1736,9 @@ def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> No
         "upstream no longer documents `False` as the opt-out; `agent/langgraph_agent.py` and "
         "`retrieval/fanout.py` both rely on it"
     )
-    assert "if self.checkpointer is False" in inspect.getsource(Pregel._defaults), (
-        "`Pregel._defaults` no longer short-circuits on `checkpointer is False` before reading "
-        "the parent's saver out of the run config, which is where the opt-out is resolved"
+    assert "if self.checkpointer is False" in inspect.getsource(Pregel._resolve_checkpointer), (
+        "`Pregel._resolve_checkpointer` no longer short-circuits on `checkpointer is False` before "
+        "reading the parent's saver out of the run config, which is where the opt-out is resolved"
     )
 
 

@@ -40,6 +40,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.logging import configure_logging
 
@@ -749,7 +750,7 @@ def build_app(mock: MockLlm) -> FastAPI:
 
     `/v1/chat/completions` is what `ChatOpenAI` posts to; `/v1/responses` serves the Responses API.
     """
-    app = FastAPI(title="chemclaw-mock-llm")
+    app = FastAPI(title="chemclaw-mock-llm", telemetry=NO_FRAMEWORK_TELEMETRY)
 
     @app.post("/v1/responses")
     async def responses(request: Request) -> Any:

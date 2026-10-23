@@ -134,12 +134,12 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   waiter joins, and the outbox `_CLAIM` has no tie-break; `connectors/calc/remote.py::remote_key`, `science/calc/store.py::_IN_FLIGHT`.
 - [ ] **A capped evidence pack drops a session's newest effects** [S] — `assemble` reads `effects` oldest first and only flags `truncated`; read newest first (latent while no shipped job
   declares an effect); `operations/evidence_pack.py::assemble`.
+- [ ] **deepagents 0.7.31 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and
+  `edit_file` text, so it ships behind `docs/guides/model-text-evaluation.md`, which needs a gateway; the code is ready on `deps/deepagents-0.7.31`.
 - [ ] **Agent tests that prove less than they say** [S] — the framer-order test reads back a literal list, the positive authz tests pass with the gate deleted, and a plan-gate docstring
   claims an unchecked fail-closed; `tests/test_tool_framing.py::test_the_framer_sits_inside_the_converters_and_outside_the_trail`, `tests/test_plan_gate.py::test_spending_never_raises_when_the_store_is_unreachable`.
 - [ ] **Retrieval tests and guards that prove less than they say** [S] — `PostgresNoteIndex`'s empty-`keep` guard survives deletion (only the in-memory twin is pinned), and the "semantic
   note" test passes on token overlap; `retrieval/vector_index.py::PostgresNoteIndex._retire_absent_ids`, `tests/test_vector_index.py::test_reindex_then_dense_search_finds_the_semantic_note`.
-- [ ] **Dependabot group #431 needs hand-made bumps** [S] — mutmut 3.8 drops `Config.ensure_loaded`; deepagents `task` schema vs the
-  900-token bound in `tests/test_context_floor.py`; rdkit 2026.3.6 lands paired with Chemclaw3-mcp (`tests/test_calc_rotation.py`).
 
 ## Upstream watch
 
