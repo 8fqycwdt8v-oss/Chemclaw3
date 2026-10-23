@@ -801,6 +801,15 @@ pytest_add_cli_args_test_selection = [
     # measurements of different things, reported as the before-and-after of one — the same
     # instrument error this repository keeps finding, one directory over.
     "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
+    # The four other files that drive `agent/plan_gate.py`: what an approval covers, the session's
+    # plan, the decision inbox and the plan link a call is stamped with. Measured on CI
+    # (workflow_dispatch, 2026-10-23): `plan_gate.py`'s `no_tests` mutants 34 -> 0 against the
+    # 2026-10-19 scheduled run, its killed count +15; the whole run 58.9% over 5,004 (59.0% before,
+    # over 48 fewer), so the floor and no-tests ceiling in mutants.yml stand: 58.9 - 5 is 53.9.
+    "tests/test_plan_scope.py",
+    "tests/test_plan_state.py",
+    "tests/test_plan_inbox.py",
+    "tests/test_plan_link.py",
     "tests/test_skill_backend.py",  # the former agent/skill_backend.py     51% ->  90%
     # The stored-tier half of `skills/backends.py` (`PermittedStoreBackend`), which the file holds
     # beside the reviewed tree's. Not measured: `make mutants` must re-record both rates.
