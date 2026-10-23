@@ -8,7 +8,10 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+import pytest
+
+from chemclaw.core.config import settings
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
@@ -299,7 +302,11 @@ async def test_fingerprint_retriever_cites_reaction_records() -> None:
     """The fingerprint retriever cites reaction records for structurally similar reactions."""
     store = InMemoryFingerprintStore()
     await store.add(record_for_reaction("eln-1", _ESTER))
-    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+    records = InMemoryReactionRecordStore()
+    await records.record(
+        [ReactionRecord(reaction_id="eln-1", body="Esterification.", source="eln:test")], "eln-json"
+    )
+    retriever = FingerprintReactionRetriever(store, records)
 
     hits = await retriever.retrieve(_ESTER, {})
     assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record
@@ -452,11 +459,48 @@ def test_a_note_two_sources_both_found_is_one_bullet_not_two() -> None:
     assert len([line for line in body.splitlines() if line.startswith("- ")]) == 1
 
 
+def test_a_section_is_bounded_by_both_evidence_budgets_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A section spends the conversational budgets down a round-robin, and renders the cut.
+
+    A leg with many long hits listed first would otherwise fill the section and push the second
+    leg's best hit to the end of an unbounded list.
+    """
+
+    def _chunks(leg: str, count: int, length: int) -> list[EvidenceChunk]:
+        return [
+            EvidenceChunk(content="x" * length, source_note_id=f"{leg}-{n}", retriever=leg)
+            for n in range(count)
+        ]
+
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+    graph = _FakeRetriever("ester", _chunks("graph", 30, 50), name="graph")
+    vector = _FakeRetriever("ester", _chunks("vector", 3, 50), name="vector")
+
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 6)
+    by_count = asyncio.run(gather_section(section, [graph, vector]))
+    assert [c.source_note_id for c in by_count.evidence[:2]] == ["graph-0", "vector-0"]
+    assert len(by_count.evidence) == 6
+    assert (by_count.truncated_by, by_count.cut) == ("count", 27)
+    body = report_note(Report(title="R", sections=[by_count])).body
+    assert "27 further evidence chunk(s) were cut by the section's chunk budget" in body
+
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 40)
+    monkeypatch.setattr(settings, "gather_evidence_max_chars", 1_000)
+    by_chars = asyncio.run(gather_section(section, [graph, vector]))
+    spent = sum(len(chunk.model_dump_json()) for chunk in by_chars.evidence)
+    assert by_chars.truncated_by == "chars" and spent <= 1_000 and by_chars.evidence
+    assert by_chars.cut == 33 - len(by_chars.evidence)
+    body = report_note(Report(title="R", sections=[by_chars])).body
+    assert "cut by the section's character budget" in body
+
+
 def test_two_different_excerpts_of_one_note_are_still_two_pieces_of_evidence() -> None:
     """The merge keys on `(note, content)`, not on the note — the round-robin's contract.
 
-    A report has no budget cap to spend, so dropping a second, genuinely different excerpt would
-    discard evidence to fix a repeat. Only a byte-identical repeat is dropped.
+    Dropping a second, genuinely different excerpt would discard evidence to fix a repeat; the
+    budgets bound the section instead. Only a byte-identical repeat is dropped.
     """
     section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
     graph = _FakeRetriever(

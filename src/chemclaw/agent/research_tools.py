@@ -11,8 +11,7 @@ The judgment (decomposing the question, separating evidence from analogy) lives 
 
 import logging
 from datetime import date
-from itertools import zip_longest
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field, computed_field
 
@@ -26,9 +25,11 @@ from chemclaw.ingest.sources.registry import active_retrieve_corpora, active_ret
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, Hits, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
 from chemclaw.retrieval.hybrid import (
+    interleave_dedup,
     reciprocal_rank_fusion,
     restated_as_position,
     with_no_leg_cut_out,
+    within_budget,
 )
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
@@ -37,9 +38,6 @@ logger = logging.getLogger(__name__)
 
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store
-
-# Which bound cut the sweep, or `None` when nothing did.
-_Truncation = Literal["count", "chars"] | None
 
 
 class EvidenceSweepWithRefusals(EvidenceSweep):
@@ -141,31 +139,6 @@ class _AnchoredRetriever:
         The filters are forwarded, so the inner retriever's date window and eligibility gate apply.
         """
         return await self._inner.retrieve(self._anchor, filters)
-
-
-def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
-    """Round-robin the per-source hit-lists into one, dropping exact (note, content) repeats.
-
-    The `graph` mode's cross-source merge. Rank position is comparable across sources and score
-    is not (confidence, `ts_rank`, cosine and Tanimoto are different scales), so each source
-    contributes its best hit before any contributes its second, and a source that runs out
-    stops taking slots. This keeps the cap in `gather_evidence` from starving a source.
-
-    Dedup granularity is a contract: this mode keys on `(note, content)`, so two excerpts of one
-    note are two chunks, while `hybrid`'s RRF keys on the note id. Switching `retrieval_mode`
-    changes chunk counts as well as order.
-    """
-    seen: set[tuple[str, str]] = set()
-    merged: list[EvidenceChunk] = []
-    for position in zip_longest(*ranked_lists):
-        for chunk in position:
-            if chunk is None:  # this source has no hit at this depth
-                continue
-            key = (chunk.source_note_id, chunk.content)
-            if key not in seen:
-                seen.add(key)
-                merged.append(chunk)
-    return merged
 
 
 async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], int, str]:
@@ -314,8 +287,8 @@ async def gather_evidence(
         )
     else:
         # Round-robin, not a union re-sorted by score: scores from different retrievers are not
-        # comparable (see `_interleave_dedup`).
-        merged = _interleave_dedup(ranked_lists)
+        # comparable (see `interleave_dedup`).
+        merged = interleave_dedup(ranked_lists)
     # Re-state `score` as the merged position in both modes, so the number agrees with the
     # delivered order. The note's confidence stays in `confidence`, and `retriever` names the
     # leg that found it.
@@ -335,7 +308,7 @@ async def gather_evidence(
         )
         for chunk in ranked
     ]
-    kept, truncated_by = _within_budget(framed)
+    kept, truncated_by = within_budget(framed)
     # Map back to the unframed chunks for attribution: framing rewrites both halves of the dedup
     # key, so attribution must use the vocabulary the merge deduped in.
     origins = {id(copy): original for copy, original in zip(framed, ranked, strict=True)}
@@ -368,28 +341,3 @@ async def gather_evidence(
         },
         sources_skipped=skipped,
     )
-
-
-def _within_budget(chunks: list[EvidenceChunk]) -> tuple[list[EvidenceChunk], _Truncation]:
-    """Spend both budgets down the merged ranking, and say which one ran out.
-
-    Both a chunk count and a character budget apply, because chunk sizes differ widely across
-    sources and a count alone bounds nothing. Walking the already cross-source-fair ranking in
-    order keeps the character cut fair too. What is charged is the serialized chunk, not just
-    its content, since the metadata fields reach the model as well. At least one chunk always
-    survives, because an empty result would read as "nothing on file".
-    """
-    budget = settings.gather_evidence_max_chars
-    kept: list[EvidenceChunk] = []
-    spent = 0
-    for chunk in chunks[: settings.gather_evidence_max_chunks]:
-        # One extra serialization for at most `gather_evidence_max_chunks` chunks, which buys the
-        # only number that means anything here: what this chunk actually costs the context window.
-        cost = len(chunk.model_dump_json())
-        if kept and spent + cost > budget:
-            return kept, "chars"
-        kept.append(chunk)
-        spent += cost
-    if len(chunks) > len(kept):
-        return kept, "count"
-    return kept, None

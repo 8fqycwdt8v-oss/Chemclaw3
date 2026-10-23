@@ -192,8 +192,8 @@ def test_the_starved_source_measurement_rerun(capsys: pytest.CaptureFixture[str]
     cosine, against a 40-chunk cap. Asserted as the property rather than exact counts, which would
     freeze the round-robin's arithmetic; the defect is a zero. The split is printed for the record.
     """
-    from chemclaw.agent.research_tools import _interleave_dedup
     from chemclaw.core.config import settings
+    from chemclaw.retrieval.hybrid import interleave_dedup
 
     lists = _swept(
         [
@@ -205,7 +205,7 @@ def test_the_starved_source_measurement_rerun(capsys: pytest.CaptureFixture[str]
     assert [len(chunks) for chunks in lists] == [45, 8, 7], "the sweep itself lost hits"
 
     cap = settings.gather_evidence_max_chunks
-    kept = _interleave_dedup(lists)[:cap]
+    kept = interleave_dedup(lists)[:cap]
     split = {
         name: sum(1 for chunk in kept if chunk.retriever == name)
         for name in ("graph", "lexical", "dense")

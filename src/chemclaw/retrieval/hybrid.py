@@ -1,4 +1,7 @@
-"""Reciprocal Rank Fusion for hybrid retrieval.
+"""Merging per-source rankings into one, and spending the evidence budgets down it.
+
+Round-robin (`interleave_dedup`) is the `graph` mode's merge and a report section's;
+`within_budget` applies both `gather_evidence_max_*` caps to either merge's order.
 
 In `hybrid` mode `gather_evidence` fuses its sources' *rankings*: a note's score is the sum over
 sources of `1 / (k + rank)`, so position matters and incomparable absolute scores do not. Fusion
@@ -8,8 +11,14 @@ representative chunk is the first seen in stable input order. This only reorders
 """
 
 from collections.abc import Sequence
+from itertools import zip_longest
+from typing import Literal
 
+from chemclaw.core.config import settings
 from chemclaw.retrieval.evidence import EvidenceChunk
+
+# Which bound cut a merged ranking, or `None` when nothing did.
+Truncation = Literal["count", "chars"] | None
 
 
 def reciprocal_rank_fusion(
@@ -160,3 +169,53 @@ def with_no_leg_cut_out(
     return [chunk for index, chunk in enumerate(fused) if index in keep] + [
         chunk for index, chunk in enumerate(fused) if index not in keep
     ]
+
+
+def interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
+    """Round-robin the per-source hit-lists into one, dropping exact (note, content) repeats.
+
+    The `graph` mode's cross-source merge, and a report section's. Rank position is comparable
+    across sources and score is not (confidence, `ts_rank`, cosine and Tanimoto are different
+    scales), so each source contributes its best hit before any contributes its second, and a
+    source that runs out stops taking slots. This keeps the evidence caps from starving a source.
+
+    Dedup granularity is a contract: this mode keys on `(note, content)`, so two excerpts of one
+    note are two chunks, while `hybrid`'s RRF keys on the note id. Switching `retrieval_mode`
+    changes chunk counts as well as order.
+    """
+    seen: set[tuple[str, str]] = set()
+    merged: list[EvidenceChunk] = []
+    for position in zip_longest(*ranked_lists):
+        for chunk in position:
+            if chunk is None:  # this source has no hit at this depth
+                continue
+            key = (chunk.source_note_id, chunk.content)
+            if key not in seen:
+                seen.add(key)
+                merged.append(chunk)
+    return merged
+
+
+def within_budget(chunks: list[EvidenceChunk]) -> tuple[list[EvidenceChunk], Truncation]:
+    """Spend both budgets down the merged ranking, and say which one ran out.
+
+    Both a chunk count and a character budget apply, because chunk sizes differ widely across
+    sources and a count alone bounds nothing. Walking the already cross-source-fair ranking in
+    order keeps the character cut fair too. What is charged is the serialized chunk, not just
+    its content, since the metadata fields reach the model as well. At least one chunk always
+    survives, because an empty result would read as "nothing on file".
+    """
+    budget = settings.gather_evidence_max_chars
+    kept: list[EvidenceChunk] = []
+    spent = 0
+    for chunk in chunks[: settings.gather_evidence_max_chunks]:
+        # One extra serialization for at most `gather_evidence_max_chunks` chunks, which buys the
+        # only number that means anything here: what this chunk actually costs the context window.
+        cost = len(chunk.model_dump_json())
+        if kept and spent + cost > budget:
+            return kept, "chars"
+        kept.append(chunk)
+        spent += cost
+    if len(chunks) > len(kept):
+        return kept, "count"
+    return kept, None

@@ -24,12 +24,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
   `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
-- [ ] **An external vector store cites cross-model neighbours after an embedding-model swap** [S] — its dense read binds no `embedding_key`, so stale vectors resolve and look correct
-  until a reindex; keep only ids catalogued under the live key, notes and documents alike; `retrieval/external_note_index.py::ExternalVectorNoteIndex.search_dense`, `ingest/documents/external_index.py::ExternalVectorDocumentIndex._resolve`.
-- [ ] **A reaction fingerprint whose record write has not landed is served at full similarity** [S] — the unfiltered path drops withheld records, not absent ones, so `gather_evidence`
-  returns a hit `expand_note` refuses; treat an absent record as withheld; `retrieval/retrievers.py::FingerprintReactionRetriever.retrieve`, `ingest/eln/records.py::structurally_withheld`.
-- [ ] **A report section is bounded by neither evidence budget** [S] — `gather_section` dedups but concatenates legs in order with no chunk or character cap; reuse the conversational
-  merge and both `gather_evidence_max_*` caps, and render the cut; `retrieval/harness.py::gather_section`, `agent/research_tools.py::_interleave_dedup`.
 - [ ] **`plan_gate.py`'s mutmut selection pairs one of its five covering test files** [S] — add the four siblings at the next floor
   re-measure (~80 min); `[tool.mutmut]` in `pyproject.toml`, `tests/test_mutation_workflow.py`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
@@ -113,8 +107,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `edit_file` text, so it ships behind `docs/guides/model-text-evaluation.md`, which needs a gateway; the code is ready on `deps/deepagents-0.7.31`.
 - [ ] **Agent tests that prove less than they say** [S] — the framer-order test reads back a literal list, the positive authz tests pass with the gate deleted, and a plan-gate docstring
   claims an unchecked fail-closed; `tests/test_tool_framing.py::test_the_framer_sits_inside_the_converters_and_outside_the_trail`, `tests/test_plan_gate.py::test_spending_never_raises_when_the_store_is_unreachable`.
-- [ ] **Retrieval tests and guards that prove less than they say** [S] — `PostgresNoteIndex`'s empty-`keep` guard survives deletion (only the in-memory twin is pinned), and the "semantic
-  note" test passes on token overlap; `retrieval/vector_index.py::PostgresNoteIndex._retire_absent_ids`, `tests/test_vector_index.py::test_reindex_then_dense_search_finds_the_semantic_note`.
 
 ## Upstream watch
 

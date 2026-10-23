@@ -15,6 +15,8 @@ import chemclaw.agent.research_tools as research_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
+from chemclaw.retrieval.hybrid import interleave_dedup
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
@@ -47,6 +49,15 @@ def test_gather_unions_graph_and_fingerprint(
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     store = _seed_store()
     monkeypatch.setattr(research_tools, "_reaction_store", lambda: store)
+    # A fingerprint is cited only with its record behind it (`ReactionRecordStore.servable`).
+    records = InMemoryReactionRecordStore()
+    asyncio.run(
+        records.record(
+            [ReactionRecord(reaction_id="rxn-1", body="Ethyl acetate.", source="eln:test")],
+            "eln-json",
+        )
+    )
+    monkeypatch.setattr(research_tools, "default_record_store", lambda: records)
 
     chunks = asyncio.run(gather_evidence("yield", reaction_smiles=_ESTER)).chunks
 
@@ -342,7 +353,7 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
 
     # Same corpus, same content, but every chunk now carries a long provenance label. Nothing about
     # `content` changed, so a content-only budget would keep exactly as many chunks as before.
-    real_chunks = research_tools._interleave_dedup
+    real_chunks = interleave_dedup
 
     def _padded(ranked_lists: Any) -> Any:
         return [
@@ -350,7 +361,7 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
             for chunk in real_chunks(ranked_lists)
         ]
 
-    monkeypatch.setattr(research_tools, "_interleave_dedup", _padded)
+    monkeypatch.setattr(research_tools, "interleave_dedup", _padded)
     padded = asyncio.run(gather_evidence("yield"))
 
     assert lean.chunks, "sanity: the corpus answers at all"

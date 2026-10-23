@@ -48,9 +48,9 @@ class _NoMetadata:
         """Every id passes; no filter is ever given here."""
         return set(reaction_ids)
 
-    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
-        """Nothing is withheld, which is what makes the unfiltered path below the subject."""
-        return set()
+    async def servable(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Everything is servable, which is what makes the unfiltered path below the subject."""
+        return set(refs)
 
 
 class _Live:

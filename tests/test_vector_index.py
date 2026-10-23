@@ -1,8 +1,9 @@
 """The derived note index: in-memory ranking (offline) and a Postgres round-trip (skips offline).
 
 Offline proves the shared reference ranking (dense by cosine, lexical by term overlap) and that
-`reindex_notes` embeds notes so a semantically related note is found without lexical overlap. The
-server-backed test proves `PostgresNoteIndex` ranks the same way over pgvector and full-text search.
+`reindex_notes` embeds note bodies for the dense leg; the offline `hash` embedder is token-based, so
+nothing here is evidence of semantic recall. The server-backed test proves `PostgresNoteIndex` ranks
+the same way over pgvector and full-text search.
 """
 
 import asyncio
@@ -65,8 +66,13 @@ async def test_inmemory_lexical_ranks_by_term_overlap() -> None:
     assert [h.note_id for h in hits] == ["both", "one"]  # 'none' shares no terms
 
 
-async def test_reindex_then_dense_search_finds_the_semantic_note(tmp_path: Path) -> None:
-    """A query sharing no id/substring with a note still retrieves it via the embedded body."""
+async def test_reindex_then_dense_search_ranks_by_the_embedded_body(tmp_path: Path) -> None:
+    """`reindex_notes` embeds each note's body, and dense search ranks by that embedding.
+
+    The query shares words with the body, not with the id. The offline `hash` embedder is a
+    feature-hash of tokens, so this proves the plumbing, not semantic recall: a query sharing no
+    token with the body scores zero here, and only an `openai_compatible` embedder can show more.
+    """
     _write_note(tmp_path, "note-001", "amide coupling with HATU gave epimerization")
     _write_note(tmp_path, "note-002", "distillation column reflux ratio study")
     index = InMemoryNoteIndex()
@@ -76,7 +82,7 @@ async def test_reindex_then_dense_search_finds_the_semantic_note(tmp_path: Path)
         embed_texts, ["epimerization observed during an amide coupling"]
     )
     hits = await index.search_dense(query_embedding, top_k=1)
-    assert hits and hits[0].note_id == "note-001"  # found without any id/substring overlap
+    assert hits and hits[0].note_id == "note-001"  # found through the body, not the id
 
 
 def test_reindex_empty_dir_is_a_noop(tmp_path: Path) -> None:
