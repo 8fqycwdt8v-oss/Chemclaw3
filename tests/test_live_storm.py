@@ -23,6 +23,7 @@ from chemclaw.cli.live_storm import (
     _knee,
     noise,
     percentiles,
+    planned_families,
     report,
     storm,
 )
@@ -458,3 +459,16 @@ def test_the_calibration_check_reads_the_ratio_not_the_in_flight_estimate() -> N
     assert not live_storm._calibration_finding(200, 41_000, None).ok, "unreadable is not a pass"
     assert not live_storm._calibration_finding(200, 0, ratio).ok, "nothing billed, nothing shown"
     assert not live_storm._calibration_finding(500, 41_000, ratio).ok
+
+
+@pytest.mark.parametrize("spelled", ["DH", "D,H", "d, h", "D H", "D,H,D"])
+def test_families_may_be_separated_by_commas_or_spaces(spelled: str) -> None:
+    """`--families D,H` asks for the same two families as `DH`, once each."""
+    assert planned_families(spelled) == ["D", "H"]
+
+
+@pytest.mark.parametrize("spelled", ["D;H", "DZ", ",", ""])
+def test_a_family_that_does_not_exist_is_refused_rather_than_dropped(spelled: str) -> None:
+    """A typo or an empty list must not quietly shrink the run to fewer families than asked."""
+    with pytest.raises(ValueError, match="famil"):
+        planned_families(spelled)

@@ -58,7 +58,11 @@ start() {
     log "$name already running (pid $(cat "$pidfile"))"
     return
   fi
-  nohup "$@" >"$LIVE_DIR/e2e-$name.log" 2>&1 &
+  # Appended under a marker, for the reason `processes.sh::start` gives: a restart must not erase
+  # the log of the process it replaced.
+  printf '\n[e2e] %s starting at %s\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >>"$LIVE_DIR/e2e-$name.log"
+  nohup "$@" >>"$LIVE_DIR/e2e-$name.log" 2>&1 &
   echo $! >"$pidfile"
   log "$name started (pid $(cat "$pidfile"))"
 }

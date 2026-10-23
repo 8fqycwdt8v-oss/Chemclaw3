@@ -262,7 +262,11 @@ start() {
   fi
   # No subshell around the launch: with `( … & echo $! )` the recorded pid is the forked subshell,
   # which is exactly the off-by-one that made the signal above miss. `up()` has already cd'd.
-  nohup "$@" >"$LIVE_DIR/$name.log" 2>&1 &
+  # Appended under a marker, not truncated: `restart` kills a process and starts it again, and a
+  # truncating start erased the log of the very process whose death was under test.
+  printf '\n[live] %s starting at %s\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >>"$LIVE_DIR/$name.log"
+  nohup "$@" >>"$LIVE_DIR/$name.log" 2>&1 &
   echo $! >"$pidfile"
   log "$name started (pid $(cat "$pidfile"))"
 }
@@ -664,6 +668,15 @@ up() {
   # hold instead of minting new ones beside them. See `source_unset_only`.
   source_unset_only "$RUN_DIR/connector-env.sh"
 
+  # One envelope secret for every process in the lane, minted once and persisted with the
+  # credentials below. Unset, each process picks its own nonce (`agent/framing.py`), so the front
+  # door and a worker frame the same content differently, and a restarted one differs from both.
+  if [ -z "${CHEMCLAW_FRAMING_ENVELOPE_SECRET:-}" ]; then
+    CHEMCLAW_FRAMING_ENVELOPE_SECRET="$("$python" -c 'import secrets; print(secrets.token_hex(32))')" \
+      || die "could not mint the lane's envelope secret"
+  fi
+  export CHEMCLAW_FRAMING_ENVELOPE_SECRET
+
   # Addresses and credentials first, so every process below inherits both (see `connector_env`).
   #
   # Captured before `eval`, not inside it: command substitution inside `eval` discards the exit
@@ -743,6 +756,7 @@ up() {
   ( umask 077
     { printf '%s\n' "$connector_exports"
       printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
+      printf 'export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q\n' "$CHEMCLAW_FRAMING_ENVELOPE_SECRET"
       for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
     } > "$RUN_DIR/connector-env.sh"
   )
