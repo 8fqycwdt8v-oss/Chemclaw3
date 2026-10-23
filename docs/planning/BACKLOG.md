@@ -102,10 +102,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **`record_note` still writes files; the transactional write has no caller** [M] — put `put(NoteUnit)` on `NoteStore`, give `record_note` a
   Postgres arm that builds the unit and books `PutOutcome.notes`, and let the importer set `created_at`; `kg/postgres_store.py::PostgresNoteStore.put`, `kg/record.py::record_note`.
 
-- [ ] **`content_sha` is the digest of the canonical note, which the 128 header and the W4 ADR call the file text** [S] — they differ when reading the
-  file back changes the note (edge whitespace, CRLF, U+2028); `kg-validate --compare` must compare `rows.canonical_note` values, never fingerprints; `kg/rows.py::content_sha`.
-- [ ] **`PostgresNoteStore.put` trusts `created_by`; the API layer must authenticate first** [S] — W4.8's `PUT /knowledge/notes/{id}` has to decide who may write as
-  `human` before it calls `put`; `kg/postgres_store.py::PostgresNoteStore.put`.
 - [ ] **A retirement through the Postgres store applies `valid_to` and `superseded-by` only** [S] — the prose the retire helpers append to the body is dropped; stop
   writing it once the file writer is gone; `kg/postgres_store.py::_closed`, `memory/supersede.py::retire_note`.
 

@@ -629,8 +629,8 @@ class PostgresNoteStore:
         The subject is refused (`HumanNoteProtected`) when it is agent-authored and a human's note
         holds the id, and an `expected_revision` that differs from the stored one raises
         `NoteRevisionConflict`. `created_by` is taken as given: whoever calls `put` has
-        authenticated the author. Either refusal raises before any row changes: the transaction
-        rolls back whole.
+        authenticated the author (`tests/test_note_writers.py` names every caller). Either
+        refusal raises before any row changes: the transaction rolls back whole.
 
         `unit.arrived` dates the subject's first appearance (an import); other notes arrive now.
 
