@@ -19,7 +19,12 @@ import logging
 
 from chemclaw.core.config import settings
 from chemclaw.core.vector_schema import LEGACY_COLUMN
-from chemclaw.retrieval.vector_index import IndexHit, NoteRecord, PostgresNoteIndex
+from chemclaw.retrieval.vector_index import (
+    IndexHit,
+    NoteRecord,
+    PostgresNoteIndex,
+    _scope_array,
+)
 from chemclaw.retrieval.vectors.base import (
     VectorPoint,
     VectorStore,
@@ -104,11 +109,28 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
     ) -> list[IndexHit]:
         """Rank in the store, scoped before the cut; the ids that come back are note ids already.
 
-        `within` becomes the store's `groups`, so the scope applies before top-k (filtering after
-        would return nothing for a narrow scope). A zero query vector short-circuits: it has cosine
-        0 to everything.
+        The scope is `within` narrowed to notes catalogued under the live embedding key, and it
+        becomes the store's `groups`, so it applies before top-k (filtering after would return
+        nothing for a narrow scope). The store keeps no key of its own, so without that narrowing a
+        model swap would rank old-model vectors until the reindex. A zero query vector
+        short-circuits: it has cosine 0 to everything.
         """
         if not any(query_embedding):
             return []
-        matches = await self._store.search(self._collection, query_embedding, top_k, within)
+        live = await self._live_ids(within)
+        if not live:
+            return []
+        matches = await self._store.search(self._collection, query_embedding, top_k, live)
         return [IndexHit(note_id=match.id, score=match.score) for match in matches]
+
+    async def _live_ids(self, within: set[str] | None) -> set[str]:
+        """Note ids within `within` whose catalogue row says the live configuration embedded them."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT note_id FROM note_index WHERE embedding_key = %(key)s "
+                    "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[]))",
+                    {"key": self._read_key(), "ids": _scope_array(within)},
+                )
+                rows = await cur.fetchall()
+        return {row[0] for row in rows}

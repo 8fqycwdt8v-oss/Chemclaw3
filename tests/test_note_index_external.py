@@ -192,6 +192,29 @@ async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Pat
     assert [hit.note_id for hit in hits] == ["reaction-1"]
 
 
+async def test_a_model_swap_does_not_rank_the_old_model_s_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store keeps no embedding key, so the catalogue's decides what a dense read may cite.
+
+    A same-width model swap leaves every old vector in the store, scoring positive against a
+    new-model query, until the reindex drains: those notes must not be served meanwhile.
+    """
+    store = InMemoryVectorStore()
+    index = await _fresh_index(store)
+    old = await _key()
+    await index.upsert([_record("reaction-a", [1.0, 0.0])], old)
+    assert [hit.note_id for hit in await index.search_dense([1.0, 0.0], 5)] == ["reaction-a"]
+
+    monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+    assert await _key() != old
+    assert await index.search_dense([1.0, 0.0], 5) == [], "cited an old-model vector"
+
+    await index.upsert([_record("reaction-b", [0.9, 0.1])], await _key())
+    hits = await index.search_dense([1.0, 0.0], 5)
+    assert [hit.note_id for hit in hits] == ["reaction-b"], "a re-embedded note is served again"
+
+
 async def test_a_zero_query_vector_costs_no_round_trip(tmp_path: Path) -> None:
     """It has cosine 0 to everything, which is what the reference backend returns too."""
     index = await _fresh_index(InMemoryVectorStore())

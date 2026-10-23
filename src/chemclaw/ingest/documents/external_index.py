@@ -179,10 +179,10 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             )
 
     def _read_key(self) -> str:
-        """The stored spelling of the live configuration, for the inherited catalogue statements.
+        """The stored spelling of the live configuration: what a dense read keeps.
 
-        Nothing reaches the `_dense` statement here (`search_dense` ranks in the store); kept in
-        step with `_stored_key` so a future scoped read cannot silently match no row.
+        `_eligible_cuttings` and `_resolve` bind it, so the store's ranking only ever reaches chunks
+        the live model embedded; kept in step with `_stored_key` so a read cannot match no row.
         """
         return self._stored_key(super()._read_key())
 
@@ -320,7 +320,9 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
     async def _eligible_cuttings(self, source: str, filters: DocumentFilter) -> set[str]:
         """The `group_key`s of `source` satisfying `filters`. Always a set — never "no restriction".
 
-        Cuttings, spelled by `group_key` to match the points. The source is always a restriction
+        Cuttings, spelled by `group_key` to match the points, holding at least one chunk the live
+        embedding configuration produced: the store keeps no key of its own, so a cutting embedded
+        by another model must not be searched at all. The source is always a restriction
         even for an unfiltered query: every share writes into one collection, and an unscoped top-k
         would be dropped by `_resolve`'s source filter, returning fewer hits than the pgvector
         index. An empty set means nothing is eligible and the caller returns no hits.
@@ -331,12 +333,15 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT DISTINCT doc_id, chunking_key FROM document_files "
-                    "WHERE source = %(src)s "
-                    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(tags)) "
-                    "AND (%(since)s::timestamptz IS NULL OR modified_at >= %(since)s) "
-                    "AND (%(until)s::timestamptz IS NULL OR modified_at <= %(until)s)",
+                    "SELECT DISTINCT f.doc_id, f.chunking_key FROM document_files f "
+                    "WHERE f.source = %(src)s "
+                    "AND (%(tag)s::text IS NULL OR %(tag)s = ANY(f.tags)) "
+                    "AND (%(since)s::timestamptz IS NULL OR f.modified_at >= %(since)s) "
+                    "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s) "
+                    "AND EXISTS (SELECT 1 FROM document_chunks c WHERE c.doc_id = f.doc_id "
+                    "AND c.chunking_key = f.chunking_key AND c.embedding_key = %(key)s)",
                     {
+                        "key": self._read_key(),
                         "src": source,
                         "tag": filters.tag or None,
                         "since": filters.since,
@@ -354,8 +359,9 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """Attach content, coordinate and a citation path to each ranked point id.
 
         One keyed statement over at most `top_k` rows. Uses `CITATION_SQL`, the same expression as
-        the pgvector index, so which copy is cited does not depend on the backend. Unresolvable
-        points are dropped and reported via `_report_unresolved`.
+        the pgvector index, so which copy is cited does not depend on the backend. A chunk not
+        catalogued under the live embedding key is dropped, as the pgvector read never scores it;
+        unresolvable points are dropped and reported via `_report_unresolved`.
         """
         addressed: dict[tuple[str, str, int], float] = {}
         for match in matches:
@@ -372,13 +378,14 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT c.doc_id, c.chunking_key, c.ordinal, c.content, c.coordinate, "
-                    f"{CITATION_SQL}"
+                    f"{CITATION_SQL}, c.embedding_key = %(key)s AS live "
                     "FROM document_chunks c "
                     "JOIN unnest(%(docs)s::text[], %(cks)s::text[], %(ords)s::int[]) "
                     "AS wanted(doc_id, chunking_key, ordinal) "
                     "ON wanted.doc_id = c.doc_id AND wanted.chunking_key = c.chunking_key "
                     "AND wanted.ordinal = c.ordinal",
                     {
+                        "key": self._read_key(),
                         "src": source,
                         "tag": filters.tag or None,
                         "since": filters.since,
@@ -389,6 +396,10 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                     },
                 )
                 rows = await cur.fetchall()
+        # A point whose chunk another model embedded is not drift but a re-embed still draining
+        # (its cutting holds a live chunk too): dropped, and kept out of the drift report.
+        stale = sum(1 for row in rows if not row[6])
+        rows = [row for row in rows if row[6]]
         hits = [
             DocumentHit(
                 doc_id=row[0],
@@ -401,7 +412,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             for row in rows
             if row[5]
         ]
-        _report_unresolved(len(addressed), len(rows), len(hits), self._collection)
+        _report_unresolved(len(addressed) - stale, len(rows), len(hits), self._collection)
         # The store ranked them; the catalogue only added text. Re-sorted because a SQL result set
         # has no order of its own, and the tie-break matches every other index here.
         hits.sort(key=lambda hit: (-hit.score, hit.doc_id, hit.ordinal))
