@@ -209,3 +209,45 @@ async def test_the_schema_lag_report_is_once_per_table_not_once_per_row(
         f"the schema lag was reported {len(lag_lines)} times for one sink and one table; at "
         "result_publish_batch_size=100 that is a log flood, not a signal"
     )
+
+
+async def test_a_registry_missing_one_property_this_release_adds_is_refused_once_per_pass() -> None:
+    """A seeded store missing one property this release publishes is refused before any write.
+
+    Seeded from an older release, `property_definition` is non-empty but would still refuse that
+    property's fact rows by foreign key after their spine rows land. The refusal is kept until
+    `aclose`, so a per-record replay in the same pass does not re-probe; the next pass sees a fix.
+    """
+    from chemclaw.publish.driver import SinkMisconfiguredError
+    from chemclaw.publish.properties import REGISTRY
+
+    lagging = next(name for name in sorted(REGISTRY) if name != "total_energy")
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        schema = f"{TEST_SCHEMA}_oldseed"
+        await _build_store(conn, schema, seed=True)
+        await conn.execute("DELETE FROM property_definition WHERE property = %s", (lagging,))
+        await conn.commit()
+
+        sink = _sink(schema)
+        with pytest.raises(SinkMisconfiguredError) as refusal:
+            await sink.deliver([_record()])
+        assert lagging in str(refusal.value) and "--seed" in str(refusal.value)
+        assert await _counts(conn) == (0, 0), "the refusal must come before the first write"
+
+        from chemclaw.cli.sink_schema import seed as seed_sql
+
+        await conn.execute(seed_sql())
+        await conn.commit()
+        with pytest.raises(SinkMisconfiguredError):
+            await sink.deliver([_record()])
+        await sink.aclose()
+
+        await sink.deliver([_record()])
+        await sink.aclose()
+        assert await _counts(conn) == (1, 1), "a re-seeded store publishes on the next pass"
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.commit()
+        await conn.close()

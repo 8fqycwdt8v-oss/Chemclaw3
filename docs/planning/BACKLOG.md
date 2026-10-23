@@ -17,8 +17,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **Worker workflow-cache bound rests on placeholders** [S] — sample cached state of `BoCampaignWorkflow` and calc workflows on a real broker;
   `core/config/temporal.py::worker_max_cached_workflows`, `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
-- [ ] **An HTTP result sink accepts `verify_tls: false` from its manifest** [S] — only a docstring forbids it and `make sink-validate` binds the signature, not the values;
-  refuse it at construction (at least under `entra_required`); `publish/drivers/http.py::HttpResultSink`.
 - [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
   which holds only for bundles this repo serves; frame or mark it, or correct the claim; `agent/tool_authz.py::answered_failure`.
 
@@ -66,16 +64,10 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **A sink's refusal spends the whole attempt budget before dead-lettering** [S] — `_drain_one` books a `SinkRejectedError` like any refusal and `mark_failed` retires it only at the
-  last attempt, against `publish/driver.py::SinkRejectedError`'s own contract; retire on refusal; `durable/publish_results.py::_drain_one`, `publish/outbox.py::mark_failed`.
 - [ ] **`request_timeout` has no ceiling, and `calc` declares the turn deadline itself** [S] — which bound fires first is a race, so the recoverable transport error may never arrive;
   bound it below `service_turn_timeout_seconds`; `connectors/manifest.py::HttpEndpoint`, `connectors/registry.py::request_timeout_seconds`.
 - [ ] **A rewritten artifact strands its old blob, and an evicted one leaves its row served** [M] — `_UPSERT_LINK` moves the link with no sweep (deleting in place raced an insert), and
   eviction never touches `calculation_results`, so `find`/`known`/backfill name a dead hash; `science/calc/postgres_artifacts.py::_UPSERT_LINK`, `durable/artifact_eviction.py::_evict_cold_artifacts`.
-- [ ] **A site registry missing a property this release adds is found only by a refused fact row** [S] — the pre-write check asks only that `property_definition` is non-empty; compare it
-  with the local registry first, and keep a failed column probe so a per-record replay does not re-probe; `publish/drivers/sql.py::SqlResultSink._known_columns`.
-- [ ] **A payload with no projector is dropped on the live hooks with a debug line and no counter** [S] — in-repo shapes are pinned by `tests/test_publish_reaches_the_hooks.py`, a new
-  bundle's are not; count it (the backfill's skip of retired calculators may stay quiet); `publish/outbox.py::enqueue_payload`.
 
 ### Where the field moved past us
 

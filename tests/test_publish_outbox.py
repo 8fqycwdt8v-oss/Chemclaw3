@@ -421,9 +421,83 @@ async def test_one_refused_record_does_not_retire_its_neighbours(
     assert rows == {
         "a-1": "delivered",
         "a-2": "delivered",
-        "poison": "pending",
+        "poison": "failed",
         "z-1": "delivered",
-    }, f"a row committed at the far end must never be booked failed; got {rows}"
+    }, (
+        "a row committed at the far end must never be booked failed, and a refused one is "
+        f"retired at once rather than re-sent until its budget is spent; got {rows}"
+    )
+
+
+async def test_a_record_that_errored_without_a_refusal_keeps_its_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a `SinkRejectedError` retires a row early; any other per-record error is retried.
+
+    The refusal is the driver's statement that a retry cannot help; an unclassified error is not.
+    """
+    from chemclaw.durable import publish_results
+
+    class _FlakySink:
+        async def deliver(self, records: Any) -> None:
+            if any(record.calc_ref == "odd" for record in records):
+                raise RuntimeError("driver bug, not a verdict on the content")
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    assert await outbox.enqueue([_record(ref) for ref in ("fine", "odd")]) == 2
+
+    outcome = await publish_results._drain_one("alpha", _FlakySink(), 10)
+
+    assert (outcome.delivered, outcome.failed) == (1, 1)
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
+        )
+        rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
+    assert rows == {"fine": ("delivered", 1), "odd": ("pending", 1)}, rows
+
+
+async def test_a_misconfigured_sink_spends_one_attempt_and_retires_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal of the sink itself (schema behind, credential unset) is booked like an outage.
+
+    Retiring on it would dead-letter every claimed row for a fault an operator fixes once; the rows
+    keep their budget and deliver on the pass after the fix.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.driver import SinkMisconfiguredError
+
+    attempts: list[int] = []
+
+    class _UnseededSink:
+        async def deliver(self, records: Any) -> None:
+            attempts.append(len(records))
+            raise SinkMisconfiguredError("property_definition is empty")
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(ref) for ref in ("m-1", "m-2")])
+
+    outcome = await publish_results._drain_one("alpha", _UnseededSink(), 10)
+
+    assert attempts == [2], f"a sink-wide refusal is not replayed per record: {attempts}"
+    assert outcome.failed == 2
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute("SELECT DISTINCT state FROM result_publications")
+        states = {row[0] for row in await cursor.fetchall()}
+    assert states == {"pending"}, states
 
 
 async def test_an_unreachable_destination_still_fails_the_whole_batch(
@@ -493,6 +567,30 @@ def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
         "nothing was queued and nothing was delivered, so the publish counter must not move — "
         "it is what an operator reads to decide whether a destination is unhealthy"
     )
+
+
+def test_a_payload_no_projector_reads_is_counted_on_the_live_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shape with no projector is counted, labelled by its `calc_type`, and queues nothing.
+
+    `tests/test_publish_reaches_the_hooks.py` pins the in-repo shapes; a new bundle's composite is
+    caught only by this series.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    before = METRICS.value("chemclaw_results_unprojected_total")
+    written = asyncio.run(
+        outbox.enqueue_payload(
+            calc_ref="newbundle@v1:x",
+            calc_type="newbundle.job",
+            payload_kind="NoSuchResult",
+            payload={"anything": 1},
+        )
+    )
+    assert written == 0
+    assert METRICS.value("chemclaw_results_unprojected_total") == before + 1
 
 
 async def test_two_workers_claiming_at_once_split_the_queue(

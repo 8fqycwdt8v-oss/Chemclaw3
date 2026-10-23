@@ -345,8 +345,8 @@ async def enqueue_payload(
     """Project one stored payload and queue what it becomes.
 
     Never raises. Returns how many rows were written, not always one: a decomposing shape queues the
-    aggregate and its parts. The single entry point every hook uses. A payload with no projector is
-    skipped with a debug line (the cache holds rows from retired calculators).
+    aggregate and its parts. The single entry point every live hook uses. A payload with no
+    projector is skipped and counted in `chemclaw_results_unprojected_total`.
 
     `payload_kind` routes a composite, whose `calc_type` is a `<connector>.<job>` route; empty
     falls back to prefix inference for cached primitives. A zero cannot say why; callers that care
@@ -358,7 +358,14 @@ async def enqueue_payload(
     from chemclaw.publish.project import projector_for
 
     if projector_for(calc_type, payload_kind) is None:
-        logger.debug("publish: no projector for %s; not queued", calc_type)
+        # Counted, not only logged: a new bundle's composite with no projector is otherwise
+        # indistinguishable from a result that was never produced.
+        logger.debug("publish: no projector for %s (%s); not queued", calc_type, payload_kind)
+        record_metric(
+            lambda m: m.increment(
+                "chemclaw_results_unprojected_total", labels={"calc_type": calc_type}
+            )
+        )
         return 0
     records = project_payload(
         calc_ref=calc_ref,
@@ -449,19 +456,19 @@ async def mark_delivered(leases: Sequence[Lease]) -> None:
     _log_fenced_off("delivered", len(leases) - marked)
 
 
-async def mark_failed(leases: Sequence[Lease], reason: str) -> None:
-    """Record a failed attempt, retiring a row only once it has spent its attempt budget.
+async def mark_failed(leases: Sequence[Lease], reason: str, *, retire: bool = False) -> None:
+    """Record a failed attempt, retiring a row once it has spent its attempt budget.
 
-    A retired row is never deleted: it is the record that something was not published, re-queued
-    with the backfill CLI once fixed. Fenced on the lease (see `Lease`).
+    `retire=True` retires it now: for a refusal of the content (`SinkRejectedError`), which a retry
+    cannot change. A retired row is never deleted: it is the record that something was not
+    published, re-queued with the backfill CLI once fixed. Fenced on the lease (see `Lease`).
     """
     if not leases:
         return
+    # A budget of zero is spent by every claimed row, so `_MARK_FAILED` retires each one.
+    budget = 0 if retire else settings.result_publish_max_attempts
     async with _connect("outbox_mark_failed") as conn:
-        cursor = await conn.execute(
-            _MARK_FAILED,
-            (reason[:2000], settings.result_publish_max_attempts, *_lease_columns(leases)),
-        )
+        cursor = await conn.execute(_MARK_FAILED, (reason[:2000], budget, *_lease_columns(leases)))
         states = [str(row[0]) for row in await cursor.fetchall()]
         await conn.commit()
     retired = sum(1 for state in states if state == "failed")

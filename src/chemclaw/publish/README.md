@@ -49,7 +49,9 @@ make identical science collide.
 **Nothing here may fail a calculation.** Every entry point runs *after* the science is durable, so
 enqueue is best-effort by construction and a destination being unreachable is counted and logged,
 never raised. `SinkUnavailableError` is a `ConnectionError` (retryable) while `SinkRejectedError` is
-a `ChemclawError` (not) — that split is the retry contract, not a taxonomy preference.
+a `ChemclawError` (not) — that split is the retry contract, not a taxonomy preference. The drain
+retires a refused record at once; its subclass `SinkMisconfiguredError` (a schema, credential or
+address the sink refuses every record for) is booked batch-wide like an outage and retires nothing.
 
 ## What deliberately does not publish
 
