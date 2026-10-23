@@ -1168,8 +1168,7 @@ config:
   # `connectors.chem`/`safety`/`rxnpredict` and `CHEMCLAW_RXNLABEL_SERVER_URL` carried the same
   # spelling. A comment restating a rule cannot check a value against it, so
   # `tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
-  # reads the Services the sibling checkout creates (its chart's render, or `servers/*/deploy/service.yaml`
-  # for a checkout that predates the chart) and compares names and ports
+  # reads the Services the sibling checkout's chart renders and compares names and ports
   # — skipping, and naming every address it therefore did not check, where there is no checkout.
   #
   # **The bare short name is the address, not an abbreviation of a longer one.** The fleet's own

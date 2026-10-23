@@ -764,8 +764,7 @@ def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
 def _fleet_services(checkout: Path) -> tuple[dict[str, int], str]:
     """Every Service the sibling fleet actually creates, name onto port, and why if unreadable.
 
-    Read from the fleet's own chart render or, for a checkout that predates the chart,
-    `servers/*/deploy/service.yaml`, which it applies untransformed.
+    Read from the fleet's own chart render.
     """
     documents, reason = fleet_objects(checkout)
     services = {
@@ -801,7 +800,7 @@ def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> N
     if unreadable:
         pytest.skip(f"{SIBLING_SKIP} {unreadable}; NOT checked against the fleet's own Services")
     assert services, (
-        f"{checkout} declares no fleet Service (chart or servers/*/deploy) to compare against"
+        f"{checkout} declares no fleet Service (in its chart's render) to compare against"
     )
 
     wrong: list[str] = []

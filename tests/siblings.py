@@ -100,7 +100,7 @@ def sibling_python(env_var: str, canonical_name: str) -> tuple[Path | None, str]
     return interpreter, ""
 
 
-#: Where the fleet keeps its deployment, once it ships one chart rather than a directory per server.
+#: Where the fleet keeps its deployment: one chart for every server.
 FLEET_CHART = Path("deploy") / "helm" / "chemclaw-fleet"
 
 
@@ -108,38 +108,22 @@ FLEET_CHART = Path("deploy") / "helm" / "chemclaw-fleet"
 def _fleet_objects(root: Path) -> tuple[tuple[dict[str, Any], ...], str]:
     """The fleet's Deployments and Services, and `""` or why they could not be read."""
     wanted = {"Deployment", "Service"}
-    if (root / FLEET_CHART).is_dir():
-        helm = shutil.which("helm")
-        if helm is None:
-            return (), f"{root} ships {FLEET_CHART}, which needs helm, and helm is not installed"
-        rendered = subprocess.run(
-            [
-                helm,
-                "template",
-                "chemclaw-fleet",
-                str(root / FLEET_CHART),
-                "--namespace",
-                "chemclaw",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if rendered.returncode != 0:
-            return (
-                (),
-                f"helm template {root / FLEET_CHART} failed: {rendered.stderr.strip()[-300:]}",
-            )
-        texts = [rendered.stdout]
-    else:
-        texts = [
-            path.read_text(encoding="utf-8")
-            for path in sorted(root.glob("servers/*/deploy/*.yaml"))
-        ]
+    if not (root / FLEET_CHART).is_dir():
+        return (), f"{root} has no {FLEET_CHART}; update the checkout"
+    helm = shutil.which("helm")
+    if helm is None:
+        return (), f"{root} ships {FLEET_CHART}, which needs helm, and helm is not installed"
+    rendered = subprocess.run(
+        [helm, "template", "chemclaw-fleet", str(root / FLEET_CHART), "--namespace", "chemclaw"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if rendered.returncode != 0:
+        return (), f"helm template {root / FLEET_CHART} failed: {rendered.stderr.strip()[-300:]}"
     documents = [
         document
-        for text in texts
-        for document in yaml.safe_load_all(text)
+        for document in yaml.safe_load_all(rendered.stdout)
         if isinstance(document, dict) and document.get("kind") in wanted
     ]
     return tuple(documents), ""
@@ -148,10 +132,9 @@ def _fleet_objects(root: Path) -> tuple[tuple[dict[str, Any], ...], str]:
 def fleet_objects(root: Path) -> tuple[list[dict[str, Any]], str]:
     """Every Deployment and Service the fleet checkout creates, and a reason if none could be read.
 
-    The fleet declares them in one of two layouts: the chart `deploy/helm/chemclaw-fleet`, rendered
-    here with `helm template`, or the older `servers/<name>/deploy/*.yaml`. Whichever the checkout
-    has is read, so a test holds against the sibling before and after it moves. The reason is
-    non-empty only when the chart is there and could not be rendered; callers skip on it.
+    The fleet declares them as the chart `deploy/helm/chemclaw-fleet`, rendered here with
+    `helm template`. The reason is non-empty only when the chart is missing or could not be
+    rendered; callers skip on it.
     """
     documents, reason = _fleet_objects(root)
     return list(documents), reason
