@@ -19,6 +19,8 @@ from chemclaw.durable.artifact_eviction import (
     EvictionOutcome,
     evict_cold_artifacts,
 )
+from chemclaw.science.calc.artifacts import ArtifactRef, content_address
+from chemclaw.science.calc.postgres_artifacts import PostgresArtifactStore
 from tests.pg import migrated_db_or_skip
 
 _STATEMENTS = (_EVICT_IDLE, _EVICT_TO_FIT)
@@ -252,3 +254,33 @@ def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer(
     assert surviving_links == 0, (
         "the link row outlived its blob — `list_for` can now hand back a ref"
     )
+
+
+def test_a_blob_written_again_is_not_idle_so_its_new_link_survives_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `put` whose bytes match an idle blob makes it recent, rather than linking to a doomed row.
+
+    The blob is content-addressed, so a new calculation producing the same bytes inserts nothing
+    and only adds a link. Were the blob left stamped with its old access time, the next idle sweep
+    would delete it and cascade the link written a moment ago: a fresh artifact evicted as stale,
+    and the same stamp is what a sweep running concurrently with the `put` re-checks.
+    """
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
+    data = b"a hessian two calculations produce bit for bit" * 8
+    digest = content_address(data)
+
+    async def _run() -> tuple[set[str], list[ArtifactRef]]:
+        await migrated_db_or_skip()
+        await _clear_artifacts()
+        await _seed_blob(digest, len(data), 90, 42.0)
+        store = PostgresArtifactStore()
+        written = await store.put("calc-written-again", "hessian.npy", data, compute_seconds=7.0)
+        assert written is not None and written.content_hash == digest
+        await evict_cold_artifacts()
+        return await _surviving_blobs(), await store.list_for("calc-written-again")
+
+    surviving, links = asyncio.run(_run())
+    assert digest in surviving, "the blob a calculation has just written was evicted as idle"
+    assert [link.content_hash for link in links] == [digest]
