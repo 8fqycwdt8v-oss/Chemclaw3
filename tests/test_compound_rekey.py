@@ -179,7 +179,7 @@ def test_the_bump_moved_exactly_the_spellings_the_table_names(corpus: dict[str, 
 
     Without it every later assertion is about a corpus in which nothing moved.
     """
-    assert STANDARDIZATION_VERSION == "std13"
+    assert STANDARDIZATION_VERSION == "std14"
     assert compound_id(_NEUTRAL) == compound_id(_IONIC) == compound_id("CCN") == corpus["ionic"]
     assert compound_id(_BORIC) != corpus["boric"]
 
