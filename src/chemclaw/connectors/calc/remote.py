@@ -332,7 +332,9 @@ async def remote_key(session: BackendSession, request: WireRequest) -> KeyedCalc
             # The server's own value, never re-derived; absent for a molecule-keyed calculation.
             structure_id=str(identity.get("structure_id") or ""),
         )
-    except (KeyError, TypeError) as exc:
+    # `ValueError` covers pydantic's `ValidationError`: a part that is present but malformed (empty,
+    # or carrying a delimiter the flat key bars) is as unusable as a missing one.
+    except (KeyError, TypeError, ValueError) as exc:
         raise CalcToolError(
             f"calculation_key returned an unusable key for {request.tool_name}: {key}"
         ) from exc

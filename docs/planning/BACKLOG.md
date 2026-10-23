@@ -17,8 +17,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **Worker workflow-cache bound rests on placeholders** [S] — sample cached state of `BoCampaignWorkflow` and calc workflows on a real broker;
   `core/config/temporal.py::worker_max_cached_workflows`, `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
-- [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
-  which holds only for bundles this repo serves; frame or mark it, or correct the claim; `agent/tool_authz.py::answered_failure`.
 
 ### Answers that are wrong without saying so
 
@@ -39,10 +37,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
-- [ ] **One bundle a deployment cannot use breaks every turn** [M] — a `stdio` bundle with stdio off raises out of `mcp_connections` unhandled while health calls it `unprobed`, and a
-  malformed manifest nobody enabled raises out of `enabled()`; skip and report per bundle; `connectors/registry.py::mcp_connections`, `connectors/registry.py::_discovered_in`.
-- [ ] **Two calc tools are told to wait past the hop that cancels them** [M] — `compute_atomic_descriptors`/`compute_surface_potential` pass `calc_atomic_timeout_seconds` to a backend
-  behind a queued call bounded by `request_timeout`, so a long run is cut and stores nothing; clamp to the hop and assert it there; `connectors/calc/server/tools.py::compute_atomic_descriptors`.
+- [ ] **The other inline calc tools wait `calc_server_timeout_seconds` past the hop that cancels them** [S] — every `cached_remote` in the calc server and `compose.relax`
+  default to a backend bound above `calc`'s `request_timeout`; lower each through `_within_the_hop`; `connectors/calc/server/tools.py::_within_the_hop`, `connectors/calc/remote.py::calc_session`.
 - [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms), a cluster run on `rpc` that proves no hop with a shorter idle or read timeout (mesh sidecar, load balancer, ingress at 60 s) cuts a long call, and a decision on `/rpc` having no `cancel_on_timeout` counterpart; then delete the MCP path for backends:
   `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `short_connect_client`, `invoke`), `connectors/calc/remote.py::_open_transport`, `ingest/labels/labeller.py::_open_transport`, `core/backend_rpc.py::BackendSession`, the `calc_transport` setting and `tests/test_backend_rpc_fleet.py`'s MCP arms.
 - [ ] **A NaN or infinity is refused in a request but not in an answer over `/rpc`** [S] — `/rpc` returns such a float as null while MCP's text carries it; fleet contract decision (reject in the tool or declare null), then pin in `tests/test_backend_rpc_fleet.py`;
@@ -64,8 +60,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **`request_timeout` has no ceiling, and `calc` declares the turn deadline itself** [S] — which bound fires first is a race, so the recoverable transport error may never arrive;
-  bound it below `service_turn_timeout_seconds`; `connectors/manifest.py::HttpEndpoint`, `connectors/registry.py::request_timeout_seconds`.
 - [ ] **A rewritten artifact strands its old blob, and an evicted one leaves its row served** [M] — `_UPSERT_LINK` moves the link with no sweep (deleting in place raced an insert), and
   eviction never touches `calculation_results`, so `find`/`known`/backfill name a dead hash; `science/calc/postgres_artifacts.py::_UPSERT_LINK`, `durable/artifact_eviction.py::_evict_cold_artifacts`.
 
@@ -105,8 +99,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   before one does; `agent/audit.py::returned_failure`.
 - [ ] **The read/write partition test sees only registered tools, not the middleware verbs a graph binds** [S] — `task`, `write_todos`, the scratchpad verbs and handoffs are classified by
   special cases nothing enumerates; `agent/authz.py::side_effecting_call`, `tests/test_authz.py::test_every_advertised_tool_is_classified_write_or_read`.
-- [ ] **A malformed key from the calc server reaches the chemist as a pydantic traceback** [S] — `remote_key` wraps only `KeyError`/`TypeError`; same pass: `_IN_FLIGHT` ignores which store a
-  waiter joins, and the outbox `_CLAIM` has no tie-break; `connectors/calc/remote.py::remote_key`, `science/calc/store.py::_IN_FLIGHT`.
 - [ ] **A capped evidence pack drops a session's newest effects** [S] — `assemble` reads `effects` oldest first and only flags `truncated`; read newest first (latent while no shipped job
   declares an effect); `operations/evidence_pack.py::assemble`.
 - [ ] **deepagents 0.7.31 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and

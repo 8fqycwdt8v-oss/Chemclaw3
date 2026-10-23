@@ -200,8 +200,9 @@ def answered_failure(message: ToolMessage) -> ToolMessage:
     In-process and job tools fail by raising, and the converters answer with `_refusal_message`,
     which deliberately avoids `status="error"` (Anthropic's `is_error`, an invitation to retry). An
     MCP tool never raises: the adapter returns `ToolMessage(status="error")`. This clears that flag
-    so connector refusals read the same way. The server's words are kept verbatim; they are already
-    sanitized by `connectors/server.py`.
+    so connector refusals read the same way. The server's words are kept verbatim: whatever server
+    wrote them, `agent/tool_framing.py` defangs and bounds them before the model reads them, and
+    only a bundle served through `connectors/server.py` has also had its exceptions sanitized.
 
     Only what the model reads changes: the audit trail and `announce_tool_failures` run inside this
     converter and have already recorded the failure, which is why the flag is not cleared lower, at

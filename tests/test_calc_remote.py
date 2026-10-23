@@ -226,6 +226,32 @@ async def test_a_key_answered_with_no_content_is_a_refusal_not_a_crash(
         await cached_remote(InMemoryStore(), PredictPkaRequest(smiles="CC(=O)O"))
 
 
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {**_KEY, "calc_type": ""},
+        {**_KEY, "input_hash": "has:colon"},
+        {**_KEY, "calc_version": 7},
+        {k: v for k, v in _KEY.items() if k != "params_hash"},
+        ["not", "a", "mapping"],
+    ],
+)
+async def test_a_malformed_key_is_a_named_refusal_not_a_validation_traceback(
+    monkeypatch: pytest.MonkeyPatch, broken: Any
+) -> None:
+    """A key the server answers with but `CalculationKey` refuses is a `CalcToolError`.
+
+    A pydantic `ValidationError` would reach the chemist as a traceback and fall outside the
+    classes a durable activity's retry policy reads.
+    """
+    fake = _FakeSession(broken, {"log_s": -1.0})
+    _session(monkeypatch, fake)
+
+    with pytest.raises(CalcToolError, match="unusable key for predict_solubility"):
+        await cached_remote(InMemoryStore(), PredictSolubilityRequest(smiles="c1ccccc1"))
+    assert fake.compute_calls == 0
+
+
 async def test_the_servers_internal_error_is_an_outage_not_bad_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

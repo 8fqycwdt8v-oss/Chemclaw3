@@ -85,7 +85,9 @@ _UNLEASED = "(claimed_at IS NULL OR claimed_at < now() - make_interval(secs => %
 #
 # The lease is a timestamp, not a fourth state: a leased row is still `pending` (it has not been
 # delivered), so every reader of `state` stays correct. Oldest first, so a backlog drains in
-# order. `attempts` is returned with the row as the fence (see `Lease`).
+# order; ties broken by `id`, since one enqueue's rows share a transaction's `enqueued_at` and would
+# otherwise come back in whatever order the heap holds them. `attempts` is returned with the row as
+# the fence (see `Lease`).
 #
 # The picking select is a `MATERIALIZED` CTE, not an `IN (subselect)`: the planner may turn that
 # into a nested-loop semi join which re-runs the `LIMIT ... FOR UPDATE` once per outer row, and
@@ -97,7 +99,7 @@ _CLAIM = f"""
         SELECT id
         FROM result_publications
         WHERE sink = %s AND state = 'pending' AND attempts < %s AND {_UNLEASED}
-        ORDER BY enqueued_at
+        ORDER BY enqueued_at, id
         LIMIT %s
         FOR UPDATE SKIP LOCKED
     )

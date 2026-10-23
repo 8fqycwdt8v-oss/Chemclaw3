@@ -126,6 +126,10 @@ class PostgresStore:
         async with db.connection(self._dsn) as conn:
             yield conn
 
+    def flight_scope(self) -> str:
+        """Every `PostgresStore` on one DSN persists to the same table, so they share a flight."""
+        return f"postgres:{self._dsn}"
+
     def claims(self) -> PostgresClaims | None:
         """The claim ledger for cross-process dedup under the postgres session store.
 
