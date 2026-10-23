@@ -3,17 +3,13 @@
 #
 #   render-fleet.sh <Chemclaw3-mcp checkout> <image tag> [server ...]
 #
-# **Derived, not rewritten.** The checkout is rendered from whichever description it carries, and
-# the output is the same three objects per server either way (Deployment, Service, NetworkPolicy):
+# **Derived, not rewritten.** The checkout's chart `deploy/helm/chemclaw-fleet` is rendered with
+# `helm template`, with values for what a kind cluster has to differ in, then `kubectl kustomize` for
+# the two things the chart has no value for (the namespace, `enableServiceLinks: false`). The output
+# is three objects per server (Deployment, Service, NetworkPolicy).
 #
-# - `deploy/helm/chemclaw-fleet` when it exists: `helm template` with values for what a kind
-#   cluster has to differ in, then `kubectl kustomize` for the two things the chart has no value
-#   for (the namespace, `enableServiceLinks: false`);
-# - otherwise the legacy `servers/<name>/deploy/{deployment,service,networkpolicy}.yaml`, used
-#   exactly as shipped and patched by kustomize alone.
-#
-# Both keep the fleet's probes, hardened security context, grace period derived from
-# `connector.yaml` and default-deny NetworkPolicy, and change only what a workstation needs:
+# It keeps the fleet's probes, hardened security context, grace period derived from
+# `connector.yaml` and default-deny NetworkPolicy, and changes only what a workstation needs:
 #
 # - the image: the fleet's unresolvable placeholder `registry.invalid/chemclaw-mcp-<name>:unset` →
 #   `chemclaw/mcp-<name>:<tag>`, loaded into the node, so `imagePullPolicy: Never`;
@@ -24,8 +20,8 @@
 # - resource *requests* sized to the node. Limits are the fleet's own.
 #
 # The HPA, PDB, ServiceMonitor and KEDA objects are left out: autoscaling has no metrics source
-# here and a ServiceMonitor is a prometheus-operator CRD. The chart path asks for the three
-# templates it wants (`--show-only`); the legacy path copies the three files.
+# here and a ServiceMonitor is a prometheus-operator CRD, so only the three workload templates are
+# asked for (`--show-only`).
 #
 # The server list defaults to every `servers/*/` the checkout deploys. Service names and ports are
 # the fleet's, which are what core's `<name>_server_url` settings and the chart's
@@ -39,16 +35,14 @@ mcp_repo="$1"; tag="$2"; shift 2
 [ -d "$mcp_repo/servers" ] || die "no servers/ under $mcp_repo — is that a Chemclaw3-mcp checkout?"
 
 chart="$mcp_repo/deploy/helm/chemclaw-fleet"
-if [ -d "$chart" ]; then layout=chart; deployed() { [ -f "$1/connector.yaml" ]; }
-else layout=legacy; deployed() { [ -f "$1/deploy/deployment.yaml" ]; }
-fi
+[ -d "$chart" ] || die "no $chart — the fleet deploys as that chart; update the checkout"
 
-# Every server directory of the checkout this layout deploys, whether or not it was asked for.
+# Every server directory of the checkout with a manifest, whether or not it was asked for.
 all_servers=()
 for dir in "$mcp_repo"/servers/*/; do
-  if deployed "${dir%/}"; then all_servers+=("$(basename "$dir")"); fi
+  if [ -f "${dir}connector.yaml" ]; then all_servers+=("$(basename "$dir")"); fi
 done
-[ ${#all_servers[@]} -gt 0 ] || die "no deployable server under $mcp_repo/servers ($layout layout)"
+[ ${#all_servers[@]} -gt 0 ] || die "no deployable server under $mcp_repo/servers"
 
 if [ $# -gt 0 ]; then servers=("$@"); else servers=("${all_servers[@]}"); fi
 
@@ -63,8 +57,8 @@ memory_request() {
   esac
 }
 
-# The name the server itself verifies, read from its app rather than assumed from the pattern. Both
-# layouts read that variable from `chemclaw-secrets` under its own name, and `up.sh` provisions
+# The name the server itself verifies, read from its app rather than assumed from the pattern. The
+# chart reads that variable from `chemclaw-secrets` under its own name, and `up.sh` provisions
 # `CHEMCLAW_<NAME>_TOKEN` keys, so a server whose `token_env` drifted would reference a key nothing
 # wrote and never start.
 check_token_env() {
@@ -131,64 +125,4 @@ EOF
   kubectl kustomize "$work"
 }
 
-render_legacy() {
-  local name src port out
-  for name in "${servers[@]}"; do
-    src="$mcp_repo/servers/$name/deploy"
-    [ -f "$src/deployment.yaml" ] || die "$name: no $src/deployment.yaml"
-    check_token_env "$name"
-    # The Service's own port, read from the file the cluster gets, so the allowed `Host` is exactly
-    # the address core dials (`http://chemclaw-mcp-<name>:<port>/mcp`).
-    port="$(awk '$1 == "port:" {print $2; exit}' "$src/service.yaml")"
-    [ -n "$port" ] || die "$name: no port in $src/service.yaml"
-    # The placeholder the `images:` rewrite below matches. A Deployment naming anything else would
-    # pass through unrewritten and sit in ErrImagePull, so refuse it here, by name.
-    grep -qs "image: registry.invalid/chemclaw-mcp-$name:" "$src/deployment.yaml" \
-      || die "$name: $src/deployment.yaml does not use the registry.invalid/chemclaw-mcp-$name placeholder"
-    out="$work/$name"
-    mkdir -p "$out"
-    cp "$src/deployment.yaml" "$src/service.yaml" "$out/"
-    [ -f "$src/networkpolicy.yaml" ] && cp "$src/networkpolicy.yaml" "$out/"
-    cat >"$out/kustomization.yaml" <<EOF
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: chemclaw
-resources:
-$(for f in deployment.yaml service.yaml networkpolicy.yaml; do [ -f "$out/$f" ] && echo "  - $f"; done)
-images:
-  - name: registry.invalid/chemclaw-mcp-$name
-    newName: chemclaw/mcp-$name
-    newTag: "$tag"
-replicas:
-  - name: chemclaw-mcp-$name
-    count: 1
-patches:
-  - target:
-      kind: Deployment
-      name: chemclaw-mcp-$name
-    patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: chemclaw-mcp-$name
-      spec:
-        template:
-          spec:
-            enableServiceLinks: false
-            containers:
-              - name: server
-                imagePullPolicy: Never
-                env:
-                  - name: MCP_ALLOWED_HOSTS
-                    value: "chemclaw-mcp-$name:$port"
-                resources:
-                  requests:
-                    cpu: 25m
-                    memory: $(memory_request "$name")
-EOF
-    echo "---"
-    kubectl kustomize "$out"
-  done
-}
-
-if [ "$layout" = chart ]; then render_chart; else render_legacy; fi
+render_chart

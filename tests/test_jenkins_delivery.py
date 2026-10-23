@@ -242,7 +242,7 @@ def test_a_release_patches_a_fleet_workload_that_exists() -> None:
     if unreadable:
         pytest.skip(f"{SIBLING_SKIP} {unreadable}; NOT checked against the fleet's own workloads")
     assert workloads, (
-        f"{checkout} declares no fleet Deployment (chart or servers/*/deploy) to compare against"
+        f"{checkout} declares no fleet Deployment (in its chart's render) to compare against"
     )
 
     servers = sorted(name.removeprefix("chemclaw-mcp-") for name in workloads)
