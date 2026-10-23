@@ -398,6 +398,18 @@ def _policy_refusal(tool: str, arguments: Mapping[str, Any]) -> AuthorizationErr
     )
 
 
+def tool_is_offered(tool: str) -> bool:
+    """Whether the turn's roles hold `tool` under the access policy, so it is worth advertising.
+
+    True with no policy or no enforcement, so the policy-less posture binds everything it did. It
+    asks the call-time question with no arguments: the filesystem verbs are not bound here, so
+    nothing arguments could change is hidden on a guess.
+    """
+    if not settings.entra_required or active_policy() is None:
+        return True
+    return _policy_refusal(tool, {}) is None
+
+
 def authorize_tool(tool: str, arguments: Mapping[str, Any] | None = None) -> None:
     """Authorize the current turn's user to invoke `tool`, or raise `AuthorizationError`.
 

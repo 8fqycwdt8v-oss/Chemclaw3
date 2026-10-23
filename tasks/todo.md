@@ -789,4 +789,4 @@ the parallel gate is W3.10–W3.12, the model-facing text is W2.13–W2.17, and 
 - [x] enforce in `authorize_tool`, fan-out, session profiles, reviewer check; startup validation
 - [x] shipped `data/access/roles.yaml` (viewer, chemist-development, chemist-medchem, admin)
 - [x] tests, ADR, docs
-- [ ] hide unauthorized tools from the model's surface; durable roles (signed payload)
+- [x] hide unauthorized tools from the model's surface; durable roles (signed payload)

@@ -70,8 +70,9 @@ def _refuse_unentitled(name: str) -> None:
     """Skip a source the access policy does not open to the turn's roles.
 
     A skip, not a failure: the model is told the source was not asked, so it does not answer "no
-    precedent" from a source the caller may not read. Roles are empty in durable activities, so a
-    policy-gated deployment's background evidence sweeps ask no source.
+    precedent" from a source the caller may not read. A background report binds its requester's
+    roles only when their launch-time signature verifies (`core/role_claim.py`); otherwise it holds
+    none and asks no source.
     """
     policy = active_policy()
     if not settings.entra_required or policy is None:

@@ -77,6 +77,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 ## Identity, authorization and security
 
 - Rights are one role-keyed file: tools by tier, bundle or name, datasources, profiles and the reviewer acts; adding a role adds a block — [D-2026-10-20-rights-are-a-role-file-not-code](D-2026-10-20-rights-are-a-role-file-not-code.md).
+- A role is bound only the tools it holds, and a background report carries its requester's roles signed — [D-2026-10-23-a-role-sees-only-its-tools-and-a-job-carries-signed-roles](D-2026-10-23-a-role-sees-only-its-tools-and-a-job-carries-signed-roles.md).
 - One per-tool authorization middleware; identity travels with the work — [D-060](D-060-f10-c-per-tool-authorization-middleware-supersedes-d.md), [D-2026-08-08-identity-must-travel-with-the-work](D-2026-08-08-identity-must-travel-with-the-work.md).
 - One gate over one side-effecting set; an approval authorizes a request, not a session — [D-2026-07-31-one-gate-over-one-side-effecting-set](D-2026-07-31-one-gate-over-one-side-effecting-set.md), [D-167](D-167-an-approval-authorizes-a-request-not-a-session.md), [D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool](D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool.md).
 - In a shared session the sender governs — [D-2026-09-27-in-a-shared-session-the-sender-governs](D-2026-09-27-in-a-shared-session-the-sender-governs.md).

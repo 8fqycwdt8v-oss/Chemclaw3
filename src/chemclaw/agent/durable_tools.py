@@ -37,6 +37,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_correlation_id, get_current_roles
 from chemclaw.core.ids import canonical_text, stable_hash
+from chemclaw.core.role_claim import sign_roles
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tenancy import owns_workflow, scope_workflow_id
@@ -149,11 +150,14 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     authorize_trigger("request_development_report")
     # `require_actor`: under Entra, refuse durable work with no user. The result travels on the
     # request as `ReportRequest.requested_by`.
+    actor = require_actor()
+    roles = sorted(get_current_roles())
     request = ReportRequest(
         title=title,
         sections=sections,
-        requested_by=require_actor(),
-        requested_roles=sorted(get_current_roles()),
+        requested_by=actor,
+        requested_roles=roles,
+        roles_claim=sign_roles(actor, roles),
         # Joins the run's logs and draft back to the asking turn; empty (not minted) outside a turn.
         correlation_id=get_current_correlation_id() or "",
         # The conversation the finished draft is shown in, as a document artefact.

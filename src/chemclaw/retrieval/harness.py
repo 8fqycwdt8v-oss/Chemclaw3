@@ -43,6 +43,9 @@ class ReportRequest(BaseModel):
     # Captured at launch: roles come from the validated token for the turn, and a background run has
     # no turn to look them up in.
     requested_roles: list[str] = Field(default_factory=list)
+    # `core/role_claim.sign_roles` over the actor and roles; the section activity binds the roles
+    # only if it verifies. Empty when no key is configured.
+    roles_claim: str = ""
     # The turn that asked, so logs and the report note join back to it; `durable/interceptor.py`
     # binds it by field name. Empty outside a turn rather than invented. Not part of `_report_id`,
     # which must not fork a new research run per re-asking turn.
@@ -92,6 +95,7 @@ class SectionRequest(BaseModel):
     section: "ReportSection"
     requested_by: str = ""
     requested_roles: list[str] = Field(default_factory=list)
+    roles_claim: str = ""
     # Relayed from `ReportRequest.correlation_id` so `retrieve_section`'s log lines are joinable.
     # Lax so a replayed payload without it degrades to an unjoined line rather than wedging.
     correlation_id: str = ""

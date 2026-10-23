@@ -252,7 +252,8 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     - `optionalKeys` exist because the Secret is operator-managed and predates a new chart version,
       so
       a required addition would break every pod on `helm upgrade`. They include the framing envelope
-      key (unset means a per-process tag, unshared across replicas), the connector bearers (fail
+      key (unset means a per-process tag, unshared across replicas), the role-claim key (unset
+      means a background report holds no roles), the connector bearers (fail
       closed with `MissingConnectorCredential` when unset), credentials for features off by default
       (LLM fallback, vector store, Temporal Cloud, a split session store), the MCP face bearer (the
       face refuses without it), and bearers for bundles that ship off.
@@ -271,6 +272,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_CALC_MCP_TOKEN",
         "CHEMCLAW_MOLFP_MCP_TOKEN",
         "CHEMCLAW_RXNFP_MCP_TOKEN",
+        "CHEMCLAW_ROLE_CLAIM_SECRET",
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
         "CHEMCLAW_CHEM_TOKEN",
         "CHEMCLAW_SAFETY_TOKEN",

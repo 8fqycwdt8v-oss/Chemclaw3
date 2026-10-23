@@ -34,6 +34,7 @@ from chemclaw.agent.audit import (
     NullAuditSink,
     make_audit_middleware,
 )
+from chemclaw.agent.authz import tool_is_offered
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
@@ -138,7 +139,12 @@ def bindable_capability_tools(prof: AgentProfile) -> list[Any]:
     # tool, because an unbound tool costs nothing in the prefix.
     if not personal_skills_available():
         tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
-    return tools
+    return _offered(tools)
+
+
+def _offered(tools: list[Any]) -> list[Any]:
+    """The in-process tools the turn's roles hold under the access policy (all, without one)."""
+    return [fn for fn in tools if tool_is_offered(fn.__name__)]
 
 
 def build_langgraph_agent(
@@ -231,6 +237,10 @@ def build_langgraph_agent(
     chat_model = _resolve_chat_model(model, prof)
     # Connectors arrive already narrowed and open; an unreachable server contributes nothing. The
     # in-process half is converted here once (`agent/tool_schema.py`); connector tools pass through.
+    # A role that cannot call a tool is not shown it: the prompt, the skills and the schemas then
+    # describe only what this account can do. Call-time authorization still holds every call.
+    tools = _offered(tools)
+    connectors = [t for t in connectors or [] if tool_is_offered(t.name)]
     bound = _bound_surface(tools, connectors, handoffs)
     # Built after `bound`, so skills are narrowed by the tools this turn actually binds rather than
     # by manifest allow-lists, which do not change when a server is unreachable. Computed once and

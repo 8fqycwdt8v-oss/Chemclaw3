@@ -411,6 +411,8 @@ _SECRET_SETTINGS = (
     # The HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from. Anyone who learns it can close a
     # retrieval envelope from inside and have their text read as instructions.
     "framing_envelope_secret",
+    # The key that signs the roles a background job carries; whoever knows it can mint any role.
+    "role_claim_secret",
 )
 
 # Settings holding a credential's variable *name* (for example `calc_server_token_env`), whose named
