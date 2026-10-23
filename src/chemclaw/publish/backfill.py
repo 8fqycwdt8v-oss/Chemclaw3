@@ -5,8 +5,10 @@ both cover exactly the same rows (it lives here because a connector may not impo
 
 Every visited row lands in exactly one bucket: `seen == queued + skipped + failed` (see
 `WalkCounts`). Rows with no projector in this release are skipped, not failed, since the cache
-is never pruned and may hold results from retired calculators. A dry run runs the same
-projection as the real pass and stops before the write, so the preview's counts match the run's.
+is never pruned and may hold results from retired calculators; so are cached rows from a
+superseded calculation epoch, which `find` withholds because they are wrong rather than old. A
+dry run runs the same projection as the real pass and stops before the write, so the preview's
+counts match the run's.
 `records` counts what was projected, not outbox rows (the outbox upserts once per enabled sink;
 `chemclaw_results_queued_total` meters writes).
 """
@@ -26,7 +28,8 @@ class WalkCounts(NamedTuple):
 
     - `seen`: rows the walk visited.
     - `queued`: rows whose records reached the outbox (an upsert, so a re-run re-covers a row).
-    - `skipped`: rows this release has no projector for at all.
+    - `skipped`: rows this release has no projector for at all, or cached under a superseded
+      calculation epoch.
     - `failed`: rows a projector exists for but could not read; these fail identically on every
       pass until code changes.
     - `records`: the scientific records the `queued` rows project into, a different unit (one
@@ -53,7 +56,7 @@ _WALK_START = (datetime.min.replace(tzinfo=UTC), "")
 # hand-expanded predicate's off-by-one.
 _CACHED = """
     SELECT key, calc_type, calc_version, input_hash, params_hash, result, structure_id,
-           compute_seconds, created_at
+           compute_seconds, created_at, epoch
     FROM calculation_results
     WHERE (created_at, key) > (%s, %s)
     ORDER BY created_at, key
@@ -85,8 +88,13 @@ _REQUEUE = f"""
 _COUNT_RETIRED = f"SELECT count(*) FROM result_publications {_RETIRED}"
 
 
-async def backfill_cached(*, dry_run: bool, batch: int) -> WalkCounts:
-    """Walk the calculation cache. See `WalkCounts` for what the five numbers are."""
+async def backfill_cached(*, dry_run: bool, batch: int, current_epoch: str) -> WalkCounts:
+    """Walk the calculation cache. See `WalkCounts` for what the five numbers are.
+
+    `current_epoch` is `science.calc.store.CALCULATION_EPOCH`, passed in because `publish` may not
+    import `science`. A row recording another epoch is skipped by `find`'s rule: one recording none
+    (written before migration 090) is published.
+    """
     seen = queued = skipped = failed = records = 0
     cursor_key: tuple[datetime, str] = _WALK_START
     while True:
@@ -108,7 +116,8 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> WalkCounts:
                 row[4],
             )
             payload, structure_id, compute_seconds, created_at = row[5], row[6], row[7], row[8]
-            if projector_for(calc_type) is None:
+            superseded = bool(row[9]) and row[9] != current_epoch
+            if superseded or projector_for(calc_type) is None:
                 skipped += 1
                 continue
             projected = outbox.project_payload(

@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.publish import backfill, outbox
+from chemclaw.science.calc.store import CALCULATION_EPOCH
 from tests.pg import migrated_db_or_skip
 
 
@@ -50,16 +51,18 @@ def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
     asyncio.run(_clean())
 
 
-async def _insert_cached(conn: Any, key: str, created_at: datetime, calc_type: str = "pka") -> None:
+async def _insert_cached(
+    conn: Any, key: str, created_at: datetime, calc_type: str = "pka", epoch: str = ""
+) -> None:
     """A cached row whose payload actually projects.
 
     So it is a valid control for "was this row queued".
     """
     await conn.execute(
         "INSERT INTO calculation_results "
-        "(key, calc_type, calc_version, input_hash, params_hash, result, created_at) "
-        "VALUES (%s, %s, 'v1', 'h', 'p', %s, %s)",
-        (key, calc_type, Jsonb({"smiles": "CCO", "pka": 4.2}), created_at),
+        "(key, calc_type, calc_version, input_hash, params_hash, result, created_at, epoch) "
+        "VALUES (%s, %s, 'v1', 'h', 'p', %s, %s, %s)",
+        (key, calc_type, Jsonb({"smiles": "CCO", "pka": 4.2}), created_at, epoch),
     )
 
 
@@ -106,7 +109,7 @@ async def test_every_row_is_seen_exactly_once_even_when_many_share_a_timestamp(
             await _insert_cached(conn, f"b-{i}", tie_b, calc_type="no-such-calculator")
         await conn.commit()
 
-    counts = await backfill.backfill_cached(dry_run=True, batch=2)
+    counts = await backfill.backfill_cached(dry_run=True, batch=2, current_epoch=CALCULATION_EPOCH)
     seen, queued, skipped = counts.seen, counts.queued, counts.skipped
 
     assert seen == 7
@@ -157,7 +160,9 @@ def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
                     conn, f"walk-{index}", datetime(2026, 2, 1 + index, tzinfo=UTC)
                 )
             await conn.commit()
-        return (await backfill.backfill_cached(dry_run=False, batch=2)).seen
+        return (
+            await backfill.backfill_cached(dry_run=False, batch=2, current_epoch=CALCULATION_EPOCH)
+        ).seen
 
     seen = asyncio.run(_run())
     assert visited == [f"walk-{index}" for index in range(6)], (
@@ -211,7 +216,9 @@ async def test_a_row_with_a_registered_projector_is_queued_not_skipped(
         )
         await conn.commit()
 
-    counts = await backfill.backfill_cached(dry_run=False, batch=10)
+    counts = await backfill.backfill_cached(
+        dry_run=False, batch=10, current_epoch=CALCULATION_EPOCH
+    )
 
     assert counts.seen == 2
     assert counts.queued == 1, "the row with a registered projector must reach the outbox"
@@ -237,7 +244,7 @@ async def test_dry_run_counts_without_calling_the_outbox(monkeypatch: pytest.Mon
         await _insert_cached(conn, "known", datetime(2026, 1, 1, tzinfo=UTC), calc_type="pka")
         await conn.commit()
 
-    counts = await backfill.backfill_cached(dry_run=True, batch=10)
+    counts = await backfill.backfill_cached(dry_run=True, batch=10, current_epoch=CALCULATION_EPOCH)
 
     assert (counts.seen, counts.queued, counts.skipped, counts.failed) == (1, 1, 0, 0)
 
@@ -370,11 +377,15 @@ def test_a_row_no_projector_can_read_is_its_own_bucket_not_a_silent_zero(
             await _insert_cached(conn, "k4", at, calc_type="no-such-calculator")
             await conn.commit()
 
-        dry = await backfill.backfill_cached(dry_run=True, batch=10)
+        dry = await backfill.backfill_cached(
+            dry_run=True, batch=10, current_epoch=CALCULATION_EPOCH
+        )
         async with db.connection(settings.postgres_dsn) as conn:
             await conn.execute("DELETE FROM result_publications")
             await conn.commit()
-        real = await backfill.backfill_cached(dry_run=False, batch=10)
+        real = await backfill.backfill_cached(
+            dry_run=False, batch=10, current_epoch=CALCULATION_EPOCH
+        )
         return dry, real
 
     dry, real = asyncio.run(_run())
@@ -414,8 +425,12 @@ def test_a_second_pass_counts_a_row_it_already_queued_as_covered(
             for index in range(3):
                 await _insert_cached(conn, f"twice-{index}", at, calc_type="pka")
             await conn.commit()
-        first = await backfill.backfill_cached(dry_run=False, batch=10)
-        second = await backfill.backfill_cached(dry_run=False, batch=10)
+        first = await backfill.backfill_cached(
+            dry_run=False, batch=10, current_epoch=CALCULATION_EPOCH
+        )
+        second = await backfill.backfill_cached(
+            dry_run=False, batch=10, current_epoch=CALCULATION_EPOCH
+        )
         return first, second
 
     first, second = asyncio.run(_run())
@@ -574,3 +589,34 @@ async def test_the_jobs_walk_carries_the_note_the_run_produced(
     assert [publication.note_id for publication in captured] == ["note-from-the-run", ""], (
         "the walk that re-publishes a deployment's whole history drops the note link on every row"
     )
+
+
+async def test_a_row_from_a_superseded_epoch_is_skipped_not_republished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached row from a superseded calculation epoch is skipped, by `find`'s own rule.
+
+    The epoch rides inside `params_hash`, so a superseded row has its own `calc_ref`; republishing
+    it puts a value `find` withholds as wrong into the sink beside the current one. A row recording
+    no epoch (written before migration 090) is published, as `find` returns it.
+    """
+    await migrated_db_or_skip()
+    monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+    monkeypatch.setattr(outbox, "enabled_names", lambda: ["alpha"])
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        at = datetime(2026, 3, 1, tzinfo=UTC)
+        await _insert_cached(conn, "current", at, epoch=CALCULATION_EPOCH)
+        await _insert_cached(conn, "unrecorded", at, epoch="")
+        await _insert_cached(conn, "superseded", at, epoch=f"before-{CALCULATION_EPOCH}")
+        await conn.commit()
+
+    counts = await backfill.backfill_cached(
+        dry_run=False, batch=10, current_epoch=CALCULATION_EPOCH
+    )
+
+    assert (counts.seen, counts.queued, counts.skipped) == (3, 2, 1), counts
+    async with db.connection(settings.postgres_dsn) as conn:
+        cursor = await conn.execute("SELECT calc_ref FROM result_publications ORDER BY calc_ref")
+        queued = [row[0] for row in await cursor.fetchall()]
+    assert queued == ["current", "unrecorded"], queued
