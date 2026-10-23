@@ -17,8 +17,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **Worker workflow-cache bound rests on placeholders** [S] — sample cached state of `BoCampaignWorkflow` and calc workflows on a real broker;
   `core/config/temporal.py::worker_max_cached_workflows`, `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
-- [ ] **IPv4-mapped arm of the compiled egress guard is unmeasured** [S] — needs a host with IPv6;
-  `tests/test_netguard_preload.py::test_an_ipv4_mapped_address_is_not_a_way_around_the_check`.
 - [ ] **An HTTP result sink accepts `verify_tls: false` from its manifest** [S] — only a docstring forbids it and `make sink-validate` binds the signature, not the values;
   refuse it at construction (at least under `entra_required`); `publish/drivers/http.py::HttpResultSink`.
 - [ ] **A third-party connector's failure text is credited to a sanitizer we do not run** [S] — bounded and defanged, but `answered_failure` says `connectors/server.py` sanitized it,
