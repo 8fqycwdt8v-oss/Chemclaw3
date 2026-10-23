@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from chemclaw.core.config import settings
-
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
 from chemclaw.retrieval.harness import (
@@ -304,7 +303,9 @@ async def test_fingerprint_retriever_cites_reaction_records() -> None:
     store = InMemoryFingerprintStore()
     await store.add(record_for_reaction("eln-1", _ESTER))
     records = InMemoryReactionRecordStore()
-    await records.record([ReactionRecord(reaction_id="eln-1", body="Esterification.", source="eln:test")], "eln-json")
+    await records.record(
+        [ReactionRecord(reaction_id="eln-1", body="Esterification.", source="eln:test")], "eln-json"
+    )
     retriever = FingerprintReactionRetriever(store, records)
 
     hits = await retriever.retrieve(_ESTER, {})

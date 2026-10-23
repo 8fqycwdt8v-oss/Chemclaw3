@@ -11,7 +11,7 @@ The judgment (decomposing the question, separating evidence from analogy) lives 
 
 import logging
 from datetime import date
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field, computed_field
 

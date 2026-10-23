@@ -192,8 +192,8 @@ def test_the_starved_source_measurement_rerun(capsys: pytest.CaptureFixture[str]
     cosine, against a 40-chunk cap. Asserted as the property rather than exact counts, which would
     freeze the round-robin's arithmetic; the defect is a zero. The split is printed for the record.
     """
-    from chemclaw.retrieval.hybrid import interleave_dedup
     from chemclaw.core.config import settings
+    from chemclaw.retrieval.hybrid import interleave_dedup
 
     lists = _swept(
         [

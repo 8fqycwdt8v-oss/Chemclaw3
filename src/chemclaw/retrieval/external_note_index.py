@@ -124,7 +124,7 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         return [IndexHit(note_id=match.id, score=match.score) for match in matches]
 
     async def _live_ids(self, within: set[str] | None) -> set[str]:
-        """Note ids within `within` whose catalogue row says the live configuration embedded them."""
+        """Note ids within `within` whose catalogue row says the live model embedded them."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(

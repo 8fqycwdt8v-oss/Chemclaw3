@@ -16,6 +16,7 @@ from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
+from chemclaw.retrieval.hybrid import interleave_dedup
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
@@ -352,7 +353,7 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
 
     # Same corpus, same content, but every chunk now carries a long provenance label. Nothing about
     # `content` changed, so a content-only budget would keep exactly as many chunks as before.
-    real_chunks = research_tools.interleave_dedup
+    real_chunks = interleave_dedup
 
     def _padded(ranked_lists: Any) -> Any:
         return [
