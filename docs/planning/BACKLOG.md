@@ -120,8 +120,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `Publication`, and `_ENQUEUE`'s `DO NOTHING` drops a later row carrying one; fix all three together, test the set of actors; `science/calc/store.py::cached_compute`, `publish/outbox.py::_ENQUEUE`.
 - [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
   give them a durable record and a walk, or declare the loss; `publish/hooks.py::publish_tool_result`, `connectors/results/workflows.py::_walk`.
-- [ ] **A published record carries no calculation epoch, so the backfill republishes superseded rows** [M] — `find` drops them by the row's epoch, but `ResultRecord` has none and
-  `_CACHED` selects none, so a sink holds both epochs' values for one subject; `publish/record.py::ResultRecord`, `publish/backfill.py::_CACHED`.
+- [ ] **A sink cannot tell a superseded-epoch calculation from a current one** [M] — the backfill skips superseded rows, but one published live before an epoch bump stays beside
+  its successor, both `status = 'valid'`; carry the epoch on `ResultRecord` (a contract and DDL change) or mark the old row superseded; `publish/record.py::ResultRecord`.
 
 ### Everything else
 
