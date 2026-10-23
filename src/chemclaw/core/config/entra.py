@@ -6,7 +6,7 @@ owns the env prefix, `.env` loading and cross-section validators.
 
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -79,6 +79,10 @@ class EntraSettings(BaseSettings):
     # set, the policy decides and those privileged-role checks are not consulted. Enforced only
     # under `entra_required`.
     access_policy_file: str = ""
+    # The HMAC key that signs the roles a background job carries (`core/role_claim.py`), so a
+    # worker can trust them without a token. A `SecretStr` in `core/logging.py`'s
+    # `_SECRET_SETTINGS`; unset, no claim is signed and a durable activity holds no roles.
+    role_claim_secret: SecretStr = SecretStr("")
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:
