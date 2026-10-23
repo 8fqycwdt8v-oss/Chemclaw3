@@ -19,6 +19,7 @@ from starlette.responses import Response
 from chemclaw.agent import text_overlay
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser
+from chemclaw.api.schemas import HealthzOut
 from chemclaw.api.state import FrontDoorState, state
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core import db
@@ -43,9 +44,9 @@ log = logging.getLogger(__name__)
 _Probed = TypeVar("_Probed")
 
 
-async def healthz() -> dict[str, str]:
+async def healthz() -> HealthzOut:
     """Liveness: the process is up."""
-    return {"status": "ok"}
+    return HealthzOut()
 
 
 async def _connector_health(request: Request) -> list[ConnectorHealth]:

@@ -56,6 +56,7 @@ from chemclaw.api.schemas import (
     QueuedMessageOut,
     RunningTurnOut,
     SessionQueueOut,
+    TurnStopOut,
     session_title,
 )
 from chemclaw.api.state import (
@@ -908,7 +909,7 @@ async def stop_turn(
     principal: CurrentUser,
     live: CurrentSession,
     reason: Literal["unload"] | None = None,
-) -> dict[str, bool]:
+) -> TurnStopOut:
     """Stop the session's running turn — the one way to cancel work in flight.
 
     A member stops only their own turn, the owner any. 404 when nothing is running, except that a
@@ -945,11 +946,11 @@ async def stop_turn(
             session_id,
             grace,
         )
-        return {"stopped": False, "deferred": True}
+        return TurnStopOut(stopped=False, deferred=True)
     await turn.stop()
     METRICS.increment("chemclaw_turns_stopped_total")
     logger.info("session %s's turn was stopped by request", session_id)
-    return {"stopped": True}
+    return TurnStopOut(stopped=True)
 
 
 async def _held_elsewhere(front: FrontDoorState, session_id: str) -> Holding | None:
@@ -977,7 +978,7 @@ async def _stop_elsewhere(
     principal: Principal,
     live: LiveSession,
     reason: Literal["unload"] | None,
-) -> dict[str, bool]:
+) -> TurnStopOut:
     """Stop a turn another replica holds: authorize here, then ask the holder and wait for it.
 
     Sender-or-owner is applied from the claim's recorded sender before anything is written, so the
@@ -990,7 +991,7 @@ async def _stop_elsewhere(
     # resumes a dead turn.
     if holding is None and reason != "unload":
         if await _stop_dead_turn(front, session_id, principal, live):
-            return {"stopped": True}
+            return TurnStopOut(stopped=True)
         # Nothing was there to end, or a resume took it first: look again before saying 404.
         holding = await _held_elsewhere(front, session_id)
     if holding is None or relay is None:
@@ -1007,9 +1008,9 @@ async def _stop_elsewhere(
             headers={"Retry-After": _retry_after_hint()},
         )
     if answer.state == "deferred":
-        return {"stopped": False, "deferred": True}
+        return TurnStopOut(stopped=False, deferred=True)
     logger.info("session %s's turn on another replica was stopped by request", session_id)
-    return {"stopped": True}
+    return TurnStopOut(stopped=True)
 
 
 async def _stop_dead_turn(
@@ -1445,7 +1446,7 @@ def register(app: FastAPI) -> None:
             }
         },
     )(post_message)
-    app.post("/sessions/{session_id}/turn/stop")(stop_turn)
+    app.post("/sessions/{session_id}/turn/stop", response_model_exclude_defaults=True)(stop_turn)
     app.get(
         "/sessions/{session_id}/turn/stream",
         responses={
