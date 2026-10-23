@@ -99,12 +99,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
   structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
 
-- [ ] **`record_note` still writes files; the transactional write has no caller** [M] — put `put(NoteUnit)` on `NoteStore`, give `record_note` a
-  Postgres arm that builds the unit and books `PutOutcome.notes`, and let the importer set `created_at`; `kg/postgres_store.py::PostgresNoteStore.put`, `kg/record.py::record_note`.
-
-- [ ] **A retirement through the Postgres store applies `valid_to` and `superseded-by` only** [S] — the prose the retire helpers append to the body is dropped; stop
-  writing it once the file writer is gone; `kg/postgres_store.py::_closed`, `memory/supersede.py::retire_note`.
-
 - [ ] **A published result names no requester, and a second chemist's identical run is dropped** [M] — the cache hook returns on a hit before publishing, neither hook passes a
   `Publication`, and `_ENQUEUE`'s `DO NOTHING` drops a later row carrying one; fix all three together, test the set of actors; `science/calc/store.py::cached_compute`, `publish/outbox.py::_ENQUEUE`.
 - [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
