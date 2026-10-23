@@ -428,16 +428,15 @@ def _middleware(
 
     return [
         *_harness_middleware(profile),
-        # `_permissions` is passed because a replacement inherits nothing:
+        # `permissions` is passed because a replacement inherits nothing:
         # `create_deep_agent(permissions=…)` only reaches the instance upstream builds, which this
-        # replaces. `tools=` decides which verbs exist; `_permissions=` decides where they may point
-        # (`agent/scratchpad.py`). The keyword is private, so `tests/test_upstream_surface.py` pins
-        # it, and `tests/test_scratchpad.py` drives an out-of-bounds write through the compiled
-        # graph. `permissions=` stays on the outer call as the public statement of the rules.
+        # replaces. `tools=` decides which verbs exist; `permissions=` decides where they may point
+        # (`agent/scratchpad.py`). `tests/test_scratchpad.py` drives an out-of-bounds write through
+        # the compiled graph.
         FilesystemMiddleware(
             backend=backend,
             tools=list(scratchpad_tools()),
-            _permissions=filesystem_permissions(),
+            permissions=filesystem_permissions(),
         ),
         # The `files` channel's retention, once per turn before the first model call
         # (`agent/scratchpad.py`).
