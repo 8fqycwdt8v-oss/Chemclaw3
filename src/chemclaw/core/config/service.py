@@ -60,12 +60,14 @@ class ServiceSettings(BaseSettings):
     # how long a removed member keeps watching. Floored, so a fast stream cannot turn every frame
     # into a membership lookup.
     service_turn_watch_recheck_seconds: float = Field(default=5.0, ge=0.5)
-    # Poll interval for cross-replica turn relay (`agent/turn_remotes.py`): a reattach or Stop
-    # landing on another replica becomes a row the holder polls for, and relayed frames come back
-    # the same way. Polls run only while there is something to relay.
+    # Cadence of the cross-replica turn relay (`agent/turn_remotes.py`): how often a followed
+    # view's frames are written for the other replica, and how often the race retries around a
+    # just-starting turn look again. Waits for an answer or a frame are woken by `NOTIFY` and
+    # otherwise re-read a quarter of `service_turn_relay_lease_seconds` apart.
     service_turn_relay_poll_seconds: float = Field(default=0.25, gt=0)
     # Lifetime of a relay request without refresh, and how long the asker waits for the holder's
-    # first answer before 503. Must exceed the poll interval (checked at startup).
+    # first answer before 503. Must exceed the relay cadence (checked at startup); a quarter of it
+    # is the fallback poll of every relay wait, so it also bounds a lost wake-up's delay.
     service_turn_relay_lease_seconds: float = Field(default=10.0, gt=0)
     # How long a finished turn waits for its bookkeeping (cost row, budget booking, spent approval)
     # before it tells the client it is done, and a shutdown waits for the rest. The wait is the

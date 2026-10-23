@@ -248,10 +248,10 @@ _UNBOUNDED_BY_DESIGN = {
     # (upstream's `setup()`, with `CREATE INDEX CONCURRENTLY`) under an advisory lock held across
     # it, so it cannot use the saver's own pool without deadlocking a small one.
     "chemclaw/agent/checkpointer.py",
-    # `science/calc/flight._Listener` holds one `LISTEN` for the life of the loop: a pooled
+    # `core/notify.Listener` holds one `LISTEN` while anybody waits on its channel: a pooled
     # connection is returned between uses, and a notification is only delivered to a session that
     # stays subscribed. It runs no statement beyond `LISTEN`, so there is nothing to bound.
-    "chemclaw/science/calc/flight.py",
+    "chemclaw/core/notify.py",
     # `core/job_lock.exclusive_job` holds one dedicated autocommit connection for as long as it
     # holds the advisory lock: a pooled connection would be returned to the pool still locked, and
     # the lock lives with the session. It runs one statement to take and one to release the lock.

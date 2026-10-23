@@ -39,8 +39,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `core/backend_rpc.py::RpcSession.invoke`, `tests/test_backend_rpc.py::test_the_client_passes_an_answer_through_as_the_server_serialized_it`.
 - [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
   clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
-- [ ] **The turn relay polls Postgres 8 times a second per held turn and per remote watcher** [L] — measured (two processes, defaults): idle holder 0.4 → 8.3 xact/s, +8.0 per remote watcher; remote attach 0.35 s vs 0.05 s local, remote Stop 0.32 s vs 0.07 s;
-  a payload-free `LISTEN` wake-up before the same rows needs one session-mode connection per replica (`science/calc/flight.py::_Listener`, the `tests/test_db.py` allow-list, `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint`); then `api/turn_relay.py::TurnRelay.run`, `agent/session_queue.py` can poll rarely.
+- [ ] **A message waiting behind a turn on another replica asks its place once a second** [S] — the relay's `NOTIFY` wake-up (`core/notify.py`) is not yet in front of
+  `session_turn_queue`: notify on `SessionTurnQueue.leave` and `SessionTurnClaims.release`, then lengthen the poll; `api/routes/turns.py::_wait_in_line`, `agent/session_queue.py`.
 - [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
   `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/core/restore_check.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions

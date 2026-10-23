@@ -3,12 +3,15 @@
 A running turn's pump, readers and cancel live in the memory of the process that started it
 (`api/detach.DetachableTurn`), so a reattach or Stop arriving at another replica must be relayed.
 A non-holding replica writes a request naming the turn's claim (`session_turns.holder`) — follow
-or stop — and polls for the answer. The holder polls for requests addressed to its claims
+or stop — and waits for the answer. The holder reads the requests addressed to its claims
 (`api/turn_relay.TurnRelay`), acts with the same calls the local routes use, writes its answer, and
 for a follow relays frames into `session_turn_frames`, which the asker consumes by deleting them.
-Every statement borrows a pooled connection briefly; no LISTEN.
+Every statement borrows a pooled connection briefly. Each write that another process waits for
+also notifies `CHANNEL` in its own transaction — `REQUESTS` for a new or withdrawn request, the
+request id for an answer or frames — so waiters re-read at once and poll only as a fallback
+(`idle_poll_seconds`); the notification carries no data, so frames of any size stay in the table.
 
-A request is a lease the asker refreshes as it polls; a dead asker's request lapses after one
+A request is a lease the asker refreshes as it reads; a dead asker's request lapses after one
 lease and is swept. Naming the `holder` means only the addressed turn can answer it. Both tables
 cascade from `session_owners`. Postgres store only: in memory a session is one process.
 
@@ -17,6 +20,7 @@ records the tenant it was asked in, and the holder writes its frames bound to th
 frames (a tenant's answer text) are covered by the policy and read back only by the asker.
 """
 
+import asyncio
 import uuid
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
@@ -26,7 +30,9 @@ import psycopg
 from psycopg.rows import TupleRow
 
 from chemclaw.agent.session_store import _session_connection, _session_dsn
+from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
+from chemclaw.core.notify import NOTIFY, woken_by
 from chemclaw.core.tenancy import bound_tenant, current_tenant
 
 #: What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
@@ -38,6 +44,20 @@ Kind = Literal["watch", "stop", "unload_stop"]
 #: `gone` (the turn ended before it could be served), `deferred` (an unload stop is waiting out its
 #: grace), `stopping` (the cancel is in flight) and `stopped` (the turn's teardown has finished).
 State = Literal["asked", "watching", "refused", "gone", "deferred", "stopping", "stopped"]
+
+
+#: The `LISTEN` channel of the relay's wake-ups, and the topic every holding process wakes on.
+CHANNEL = "turn_remotes"
+REQUESTS = "requests"
+
+#: Fallback polls per relay lease while a wait has had no wake-up: often enough to refresh the
+#: lease (`_REFRESH`) and to see a turn end that answered nothing, rare enough to cost nothing.
+_IDLE_POLLS_PER_LEASE = 4
+
+
+def idle_poll_seconds() -> float:
+    """How long a relay wait parks without a wake-up before it re-reads its rows anyway."""
+    return settings.service_turn_relay_lease_seconds / _IDLE_POLLS_PER_LEASE
 
 
 class Holding(NamedTuple):
@@ -106,6 +126,13 @@ class TurnRemotes:
         """Borrow a connection on this store's database (see `chemclaw.agent.session_store`)."""
         return _session_connection(self._dsn)
 
+    def woken(self, topic: str) -> AbstractAsyncContextManager[asyncio.Event]:
+        """An event set when `topic` is notified on this store's database, until the block ends.
+
+        `REQUESTS` for the holder, a request id for its asker. Subscribe before reading the rows.
+        """
+        return woken_by(self._dsn, CHANNEL, topic, idle_poll_seconds)
+
     # -- the asking replica --------------------------------------------------------------------
 
     async def holding(self, session_id: str) -> Holding | None:
@@ -129,6 +156,7 @@ class TurnRemotes:
                     _ASK,
                     (request_id, session_id, holder, kind, actor, lease_seconds, current_tenant()),
                 )
+                await cur.execute(NOTIFY, (CHANNEL, REQUESTS))
             await conn.commit()
         return request_id
 
@@ -168,6 +196,7 @@ class TurnRemotes:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_WITHDRAW, (request_id,))
+                await cur.execute(NOTIFY, (CHANNEL, REQUESTS))
             await conn.commit()
 
     # -- the holding process -------------------------------------------------------------------
@@ -195,6 +224,7 @@ class TurnRemotes:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_ANSWER, (state, correlation_id or None, request_id))
+                await cur.execute(NOTIFY, (CHANNEL, request_id))
             await conn.commit()
 
     async def relay(
@@ -221,4 +251,5 @@ class TurnRemotes:
                             for frame in frames
                         ],
                     )
+                    await cur.execute(NOTIFY, (CHANNEL, request_id))
                 await conn.commit()

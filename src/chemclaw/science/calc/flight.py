@@ -22,15 +22,12 @@ from dataclasses import dataclass
 from os import getpid
 from socket import gethostname
 from typing import Protocol, TypeVar, runtime_checkable
-from weakref import WeakKeyDictionary
-
-import psycopg
-from psycopg.rows import TupleRow
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.core.notify import NOTIFY, woken_by
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +121,11 @@ _ABANDON = """
 _FAIL = """
     UPDATE calculation_claims SET state = 'failed', error = %s WHERE key = %s AND attempt = %s
 """
-_NOTIFY = "SELECT pg_notify(%s, %s)"
+
+
+def _retry_seconds() -> float:
+    """How long the claim listener waits before reconnecting: one waiter poll."""
+    return PostgresClaims.lease_seconds() / _POLLS_PER_LEASE
 
 
 class PostgresClaims:
@@ -209,13 +210,13 @@ class PostgresClaims:
         """
         async with db.connection(self._dsn, operation="calc_claim") as conn:
             await conn.execute(_RELEASE, (claim.slot, claim.attempt))
-            await conn.execute(_NOTIFY, (CHANNEL, _topic(claim.slot)))
+            await conn.execute(NOTIFY, (CHANNEL, _topic(claim.slot)))
 
     async def fail(self, claim: Claim, error: str) -> None:
         """Record that this attempt failed, for its waiters, and wake them."""
         async with db.connection(self._dsn, operation="calc_claim") as conn:
             await conn.execute(_FAIL, (error[:_ERROR_CHARS], claim.slot, claim.attempt))
-            await conn.execute(_NOTIFY, (CHANNEL, _topic(claim.slot)))
+            await conn.execute(NOTIFY, (CHANNEL, _topic(claim.slot)))
 
     @asynccontextmanager
     async def watch(self, slot: str) -> AsyncIterator[asyncio.Event]:
@@ -224,108 +225,8 @@ class PostgresClaims:
         Never the only way to learn of a release: the caller also polls, so a missed notification
         costs one poll interval, not a hang.
         """
-        listener = _listener_for(self._dsn)
-        event = await listener.subscribe(_topic(slot))
-        try:
+        async with woken_by(self._dsn, CHANNEL, _topic(slot), _retry_seconds) as event:
             yield event
-        finally:
-            await listener.unsubscribe(_topic(slot), event)
-
-
-class _Listener:
-    """One dedicated `LISTEN` connection per event loop, shared by every waiter in it.
-
-    Started by the first subscriber and stopped with the last, so an idle process holds no extra
-    connection. A broken connection wakes every subscriber (they re-check) and is reopened.
-    """
-
-    def __init__(self, dsn: str) -> None:
-        self._dsn = dsn
-        self._events: dict[str, set[asyncio.Event]] = {}
-        self._task: asyncio.Task[None] | None = None
-        self._ready: asyncio.Event | None = None
-
-    async def subscribe(self, topic: str) -> asyncio.Event:
-        """Register for `topic` and return once the connection is listening (or has failed)."""
-        event = asyncio.Event()
-        self._events.setdefault(topic, set()).add(event)
-        if self._task is None:
-            self._ready = asyncio.Event()
-            self._task = asyncio.get_running_loop().create_task(self._run(self._ready))
-        ready = self._ready
-        if ready is not None:
-            try:
-                await ready.wait()
-            except BaseException:
-                # Cancelled while connecting: the caller never entered its block, so nothing else
-                # would forget this registration.
-                await self.unsubscribe(topic, event)
-                raise
-        return event
-
-    async def unsubscribe(self, topic: str, event: asyncio.Event) -> None:
-        """Forget `event`; the last one out closes the connection."""
-        waiting = self._events.get(topic)
-        if waiting is not None:
-            waiting.discard(event)
-            if not waiting:
-                del self._events[topic]
-        if self._events or self._task is None:
-            return
-        task, self._task, self._ready = self._task, None, None
-        task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await task
-
-    def _wake(self, topic: str | None) -> None:
-        """Set the events waiting on `topic`, or every event when `topic` is `None`."""
-        pools = self._events.values() if topic is None else [self._events.get(topic, set())]
-        for events in pools:
-            for event in events:
-                event.set()
-
-    async def _run(self, ready: asyncio.Event) -> None:
-        """Listen until cancelled, reconnecting after a failure."""
-        reconnecting = False
-        while True:
-            conn: psycopg.AsyncConnection[TupleRow] | None = None
-            try:
-                conn = await db.connect(self._dsn)
-                await conn.set_autocommit(True)
-                await conn.execute(f"LISTEN {CHANNEL}")
-                ready.set()
-                if reconnecting:
-                    self._wake(None)
-                async for note in conn.notifies():
-                    self._wake(note.payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                degraded(
-                    logger,
-                    "calc_claim",
-                    "the claim listener lost its connection; waiters fall back to polling",
-                    level=logging.WARNING,
-                )
-            finally:
-                ready.set()
-                if conn is not None:
-                    with suppress(Exception):
-                        await conn.close()
-            reconnecting = True
-            self._wake(None)
-            await asyncio.sleep(PostgresClaims.lease_seconds() / _POLLS_PER_LEASE)
-
-
-_LISTENERS: "WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _Listener]]" = (
-    WeakKeyDictionary()
-)
-
-
-def _listener_for(dsn: str) -> _Listener:
-    """This loop's listener for `dsn`, created on first use (a task belongs to one loop)."""
-    per_dsn = _LISTENERS.setdefault(asyncio.get_running_loop(), {})
-    return per_dsn.setdefault(dsn, _Listener(dsn))
 
 
 def _describe(exc: BaseException) -> str:
