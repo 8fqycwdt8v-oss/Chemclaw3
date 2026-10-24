@@ -3,22 +3,26 @@
 Not the record of truth: both tables can be dropped and refilled from `reaction_records` or the
 source table, and nothing reads a label as evidence without its citation.
 
-Three write paths, kept apart:
+Two write paths, kept apart:
 
-* `record()` writes only the record phase, `withheld` with it; the upsert names its columns so
-  re-ingesting an amended entry does not discard derived labels.
+* `record()` writes only the record phase, `withheld` and the tier with it; the upsert names its
+  columns so re-ingesting an amended entry does not discard derived labels.
 * `store_labels()` writes only the derived phase and stamps `labeller_version`.
-* `withhold()` sets `withheld` alone, for an entry amended to citation-only, which has no record
-  phase to write.
+
+Two tiers share the rows. A **structured** row has a reaction string and is labelled by the drain. A
+**citation-only** row (`D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier`) holds
+what the source drew and stated and nothing derived: `stale()` and `store_labels()` never touch it,
+`coverage()` leaves it out of the structured denominator, and `select()` returns it only for a
+facet that names no derived or fingerprint key (`Facet.reaches_citation_only`).
 
 Every read skips a withheld row (`select`, `coverage`, `stale()`). The app role cannot delete a row,
-so this is how an entry withdrawn or amended out of the structured tier stops answering, until a
-structured, current re-ingest clears it.
+so this is how an entry withdrawn, or amended out of the structured tier, stops answering: the next
+ingest of the entry replaces the row with its tier's own and clears the flag.
 
-`stale()` returns rows whose `labeller_version` is NULL or differs from the current one, so nothing
-has to remember to mark work. A row the labelling server could not answer for is stamped with
-`underived_stamp`, which `stale()` treats as done while `coverage`, `select` and `current_version`
-do not treat it as labelled.
+`stale()` returns structured rows whose `labeller_version` is NULL or differs from the current one,
+so nothing has to remember to mark work. A row the labelling server could not answer for is
+stamped with `underived_stamp`, which `stale()` treats as done while `coverage`, `select` and
+`current_version` do not treat it as labelled.
 """
 
 import logging
@@ -34,7 +38,12 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.science.labels.facets import AgentCount, Facet, FacetSelection, FrequencyReport
-from chemclaw.science.labels.records import CorpusCoverage, ReactionLabel, SpeciesLabel
+from chemclaw.science.labels.records import (
+    CorpusCoverage,
+    LabelTier,
+    ReactionLabel,
+    SpeciesLabel,
+)
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
 log = logging.getLogger(__name__)
@@ -91,18 +100,18 @@ class LabelIndex:
         """
         raise NotImplementedError
 
-    async def withhold(self, source: str, reaction_id: str) -> None:
-        """Keep one reaction's row out of every read, leaving both phases as they are.
+    async def citation_rows(self, keys: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `keys` hold a citation-only row, withheld or not.
 
-        For an entry amended to citation-only, which writes no record phase. A no-op when the index
-        holds no row for the key.
+        Asked by the ELN sync before it skips a replayed citation-only entry whose body is
+        unchanged: an entry stored before the tier had label rows has no row to skip over.
         """
         raise NotImplementedError
 
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
     ) -> list[ReactionLabel]:
-        """Rows never derived, or derived under a version other than `version`, oldest key first.
+        """Structured rows never derived, or derived under a version other than `version`.
 
         Deterministic order, so a drain that dies mid-batch resumes on the same rows and an
         unprocessable row is the same row on every attempt.
@@ -127,7 +136,10 @@ class LabelIndex:
     async def coverage(
         self, version: str, reaction_keys: Iterable[tuple[str, str]] | None = None
     ) -> CorpusCoverage:
-        """Labelled-vs-total over a facet's rows, or over the whole index when `None`."""
+        """Structured labelled-vs-total over a facet's rows, or the whole index when `None`.
+
+        Never counts the citation-only tier, which no facet is asked about here.
+        """
         raise NotImplementedError
 
     async def count(self) -> int:
@@ -145,18 +157,22 @@ class LabelIndex:
         raise NotImplementedError
 
     async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
-        """The labelled reactions this facet selects, with the coverage of its own row set.
+        """The reactions this facet selects, with the coverage of its own row set.
 
-        Only rows labelled at `version` are returned: an unlabelled row cannot satisfy any facet,
-        and showing it beside labelled rows would imply it was checked. It counts towards `coverage`
-        instead.
+        A structured row is returned only when labelled at `version`: an unlabelled row cannot
+        satisfy any facet, and showing it beside labelled rows would imply it was checked. It counts
+        towards `coverage` instead. A citation-only row has nothing to be labelled with and is
+        returned whenever the facet reaches the tier and it matches.
         """
         raise NotImplementedError
 
     async def agent_counts(
         self, facet: Facet, version: str, roles: frozenset[SpeciesRole], limit: int
     ) -> FrequencyReport:
-        """How often each species appears in each of `roles` across the facet's reactions."""
+        """How often each species appears in each of `roles` across the facet's reactions.
+
+        Each count is split by tier, so no figure mixes the source's own role with a derived one.
+        """
         raise NotImplementedError
 
 
@@ -174,9 +190,9 @@ class InMemoryLabelIndex(LabelIndex):
     async def record(self, label: ReactionLabel) -> None:
         """Upsert the record phase, carrying an already-derived phase across where it still holds.
 
-        If `record_smiles` changed, the entry is a different reaction: its derived phase is dropped
-        and `labeller_version` cleared, putting it back in `stale()`. Otherwise everything is kept,
-        so a note edit does not discard a backfill.
+        If `record_smiles` changed (an entry changing tier changes it), the entry is a different
+        reaction: its derived phase is dropped and `labeller_version` cleared, putting it back in
+        `stale()`. Otherwise everything is kept, so a note edit does not discard a backfill.
         """
         key = (label.source, label.reaction_id)
         existing = self._rows.get(key)
@@ -184,15 +200,21 @@ class InMemoryLabelIndex(LabelIndex):
             self._rows[key] = label
             return
         carried = existing.model_dump(include=_DERIVED_FIELDS | _STAMP_FIELDS)
-        species = [_carry_species(new, existing.species) for new in label.species]
+        # A citation-only row's roles are its own record phase's, so there is nothing to carry.
+        species = (
+            label.species
+            if label.tier is LabelTier.CITATION_ONLY
+            else [_carry_species(new, existing.species) for new in label.species]
+        )
         self._rows[key] = label.model_copy(update={**carried, "species": species})
 
-    async def withhold(self, source: str, reaction_id: str) -> None:
-        """Flag the held row, if there is one; both phases stay as they are."""
-        key = (source, reaction_id)
-        existing = self._rows.get(key)
-        if existing is not None:
-            self._rows[key] = existing.model_copy(update={"withheld": True})
+    async def citation_rows(self, keys: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+        """The keys held as citation-only rows."""
+        return {
+            key
+            for key in keys
+            if key in self._rows and self._rows[key].tier is LabelTier.CITATION_ONLY
+        }
 
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
@@ -201,7 +223,8 @@ class InMemoryLabelIndex(LabelIndex):
 
         An underived stamp at this version also counts as done, or an unlabellable batch would be
         re-read on every pass. A withheld row is skipped: nothing serves it, and an amended entry's
-        old reaction is not one to derive from.
+        old reaction is not one to derive from. A citation-only row is never stale: nothing is
+        derived for it.
         """
         allowed = frozenset(sources) if sources is not None else None
         current = {version, underived_stamp(version)}
@@ -209,6 +232,7 @@ class InMemoryLabelIndex(LabelIndex):
             row
             for row in self._rows.values()
             if row.labeller_version not in current
+            and row.tier is LabelTier.STRUCTURED
             and not row.withheld
             and (allowed is None or row.source in allowed)
         ]
@@ -231,6 +255,8 @@ class InMemoryLabelIndex(LabelIndex):
         existing = self._rows.get(key)
         if existing is None:
             raise LabelIndexError(f"no record-phase row for {key!r}; label the corpus first")
+        if existing.tier is not LabelTier.STRUCTURED:
+            raise LabelIndexError(f"{key!r} is citation-only; nothing is derived for that tier")
         written = label.model_dump(include=_DERIVED_FIELDS)
         by_ordinal = {new.ordinal: _derived_species(new) for new in label.species}
         species = [
@@ -251,12 +277,12 @@ class InMemoryLabelIndex(LabelIndex):
     async def coverage(
         self, version: str, reaction_keys: Iterable[tuple[str, str]] | None = None
     ) -> CorpusCoverage:
-        """Labelled-vs-total over the given keys, or over everything, withheld rows left out."""
+        """Structured labelled-vs-total over the given keys or everything, withheld left out."""
         if reaction_keys is None:
             held = list(self._rows.values())
         else:
             held = [self._rows[k] for k in reaction_keys if k in self._rows]
-        rows = [r for r in held if not r.withheld]
+        rows = [r for r in held if not r.withheld and r.tier is LabelTier.STRUCTURED]
         return CorpusCoverage(
             labelled=sum(1 for r in rows if r.labeller_version == version),
             total=len(rows),
@@ -286,15 +312,23 @@ class InMemoryLabelIndex(LabelIndex):
     async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
         """The reference implementation of the facet query — plain Python over the held rows."""
         scoped = [r for r in self._rows.values() if _in_scope(r, facet)]
-        labelled = [r for r in scoped if r.labeller_version == version and _matches(r, facet)]
-        labelled.sort(key=lambda r: (r.source, r.reaction_id))
+        structured = [r for r in scoped if r.tier is LabelTier.STRUCTURED]
+        matched = [
+            r
+            for r in scoped
+            if (r.tier is LabelTier.CITATION_ONLY or r.labeller_version == version)
+            and _matches(r, facet)
+        ]
+        matched.sort(key=lambda r: (r.source, r.reaction_id))
         return FacetSelection(
-            rows=labelled[:limit],
-            truncated=len(labelled) > limit,
+            rows=matched[:limit],
+            truncated=len(matched) > limit,
             coverage=CorpusCoverage(
-                labelled=sum(1 for r in scoped if r.labeller_version == version),
-                total=len(scoped),
+                labelled=sum(1 for r in structured if r.labeller_version == version),
+                total=len(structured),
                 sources=sorted({r.source for r in scoped}),
+                citation_only=len(scoped) - len(structured),
+                citation_tier_searched=facet.reaches_citation_only,
             ),
         )
 
@@ -353,17 +387,20 @@ class PostgresLabelIndex(LabelIndex):
 
     # Record phase. `ON CONFLICT` names only the record columns, so a re-ingest keeps the derived
     # phase, unless `record_smiles` changed: then the derived phase is cleared and
-    # `labeller_version` reset to NULL, returning the row to `stale()`. `withheld` is refreshed with
-    # them, so a re-publication clears it.
+    # `labeller_version` reset to NULL, returning the row to `stale()`. A tier change is such a
+    # change (a citation-only row has no `record_smiles`; `NULL = x` is not true, so the CASE
+    # clears). `withheld` is refreshed with them, so a re-publication clears it.
     _RECORD = """
         INSERT INTO reaction_labels (
-            source, reaction_id, record_smiles, citation, performed_on,
+            source, reaction_id, tier, record_smiles, citation, performed_on,
             temperature_c, time_h, yield_percent, workup_text, withheld
         ) VALUES (
-            %(source)s, %(reaction_id)s, %(record_smiles)s, %(citation)s, %(performed_on)s,
-            %(temperature_c)s, %(time_h)s, %(yield_percent)s, %(workup_text)s, %(withheld)s
+            %(source)s, %(reaction_id)s, %(tier)s, %(record_smiles)s, %(citation)s,
+            %(performed_on)s, %(temperature_c)s, %(time_h)s, %(yield_percent)s, %(workup_text)s,
+            %(withheld)s
         )
         ON CONFLICT ON CONSTRAINT reaction_labels_pkey DO UPDATE SET
+            tier = EXCLUDED.tier,
             record_smiles = EXCLUDED.record_smiles,
             citation = EXCLUDED.citation,
             performed_on = EXCLUDED.performed_on,
@@ -391,19 +428,46 @@ class PostgresLabelIndex(LabelIndex):
     """
 
     # Same rule per species: an unchanged structure at this ordinal keeps its derived role and
-    # features; a replaced one loses them.
+    # features; a replaced one loses them. A citation-only record supplies its own role
+    # (`derived_role` is the source's word, mapped and never refined), which replaces whatever the
+    # ordinal held and keeps no feature.
     _RECORD_SPECIES = """
-        INSERT INTO reaction_species (source, reaction_id, ordinal, smiles, role)
-        VALUES (%(source)s, %(reaction_id)s, %(ordinal)s, %(smiles)s, %(role)s)
+        INSERT INTO reaction_species (source, reaction_id, ordinal, smiles, role, derived_role)
+        VALUES (%(source)s, %(reaction_id)s, %(ordinal)s, %(smiles)s, %(role)s, %(derived_role)s)
         ON CONFLICT ON CONSTRAINT reaction_species_pkey DO UPDATE SET
             smiles = EXCLUDED.smiles,
             role = EXCLUDED.role,
-            derived_role = CASE WHEN reaction_species.smiles = EXCLUDED.smiles
-                THEN reaction_species.derived_role END,
-            scaffold = CASE WHEN reaction_species.smiles = EXCLUDED.smiles
-                THEN reaction_species.scaffold END,
-            functional_groups = CASE WHEN reaction_species.smiles = EXCLUDED.smiles
-                THEN reaction_species.functional_groups END
+            derived_role = CASE
+                WHEN EXCLUDED.derived_role IS NOT NULL THEN EXCLUDED.derived_role
+                WHEN reaction_species.smiles = EXCLUDED.smiles THEN reaction_species.derived_role
+            END,
+            scaffold = CASE
+                WHEN EXCLUDED.derived_role IS NULL AND reaction_species.smiles = EXCLUDED.smiles
+                THEN reaction_species.scaffold
+            END,
+            functional_groups = CASE
+                WHEN EXCLUDED.derived_role IS NULL AND reaction_species.smiles = EXCLUDED.smiles
+                THEN reaction_species.functional_groups
+            END
+    """
+
+    # An entry changing tier is a different reaction, so its species are re-recorded from nothing:
+    # a role a labeller refined for the structured record must not survive into the other tier,
+    # and the source's own role must not be mistaken for a derived one when the entry is structured
+    # again. The app role may DELETE species (not labels).
+    _RESET_SPECIES = """
+        DELETE FROM reaction_species WHERE source = %(source)s AND reaction_id = %(reaction_id)s
+    """
+
+    _CITATION_ROWS = """
+        SELECT source, reaction_id FROM reaction_labels
+        JOIN unnest(%(sources)s::text[], %(ids)s::text[]) AS k(s, i)
+          ON source = k.s AND reaction_id = k.i
+        WHERE tier = 'citation-only'
+    """
+
+    _TIER_OF = """
+        SELECT tier FROM reaction_labels WHERE source = %(source)s AND reaction_id = %(reaction_id)s
     """
 
     # Removes species past the current record's last ordinal, so the index does not answer from a
@@ -413,22 +477,22 @@ class PostgresLabelIndex(LabelIndex):
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal >= %(kept)s
     """
 
-    # The one write `withhold()` makes; the phases are left as they are.
-    _WITHHOLD = """
-        UPDATE reaction_labels SET withheld = true
-        WHERE source = %(source)s AND reaction_id = %(reaction_id)s
-    """
+    # The columns every read of a row returns, in the order `_label_from_row` reads them.
+    _ROW_COLUMNS = (
+        "source, reaction_id, record_smiles, citation, performed_on, temperature_c, "
+        "time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class, "
+        "rxno_id, confidence, method, labeller_version, labelled_at, tier"
+    )
 
     # `IS DISTINCT FROM`, not `<>`, so NULL (never derived) rows are stale. The underived stamp for
     # this version is also not stale, or the row would be re-read every pass. A withheld row is
-    # skipped (see the in-memory twin).
-    _STALE = """
-        SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c,
-               time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class,
-               rxno_id, confidence, method, labeller_version, labelled_at
+    # skipped (see the in-memory twin), and so is the whole citation-only tier.
+    _STALE = f"""
+        SELECT {_ROW_COLUMNS}
         FROM reaction_labels
         WHERE labeller_version IS DISTINCT FROM %(version)s
           AND labeller_version IS DISTINCT FROM %(underived)s
+          AND tier = 'structured'
           AND NOT withheld
           AND (%(sources)s::text[] IS NULL OR source = ANY(%(sources)s::text[]))
         ORDER BY source, reaction_id
@@ -453,7 +517,7 @@ class PostgresLabelIndex(LabelIndex):
             method = %(method)s,
             labeller_version = %(stamp)s,
             labelled_at = CASE WHEN %(derived)s THEN now() ELSE labelled_at END
-        WHERE source = %(source)s AND reaction_id = %(reaction_id)s
+        WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND tier = 'structured'
     """
 
     _STORE_SPECIES = """
@@ -464,22 +528,25 @@ class PostgresLabelIndex(LabelIndex):
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal = %(ordinal)s
     """
 
-    # The one coverage projection (labelled at this version, total, sources present); each coverage
-    # read appends its own scope, and every scope leaves withheld rows out.
+    # The one coverage projection (structured labelled at this version, structured total, sources
+    # present, citation-only rows); each coverage read appends its own scope, and every scope leaves
+    # withheld rows out. The citation-only tier is in the denominator of no one else's count.
     _COVERAGE_COLUMNS = """
-        SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*),
-               array_agg(DISTINCT source)
+        SELECT count(*) FILTER (WHERE tier = 'structured' AND labeller_version = %(version)s),
+               count(*) FILTER (WHERE tier = 'structured'),
+               array_agg(DISTINCT source),
+               count(*) FILTER (WHERE tier = 'citation-only')
         FROM reaction_labels
     """
 
-    _COVERAGE_ALL = _COVERAGE_COLUMNS + " WHERE NOT withheld"
+    _COVERAGE_ALL = _COVERAGE_COLUMNS + " WHERE NOT withheld AND tier = 'structured'"
 
     _COVERAGE_KEYS = (
         _COVERAGE_COLUMNS
         + """
         JOIN unnest(%(sources)s::text[], %(ids)s::text[]) AS k(s, i)
           ON source = k.s AND reaction_id = k.i
-        WHERE NOT withheld
+        WHERE NOT withheld AND tier = 'structured'
     """
     )
 
@@ -510,17 +577,23 @@ class PostgresLabelIndex(LabelIndex):
 
         One transaction so the row and its species never describe different reactions.
         """
+        key = {"source": label.source, "reaction_id": label.reaction_id}
         async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._TIER_OF, key)
+                held = await cur.fetchone()
+            if held is not None and held[0] != label.tier.value:
+                await conn.execute(self._RESET_SPECIES, key)
             await conn.execute(self._RECORD, _record_params(label))
             for species in label.species:
                 await conn.execute(
                     self._RECORD_SPECIES,
                     {
-                        "source": label.source,
-                        "reaction_id": label.reaction_id,
+                        **key,
                         "ordinal": species.ordinal,
                         "smiles": species.smiles,
                         "role": species.role,
+                        "derived_role": species.derived_role,
                     },
                 )
             await conn.execute(
@@ -533,11 +606,17 @@ class PostgresLabelIndex(LabelIndex):
             )
             await conn.commit()
 
-    async def withhold(self, source: str, reaction_id: str) -> None:
-        """Flag one row by its key; an absent row updates nothing."""
-        async with self._connection() as conn:
-            await conn.execute(self._WITHHOLD, {"source": source, "reaction_id": reaction_id})
-            await conn.commit()
+    async def citation_rows(self, keys: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+        """The keys held as citation-only rows, in one statement over the page."""
+        pairs = sorted(set(keys))
+        if not pairs:
+            return set()
+        async with self._connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                self._CITATION_ROWS,
+                {"sources": [k[0] for k in pairs], "ids": [k[1] for k in pairs]},
+            )
+            return {(str(r[0]), str(r[1])) for r in await cur.fetchall()}
 
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
@@ -591,8 +670,9 @@ class PostgresLabelIndex(LabelIndex):
             cur = await conn.execute(self._STORE_LABELS, params)
             if cur.rowcount == 0:
                 raise LabelIndexError(
-                    f"no record-phase row for ({label.source!r}, {label.reaction_id!r}); "
-                    "the corpus must be recorded before it can be labelled"
+                    f"no structured record-phase row for ({label.source!r}, "
+                    f"{label.reaction_id!r}); the corpus must be recorded before it can be "
+                    "labelled, and nothing is derived for a citation-only record"
                 )
             for species in label.species:
                 await conn.execute(
@@ -627,7 +707,7 @@ class PostgresLabelIndex(LabelIndex):
             row = await cur.fetchone()
         if row is None:
             return CorpusCoverage(labelled=0, total=0, sources=[])
-        return CorpusCoverage(labelled=int(row[0]), total=int(row[1]), sources=sorted(row[2] or []))
+        return _coverage_from_row(row)
 
     async def count(self) -> int:
         """How many reactions the index holds."""
@@ -649,26 +729,33 @@ class PostgresLabelIndex(LabelIndex):
         return str(row[0]) if row and row[0] is not None else None
 
     async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
-        """The facet's labelled reactions, plus the coverage of the row set it drew them from.
+        """The facet's reactions, plus the coverage of the row set it drew them from.
 
-        Two statements because the denominators differ: the selection is over labelled rows matching
-        every narrowing, coverage over every row in scope. One row over `limit` is fetched and
-        dropped, so a page that exactly fills the cap is distinguishable from a truncated one.
+        One statement per tier, merged in key order: the structured read keeps the
+        `labeller_version` ordering index and the citation-only read its own partial index, which
+        an `OR` between the two would defeat. Each fetches one row over `limit`, so a page that
+        exactly fills the cap is distinguishable from a truncated one. Coverage is a further
+        statement because its denominator differs: every row in scope, matched or not.
         """
         where, params = _facet_sql(facet)
         params["version"] = version
         params["limit"] = limit + 1
-        sql = (
-            "SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c, "
-            "time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class, "
-            "rxno_id, confidence, method, labeller_version, labelled_at "
-            "FROM reaction_labels r "
-            f"WHERE labeller_version = %(version)s AND NOT r.withheld{where} "
-            "ORDER BY source, reaction_id LIMIT %(limit)s"
-        )
+        statements = [
+            "WHERE tier = 'structured' AND labeller_version = %(version)s "
+            f"AND NOT r.withheld{where}"
+        ]
+        if facet.reaches_citation_only:
+            statements.append(f"WHERE tier = 'citation-only' AND NOT r.withheld{where}")
         async with self._connection() as conn, conn.cursor() as cur:
-            await cur.execute(sql, params)
-            rows = await cur.fetchall()
+            rows: list[Sequence[Any]] = []
+            for clause in statements:
+                await cur.execute(
+                    f"SELECT {self._ROW_COLUMNS} FROM reaction_labels r {clause} "
+                    "ORDER BY source, reaction_id LIMIT %(limit)s",
+                    params,
+                )
+                rows.extend(await cur.fetchall())
+            rows.sort(key=lambda r: (str(r[0]), str(r[1])))
             truncated = len(rows) > limit
             rows = rows[:limit]
             species = await self._species_for(cur, [(str(r[0]), str(r[1])) for r in rows])
@@ -714,6 +801,8 @@ class PostgresLabelIndex(LabelIndex):
         """
         params: dict[str, Any] = {"version": version}
         clauses: list[str] = ["NOT withheld"]
+        if not facet.reaches_citation_only:
+            clauses.append("tier = 'structured'")
         if facet.sources:
             params["sources"] = sorted(facet.sources)
             clauses.append("source = ANY(%(sources)s::text[])")
@@ -728,9 +817,21 @@ class PostgresLabelIndex(LabelIndex):
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         await cur.execute(self._COVERAGE_COLUMNS + where, params)
         row = await cur.fetchone()
+        searched = facet.reaches_citation_only
         if row is None:
-            return CorpusCoverage(labelled=0, total=0, sources=[])
-        return CorpusCoverage(labelled=int(row[0]), total=int(row[1]), sources=sorted(row[2] or []))
+            return CorpusCoverage(labelled=0, total=0, sources=[], citation_tier_searched=searched)
+        return _coverage_from_row(row, searched=searched)
+
+
+def _coverage_from_row(row: Sequence[Any], *, searched: bool = False) -> CorpusCoverage:
+    """One `_COVERAGE_COLUMNS` row as a `CorpusCoverage`; `searched`: the facet reached the tier."""
+    return CorpusCoverage(
+        labelled=int(row[0]),
+        total=int(row[1]),
+        sources=sorted(row[2] or []),
+        citation_only=int(row[3]),
+        citation_tier_searched=searched,
+    )
 
 
 def _labelled_key(row: ReactionLabel) -> tuple[datetime, str, str]:
@@ -802,6 +903,8 @@ def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
     """
     if row.withheld:
         return False
+    if row.tier is LabelTier.CITATION_ONLY and not facet.reaches_citation_only:
+        return False
     if facet.sources and row.source not in facet.sources:
         return False
     # In scope because it reads the reaction's own key, which an unlabelled row has; without it the
@@ -810,7 +913,13 @@ def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
 
 
 def _matches(row: ReactionLabel, facet: Facet) -> bool:
-    """Whether a labelled row satisfies every narrowing the facet sets."""
+    """Whether a labelled row satisfies every narrowing the facet sets.
+
+    A citation-only row satisfies none that names a derived or fingerprint key, even when a stale
+    fingerprint brought its key into the facet.
+    """
+    if row.tier is LabelTier.CITATION_ONLY and not facet.reaches_citation_only:
+        return False
     if facet.named_reaction and (row.named_reaction or "").lower() != facet.named_reaction.lower():
         return False
     if facet.rxno_id and row.rxno_id != facet.rxno_id:
@@ -834,12 +943,13 @@ def _matches(row: ReactionLabel, facet: Facet) -> bool:
 
 
 def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> FrequencyReport:
-    """Count species by role over a selection, and attach the yields that go with them.
+    """Count species by role over a selection, split by tier, with the yields that go with them.
 
     The denominator is reactions that named a species in this role: an unrecorded ligand is not
-    evidence that none was used.
+    evidence that none was used. A figure is kept per tier because a citation-only record's role is
+    the source's own word and a structured one's was refined from its structure.
     """
-    counts: dict[tuple[SpeciesRole, str], list[float | None]] = {}
+    counts: dict[tuple[SpeciesRole, str], list[tuple[LabelTier, float | None]]] = {}
     denominator: dict[SpeciesRole, int] = {}
     for row in selection.rows:
         seen: set[tuple[SpeciesRole, str]] = set()
@@ -852,26 +962,42 @@ def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> Freque
                 # A species charged twice in one run counts once for that reaction.
                 continue
             seen.add(key)
-            counts.setdefault(key, []).append(row.yield_percent)
+            counts.setdefault(key, []).append((row.tier, row.yield_percent))
         for role in {r for r, _ in seen}:
             denominator[role] = denominator.get(role, 0) + 1
     agents = [
         AgentCount(
             role=role,
             smiles=smiles,
-            count=len(yields),
-            share=len(yields) / denominator[role],
-            median_yield_percent=_median([y for y in yields if y is not None]),
+            count=len(runs),
+            structured_count=_tier_runs(runs, LabelTier.STRUCTURED),
+            citation_only_count=_tier_runs(runs, LabelTier.CITATION_ONLY),
+            share=len(runs) / denominator[role],
+            median_yield_percent=_tier_median(runs, LabelTier.STRUCTURED),
+            citation_only_median_yield_percent=_tier_median(runs, LabelTier.CITATION_ONLY),
         )
-        for (role, smiles), yields in counts.items()
+        for (role, smiles), runs in counts.items()
     ]
     agents.sort(key=lambda a: (-a.count, a.role.value, a.smiles))
+    cited = sum(1 for row in selection.rows if row.tier is LabelTier.CITATION_ONLY)
     return FrequencyReport(
         agents=agents,
         reactions_in_scope=len(selection.rows),
+        structured_reactions=len(selection.rows) - cited,
+        citation_only_reactions=cited,
         coverage=selection.coverage,
         truncated=selection.truncated,
     )
+
+
+def _tier_runs(runs: list[tuple[LabelTier, float | None]], tier: LabelTier) -> int:
+    """How many of an agent's reactions are in `tier`."""
+    return sum(1 for one, _ in runs if one is tier)
+
+
+def _tier_median(runs: list[tuple[LabelTier, float | None]], tier: LabelTier) -> float | None:
+    """The median of the yields `tier`'s reactions recorded, or `None` when none did."""
+    return _median([y for one, y in runs if one is tier and y is not None])
 
 
 def _median(values: list[float]) -> float | None:
@@ -898,6 +1024,7 @@ def _record_params(label: ReactionLabel) -> dict[str, Any]:
     return {
         "source": label.source,
         "reaction_id": label.reaction_id,
+        "tier": label.tier.value,
         "record_smiles": label.record_smiles,
         "citation": label.citation,
         "performed_on": label.performed_on,
@@ -910,21 +1037,30 @@ def _record_params(label: ReactionLabel) -> dict[str, Any]:
 
 
 def _label_from_row(row: Sequence[Any], species: list[SpeciesLabel]) -> ReactionLabel:
-    """Rebuild a `ReactionLabel` from one `_STALE` row plus its species.
+    """Rebuild a `ReactionLabel` from one `_ROW_COLUMNS` row plus its species.
 
     `withheld` is not selected and keeps its default: every read returning rows skips withheld ones.
+    A citation-only row is rebuilt from its record phase alone, whatever the derived columns hold:
+    an image that predates the tier may have stamped them, and nothing derived is ever read for it.
     """
+    tier = LabelTier(row[17])
+    record_phase = {
+        "source": str(row[0]),
+        "reaction_id": str(row[1]),
+        "tier": tier,
+        "citation": str(row[3]),
+        "performed_on": row[4],
+        "temperature_c": row[5],
+        "time_h": row[6],
+        "yield_percent": row[7],
+        "workup_text": row[8],
+        "species": species,
+    }
+    if tier is LabelTier.CITATION_ONLY:
+        return ReactionLabel(**record_phase)
     return ReactionLabel(
-        source=str(row[0]),
-        reaction_id=str(row[1]),
+        **record_phase,
         record_smiles=str(row[2]),
-        citation=str(row[3]),
-        performed_on=row[4],
-        temperature_c=row[5],
-        time_h=row[6],
-        yield_percent=row[7],
-        workup_text=row[8],
-        species=species,
         mapped_smiles=row[9],
         named_reaction=row[10],
         reaction_class=row[11],

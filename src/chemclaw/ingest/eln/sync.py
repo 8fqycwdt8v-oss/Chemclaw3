@@ -117,7 +117,9 @@ async def sync_entries(
     An overlap entry whose stored body is byte-identical (and whose withdrawal state is unchanged)
     is skipped after one indexed lookup over the replayed ids, bounded by the page. That also skips
     its label row, correctly, since an identical body is an identical canonical record; an amended
-    body re-records and re-derives labels.
+    body re-records and re-derives labels. A citation-only entry is skipped only when its label row
+    exists too: one stored before the tier had label rows has the body and not the row, and is
+    written once.
     """
     started = time.perf_counter()
     floor = _fetch_floor(since) if apply_overlap else since
@@ -128,6 +130,7 @@ async def sync_entries(
     rejected: list[RejectedEntry] = []
     stored: dict[str, str] | None = None
     withdrawn: set[tuple[str, str]] = set()
+    labelled_citations: set[tuple[str, str]] = set()
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     # One regex budget for the whole page, opened here so no caller can forget it: the per-cell
@@ -181,9 +184,18 @@ async def sync_entries(
                         withdrawn = await record_store.retracted(
                             [(source, one) for one in replayed]
                         )
-                    if stored.get(record.reaction_id) == record.body and (
-                        (source, record.reaction_id) in withdrawn
-                    ) == (raw.retracted_at is not None):
+                        labelled_citations = await label_index.citation_rows(
+                            [(source, one) for one in replayed]
+                        )
+                    if (
+                        stored.get(record.reaction_id) == record.body
+                        and ((source, record.reaction_id) in withdrawn)
+                        == (raw.retracted_at is not None)
+                        and (
+                            reaction.tier is RecordTier.STRUCTURED
+                            or (source, record.reaction_id) in labelled_citations
+                        )
+                    ):
                         # Byte-identical body and the same withdrawal state: nothing to write.
                         # Anything else falls through and overwrites the record, which is what an
                         # amendment, a retraction or a re-publication is.

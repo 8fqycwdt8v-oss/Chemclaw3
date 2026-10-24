@@ -943,6 +943,13 @@ re-drive by design — re-ingestion is a deliberate, admin-triggered action. Ver
 `rejected entry <id>` line recurs for it in the background worker's log during the run, and that
 the workflow result's `ingested` count moved.
 
+**After upgrading to `infra/sql/136`, re-sync once from the epoch** (`"1970-01-01T00:00:00+00:00"`). A
+citation-only entry's label row is written from the canonical record at ingest, and an entry stored
+before 136 has the record and not the row; the sync writes the row for each such entry once (an
+entry held unchanged is skipped only when its row exists too). Until then the species-keyed facet
+tools say `NOT COUNTED: N citation-only ELN record(s) on file have no label row yet`, and their
+citation-only figures are a lower bound.
+
 The **same procedure backfills a late-arriving export**: a file dropped into the export directory
 after the sync's overlap window (`CHEMCLAW_ELN_SYNC_OVERLAP_SECONDS`), carrying an older payload
 timestamp, is filtered out permanently and reported as `… export file(s) arrived after the sync
@@ -952,7 +959,7 @@ timestamps to pull them in.
 **Reading the result.** The workflow returns counters (per-entry ids are in the log): `ingested`
 is entries this run newly indexed and stored (queryable the moment the write returns — there is no
 review step); `citation_only` is the subset stored without a structure, so citable but in no
-similarity index; `skipped_existing` is entries already held byte-identical, which the overlap
+similarity index (it has a label row, which the species-keyed facet tools count in a tier of its own); `skipped_existing` is entries already held byte-identical, which the overlap
 window re-fetches every run; `rejected` is above; `failed_sources` names a source whose sync
 failed outright. A steady `ingested` count means the source is producing new data.
 
@@ -2605,7 +2612,8 @@ nothing", not "the database matches this image".
 | 116 | no write — the `session_exhibits` kind `CHECK` widens, and the restored image writes only kinds it still admits. But a `geometry` artefact written before the rollback **cannot be opened or exported** by it: its spec model refuses the kind, so the listing shows the artefact and every read of its body fails | yes — a refusal naming `geometry` on every such read. Roll forward, or leave those artefacts unopened until you do |
 | 117 | no write — the kind `CHECK` widens again, for `html`. A restored image **cannot open or export** an `html` artefact, nor any revision whose spec binds a value (`$bind`, `rows_from`) — its spec model refuses both — so the listing shows them and every read of their bodies fails | yes — a refusal naming `html`, `$bind` or `rows_from` on every such read. Roll forward, or leave those artefacts unopened until you do |
 | 120 | uploads go back to the pod's memory: a file uploaded before the rollback **cannot be read** by the restored image, and one uploaded during it is visible only on the replica that took it (the affinity gap 120 closed). And since uploads have no foreign key to `session_owners`, the restored image **deletes a session, erases a leaver and forgets an empty session without their uploads** | **no — this one is silent.** Ask chemists to re-attach files they need. After rolling forward, run `DELETE FROM session_attachments a WHERE NOT EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = a.session_id)` on the session database, then re-run every erasure requested during the rollback window (`(xv)`, *Offboard: erase their data*) so a leaver's uploads to other people's sessions go too |
-| 135 | the restored image never names `reaction_labels.withheld`: it serves a withdrawn or citation-only entry's label row to the facet tools again, as before 135, and never clears the flag, so an entry re-published or amended back to structured during the rollback window stays out of every facet answer until its next amendment | **no — this one is silent.** After rolling forward, re-run 135's `DO` block by hand: it sets and clears every ELN row's flag from its `reaction_records` row |
+| 135 | the restored image never names `reaction_labels.withheld`: it serves a withdrawn or citation-only entry's label row to the facet tools again, as before 135, and never clears the flag, so an entry re-published or amended back to structured during the rollback window stays out of every facet answer until its next amendment | **no — this one is silent.** After rolling forward, re-run **136's** `DO` block by hand (not 135's, which would withhold the citation-only tier 136 serves): it sets and clears every ELN row's flag from its `reaction_records` row |
+| 136 | the restored image never names `reaction_labels.tier` and reads every unwithheld row's `record_smiles` as text, so its labeller sends a citation-only row's missing reaction string to the labelling server and stamps whatever comes back; a citation-only entry ingested during the window gets no label row at all, and one amended to or from the tier leaves the other tier's row | **no — this one is silent.** After rolling forward, re-run 136's `DO` block by hand (it clears what the labeller derived for the tier), then re-sync the source from the epoch (`(v)`) so every citation-only entry has its row; until then a facet answer says how many citation-only records on file it does not count (`NOT COUNTED`) |
 
 119 needs no row: it adds a nullable column the restored image never names, and a person's revision written during the window records no introduced figures, which the newer image derives from the revision and its parent exactly as it did before the column existed.
 

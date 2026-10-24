@@ -123,14 +123,16 @@ class CitationOnlyRecords(BaseModel):
     """The ELN records no structure index holds, and which of them give the queried structure.
 
     **Why every structural answer carries this.** A citation-only record — the source named at
-    least one species without its structure — contributes no fingerprint, molecule or label row,
-    not even for the species it *does* draw
-    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`, step 4). That is the
-    decided tier and it is unchanged here. What was wrong is that no verdict said so: once the
-    indexes were complete, "COMPLETE: all 4282 …" and "a genuine negative result" told the model
-    the *corpus* had been searched, and it reported "no in-house data" for 6-iodoquinoline while
+    least one species without its structure — has no fingerprint and no molecule row, not even for
+    the species it *does* draw: no structure or similarity search reaches it
+    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`, unchanged). Its label
+    row (`D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier`) lets the species-keyed
+    facet questions count it, but a question keyed on a similarity neighbour, a named reaction or a
+    product structure still cannot. What went wrong before any verdict said so: once the indexes
+    were complete, "COMPLETE: all 4282 …" and "a genuine negative result" told the model the
+    *corpus* had been searched, and it reported "no in-house data" for 6-iodoquinoline while
     `reaction-suzuki-flow-hte-01243` (6-iodoquinoline drawn, its boronic-acid partner only named,
-    67.76 %) sat outside the denominator. So the denominator is now stated as what it is.
+    67.76 %) sat outside the denominator. So the denominator is stated as what it is.
 
     `giving_query` is a **text check, not a structure search**: it counts citation-only records
     whose body lists one of the query's spellings (as given, RDKit-canonical, standardized) as a
@@ -140,6 +142,10 @@ class CitationOnlyRecords(BaseModel):
 
     `outside_index` and `giving_query` count records that are not withdrawn by their source, since
     those are the only ones a chemist could be told to cite.
+
+    `awaiting_label_row` is the other reason a record can be outside an answer: a facet that does
+    count the tier cannot count a record whose label row has not been written yet (an entry stored
+    before the tier had rows, until its source is re-synced), and says how many those are.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -151,6 +157,10 @@ class CitationOnlyRecords(BaseModel):
     query_checked: bool = Field(
         default=False,
         description="Whether the query's spellings were looked for among their drawn species.",
+    )
+    awaiting_label_row: bool = Field(
+        default=False,
+        description="Whether they are outside this answer for want of a label row, not a search.",
     )
     giving_query: int = Field(
         default=0, ge=0, description="How many of them list a spelling of the query as drawn."
@@ -170,11 +180,19 @@ class CitationOnlyRecords(BaseModel):
         """
         if self.outside_index == 0:
             return ""
+        if self.awaiting_label_row:
+            return (
+                f"NOT COUNTED: {self.outside_index} citation-only ELN record(s) on file have no "
+                "label row yet, so this answer does not count them (they are written when the "
+                "source is re-synced). Treat its citation-only figures as a lower bound."
+            )
         outside = (
             f"NOT SEARCHED: {self.outside_index} citation-only ELN record(s) are outside this "
             "search — the source named at least one of their species without a structure, so none "
-            "of them is fingerprinted or labelled, and no structure or similarity search reaches "
-            "them, not even through the species they do draw. This answer says nothing about them."
+            "of them is fingerprinted or named-reaction labelled, and no structure, similarity or "
+            "named-reaction search reaches them, not even through the species they do draw "
+            "(`substrate_precedent` and `reagent_frequency` without a named reaction do count "
+            "them). This answer says nothing about them."
         )
         if not self.query_checked:
             return outside

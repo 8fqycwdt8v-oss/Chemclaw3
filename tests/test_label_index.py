@@ -105,7 +105,7 @@ def test_the_record_phase_round_trips_with_its_species() -> None:
         [stored] = await index.stale(_VERSION, limit=50, sources=[_SOURCE])
         assert stored.reaction_id == f"{tag}-round-trip"
         # The record form, agents kept: the whole reason this row exists beside the fingerprint.
-        assert ">CC(C)(C)P" in stored.record_smiles
+        assert stored.record_smiles is not None and ">CC(C)(C)P" in stored.record_smiles
         assert stored.workup_text is not None and "EtOAc" in stored.workup_text
         assert stored.yield_percent == 78.0
         assert [s.smiles for s in stored.species] == [
@@ -430,10 +430,10 @@ def test_a_version_that_already_carries_the_marker_is_refused_in_both_backends()
 def test_a_withheld_row_answers_nothing_until_a_current_record_clears_it() -> None:
     """A withheld row is in no selection, no coverage and no stale scan, and a re-record clears it.
 
-    `withhold` is the one write an entry amended to citation-only makes, and `withheld=True` on the
-    record phase is a withdrawn entry's; both rows stay in the table, which the app role cannot
-    delete from. The served control sits in the same scope, so an empty answer cannot pass by the
-    facet matching nothing.
+    `withheld=True` on the record phase is a withdrawn entry's, whether it is the first record or a
+    re-record of a row already held; the row stays in the table, which the app role cannot delete
+    from. The served control sits in the same scope, so an empty answer cannot pass by the facet
+    matching nothing.
     """
 
     async def _body(index: LabelIndex, tag: str) -> None:
@@ -451,12 +451,9 @@ def test_a_withheld_row_answers_nothing_until_a_current_record_clears_it() -> No
         await index.record(_label(pending))
         # The unscoped coverage read too, asserted by delta since the durable index is shared.
         whole = (await index.coverage(_VERSION)).total
-        await index.withhold(_SOURCE, amended)
+        await index.record(_label(amended).model_copy(update={"withheld": True}))
         assert (await index.coverage(_VERSION)).total == whole - 1
-        await index.withhold(_SOURCE, pending)
-        before = await index.count()
-        await index.withhold(_SOURCE, f"{tag}-wh-never-recorded")
-        assert await index.count() == before, "withholding an absent row created one"
+        await index.record(_label(pending).model_copy(update={"withheld": True}))
 
         keys = frozenset((_SOURCE, rid) for rid in (served, amended, withdrawn, pending))
         selection = await index.select(Facet(reaction_keys=keys), _VERSION, limit=50)

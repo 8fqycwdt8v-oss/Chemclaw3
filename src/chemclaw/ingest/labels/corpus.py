@@ -266,7 +266,7 @@ def _collect_fingerprint(
     """
     try:
         record = record_for_reaction(
-            label.reaction_id, transformation_of(label.record_smiles)
+            label.reaction_id, transformation_of(label.reaction_string)
         ).model_copy(update={"source": source})
     except FingerprintInputError:
         report.unfingerprintable += 1

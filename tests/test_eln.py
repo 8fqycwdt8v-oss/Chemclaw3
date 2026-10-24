@@ -2469,7 +2469,7 @@ async def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
     await ingest_reaction(reaction, rxn, mol, rec, label_index=labels, source="eln-json")
 
     [row] = await labels.stale("any-version", limit=10)
-    assert "CC#N" in row.record_smiles
+    assert "CC#N" in (row.record_smiles or "")
     assert "CC#N" not in reaction.transformation_smiles()
     assert "CC#N" in {s.smiles for s in row.species}
 

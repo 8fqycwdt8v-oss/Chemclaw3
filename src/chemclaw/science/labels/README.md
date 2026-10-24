@@ -37,9 +37,19 @@ base*. And `ElnAdapter` offers `fetch_new_entries(since)` and nothing that reads
 id, so there is no second chance to ask the source.
 
 `withheld` belongs to neither phase: it follows the ELN entry the row records. The ingest writes it
-with every record phase, and sets it alone (`LabelIndex.withhold`) when the entry is amended to name
-a species without its structure, because the app role cannot delete the row. Every read skips a
-withheld row, and a structured, current re-ingest clears it.
+with every record phase, so a withdrawal sets it and a re-publication clears it; every read skips a
+withheld row, because the app role cannot delete one.
+
+**A row has a tier.** An entry whose source named a species without its structure
+(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`) has a `citation-only` row of
+the record phase alone: the species the source drew, each with the source's own role, plus the
+conditions, yield and workup, and no `record_smiles`. The labeller never reads it and nothing is
+derived for it (`stale()` and `store_labels()` skip the tier). The facet questions keyed on a drawn
+species or a role count it in a tier of its own and mark it; a facet narrowing on a named reaction,
+a product or a fingerprint neighbour cannot reach it
+(`D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier`). An entry changing tier
+re-records its row and species from nothing, so a role refined for one record is never read as the
+other's.
 
 ## Staleness is a query, not a flag
 

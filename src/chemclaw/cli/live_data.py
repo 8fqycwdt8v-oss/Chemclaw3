@@ -632,11 +632,14 @@ async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Che
 async def check_citation_only_is_not_structure_searchable(
     mapped: dict[str, list[OrdReaction]],
 ) -> Check:
-    """No citation-only record has a row in any index a structure search reads.
+    """No citation-only record is fingerprinted, and each has a label row with nothing derived.
 
-    Asked of the tables, not a search: zero `reaction_fingerprints` and `reaction_labels` rows is
-    the claim itself. A row predating an amendment to citation-only is not visible here;
-    `ReactionRecordStore.structurally_withheld` keeps such a row unserved.
+    Asked of the tables, not a search: zero `reaction_fingerprints` rows is the claim that
+    structure search is closed, and one `citation-only` `reaction_labels` row per record, with no
+    reaction string and nothing derived, is the claim that the facet questions can count it
+    (`D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier`). A row predating an
+    amendment to citation-only is not visible here; `ReactionRecordStore.structurally_withheld`
+    keeps such a fingerprint unserved.
     """
     ids = [
         reaction.reaction_id
@@ -654,18 +657,23 @@ async def check_citation_only_is_not_structure_searchable(
         counts = []
         for statement in (
             "SELECT count(*) FROM reaction_fingerprints WHERE id = ANY(%s)",
-            "SELECT count(*) FROM reaction_labels WHERE reaction_id = ANY(%s)",
+            "SELECT count(*) FROM reaction_labels WHERE reaction_id = ANY(%s) "
+            "AND tier = 'citation-only' AND record_smiles IS NULL AND labeller_version IS NULL "
+            "AND named_reaction IS NULL AND mapped_smiles IS NULL",
+            "SELECT count(*) FROM reaction_labels WHERE reaction_id = ANY(%s) "
+            "AND tier <> 'citation-only'",
         ):
             cursor = await connection.execute(statement, (ids,))
             row = await cursor.fetchone()
             counts.append(0 if row is None else int(row[0]))
-    fingerprints, labels = counts
+    fingerprints, label_rows, structured_rows = counts
     return Check(
         name="citation-only is not structure-searchable",
-        passed=fingerprints == 0 and labels == 0,
+        passed=fingerprints == 0 and structured_rows == 0 and label_rows == len(ids),
         observed=(
             f"{len(ids)} citation-only records: {fingerprints} reaction-fingerprint rows, "
-            f"{labels} label rows"
+            f"{label_rows} label rows of the tier with nothing derived, "
+            f"{structured_rows} label rows of another tier"
         ),
     )
 

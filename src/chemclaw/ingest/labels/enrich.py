@@ -242,13 +242,13 @@ async def _label(
     """
     representations = await _batch(
         lambda rows: labeller.represent(
-            [(token, r.record_smiles, [s.smiles for s in r.species]) for token, r in rows]
+            [(token, r.reaction_string, [s.smiles for s in r.species]) for token, r in rows]
         ),
         stale,
         "represent",
     )
     namings = await _batch(
-        lambda rows: labeller.name([(token, r.record_smiles) for token, r in rows]),
+        lambda rows: labeller.name([(token, r.reaction_string) for token, r in rows]),
         stale,
         "name",
     )
