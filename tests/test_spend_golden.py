@@ -27,6 +27,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.spend import ledger as cost_module
 from chemclaw.spend import limits as budget_store
 from chemclaw.spend.guard import (
+    SPEND_WRAP_UP_NOTE,
     WRAP_UP_NOTE,
     AnswerAtTheCap,
     MeterTurnSpend,
@@ -205,16 +206,16 @@ _SPEND_GOLDEN: list[Any] = [
     (None, False, 0, False),
     (None, False, 0, False),
     (None, False, 0, False),
-    ({"jump_to": "end", "spend_capped": True}, True, 1000, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
-    ({"jump_to": "end", "spend_capped": True}, True, 1500, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
-    ({"jump_to": "end", "spend_capped": True}, True, 1500, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1000, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1500, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1500, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
     (None, False, 0, False),
     (None, False, 0, False),
-    ({"jump_to": "end", "spend_capped": True}, True, 1000, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1000, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
 ]
 
 
@@ -241,7 +242,7 @@ def _spend_decisions(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 def test_the_spend_cap_decides_each_row_as_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The billed-token cap ends the turn at the larger of its two readings, as recorded."""
+    """The billed-token cap grants its wrap-up at the larger of its two readings, as recorded."""
     assert _spend_decisions(monkeypatch) == _SPEND_GOLDEN
 
 
@@ -374,6 +375,7 @@ _WRAP_UP_GOLDEN: list[Any] = [
     ),
 ]
 _WRAP_UP_NOTE_DIGEST = "130acc01718ae1dc"
+_SPEND_WRAP_UP_NOTE_DIGEST = "ff090ce6169517b4"
 
 
 def _wrap_up() -> list[Any]:
@@ -419,6 +421,9 @@ def test_the_wrap_up_rewrites_request_and_reply_as_recorded() -> None:
     """The wrap-up turns tools off, appends the note and drops any tool call, as recorded."""
     assert _wrap_up() == _WRAP_UP_GOLDEN
     assert _digest(str(WRAP_UP_NOTE)) == _WRAP_UP_NOTE_DIGEST, "the model reads this sentence"
+    assert _digest(str(SPEND_WRAP_UP_NOTE)) == _SPEND_WRAP_UP_NOTE_DIGEST, (
+        "the model reads this sentence"
+    )
 
 
 # --- the per-session and per-user turn budget ----------------------------------------------------

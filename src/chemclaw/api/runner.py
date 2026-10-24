@@ -1337,8 +1337,9 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
 
     Separate from the loop cap because the remedy differs: a spend-capped turn may have had a small
     plan drowned in tool output, so the next step may be a narrower corpus or a higher
-    `agent_max_turn_billed_tokens`. The message carries the spend and the budget so the chemist can
-    judge which was wrong. Not retryable unchanged.
+    `agent_max_turn_billed_tokens`. The message carries the spend (the one tool-less wrap-up call
+    the guard grants included) and the budget so the chemist can judge which was wrong. Not
+    retryable unchanged.
     """
     # Already announced by an earlier ask.
     if ledger.spend_capped or not spend_hit_cap():

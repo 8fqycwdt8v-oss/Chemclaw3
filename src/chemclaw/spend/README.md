@@ -25,7 +25,9 @@ spend/
 
 - The runaway cap is a first-party `before_model` counter, never upstream's
   `ModelCallLimitMiddleware`: a counter in `after_model` can be skipped by a later hook that jumps.
-- A capped turn ends rather than raising, so its last answer still goes out, marked partial.
+- A capped turn ends rather than raising, so its answer still goes out, marked partial. Both caps
+  grant one tool-less wrap-up call (`guard.AnswerAtTheCap`) before ending: a turn that ends on a
+  cap with no answer has spent its budget for nothing, and no number prevents that.
 - `TurnCost` (the record) stays in `core/turn_cost.py` so `evals/` can score it without importing
   `agent/`. `agent/context_budget.py` is a context concern, not a spend one.
 - The per-user window is the `budget_usage` table and the ledger is `turn_costs`; neither moved.

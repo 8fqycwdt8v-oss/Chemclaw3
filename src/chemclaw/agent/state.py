@@ -112,8 +112,9 @@ class ChemclawState(PlanningState):
 
     # How many model calls this turn has *authorised* — the runaway guard's counter
     # (`spend/guard.py`). The increment is written in `before_model`, so a later `before_model`
-    # hook that ends the run (`guard.enforce_spend_cap`) leaves one increment for a call never
-    # made; the cap can bind one call early, never late (pinned by `tests/test_spend_cap.py`).
+    # hook that ends the run (`guard.enforce_spend_cap`'s second arrival) leaves one increment for
+    # a call never made; the cap can bind one call early, never late (pinned by
+    # `tests/test_spend_cap.py`).
     #
     # Counted in `before_model` because an `after_model` count can be skipped by any middleware
     # jumping from `after_model`. Untracked, so a new run on the same thread starts at 0. Not
@@ -133,9 +134,10 @@ class ChemclawState(PlanningState):
     # `wrap_model_call` as an absolute total, which is what `TurnTotal`'s fold is defined against.
     billed_tokens: NotRequired[Annotated[int, TurnTotal(int)]]
 
-    # Whether the spend guard stopped this turn, written on the stopping branch. The count alone
-    # cannot answer it: the stopping branch bills nothing, so a capped turn and one that finished at
-    # its last allowed token end at the same number.
+    # Whether the spend guard cut this turn short, written on the branch that fires (the first
+    # arrival over budget, which grants the wrap-up call, and the second, which ends the turn). The
+    # count alone cannot answer it: a capped turn and one that finished at its last allowed token
+    # end at the same number.
     spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
     # Whether *this graph* has spent its one tool-less call at the loop cap — the per-branch half of
