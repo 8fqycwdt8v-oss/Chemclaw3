@@ -97,10 +97,10 @@ def test_the_meter_reaches_the_channel_and_the_state_carries_the_total(
 def test_a_turn_over_its_budget_is_stopped_and_says_so(
     monkeypatch: pytest.MonkeyPatch, watch: Any
 ) -> None:
-    """Past the budget the graph ends, and the fact is on the state.
+    """Past the budget the graph makes one last call and ends, and the fact is on the state.
 
-    Two calls of 600 against 1,000: the third is refused at 1,200, so the cap bounds spend before
-    the next call.
+    Two calls of 600 against 1,000: the third arrival is over at 1,200 and is the tool-less
+    wrap-up, so the turn bills 1,800 and no more.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600, 600))))
@@ -108,21 +108,20 @@ def test_a_turn_over_its_budget_is_stopped_and_says_so(
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
     assert spend_capped(result)
-    assert result["billed_tokens"] == 1_200
+    assert result["billed_tokens"] == 1_800
     # The runner's reader agrees with the state's, which is what lets a streaming driver — which
-    # never gets the final state back — report the same fact.
+    # never gets the final state back — report the same fact, wrap-up call included.
     assert spend_hit_cap()
-    assert turn_billed_tokens() == 1_200
+    assert turn_billed_tokens() == 1_800
 
 
-def test_the_call_count_is_what_the_turn_authorised_not_what_it_made(
+def test_the_call_count_includes_the_wrap_up_the_cap_granted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`model_calls` counts authorisations, not completions.
+    """`model_calls` counts authorisations, and the wrap-up is one: three, all made.
 
-    `enforce_loop_cap` increments in `before_model`, which no later hook can skip, so a later hook
-    ending the run leaves one extra count. That errs early, and is pinned because the field is
-    public.
+    `enforce_loop_cap` increments in `before_model` ahead of the spend hook, so the call the spend
+    cap turns into its answer is counted like any other.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600, 600))))
@@ -130,12 +129,12 @@ def test_the_call_count_is_what_the_turn_authorised_not_what_it_made(
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
     assert spend_capped(result)
-    assert result["billed_tokens"] == 1_200, "two calls were billed"
-    assert result["model_calls"] == 3, "the third was authorised and never made"
+    assert result["billed_tokens"] == 1_800, "three calls were billed"
+    assert result["model_calls"] == 3, "two ordinary calls and the wrap-up"
 
 
 def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A capped turn delivers its partial answer rather than raising it away.
+    """A capped turn delivers the model's own wrap-up rather than raising it away.
 
     Unlike upstream's `ModelCallLimitMiddleware`, this cap fabricates no assistant message.
     """
@@ -145,11 +144,12 @@ def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> N
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
     assert spend_capped(result)
-    # The last assistant message is the model's own: the cap fires after a tool result, and nothing
-    # may be appended as the assistant, since the CLI, reports and the persisted thread read that
-    # slot.
+    # The last assistant message is the model's own, from the wrap-up call (a scripted tool call,
+    # had it asked for one, is dropped): nothing may be appended as the assistant, since the CLI,
+    # reports and the persisted thread read that slot.
     assistant = [m for m in result["messages"] if isinstance(m, AIMessage)]
-    assert assistant[-1].content == "answer 0"
+    assert assistant[-1].content == "answer 1"
+    assert not assistant[-1].tool_calls
 
 
 def test_the_cap_binds_with_no_watch_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,7 +283,7 @@ def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
 
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
-    assert result["billed_tokens"] == 1_000
+    assert result["billed_tokens"] == 1_500, "the wrap-up is the third call"
     assert spend_capped(result), (
         "a turn that spent exactly its budget was allowed another model call — the comparison is "
         "`>=` deliberately, and `>` would let every round-number budget overrun by one call"
@@ -461,23 +461,6 @@ def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
             f"the {cap} cap's enforcer does not go through {recorder}(), so that recorder has no "
             "producer and the runner's reader is fed by something else"
         )
-
-
-def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
-    """The turn cap stays above what the other two guards authorise.
-
-    A lawful turn is at most `harness_max_loop_iterations` calls of at most
-    `agent_context_token_budget` each, and the whole prefix is billed every call. A cap below that
-    product silently supersedes the loop cap. This holds the shipped default; a deployment may set a
-    smaller cost budget deliberately.
-    """
-    lawful_ceiling = settings.harness_max_loop_iterations * settings.agent_context_token_budget
-    assert settings.agent_max_turn_billed_tokens >= lawful_ceiling, (
-        f"the turn cap ({settings.agent_max_turn_billed_tokens:,}) is below the "
-        f"{lawful_ceiling:,} tokens that {settings.harness_max_loop_iterations} model calls at "
-        f"agent_context_token_budget already authorise, so it refuses lawful turns and makes the "
-        "loop cap unreachable"
-    )
 
 
 def test_the_turn_cap_funds_more_calls_than_the_loop_cap_permits() -> None:

@@ -169,12 +169,12 @@ class AgentSettings(BaseSettings):
     plan_max_tools_per_step: int = Field(default=32, ge=1)
 
     # Billed tokens one turn may spend (input, output and cache, helpers included) before
-    # `spend/guard.py` ends it with a partial answer and `spend_cap_reached`. The loop cap
-    # counts calls, not cost, and `spend/limits.py` meters only between turns. A runaway backstop,
-    # not a budget: derived as `harness_max_loop_iterations` calls each at
-    # `agent_context_token_budget`, so a lawful turn never hits it (`tests/test_spend_cap.py` holds
-    # that). Set lower from `turn_costs` to buy a cost ceiling, knowing it refuses work. 0 means no
-    # cap.
+    # `spend/guard.py` grants it one tool-less call to write its answer, then ends it, with the
+    # answer marked partial and `spend_cap_reached`. The loop cap counts calls, not cost, and
+    # `spend/limits.py` meters only between turns. A runaway backstop, not a budget: the size of one
+    # call depends on how many connectors a deployment binds, so no number keeps a lawful turn
+    # under it, and reaching it costs the last call rather than the answer. Set lower from
+    # `turn_costs` to buy a cost ceiling, knowing it cuts work short. 0 means no cap.
     agent_max_turn_billed_tokens: int = Field(default=3_000_000, ge=0)
 
     # Supersteps one model call costs, for deriving `agent_recursion_limit`. The framework default

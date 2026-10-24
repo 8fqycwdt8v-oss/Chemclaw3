@@ -3,11 +3,13 @@
 Both are `before_model` hooks, which no later hook can skip
 (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`), counted in state channels
 (`ChemclawState.model_calls`, `billed_tokens`: `TurnTotal`s, so one budget spans subagents and a
-fan-out folds additively). Each ends the run rather than raising, so the last answer still goes
-out, marked partial by `chemclaw.api.runner`, which reads `loop_hit_cap()` / `spend_hit_cap()`
-because a streaming driver never gets the final state back (`loop_capped(state)` /
-`spend_capped(state)` read it where it does). The runaway cap grants one tool-less wrap-up call
-(`AnswerAtTheCap`); the spend cap has none, since past the budget there is nothing left to spend.
+fan-out folds additively). Neither raises, so the turn still answers, marked partial by
+`chemclaw.api.runner`, which reads `loop_hit_cap()` / `spend_hit_cap()` because a streaming driver
+never gets the final state back (`loop_capped(state)` / `spend_capped(state)` read it where it
+does). Each grants its graph one tool-less wrap-up call (`AnswerAtTheCap`, through the one
+`loop_wrap_up` flag) and ends the turn on the second arrival: a cap that ends a turn with no answer
+has spent the budget for nothing, and the size of one call depends on how many connectors a
+deployment binds, so no number makes the budget safe to end on.
 `MeterTurnSpend` is the only hook that sees a response's bill. Limits come from `SpendPolicy`.
 """
 
@@ -90,7 +92,8 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     `before_model` and offers a non-message exit.
 
     The run ends rather than raising, after one tool-less call whose answer goes out and is marked
-    partial by `chemclaw.api.runner`.
+    partial by `chemclaw.api.runner`. A wrap-up the spend cap already granted counts as this graph's
+    one: past the cap too, the next arrival ends the turn.
     """
     # The count has three floors. The channel is untracked, so a resumed turn reads 0; the thread
     # (this turn's assistant messages) is the floor for that. On an ordinary turn the two are equal
@@ -131,7 +134,7 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     return {"model_calls": own + 1}
 
 
-#: What a graph at the cap is told on its one tool-less call. Added to the request only, never
+#: What a graph at the step cap is told on its one tool-less call. Added to the request only, never
 #: stored. Worded to be obeyed rather than answered, so the reply does not open with an
 #: acknowledgement.
 WRAP_UP_NOTE = ModelProse(
@@ -145,13 +148,16 @@ WRAP_UP_NOTE = ModelProse(
 
 
 class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
-    """Turn the call `enforce_loop_cap` authorises past the cap into an answer, not another step.
+    """Turn the call a cap authorises past its limit into an answer, not another step.
+
+    `enforce_loop_cap` and `enforce_spend_cap` both authorise it, through `loop_wrap_up`.
 
     On the request and response only, never the thread:
 
     - **`tool_choice="none"`, with the tools still bound**: a thread with `tool_use` blocks must
       declare tools, so unbinding them is a 400.
-    - **`WRAP_UP_NOTE` appended** to the request's messages.
+    - **`WRAP_UP_NOTE` appended** to the request's messages, for either cap: the chemist is told
+      the true reason by the `spend_cap_reached` event that follows the answer.
     - **Any tool call in the reply is dropped**, with a warning, so a provider ignoring
       `tool_choice` cannot buy another round and the thread stays legal; the text is kept exactly.
 
@@ -186,7 +192,7 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
                 kept.append(message)
                 continue
             logger.warning(
-                "the wrap-up call at the loop cap asked for tools despite tool_choice='none'; "
+                "the wrap-up call at a cap asked for tools despite tool_choice='none'; "
                 "the calls are dropped and its text is kept"
             )
             extra = {k: v for k, v in message.additional_kwargs.items() if k != "tool_calls"}
@@ -344,12 +350,17 @@ def _meter(billed: int) -> None:
 
 @before_model(can_jump_to=["end"], state_schema=ChemclawState)
 def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
-    """End the turn before a model call that would put it past its billed-token budget.
+    """Grant one tool-less call, then end, once the turn is over its billed-token budget.
 
-    Checked before the call, the only placement that bounds anything. The cap therefore bounds spend
-    before the next call; the last allowed call may overshoot by at most one call's bill, since a
-    call's cost cannot be predicted reliably beforehand. `can_jump_to` is what connects the jump to
-    an edge.
+    Checked before the call, the only placement that bounds anything. The first arrival over budget
+    does not end the turn: it sets `loop_wrap_up`, so `AnswerAtTheCap` makes the call it is about to
+    authorise an answer, and that call may overshoot by its own bill. The second arrival ends the
+    run. A turn ended with no answer spent its whole budget for nothing, and no number prevents it:
+    the size of one call depends on how many connectors a deployment binds. `can_jump_to` is what
+    connects the jump to an edge.
+
+    The hook runs after `enforce_loop_cap`, so a `loop_wrap_up` it finds may be that cap's pending
+    wrap-up (`spend_capped` unset): that call is the answer and the loop cap ends the turn after it.
 
     Args:
         state: The graph state, carrying `billed_tokens` as this turn's calls have folded it.
@@ -357,7 +368,8 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
         per-run one.
 
     Returns:
-        `{"jump_to": "end", "spend_capped": True}` when the turn is over budget, else `None`.
+        `{"spend_capped": True, "loop_wrap_up": True}` on the first arrival over budget,
+        `{"jump_to": "end", "spend_capped": True}` on the second, else `None`.
     """
     budget = SpendPolicy.current().billed_tokens_per_turn
     if not budget:
@@ -370,13 +382,24 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
     billed = max(int(state.get("billed_tokens", 0)), metered_turn_tokens())
     if billed < budget:
         return None
-    logger.warning("the turn hit its %d billed-token cap after %d tokens", budget, billed)
+    if state.get("loop_wrap_up"):
+        if not state.get("spend_capped"):
+            # The step cap's wrap-up, authorised a moment ago in this same pass: it is the answer.
+            return None
+        logger.warning("the turn hit its %d billed-token cap after its wrap-up", budget)
+        return {"jump_to": "end", "spend_capped": True}
+    logger.warning(
+        "the turn hit its %d billed-token cap after %d tokens; one last call, without tools, "
+        "writes the answer from what it has",
+        budget,
+        billed,
+    )
     record_spend_cap(billed)
-    return {"jump_to": "end", "spend_capped": True}
+    return {"spend_capped": True, "loop_wrap_up": True}
 
 
 def spend_capped(state: Mapping[str, Any]) -> bool:
-    """Whether this turn was stopped by its spend cap — read, not inferred.
+    """Whether this turn was cut short by its spend cap — read, not inferred.
 
     Args:
         state: The state the finished run **returned**. Not `graph.get_state(config).values`: the

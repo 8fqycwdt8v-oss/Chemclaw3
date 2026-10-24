@@ -128,6 +128,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 
 ### Gated on a live model budget
 
+- **A spend-capped wrap-up tells the model it hit a step limit, not a budget** — `spend/guard.py::WRAP_UP_NOTE` is shared by both caps because an accurate note is model-facing text and ships behind `make model-text-eval` · *Revisit:* a gateway credential for that evaluation.
 - **Tool selection is never exercised by `make test`** — every test scripts its own `tool_call` and `tests/test_probe_coverage.py` checks probe names only, so a prompt change that stops the model reaching for a tool passes the gate · *Revisit:* a gateway credential in the environment that runs `make live-ab`; gate on its tool-selection accuracy.
 - **Model-facing text rewrite (W2.15–W2.17), the deepagents upgrade merge (W5.2), the delegation re-check (W5.14), a semantic default embedder (W7.1) and the retrieval-eval floor (W7.3)** — each ships only behind the live arm; the first step of each is in `docs/planning/programme-deferred-2026-10.md` §A · *Revisit:* a gateway credential in the environment that runs `make live-ab`.
 - **The judge names no claims on 88% of turns** — schema half fixed, measurement half open · *Revisit:* a live run re-counts non-empty `claims`.
