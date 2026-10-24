@@ -27,7 +27,6 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.spend import ledger as cost_module
 from chemclaw.spend import limits as budget_store
 from chemclaw.spend.guard import (
-    SPEND_WRAP_UP_NOTE,
     WRAP_UP_NOTE,
     AnswerAtTheCap,
     MeterTurnSpend,
@@ -375,7 +374,6 @@ _WRAP_UP_GOLDEN: list[Any] = [
     ),
 ]
 _WRAP_UP_NOTE_DIGEST = "130acc01718ae1dc"
-_SPEND_WRAP_UP_NOTE_DIGEST = "ff090ce6169517b4"
 
 
 def _wrap_up() -> list[Any]:
@@ -421,9 +419,6 @@ def test_the_wrap_up_rewrites_request_and_reply_as_recorded() -> None:
     """The wrap-up turns tools off, appends the note and drops any tool call, as recorded."""
     assert _wrap_up() == _WRAP_UP_GOLDEN
     assert _digest(str(WRAP_UP_NOTE)) == _WRAP_UP_NOTE_DIGEST, "the model reads this sentence"
-    assert _digest(str(SPEND_WRAP_UP_NOTE)) == _SPEND_WRAP_UP_NOTE_DIGEST, (
-        "the model reads this sentence"
-    )
 
 
 # --- the per-session and per-user turn budget ----------------------------------------------------

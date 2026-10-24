@@ -22,7 +22,6 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.state import turn_input
 from chemclaw.core.config import settings
 from chemclaw.spend.guard import (
-    SPEND_WRAP_UP_NOTE,
     WRAP_UP_NOTE,
     begin_spend_watch,
     end_spend_watch,
@@ -67,7 +66,7 @@ class _Turn(GenericFakeChatModel):
         }
         last = messages[-1]
         ls = [{"name": "ls", "args": {"path": "."}, "id": f"c{self.calls}", "type": "tool_call"}]
-        if isinstance(last, HumanMessage) and last.content in (WRAP_UP_NOTE, SPEND_WRAP_UP_NOTE):
+        if isinstance(last, HumanMessage) and last.content in (WRAP_UP_NOTE,):
             self.notes.append(str(last.content))
             message = AIMessage(
                 content=_ANSWER, tool_calls=ls if self.obstinate else [], usage_metadata=usage
@@ -134,7 +133,7 @@ def test_a_turn_over_budget_early_answers_and_bills_the_wrap_up(
     assert model.calls == 3, "two ordinary calls, then the one wrap-up and nothing after"
     assert final["billed_tokens"] == 3 * 600, "the wrap-up call's bill is in the turn's total"
     assert watched == final["billed_tokens"]
-    assert model.notes == [str(SPEND_WRAP_UP_NOTE)], "the call must say the budget, not the steps"
+    assert model.notes == [str(WRAP_UP_NOTE)], "both caps send the one existing note"
     assert model.choices[-1] == "none"
 
 
@@ -197,7 +196,7 @@ def test_every_graph_over_budget_gets_one_wrap_up_across_a_fan_out(
 
     assert _last_text(final) == _ANSWER
     assert spend_capped(final) and hit
-    assert model.notes == [str(SPEND_WRAP_UP_NOTE)] * (helpers + 1), (
+    assert model.notes == [str(WRAP_UP_NOTE)] * (helpers + 1), (
         f"{len(model.notes)} wrap-up calls for {helpers + 1} graphs"
     )
 

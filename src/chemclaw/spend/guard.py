@@ -146,16 +146,6 @@ WRAP_UP_NOTE = ModelProse(
     "next as if you were about to do it."
 )
 
-#: The same call's note when the billed-token budget, not the step cap, is what ended the work.
-SPEND_WRAP_UP_NOTE = ModelProse(
-    "[System note, not from the person you are working for — do not reply to it or mention it.] "
-    "This turn has used its budget, so no further tools can run. Write your final response "
-    "now, from what you have already found: lead with what the evidence gathered so far supports, "
-    "with its citations, then say plainly that the work was cut short because the budget was used "
-    "and name what was left unexamined, so it is not read as absent. Do not describe what you "
-    "would check next as if you were about to do it."
-)
-
 
 class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
     """Turn the call a cap authorises past its limit into an answer, not another step.
@@ -166,8 +156,8 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
 
     - **`tool_choice="none"`, with the tools still bound**: a thread with `tool_use` blocks must
       declare tools, so unbinding them is a 400.
-    - **`WRAP_UP_NOTE` appended** to the request's messages, or `SPEND_WRAP_UP_NOTE` when the
-      spend cap granted the call (`spend_capped`).
+    - **`WRAP_UP_NOTE` appended** to the request's messages, for either cap: the chemist is told
+      the true reason by the `spend_cap_reached` event that follows the answer.
     - **Any tool call in the reply is dropped**, with a warning, so a provider ignoring
       `tool_choice` cannot buy another round and the thread stays legal; the text is kept exactly.
 
@@ -179,12 +169,11 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
         """The wrap-up request, or `request` unchanged off the wrap-up."""
         if not request.state.get("loop_wrap_up"):
             return request
-        note = SPEND_WRAP_UP_NOTE if request.state.get("spend_capped") else WRAP_UP_NOTE
         return request.override(
             tool_choice="none" if request.tools else None,
             # A `request_note`, not a bare `HumanMessage`, so the conversation window does not treat
             # it as the newest turn and cut the chemist's question.
-            messages=[*request.messages, request_note(note)],
+            messages=[*request.messages, request_note(WRAP_UP_NOTE)],
         )
 
     @staticmethod

@@ -24,7 +24,7 @@ now is wrong for the next deployment.
    the per-call size without touching the setting. The loop cap's wrap-up call still falls outside it.
 3. **The spend cap grants the one tool-less wrap-up call the loop cap grants.** The first arrival
    over budget sets `spend_capped` and `loop_wrap_up`; `AnswerAtTheCap` makes that call
-   `tool_choice="none"` with a note naming the budget and drops any tool call in the reply, so the
+   `tool_choice="none"` with the existing step-cap note and drops any tool call in the reply, so the
    graph ends on its own. A second arrival ends the turn.
 
 ## Decision
@@ -41,8 +41,10 @@ over budget gets one call.
 
 - An over-budget turn makes exactly one more call than before, billed to the turn; the overshoot
   bound is one call plus the wrap-up. The default 3,000,000 does not change.
-- The wrap-up note for this cap (`SPEND_WRAP_UP_NOTE`) is model-facing text mirroring the step-cap
-  note; `tests/test_spend_golden.py` pins its digest.
+- Both caps send the existing `WRAP_UP_NOTE` verbatim: a new model-facing sentence would need the
+  live evaluation `D-2026-10-08` requires, disproportionate for a rare path. The model is told
+  "step limit" while the chemist is told the true reason by `spend_cap_reached`; an accurate note is
+  a BACKLOG row.
 - `spend_cap_reached` still fires and the answer is marked partial; "nothing had been written"
   now means the wrap-up itself came back empty.
 - `tests/test_spend_cap.py` and `tests/test_spend_wrap_up.py` hold the cases.
