@@ -23,14 +23,14 @@
   "profile": "default",
   "prefix": {
     "tool_schemas": 64622,
-    "instructions": 3934,
+    "instructions": 3986,
     "skill_descriptions": 3283,
-    "total": 71839
+    "total": 71891
   },
   "totals": {
     "every-request": {
-      "entries": 180,
-      "tokens": 72483
+      "entries": 181,
+      "tokens": 72539
     },
     "conditional": {
       "entries": 18,
@@ -64,222 +64,231 @@
       "id": "block:10",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[10]",
+      "residence": "every-request",
+      "tokens": 90,
+      "chars": 344,
+      "sha256": "81bd44c0eac6fd7e"
+    },
+    {
+      "id": "block:11",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[11]",
       "residence": "conditional",
       "tokens": 77,
       "chars": 290,
       "sha256": "0894d48a936ef675"
     },
     {
-      "id": "block:11",
+      "id": "block:12",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[11]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[12]",
       "residence": "every-request",
       "tokens": 106,
       "chars": 408,
       "sha256": "0ce082f3f7e90769"
     },
     {
-      "id": "block:12",
+      "id": "block:13",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[12]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[13]",
       "residence": "every-request",
       "tokens": 71,
       "chars": 265,
       "sha256": "7e848a999b311d15"
     },
     {
-      "id": "block:13",
+      "id": "block:14",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[13]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[14]",
       "residence": "every-request",
       "tokens": 134,
       "chars": 517,
       "sha256": "c972791b13897369"
     },
     {
-      "id": "block:14",
+      "id": "block:15",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[14]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[15]",
       "residence": "every-request",
       "tokens": 177,
       "chars": 692,
       "sha256": "a9bd6c5fdccce6c1"
     },
     {
-      "id": "block:15",
+      "id": "block:16",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[15]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[16]",
       "residence": "conditional",
       "tokens": 175,
       "chars": 681,
       "sha256": "5673c56b8d435966"
     },
     {
-      "id": "block:16",
+      "id": "block:17",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[16]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[17]",
       "residence": "every-request",
       "tokens": 136,
       "chars": 526,
       "sha256": "c0e0e310080e775a"
     },
     {
-      "id": "block:17",
+      "id": "block:18",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[17]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[18]",
       "residence": "every-request",
       "tokens": 183,
       "chars": 713,
       "sha256": "25e1381cfacea8ad"
     },
     {
-      "id": "block:18",
+      "id": "block:19",
       "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[18]",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[19]",
       "residence": "conditional",
       "tokens": 105,
       "chars": 404,
       "sha256": "ac04c8f8ba560e23"
     },
     {
-      "id": "block:19",
-      "kind": "prompt-block",
-      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[19]",
-      "residence": "every-request",
-      "tokens": 143,
-      "chars": 554,
-      "sha256": "3866fdc9c1385b27"
-    },
-    {
       "id": "block:2",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[2]",
       "residence": "every-request",
-      "tokens": 89,
-      "chars": 337,
-      "sha256": "f8c24814b7f08dec"
+      "tokens": 56,
+      "chars": 206,
+      "sha256": "57a2e908180ef7bf"
     },
     {
       "id": "block:20",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[20]",
       "residence": "every-request",
-      "tokens": 167,
-      "chars": 652,
-      "sha256": "3082fa0b200bd27c"
+      "tokens": 143,
+      "chars": 554,
+      "sha256": "3866fdc9c1385b27"
     },
     {
       "id": "block:21",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[21]",
       "residence": "every-request",
-      "tokens": 217,
-      "chars": 850,
-      "sha256": "6058ac604e010d3c"
+      "tokens": 167,
+      "chars": 652,
+      "sha256": "3082fa0b200bd27c"
     },
     {
       "id": "block:22",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[22]",
       "residence": "every-request",
-      "tokens": 95,
-      "chars": 363,
-      "sha256": "c855674f6126954f"
+      "tokens": 217,
+      "chars": 850,
+      "sha256": "6058ac604e010d3c"
     },
     {
       "id": "block:23",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[23]",
       "residence": "every-request",
-      "tokens": 20,
-      "chars": 64,
-      "sha256": "9de42b4af305af85"
+      "tokens": 95,
+      "chars": 363,
+      "sha256": "c855674f6126954f"
     },
     {
       "id": "block:24",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[24]",
       "residence": "every-request",
-      "tokens": 17,
-      "chars": 50,
-      "sha256": "1e9cb16d573912a4"
+      "tokens": 20,
+      "chars": 64,
+      "sha256": "9de42b4af305af85"
     },
     {
       "id": "block:25",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[25]",
       "residence": "every-request",
-      "tokens": 63,
-      "chars": 234,
-      "sha256": "23b2f85919774857"
+      "tokens": 17,
+      "chars": 50,
+      "sha256": "1e9cb16d573912a4"
     },
     {
       "id": "block:26",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[26]",
       "residence": "every-request",
-      "tokens": 284,
-      "chars": 1117,
-      "sha256": "ea37f1a5aaefcd6a"
+      "tokens": 63,
+      "chars": 234,
+      "sha256": "23b2f85919774857"
     },
     {
       "id": "block:27",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[27]",
       "residence": "every-request",
-      "tokens": 146,
-      "chars": 568,
-      "sha256": "f57d19713fb00208"
+      "tokens": 284,
+      "chars": 1117,
+      "sha256": "ea37f1a5aaefcd6a"
     },
     {
       "id": "block:28",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[28]",
       "residence": "every-request",
-      "tokens": 233,
-      "chars": 914,
-      "sha256": "5945cfac4778af2e"
+      "tokens": 146,
+      "chars": 568,
+      "sha256": "f57d19713fb00208"
     },
     {
       "id": "block:29",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[29]",
       "residence": "every-request",
-      "tokens": 38,
-      "chars": 134,
-      "sha256": "cb9b287ce77d7916"
+      "tokens": 233,
+      "chars": 914,
+      "sha256": "5945cfac4778af2e"
     },
     {
       "id": "block:3",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[3]",
       "residence": "every-request",
-      "tokens": 28,
-      "chars": 95,
-      "sha256": "8ae954928fa76800"
+      "tokens": 89,
+      "chars": 337,
+      "sha256": "f8c24814b7f08dec"
     },
     {
       "id": "block:30",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[30]",
       "residence": "every-request",
-      "tokens": 360,
-      "chars": 1421,
-      "sha256": "4fcc9a9f17d4f090"
+      "tokens": 38,
+      "chars": 134,
+      "sha256": "cb9b287ce77d7916"
     },
     {
       "id": "block:31",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[31]",
       "residence": "every-request",
-      "tokens": 317,
-      "chars": 1250,
-      "sha256": "be3b8f3adce1aa88"
+      "tokens": 360,
+      "chars": 1421,
+      "sha256": "4fcc9a9f17d4f090"
     },
     {
       "id": "block:32",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[32]",
+      "residence": "every-request",
+      "tokens": 317,
+      "chars": 1250,
+      "sha256": "be3b8f3adce1aa88"
+    },
+    {
+      "id": "block:33",
+      "kind": "prompt-block",
+      "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[33]",
       "residence": "every-request",
       "tokens": 125,
       "chars": 484,
@@ -290,54 +299,54 @@
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[4]",
       "residence": "every-request",
-      "tokens": 83,
-      "chars": 313,
-      "sha256": "a3bcd05fddde6c5e"
+      "tokens": 28,
+      "chars": 95,
+      "sha256": "8ae954928fa76800"
     },
     {
       "id": "block:5",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[5]",
       "residence": "every-request",
-      "tokens": 41,
-      "chars": 145,
-      "sha256": "f2257719af5e1c18"
+      "tokens": 83,
+      "chars": 313,
+      "sha256": "a3bcd05fddde6c5e"
     },
     {
       "id": "block:6",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[6]",
       "residence": "every-request",
-      "tokens": 60,
-      "chars": 222,
-      "sha256": "cf9ed72aa44d2e5d"
+      "tokens": 41,
+      "chars": 145,
+      "sha256": "f2257719af5e1c18"
     },
     {
       "id": "block:7",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[7]",
       "residence": "every-request",
-      "tokens": 150,
-      "chars": 583,
-      "sha256": "fba4c131eea442d9"
+      "tokens": 60,
+      "chars": 222,
+      "sha256": "cf9ed72aa44d2e5d"
     },
     {
       "id": "block:8",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[8]",
       "residence": "every-request",
-      "tokens": 242,
-      "chars": 949,
-      "sha256": "49594c9a04b523b7"
+      "tokens": 150,
+      "chars": 583,
+      "sha256": "fba4c131eea442d9"
     },
     {
       "id": "block:9",
       "kind": "prompt-block",
       "owner": "src/chemclaw/agent/chemclaw_agent.py:_INSTRUCTION_BLOCKS[9]",
       "residence": "every-request",
-      "tokens": 90,
-      "chars": 344,
-      "sha256": "81bd44c0eac6fd7e"
+      "tokens": 242,
+      "chars": 949,
+      "sha256": "49594c9a04b523b7"
     },
     {
       "id": "doc:ask_clarifying_question",
