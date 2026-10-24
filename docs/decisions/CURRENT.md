@@ -63,6 +63,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - Every connector job leaves a durable record — [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md); a finished job reaches the model through the mailbox — [D-2026-08-27-the-mailbox-reaches-the-model-not-only-the-browser](D-2026-08-27-the-mailbox-reaches-the-model-not-only-the-browser.md).
 - A geometry crosses into context as a handle, never a payload — [D-2026-08-21-a-geometry-is-an-address-not-a-payload](D-2026-08-21-a-geometry-is-an-address-not-a-payload.md).
 - BoFire is the BO engine — [D-012](D-012-bofire-is-the-bayesian-optimization-engine-no-in.md), [D-2026-08-04-what-bofire-does-when-you-actually-run-it](D-2026-08-04-what-bofire-does-when-you-actually-run-it.md).
+- A cached BO campaign costs ~284 + 31.5·R + 0.21·R² KiB in the SDK core, so the bo worker has its own workflow-cache ceiling (`connectors.bo.maxCachedWorkflows`) and the history is passed by reference later — [D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core](D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core.md).
 
 ## Connectors, sources and sinks
 
