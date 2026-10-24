@@ -71,6 +71,7 @@ from chemclaw.api.routes import (
     skills,
     streams,
     turns,
+    watches,
     workflows,
 )
 from chemclaw.api.schemas import _TRANSCRIPT_ARG_CHARS, _transcript
@@ -470,6 +471,7 @@ def create_app(
         members,
         exhibits,
         calc_artifacts,
+        watches,
     ):
         module.register(app)
 

@@ -32,6 +32,7 @@ _COLUMNS = "id, owner, query, note_type, last_seen_at, last_seen_note_ids"
 _SELECT_OWNER = f"SELECT {_COLUMNS} FROM subscriptions WHERE owner = %s ORDER BY id"
 _SELECT_ALL = f"SELECT {_COLUMNS} FROM subscriptions ORDER BY id"
 _DELETE = "DELETE FROM subscriptions WHERE owner = %s AND query = %s"
+_DELETE_ID = "DELETE FROM subscriptions WHERE owner = %s AND id = %s"
 
 # Accumulate within the watermark's date, reset when it rolls over. One SQL statement, so
 # overlapping digest runs cannot overwrite each other's additions and re-report them.
@@ -115,6 +116,19 @@ async def remove(owner: str, query: str) -> None:
         async with conn.cursor() as cur:
             await cur.execute(_DELETE, (owner, query))
         await conn.commit()
+
+
+async def remove_by_id(owner: str, subscription_id: int) -> bool:
+    """Drop one of `owner`'s standing queries by id; False when `owner` holds no such watch.
+
+    Owner-scoped in the statement itself, so another person's id deletes nothing.
+    """
+    async with _connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_DELETE_ID, (owner, subscription_id))
+            removed = cur.rowcount > 0
+        await conn.commit()
+    return removed
 
 
 async def mark_reported(subscription_id: int, note_ids: list[str]) -> None:

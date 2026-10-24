@@ -782,6 +782,10 @@
             "type": "array"
           },
           "kind": {
+            "enum": [
+              "request",
+              "protocol"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -2260,6 +2264,19 @@
         "title": "HandoffEvent",
         "type": "object"
       },
+      "HealthzOut": {
+        "description": "`GET /healthz` — liveness only: the process is up. Readiness is `GET /readyz`.",
+        "properties": {
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "HealthzOut",
+        "type": "object"
+      },
       "HtmlSpec": {
         "additionalProperties": false,
         "description": "A page the model wrote, rendered only inside the UI's sandbox origin, never by this server.\n\nThe backend stores and exports it as text and never serves it as `text/html`\n(`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`); the\npage runs in an opaque-origin iframe on a separate origin with `connect-src 'none'`. `height` is\nthe frame's initial height in CSS pixels, which the frame may report back.",
@@ -2656,7 +2673,7 @@
         "type": "object"
       },
       "NoteRecordedEvent": {
-        "description": "A note was written into the knowledge graph (gap RCH-4).\n\nA note write returns its reference into the *model's* context, so without this the chemist\nnever learns their contribution landed. This carries the reference back to the surface that\nproduced it.\n\n**The wire name was `note_proposed` and the event was never a proposal**\n(`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). Nothing reviews a note any more\n(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is\n`note_recorded`, and what a chemist reads has said \"recorded\" the whole time. The literal is an\nSSE discriminator two repositories switch on, so the rename is a three-step deploy and **the\nonly ordering with no broken state is reader first**: `Chemclaw3_ui` shipped a reader that\naccepts both names (its `shared/events.ts` carries the argument), this is the second step, and\nthe third — dropping the old name from that reader — is theirs and happens after this ships.\nThe reverse order silently drops the event in every browser not yet redeployed.\n\n`evals/live.py` is this repository's own reader and accepts both for the same window.",
+        "description": "A note was written into the knowledge graph (gap RCH-4).\n\nA note write returns its reference into the *model's* context, so without this the chemist\nnever learns their contribution landed. This carries the reference back to the surface that\nproduced it.\n\nRecorded, not proposed: nothing reviews a note\n(`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). The literal is an SSE\ndiscriminator `Chemclaw3_ui` switches on, so renaming it is a reader-first deploy.",
         "properties": {
           "note_id": {
             "title": "Note Id",
@@ -4046,6 +4063,10 @@
             "type": "string"
           },
           "kind": {
+            "enum": [
+              "request",
+              "protocol"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -4585,7 +4606,7 @@
       },
       "StatusIn": {
         "additionalProperties": false,
-        "description": "A lifecycle move.",
+        "description": "A lifecycle move.\n\nThe schema carries the rules the move is judged by (`lifecycle_rules`): `x-legal-moves` from\neach status, and the statuses a head's `kind` must be `protocol` for, or must not be.",
         "properties": {
           "expected_revision": {
             "minimum": 1.0,
@@ -4627,7 +4648,35 @@
           "expected_status"
         ],
         "title": "StatusIn",
-        "type": "object"
+        "type": "object",
+        "x-legal-moves": {
+          "abandoned": [
+            "draft"
+          ],
+          "approved": [
+            "abandoned",
+            "draft",
+            "executed"
+          ],
+          "draft": [
+            "abandoned",
+            "approved"
+          ],
+          "executed": [
+            "abandoned"
+          ],
+          "requested": [
+            "abandoned",
+            "draft"
+          ]
+        },
+        "x-statuses-needing-a-protocol": [
+          "approved",
+          "executed"
+        ],
+        "x-statuses-refusing-a-protocol": [
+          "requested"
+        ]
       },
       "StoredToolResult": {
         "description": "One stored tool result, as the fetch route returns it.\n\n`text` is exactly what the tool returned — the same string the answer verifier scores against,\nnot the preview. It is deliberately typed as text rather than parsed JSON: a tool result is\nwhatever the framework handed back, and a store that promised JSON would have to fail or lie\nabout the ones that are not.\n\n`correlation_id` rides along so a fetched result joins the audit trail and the logs of the turn\nthat produced it, which is the join a reviewer asks for and the one a ref alone cannot make.\n\n**Both `tool` and `correlation_id` are empty when the store cannot name one call**, and a\nreader must treat an empty one as \"unknown\" rather than as a value. A ref names *bytes*: two\ncalls in one session that returned identical text share one blob and one link row by design\n(D-011 applied to bytes), and there is then no single tool or turn the row belongs to. The\nwrite collapses a disagreeing column to `''` rather than overwriting it with the newest call's\n(see `_UPSERT_LINK`), because a label that is right most of the time is the failure mode this\nwhole surface is built to avoid — and \"Error: Function failed.\" makes it a certainty, not an\nedge case. What is never ambiguous is `text`: those are the bytes the ref addresses, and every\ncall that produced them produced exactly these.",
@@ -5256,6 +5305,25 @@
         "title": "TurnStartedEvent",
         "type": "object"
       },
+      "TurnStopOut": {
+        "description": "What `POST /sessions/{id}/turn/stop` answers.\n\n`stopped` is whether the turn has ended. `deferred` is true only for `?reason=unload`, when the\nstop waits out the reattach grace and may yet be cancelled by a reattach; it is omitted, not\nfalse, everywhere else, so the body of a plain stop is `{\"stopped\": true}`.",
+        "properties": {
+          "deferred": {
+            "default": false,
+            "title": "Deferred",
+            "type": "boolean"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped"
+        ],
+        "title": "TurnStopOut",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -5294,6 +5362,72 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WatchOut": {
+        "description": "One standing query and its watermark: only news after `last_seen_at` is reported.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "note_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Type"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "query",
+          "note_type",
+          "last_seen_at"
+        ],
+        "title": "WatchOut",
+        "type": "object"
+      },
+      "WatchesOut": {
+        "description": "The caller's watches, oldest first, and whether this deployment evaluates any of them.\n\n`digests_enabled` false means nothing runs a watch (`CHEMCLAW_DIGEST_ENABLED`): the rows are\nkept and will report once an operator turns digests on, so a surface must not promise news.",
+        "properties": {
+          "digests_enabled": {
+            "title": "Digests Enabled",
+            "type": "boolean"
+          },
+          "watches": {
+            "items": {
+              "$ref": "#/components/schemas/WatchOut"
+            },
+            "title": "Watches",
+            "type": "array"
+          }
+        },
+        "required": [
+          "watches",
+          "digests_enabled"
+        ],
+        "title": "WatchesOut",
         "type": "object"
       },
       "Well": {
@@ -5519,7 +5653,7 @@
   },
   "info": {
     "title": "Chemclaw",
-    "version": "1.1.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5661,11 +5795,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Healthz Healthz Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HealthzOut"
                 }
               }
             },
@@ -7666,11 +7796,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
-                  "title": "Response Stop Turn Sessions  Session Id  Turn Stop Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TurnStopOut"
                 }
               }
             },
@@ -8089,6 +8215,58 @@
           }
         },
         "summary": "Read Versions"
+      }
+    },
+    "/watches": {
+      "get": {
+        "description": "The caller's own standing queries.",
+        "operationId": "list_watches_watches_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Watches"
+      }
+    },
+    "/watches/{watch_id}": {
+      "delete": {
+        "description": "Stop one of the caller's watches. 404 for an id the caller does not hold.",
+        "operationId": "stop_watch_watches__watch_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "watch_id",
+            "required": true,
+            "schema": {
+              "title": "Watch Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Watch"
       }
     },
     "/workflows": {

@@ -31,6 +31,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    RevisionKind,
     StatusEvent,
 )
 from chemclaw.protocols.store import (
@@ -39,6 +40,7 @@ from chemclaw.protocols.store import (
     UnknownDesign,
     UnstorableDocument,
     default_design_store,
+    lifecycle_rules,
 )
 
 
@@ -46,7 +48,7 @@ class RevisionSummary(BaseModel):
     """One entry of the history list — enough to choose a revision to open."""
 
     revision: int
-    kind: str
+    kind: RevisionKind
     author_kind: AuthorKind
     author: str = ""
     change_note: str = ""
@@ -83,7 +85,7 @@ class DesignOut(BaseModel):
     design_id: str
     summary: DesignSummary | None = None
     revision: int
-    kind: str
+    kind: RevisionKind
     author_kind: AuthorKind
     author: str = ""
     change_note: str = ""
@@ -127,7 +129,11 @@ class RevisionOut(BaseModel):
 
 
 class StatusIn(BaseModel):
-    """A lifecycle move."""
+    """A lifecycle move.
+
+    The schema carries the rules the move is judged by (`lifecycle_rules`): `x-legal-moves` from
+    each status, and the statuses a head's `kind` must be `protocol` for, or must not be.
+    """
 
     status: DesignStatus
     # The revision the person was looking at when they decided; required for the same reason as
@@ -139,7 +145,7 @@ class StatusIn(BaseModel):
     # Recorded with the status move.
     reason: str = Field(default="", max_length=2000)
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra=lifecycle_rules())
 
 
 async def list_protocols(

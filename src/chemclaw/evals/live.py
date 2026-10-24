@@ -517,10 +517,7 @@ async def run_turn(
                         outcome.first_degraded_index = index
                 elif kind == "job_started":
                     outcome.jobs_started.append(str(event.get("job_id", event.get("job", ""))))
-                elif kind in {"note_recorded", "note_proposed"}:
-                    # Both event names, for one deployment cycle: `note_proposed` is the old name,
-                    # and a service one deploy behind would otherwise score its knowledge writes as
-                    # missing. Drop it once `Chemclaw3_ui` has.
+                elif kind == "note_recorded":
                     outcome.notes_proposed.append(str(event.get("note_id", "")))
                 elif kind == "question":
                     outcome.asked_clarifying = True
