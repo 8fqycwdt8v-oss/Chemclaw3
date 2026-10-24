@@ -1,6 +1,6 @@
 # deepagents: `permissions=` does not reach a caller-supplied `FilesystemMiddleware`
 
-**File against:** `langchain-ai/deepagents`. **Status:** draft, not filed. **Reproduced on:**
+**File against:** `langchain-ai/deepagents`. **Status:** not filed — fixed upstream: deepagents 0.7.31 and later take a public `permissions=` keyword, and the replaced-middleware repro denies the write on 0.7.32. **Reproduced on:**
 deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here).
 
 ## Title

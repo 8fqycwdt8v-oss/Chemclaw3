@@ -1,6 +1,6 @@
 # langchain: `ModelCallLimitMiddleware` counts in `after_model`, so another `after_model` hook can skip it
 
-**File against:** `langchain-ai/langchain`. **Status:** draft, not filed. **Reproduced on:**
+**File against:** `langchain-ai/langchain`. **Status:** filed as [langchain#41450](https://github.com/langchain-ai/langchain/issues/41450) (2026-10-24); reproduced on 1.4.7. **Reproduced on:**
 langchain 1.4.6 (latest on PyPI, 2026-10-14) and 1.3.16 (installed here).
 
 ## Title

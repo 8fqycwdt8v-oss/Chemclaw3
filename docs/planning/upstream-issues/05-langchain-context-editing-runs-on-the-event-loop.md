@@ -1,6 +1,6 @@
 # langchain: `ContextEditingMiddleware.awrap_model_call` does its work on the event loop
 
-**File against:** `langchain-ai/langchain`. **Status:** draft, not filed. **Reproduced on:**
+**File against:** `langchain-ai/langchain`. **Status:** filed as [langchain#41449](https://github.com/langchain-ai/langchain/issues/41449) (2026-10-24); reproduced on 1.4.7. **Reproduced on:**
 langchain 1.4.6 (latest on PyPI, 2026-10-14) and 1.3.16 (installed here).
 
 ## Title
