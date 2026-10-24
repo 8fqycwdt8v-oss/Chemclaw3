@@ -382,3 +382,36 @@ def _vm_rss_kb() -> float:
         if line.startswith("VmRSS:"):
             return float(line.split()[1])
     raise AssertionError("/proc/self/status carries no VmRSS line")
+
+
+# --- the lane configuration ---------------------------------------------------------------------
+
+
+def test_the_lane_settings_reach_the_settings_the_app_is_built_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing exported, the already-built `settings` carries the lane's loopback values.
+
+    `settings` exists before `main` runs (importing this module builds it), so a variable set in
+    `main` would change nothing and `create_app` would refuse the 0.0.0.0 default.
+    """
+    from chemclaw.core.config import settings
+
+    for name, _, _ in cli._LANE_SETTINGS:
+        monkeypatch.setattr(settings, name, getattr(settings, name))
+    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    cli._pin_lane_settings({})
+    assert settings.service_host == "127.0.0.1"
+    assert settings.session_store == "postgres"
+    assert settings.connectors_required is True
+
+
+def test_a_lane_value_the_caller_exported_is_left_as_the_caller_set_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A variable present in the environment wins: `settings` already read it."""
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "service_host", "10.0.0.5")
+    cli._pin_lane_settings({"CHEMCLAW_SERVICE_HOST": "10.0.0.5"})
+    assert settings.service_host == "10.0.0.5"
