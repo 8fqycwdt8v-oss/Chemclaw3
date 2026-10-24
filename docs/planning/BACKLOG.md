@@ -60,8 +60,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   own token and declining (proposal PR #640); the queue/stream UI shipped in `Chemclaw3_ui`.
 - [ ] **Profile routing is not compared on answers** [M] — the corpus exists (`data/evals/routing/profile-routing.yaml`, checked offline by `tests/test_routing_corpus.py`);
   run each case under its `worded_like`, its `needs` and the default agent against a live model and grade on `direction`; a router only after (`D-2026-08-15` deleted automatic routing).
-- [ ] **Seven upstream issues are drafted and unfiled** [S] — file them from `docs/planning/upstream-issues/` (a human, with access to
-  `langchain-ai`), then pin each fix: `core/graph_durability.py::ignoring_inherited_durability`, `agent/compaction.py::OffLoopContextEditing`.
+- [ ] **Five upstream reports are open; pin each fix as it lands** [S] — deepagents#7236, #7237, langchain#41449, #41450 (filed) and langgraph#9267 (another reporter); status per draft in
+  `docs/planning/upstream-issues/`; `core/graph_durability.py::ignoring_inherited_durability`, `agent/compaction.py::OffLoopContextEditing`.
 
 ### Knowledge and records
 
@@ -75,8 +75,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Everything else
 
-- [ ] **deepagents 0.7.31 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and
-  `edit_file` text, so it ships behind `docs/guides/model-text-evaluation.md`, which needs a gateway; the code is ready on `deps/deepagents-0.7.31`.
+- [ ] **deepagents 0.7.32 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and `edit_file` text, so it ships behind
+  `docs/guides/model-text-evaluation.md`; 0.7.31+ also takes `FilesystemMiddleware(permissions=)` publicly, so the `_permissions` shim in `agent/langgraph_agent.py::_middleware` goes with it.
 
 ## Upstream watch
 
