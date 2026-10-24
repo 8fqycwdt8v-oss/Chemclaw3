@@ -592,6 +592,7 @@ from pathlib import Path
 from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.connectors.queues import bundle_queue, interactive_queue
 from chemclaw.core.config import settings
@@ -616,14 +617,25 @@ def alive(worker: str) -> bool:
     return True
 
 
+# A broker that is busy, not wrong: asked again next round, within the same attempt budget. The
+# lane's own describe calls can trip a dev server's namespace rate limit, and a restart that died
+# on that left the front door stopped.
+TRANSIENT = {RPCStatusCode.RESOURCE_EXHAUSTED, RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED}
+
+
 async def polled(client, queue: str) -> bool:
     for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
-        answer = await client.workflow_service.describe_task_queue(
-            DescribeTaskQueueRequest(
-                namespace=client.namespace, task_queue=TaskQueue(name=queue), task_queue_type=kind
-            ),
-            timeout=timedelta(seconds=5),
-        )
+        try:
+            answer = await client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=client.namespace, task_queue=TaskQueue(name=queue), task_queue_type=kind
+                ),
+                timeout=timedelta(seconds=5),
+            )
+        except RPCError as exc:
+            if exc.status in TRANSIENT:
+                return False
+            raise
         if answer.pollers:
             return True
     return False
