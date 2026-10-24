@@ -79,6 +79,18 @@ free_gb() {
   df -Pk "$REPO_ROOT" | awk 'NR == 2 { print int($4 / 1048576) }'
 }
 
+# Run "$@" with a deadline of $1 seconds; at the deadline the child is killed and the status is 124,
+# as GNU `timeout` reports it. Not `timeout` itself: BSD userland (macOS) has none.
+bounded() {
+  "$python" -c '
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+' "$@"
+}
+
 # Every sample is optional: a scrape that times out must cost its own field, never the round.
 # `|| true` throughout, and the line builder treats an empty value as null.
 sample_rows() {
@@ -128,7 +140,7 @@ run() {
     local storm_out; storm_out="$LIVE_DIR/soak-round.md"
     CHEMCLAW_LLM_BASE_URL="$mock_base" \
     CHEMCLAW_LLM_MODEL=mock \
-      timeout 1800 "$python" -m chemclaw.cli.live_storm \
+      bounded 1800 "$python" -m chemclaw.cli.live_storm \
         --families "$FAMILIES" \
         --sweep-turns "$SWEEP_TURNS" --collide "$COLLIDE" --report "$storm_out" \
         >"$LIVE_DIR/soak-round.log" 2>&1
