@@ -15,8 +15,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Untrusted input and privileged surfaces
 
-- [ ] **A worker's memory grows with a BO campaign's rounds whether or not the run stays cached** [M] — parked on the `make up` broker (macOS footprint, 2 runs): calc 146 KiB, a fresh campaign 253 KiB, under the
-  530 KiB per workflow `tests/test_workers.py` asserts; but 30 rounds 1.6 MiB cached vs 1.3–1.5 MiB with the cache at 1, 100 rounds 6.6 MiB; find the holder before the bound covers `bo`; `connectors/bo/workflows.py`.
+- [ ] **A cached BO campaign holds ~40 KiB per round in the SDK core, so the worker cache bound does not cover `bo`** [M] — not a leak (cache at 1: 120–200 KiB live per run); cached: 620 / 1416 / 2916 KiB at
+  10 / 30 / 60 rounds, under 250 KiB of it Python; owner call between options in PR #680 (history by reference, rounds per run, a bo cache ceiling); `connectors/bo/workflows.py`, `tests/test_workers.py`.
 
 ### Answers that are wrong without saying so
 
