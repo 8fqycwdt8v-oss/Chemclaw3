@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_state
-from chemclaw.agent.checkpointer import process_checkpointer
+from chemclaw.agent.checkpointer import graph_checkpointer
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import Decision, InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
@@ -313,7 +313,7 @@ async def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch
 
     _Recording.seen = []
 
-    saver = await process_checkpointer()
+    saver = await graph_checkpointer()
     agent = build_langgraph_agent(
         model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
         checkpointer=saver,
@@ -341,7 +341,7 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
     plan = "screen three solvents"
 
     async def _run() -> str:
-        saver = await process_checkpointer()
+        saver = await graph_checkpointer()
         model = _WriteTodosThenAnswer(
             messages=iter(
                 [
@@ -540,7 +540,7 @@ def test_a_one_shot_run_exits_nonzero_when_the_answer_it_printed_is_incomplete(
     `_DEGRADED_EXIT`, distinct from success and from a refused startup.
     """
     monkeypatch.setattr(cli, "resolve_identity", lambda **_k: ("admin@localhost", frozenset()))
-    monkeypatch.setattr(cli, "process_checkpointer", _none)
+    monkeypatch.setattr(cli, "graph_checkpointer", _none)
     monkeypatch.setattr(cli, "open_connector_specs", _no_connectors)
     monkeypatch.setattr(cli, "_build_cli_agent", lambda *_a, **_k: object())
 

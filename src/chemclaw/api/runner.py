@@ -26,8 +26,9 @@ from chemclaw.agent.authz import (
     knowledge_read_tools,
     side_effecting_tools,
 )
-from chemclaw.agent.checkpointer import checkpointer
+from chemclaw.agent.checkpointer import graph_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.compaction import system_note
 from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.exhibit_notes import exhibit_turn_note, mark_told
 from chemclaw.agent.framing import frame_untrusted
@@ -351,7 +352,7 @@ async def run_turn(
                 # awaited first, on the loop. The declaration read takes no actor: it uses
                 # `get_current_actor()` as the mount does, which is why it sits inside
                 # `_turn_ambient`.
-                checkpointer = await _turn_checkpointer()
+                checkpointer = await graph_checkpointer()
                 store = await turn_store()
                 stored_skills = await stored_skill_declarations(store)
                 graph = await asyncio.to_thread(
@@ -1020,7 +1021,7 @@ async def _resume_on_job_results(
     async for event in _stream_into(
         graph_events(
             graph,
-            _job_results_message(results),
+            system_note(_job_results_message(results)),
             config=config,
             trace=trace,
             on_signal=ledger.note_signal_without_job_chaining,
@@ -1056,7 +1057,7 @@ async def _revise_answer(
     async for event in _stream_into(
         graph_events(
             graph,
-            _revision_message(claims),
+            system_note(_revision_message(claims)),
             config=config,
             trace=trace,
             # No job chaining, for the reason the resume gives.
@@ -1763,20 +1764,6 @@ def _book_turn_spend(
         if value:
             METRICS.increment(name, float(value), spend_labels)
     return writes
-
-
-async def _turn_checkpointer() -> Any:
-    """The graph engine's checkpointer, or `None` where this deployment stores nothing durably.
-
-    Gated on the same `session_store` setting `history_provider` reads, so both agree on durability,
-    and an in-memory deployment never needs Postgres.
-
-    Returns:
-        A ready `AsyncPostgresSaver`, or `None` to keep turn state in the invocation.
-    """
-    if settings.session_store != "postgres":
-        return None
-    return await checkpointer()
 
 
 async def turn_store() -> Any:

@@ -215,7 +215,7 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ),
     ("chemclaw.spend", "chemclaw.agent"): (
         "the per-turn guard is a middleware over `agent.state.ChemclawState` and its wrap-up note "
-        "is an `agent.compaction.request_note`; the usage ledger charges the prefix "
+        "is an `agent.compaction.system_note`; the usage ledger charges the prefix "
         "`agent.context_budget` measures"
     ),
     ("chemclaw.agent", "chemclaw.spend"): (

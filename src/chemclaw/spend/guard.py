@@ -22,7 +22,7 @@ from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Command
 
-from chemclaw.agent.compaction import request_note
+from chemclaw.agent.compaction import system_note
 from chemclaw.agent.state import ChemclawState
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.model_prose import ModelProse
@@ -165,9 +165,9 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
             return request
         return request.override(
             tool_choice="none" if request.tools else None,
-            # A `request_note`, not a bare `HumanMessage`, so the conversation window does not treat
+            # A `system_note`, not a bare `HumanMessage`, so the conversation window does not treat
             # it as the newest turn and cut the chemist's question.
-            messages=[*request.messages, request_note(WRAP_UP_NOTE)],
+            messages=[*request.messages, system_note(WRAP_UP_NOTE)],
         )
 
     @staticmethod

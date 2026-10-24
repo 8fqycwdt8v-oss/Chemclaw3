@@ -56,9 +56,9 @@ async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_trans
     The turn is not rolled back: its committed exchange is complete and correctly paired, and
     deleting it because a client dropped is the failure `_roll_back_unfinished` exists to avoid.
     """
-    # Both engines are gated on this one setting: `_turn_checkpointer` returns `None` off the
-    # Postgres store, which is the configuration in which this divergence cannot arise at all —
-    # there is no second record to diverge from.
+    # Both engines are gated on this one setting: off the Postgres store `graph_checkpointer`'s
+    # saver dies with the turn, which is the configuration in which this divergence cannot arise
+    # at all — there is no second record to diverge from.
     monkeypatch.setattr(settings, "session_store", "postgres")
 
     await migrated_db_or_skip()
