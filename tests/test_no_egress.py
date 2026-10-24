@@ -20,6 +20,11 @@ _PACKAGES = ("src",)
 # because the tenant is substituted into Microsoft's host.
 _INFRASTRUCTURE_HOSTS = {
     "login.microsoftonline.com",
+    # The Teams room bridge's defaults for public Microsoft (`core/config/rooms.py`): Bot
+    # Framework's key metadata and reply scope. Settings, overridable, and dialled only by the
+    # bridge, which is off until an operator enables it.
+    "login.botframework.com",
+    "api.botframework.com",
 }
 
 # Userinfo is skipped, not captured: the host of `https://svc:token@llm.internal/v1` is what

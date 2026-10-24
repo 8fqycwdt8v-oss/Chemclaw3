@@ -225,6 +225,15 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "seam, and the reason the channel is opt-in and owes the chart an egress rule; "
         "the `share` channel writes to a mounted directory and holds no client"
     ),
+    ("chemclaw.rooms", "httpx"): (
+        "the Teams bridge is an HTTP client of Entra, Bot Framework and the front door, and "
+        "`serve.py` builds its three clients"
+    ),
+    ("chemclaw.rooms", "token"): (
+        "`jwt` decodes the claims that bind a token to its sender and verifies the Bot Framework "
+        "token that carries an activity"
+    ),
+    ("chemclaw.rooms", "http"): "the bridge serves `/api/messages` as an ASGI app under uvicorn",
     ("chemclaw.operations", "postgres"): (
         "the operational read model is five SELECTs over this system's own tables"
     ),
