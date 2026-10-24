@@ -302,6 +302,15 @@ def derive_allowed(settings: Any) -> frozenset[str]:
         add(url)
     if getattr(settings, "entra_required", False):
         add(getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url)
+    if getattr(settings, "teams_bridge_enabled", False):
+        # The Teams bridge's four destinations: the front door it posts to, the Entra authority,
+        # Bot Framework's key metadata, and the hosts its replies may go to. Only when the bridge is
+        # on, so no other process gains a Microsoft host. The NetworkPolicy is the operator's
+        # (`docs/guides/teams-room-bridge.md`), not derived here.
+        add(settings.teams_api_base_url)
+        add(settings.teams_authority_url)
+        add(settings.teams_openid_metadata_url)
+        hosts.update(settings.teams_service_url_host_list)
     if getattr(settings, "otel_enabled", False):
         # Every spelling the exporter would resolve, most specific first, since `core/logging.py`
         # only `setdefault`s the bridge and OTel prefers the per-signal variable.

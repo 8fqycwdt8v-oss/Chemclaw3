@@ -1582,6 +1582,10 @@ secrets:
     # `ingest/labels/labeller.py`). Same shape as `calcToken` one hop away: a credential this
     # release *presents* to a server it does not run.
     rxnlabelToken: "CHEMCLAW_RXNLABEL_TOKEN"
+    # The Teams room bridge's client secret (`settings.teams_bot_credential_token_env`, read per
+    # call by `rooms/identity.py`). The bridge is not a chart role: it runs as its own Deployment
+    # (`docs/guides/teams-room-bridge.md`), and this slot only keeps the secret out of the ConfigMap.
+    teamsBotCredential: "CHEMCLAW_TEAMS_BOT_CREDENTIAL"
     # **Four credentials that had no slot at all**, and therefore exactly one chart seam left:
     # `.Values.config`, which renders a ConfigMap the OpenShift `view` role can read and which
     # `helm get values` prints. Each has a live reader, and each is optional in the sense the four

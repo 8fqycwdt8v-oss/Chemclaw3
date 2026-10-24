@@ -52,8 +52,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   add it to the research-loop block behind a `make live-ab` arm; `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`.
 - [ ] **`fetch_artifact` refuses every artifact this release stores and is still bound** [S] — kept only for older notes' `artifact_refs`; unbind it from the `computation`/`evidence`
   profiles, or bind it only when a text artifact exists, behind a live eval; `connectors/calc/server/tools.py::fetch_artifact`.
-- [ ] **A chat-room connector over a shared session** [M] — owner call between a Teams bridge on each sender's
-  own token and declining (proposal PR #640); the queue/stream UI shipped in `Chemclaw3_ui`.
 - [ ] **Profile routing is not compared on answers** [M] — the corpus exists (`data/evals/routing/profile-routing.yaml`, checked offline by `tests/test_routing_corpus.py`);
   run each case under its `worded_like`, its `needs` and the default agent against a live model and grade on `direction`; a router only after (`D-2026-08-15` deleted automatic routing).
 - [ ] **Four upstream reports need re-filing by hand; pin each fix as it lands** [S] — deepagents#7236, #7237, langchain#41449, #41450 were closed by a triage bot that refuses
