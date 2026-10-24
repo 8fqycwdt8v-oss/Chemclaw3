@@ -884,6 +884,21 @@ async def family_h_edges() -> list[Finding]:
     return findings
 
 
+def admission_env(cap: int) -> dict[str, str]:
+    """The front door's environment for one admission cap: the cap, and the sockets it needs.
+
+    A cap above what `service_max_connections` was sized for makes `Settings` refuse to load, and
+    the restart that carried it then left the lane without a front door. The connection limit goes
+    with the cap, derived from the same formula the validator uses (`Settings.socket_budget`).
+    """
+    return {
+        "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap),
+        "CHEMCLAW_SERVICE_MAX_CONNECTIONS": str(
+            max(settings.service_max_connections, settings.socket_budget(cap))
+        ),
+    }
+
+
 async def family_a_admission(
     *, sweep_turns: int, offered: int, repeats: int
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
@@ -907,11 +922,7 @@ async def family_a_admission(
             p50 = p95 = 0.0
             for _ in range(max(repeats, 1)):
                 await asyncio.to_thread(
-                    _lane,
-                    "processes.sh",
-                    "restart",
-                    "api",
-                    env={"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap)},
+                    _lane, "processes.sh", "restart", "api", env=admission_env(cap)
                 )
                 started = time.monotonic()
                 results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)

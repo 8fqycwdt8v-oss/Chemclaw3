@@ -10,6 +10,7 @@ calls match the live tool surface). No network, database or broker.
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
@@ -472,3 +473,37 @@ def test_a_family_that_does_not_exist_is_refused_rather_than_dropped(spelled: st
     """A typo or an empty list must not quietly shrink the run to fewer families than asked."""
     with pytest.raises(ValueError, match="famil"):
         planned_families(spelled)
+
+
+def test_every_admission_cap_the_sweep_asks_for_is_a_front_door_that_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep's restart environment loads under `Settings`, at every cap it sweeps.
+
+    Sent the cap alone, the largest step (32 turns) needs 552 sockets against the default 512 and
+    `Settings` refuses to load: `processes.sh restart api` killed the front door and then could not
+    start it, and the storm died with the lane down. The control is that same cap-only environment,
+    which must still be refused, so this test cannot pass on a validator that stopped checking.
+    """
+    from chemclaw.core.config import Settings
+
+    def loads(env: dict[str, str]) -> bool:
+        for key in list(os.environ):
+            if key.startswith("CHEMCLAW_SERVICE_MAX_"):
+                monkeypatch.delenv(key)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        try:
+            Settings(_env_file=None)  # type: ignore[call-arg]
+        except Exception:
+            return False
+        return True
+
+    from chemclaw.cli.live_storm import _ADMISSION_CAPS, admission_env
+
+    top = max(_ADMISSION_CAPS)
+    assert not loads({"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(top)}), (
+        "the cap alone now loads, so the sweep no longer needs the connection limit it derives"
+    )
+    for cap in _ADMISSION_CAPS:
+        assert loads(admission_env(cap)), f"cap {cap}: Settings refuses the sweep's environment"

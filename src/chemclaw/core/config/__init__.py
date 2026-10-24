@@ -291,6 +291,26 @@ class Settings(
         )
         return longest
 
+    def socket_budget(self, turns: int | None = None) -> int:
+        """The sockets one process can occupy with `turns` admitted turns, headroom included.
+
+        `service_max_connections` must be at least this (`_guards_that_the_comments_already_demand`
+        refuses a smaller one at startup). Exposed so a caller that varies the turn cap, like the
+        storm's admission sweep, derives the connection limit that goes with it instead of guessing
+        a number the validator then refuses. Defaults to this process's own cap.
+
+        Turns and streams add rather than max: a turn holds its sender's stream plus up to
+        `service_turn_max_watchers` followers, and waiters are charged per process
+        (`turns` x `service_turn_queue_max`).
+        """
+        admitted = self.service_max_concurrent_turns if turns is None else turns
+        return (
+            self.service_max_event_streams_total
+            + admitted * (1 + self.service_turn_max_watchers)
+            + admitted * self.service_turn_queue_max
+            + self.service_connection_headroom
+        )
+
     def _fleet_pool_widths(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(one-connection pools, pg_pool_max_size pools)` on `postgres_dsn`'s server.
 
@@ -478,11 +498,7 @@ class Settings(
         # enforces.
         per_turn = 1 + self.service_turn_max_watchers
         waiters = self.service_max_concurrent_turns * self.service_turn_queue_max
-        occupied = (
-            self.service_max_event_streams_total
-            + self.service_max_concurrent_turns * per_turn
-            + waiters
-        )
+        occupied = self.socket_budget() - self.service_connection_headroom
         if self.service_max_connections < occupied + self.service_connection_headroom:
             raise ValueError(
                 f"service_max_connections ({self.service_max_connections}) is below what this "

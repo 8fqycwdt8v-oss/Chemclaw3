@@ -926,6 +926,17 @@ restart() {
   [ -d "$MCP_REPO" ] || die "refusing to restart $name: chem and safety are served by Chemclaw3-mcp,
 which is not at $MCP_REPO, so \`up\` could not bring the lane back after the kill. Clone it beside
 this checkout, or set CHEMCLAW_MCP_REPO. Nothing has been killed."
+  # The settings the new process would start with must load. `up` dies on a `Settings` error after
+  # the kill, and the storm's admission sweep did exactly that (a cap its connection limit was not
+  # sized for), leaving the lane with no front door: the same worse-than-found state as the missing
+  # checkout above, so it is refused the same way, before anything is killed.
+  local settings_error
+  if ! settings_error="$( ( source_unset_only "$RUN_DIR/connector-env.sh"; cd "$REPO_ROOT" \
+      && uv run python -c 'from chemclaw.core.config import Settings; Settings()' ) 2>&1 )"; then
+    die "refusing to restart $name: the settings it would start with do not validate, so \`up\`
+could not bring it back after the kill. Nothing has been killed.
+$(printf '%s' "$settings_error" | tail -4)"
+  fi
   local pid
   pid="$(cat "$pidfile")"
   # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a
