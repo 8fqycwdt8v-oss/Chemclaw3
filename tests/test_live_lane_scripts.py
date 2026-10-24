@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -1046,3 +1047,32 @@ def test_restart_refuses_before_killing_when_postgres_does_not_answer(tmp_path: 
     finally:
         standin.kill()
         standin.wait()
+
+
+def test_the_soak_reads_the_free_disk_space_the_filesystem_reports(tmp_path: Path) -> None:
+    """`free_gb` prints whole GiB free under the checkout, on GNU and BSD `df` alike.
+
+    A `df` flag one platform refuses printed nothing, which the loop read as zero and stopped the
+    soak at round 1 for want of disk on a machine with tens of GB free.
+    """
+    script = _LIVE / "soak.sh"
+    out = _bash(
+        f"REPO_ROOT={shlex.quote(str(tmp_path))}\n{_function(script, 'free_gb')}free_gb",
+        {"PATH": os.environ["PATH"]},
+    )
+    expected = shutil.disk_usage(tmp_path).free // 2**30
+    assert abs(int(out.strip()) - expected) <= 1, out
+
+
+def test_a_soak_round_is_killed_at_its_deadline_and_reads_as_timeout_did() -> None:
+    """`bounded` passes the child's own status through, and is 124 once the deadline passes.
+
+    `timeout` is GNU coreutils; on BSD userland every round exited 127 in no time at all.
+    """
+    defined = f"python={shlex.quote(sys.executable)}\n{_function(_LIVE / 'soak.sh', 'bounded')}"
+    env = {"PATH": os.environ["PATH"]}
+    assert _bash(f"{defined}bounded 30 sh -c 'echo ran'", env).strip() == "ran"
+    passed = _bash(f"{defined}rc=0; bounded 30 sh -c 'exit 3' || rc=$?; echo $rc", env)
+    assert passed.strip() == "3"
+    killed = _bash(f"{defined}rc=0; bounded 0.5 sleep 30 || rc=$?; echo $rc", env)
+    assert killed.strip() == "124"
