@@ -11,6 +11,7 @@ import logging
 import tracemalloc
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -387,31 +388,39 @@ def _vm_rss_kb() -> float:
 # --- the lane configuration ---------------------------------------------------------------------
 
 
+@pytest.fixture
+def restored_settings(monkeypatch: pytest.MonkeyPatch) -> object:
+    """The process `settings`, with every lane field put back after the test.
+
+    `_pin_lane_settings` writes onto the shared singleton, so a field left set here
+    (`connectors_required`, above all) would make every later test's app refuse to start.
+    """
+    from chemclaw.core.config import settings
+
+    for name, _, _ in cli._LANE_SETTINGS:
+        monkeypatch.setattr(settings, name, getattr(settings, name))
+    return settings
+
+
 def test_the_lane_settings_reach_the_settings_the_app_is_built_from(
-    monkeypatch: pytest.MonkeyPatch,
+    restored_settings: Any,
 ) -> None:
     """With nothing exported, the already-built `settings` carries the lane's loopback values.
 
     `settings` exists before `main` runs (importing this module builds it), so a variable set in
     `main` would change nothing and `create_app` would refuse the 0.0.0.0 default.
     """
-    from chemclaw.core.config import settings
-
-    for name, _, _ in cli._LANE_SETTINGS:
-        monkeypatch.setattr(settings, name, getattr(settings, name))
-    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    restored_settings.service_host = "0.0.0.0"
     cli._pin_lane_settings({})
-    assert settings.service_host == "127.0.0.1"
-    assert settings.session_store == "postgres"
-    assert settings.connectors_required is True
+    assert restored_settings.service_host == "127.0.0.1"
+    assert restored_settings.session_store == "postgres"
+    assert restored_settings.connectors_required is True
 
 
 def test_a_lane_value_the_caller_exported_is_left_as_the_caller_set_it(
-    monkeypatch: pytest.MonkeyPatch,
+    restored_settings: Any,
 ) -> None:
     """A variable present in the environment wins: `settings` already read it."""
-    from chemclaw.core.config import settings
-
-    monkeypatch.setattr(settings, "service_host", "10.0.0.5")
+    restored_settings.service_host = "10.0.0.5"
     cli._pin_lane_settings({"CHEMCLAW_SERVICE_HOST": "10.0.0.5"})
-    assert settings.service_host == "10.0.0.5"
+    assert restored_settings.service_host == "10.0.0.5"
