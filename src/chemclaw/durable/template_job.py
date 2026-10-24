@@ -464,8 +464,9 @@ class TemplateWorkflow:
             step = wave[0]
             try:
                 return [(step, await self._run_step(step, scope, identity, timeout, template))]
-            except asyncio.CancelledError:
-                # Re-raised, not wrapped: a cancellation is not a failure at a step.
+            except (asyncio.CancelledError, GeneratorExit):
+                # Re-raised, not wrapped: a cancellation, or the close of an evicted run's
+                # coroutine, is not a failure at a step.
                 raise
             except BaseException as exc:
                 raise _StepFailed(step, exc) from exc

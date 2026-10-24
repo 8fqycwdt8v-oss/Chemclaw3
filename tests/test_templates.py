@@ -1958,3 +1958,38 @@ def test_a_step_identity_strips_the_actor_it_keeps() -> None:
     from chemclaw.durable.template_activities import StepIdentity
 
     assert StepIdentity(actor="  alice  ", correlation_id="run-1").actor == "alice"
+
+
+def test_the_close_of_an_evicted_run_is_not_a_failed_step() -> None:
+    """`GeneratorExit` thrown into a step leaves `_run_wave` as itself, never as `_StepFailed`.
+
+    That is how the SDK closes an evicted run's coroutine; wrapped, the caller would record the run
+    as failed and tell its session so while another worker replays it to completion.
+    """
+    from chemclaw.durable.template_activities import StepIdentity
+    from chemclaw.durable.template_job import TemplateWorkflow
+
+    class _Suspend:
+        def __await__(self) -> Any:
+            yield
+
+    async def _step(_self: Any, step: Any, *_args: Any, **_kwargs: Any) -> str:
+        await _Suspend()
+        return "unreached"
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(TemplateWorkflow, "_run_step", _step)
+        running = TemplateWorkflow()._run_wave(
+            ("s0",),
+            {},
+            StepIdentity(actor="tester", roles=[], correlation_id="evict-probe"),
+            timedelta(seconds=1),
+            "probe",
+            0,
+        )
+        running.send(None)
+        with pytest.raises(GeneratorExit):
+            running.throw(GeneratorExit())
+    finally:
+        monkey.undo()
