@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage
 
 from chemclaw.agent import session_members as members_module
 from chemclaw.agent.checkpointer import close_checkpointer
+from chemclaw.agent.session_queue import SessionTurnQueue
 from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
     SessionOwnerStore,
@@ -36,6 +37,7 @@ from chemclaw.agent.session_store import (
 from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
+from chemclaw.api.routes import turns as turns_module
 from chemclaw.api.routes.turns import TURN_CORRELATION_HEADER
 from chemclaw.core.config import settings
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -474,3 +476,97 @@ def test_a_held_turn_is_read_on_a_wake_up_and_not_on_every_relay_poll(
     assert seen["view_idle"] <= 2, f"the remote view read its frames on every relay poll: {seen}"
     assert seen["follow_took"] < _WOKEN_WITHIN, f"the follow waited for a fallback poll: {seen}"
     assert seen["stop_took"] < _WOKEN_WITHIN, f"the Stop waited for a fallback poll: {seen}"
+
+
+async def _post_timed(
+    client: httpx.AsyncClient, session_id: str, message: str, person: Principal
+) -> list[tuple[str, str, float]]:
+    """POST one message and read its stream to the end: each event's type, code and arrival time."""
+    events: list[tuple[str, str, float]] = []
+    async with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": message}, headers=_as(person)
+    ) as response:
+        assert response.status_code == 200, await response.aread()
+        async for line in response.aiter_lines():
+            if line.startswith("data:"):
+                event = json.loads(line.removeprefix("data:"))
+                events.append((event["type"], event.get("code", ""), time.monotonic()))
+    return events
+
+
+def test_a_message_waiting_on_another_replica_is_woken_and_not_polled(
+    two_replicas: Callable[[], tuple[_Gated, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A waiter on B asks its place when A's line or claim moves, and otherwise only rarely.
+
+    Ana's turn holds the session on A; Ben's and then Ana's next message wait on B. With the
+    claim lease long, the fallback ask is ten seconds apart: the two waiters ask at most once in
+    two idle seconds (a one-second poll asks every second for each), and a withdrawal sent to A
+    ending Ben's wait, and Ana's turn ending on A starting her next one on B, each within
+    `_WOKEN_WITHIN`, are explained only by the notification.
+    """
+    monkeypatch.setattr(settings, "service_turn_claim_lease_seconds", _LONG_LEASE)
+
+    async def _reauthorized(request: Request, principal: Principal) -> Principal:
+        return principal
+
+    monkeypatch.setattr(turns_module, "reauthorize", _reauthorized)
+    asks = 0
+    real_position = SessionTurnQueue.position
+
+    async def _position(self: SessionTurnQueue, *args: Any) -> Any:
+        nonlocal asks
+        asks += 1
+        return await real_position(self, *args)
+
+    monkeypatch.setattr(SessionTurnQueue, "position", _position)
+    agent, (a, b) = two_replicas()
+
+    async def _run() -> dict[str, Any]:
+        with a, b:
+            async with (
+                httpx.AsyncClient(base_url=a.base, timeout=60) as on_a,
+                httpx.AsyncClient(base_url=b.base, timeout=60) as on_b,
+            ):
+                session_id = await _shared_session(on_a)
+                first = asyncio.create_task(_post(on_a, session_id, "hold ana", _as(_ANA)))
+                await _until(lambda: agent.started == ["hold ana"])
+                ben = asyncio.create_task(_post_timed(on_b, session_id, "ben asks", _BEN))
+                await _until(lambda: asks > 0)
+                ana = asyncio.create_task(_post_timed(on_b, session_id, "ana again", _ANA))
+                await _until(lambda: asks > 1)
+                before = asks
+                await asyncio.sleep(2.0)
+                idle_asks = asks - before
+
+                line = (await on_a.get(f"/sessions/{session_id}/queue", headers=_as(_ANA))).json()
+                ticket = next(e["ticket"] for e in line["waiting"] if e["sender"] == _BEN.oid)
+                withdrawn_at = time.monotonic()
+                withdrawn = await on_a.delete(
+                    f"/sessions/{session_id}/queue/{ticket}", headers=_as(_BEN)
+                )
+                ben_events = await asyncio.wait_for(ben, 30)
+
+                agent.gate.set()
+                await asyncio.wait_for(first, 30)
+                ended_at = time.monotonic()
+                ana_events = await asyncio.wait_for(ana, 30)
+                return {
+                    "idle_asks": idle_asks,
+                    "withdrawn": withdrawn.status_code,
+                    "ben": ben_events,
+                    "ben_took": ben_events[-1][2] - withdrawn_at,
+                    "ana": ana_events,
+                    "ana_took": next(t for kind, _, t in ana_events if kind == "turn_started")
+                    - ended_at,
+                }
+
+    seen = asyncio.run(_run())
+    assert seen["withdrawn"] == 204, seen
+    assert seen["ben"][-1][:2] == ("error", "queue_cancelled"), seen
+    # Only `turn_started` is asked of B: past it the turn runs on stores bound to A's loop, which
+    # two replicas in one test process share and two pods do not.
+    assert ("queued", "") in [event[:2] for event in seen["ana"]], seen["ana"]
+    assert seen["idle_asks"] <= 1, f"two waiters on another replica asked over and over: {seen}"
+    assert seen["ben_took"] < _WOKEN_WITHIN, f"the withdrawal waited for a fallback ask: {seen}"
+    assert seen["ana_took"] < _WOKEN_WITHIN, f"the turn's end waited for a fallback ask: {seen}"

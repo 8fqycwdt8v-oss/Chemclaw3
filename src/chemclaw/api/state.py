@@ -432,10 +432,11 @@ async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str
 class QueueSignal:
     """Wakes this process's waiting messages the moment the turn ahead of them may have moved.
 
-    Remote waiters poll every `service_turn_queue_poll_seconds`; local events (a turn ending, a
-    message leaving or withdrawn) wake local waiters at once. A wake is only a hint to re-ask the
-    queue. The event is created lazily per loop, because an `asyncio` primitive binds to its first
-    loop and tests drive `app.state` from several; `notify` drops the event it set.
+    Local events (a turn ending, a message leaving or withdrawn) wake local waiters at once; another
+    process's arrive as the durable line's `woken` event, which `wait` also takes. A wake is only a
+    hint to re-ask the queue. The event is created lazily per loop, because an `asyncio` primitive
+    binds to its first loop and tests drive `app.state` from several; `notify` drops the event it
+    set.
     """
 
     def __init__(self) -> None:
@@ -449,17 +450,18 @@ class QueueSignal:
             self._event.set()
             self._event = None
 
-    async def wait(self, timeout: float) -> None:
-        """Park until the next `notify` or for `timeout` seconds, whichever is first."""
+    async def wait(self, timeout: float, woken: asyncio.Event) -> None:
+        """Park until the next `notify`, until `woken` is set, or for `timeout` seconds."""
         loop = asyncio.get_running_loop()
         if self._event is None or self._loop is not loop:
             self._event = asyncio.Event()
             self._loop = loop
-        event = self._event
+        waits = [loop.create_task(self._event.wait()), loop.create_task(woken.wait())]
         try:
-            await asyncio.wait_for(event.wait(), timeout)
-        except TimeoutError:
-            return
+            await asyncio.wait(waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in waits:
+                task.cancel()
 
 
 def _default_turn_queue() -> TurnQueue:

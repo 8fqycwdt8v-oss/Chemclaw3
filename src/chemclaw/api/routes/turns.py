@@ -24,7 +24,7 @@ from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from chemclaw.agent.exhibit_notes import resolve_exhibit_refs
-from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
+from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue, idle_poll_seconds
 from chemclaw.agent.session_store import RunningTurn, owner_permits
 from chemclaw.agent.turn_remotes import Holding
 from chemclaw.agent.turn_resume import ResumePoint, log_refusal, resume_point
@@ -520,33 +520,37 @@ async def _start_turn(
         a participant — and a final `queue_cancelled` frame. Authority is re-read at the head
         (`_refusal_at_the_head`).
         """
+        if ticket is None:
+            return
         shown: int | None = None
-        while ticket is not None:
-            mine = ticket
-            place = await queue.position(session_id, mine, lease)
-            if place is None:
-                _left_line()
-                yield _withdrawn("Your message was withdrawn before it ran.")
-                return
-            if place == 0:
-                refusal = await _refusal_at_the_head()
-                if refusal is not None:
+        async with queue.woken(session_id) as moved:
+            while ticket is not None:
+                moved.clear()
+                mine = ticket
+                place = await queue.position(session_id, mine, lease)
+                if place is None:
                     _left_line()
-                    await _leave_line(queue, session_id, mine)
-                    signal.notify()
-                    yield _withdrawn(refusal)
-                    return
-                outcome = await _take_the_turn(mine)
-                if outcome == "taken":
-                    yield sse_frame(TurnStartedEvent(ticket=mine))
-                    return
-                if outcome == "withdrawn":
                     yield _withdrawn("Your message was withdrawn before it ran.")
                     return
-            if place != shown:
-                shown = place
-                yield sse_frame(QueuedEvent(ticket=mine, position=place))
-            await signal.wait(settings.service_turn_queue_poll_seconds)
+                if place == 0:
+                    refusal = await _refusal_at_the_head()
+                    if refusal is not None:
+                        _left_line()
+                        await _leave_line(queue, session_id, mine)
+                        signal.notify()
+                        yield _withdrawn(refusal)
+                        return
+                    outcome = await _take_the_turn(mine)
+                    if outcome == "taken":
+                        yield sse_frame(TurnStartedEvent(ticket=mine))
+                        return
+                    if outcome == "withdrawn":
+                        yield _withdrawn("Your message was withdrawn before it ran.")
+                        return
+                if place != shown:
+                    shown = place
+                    yield sse_frame(QueuedEvent(ticket=mine, position=place))
+                await signal.wait(idle_poll_seconds(), moved)
 
     def _shed() -> dict[str, str]:
         """The frame a turn that found no free slot ends on, counted so shedding is visible.
@@ -1110,8 +1114,8 @@ async def withdraw_queued(
     404 for a ticket this session's line does not hold, including another session's, so tickets
     cannot be guessed across sessions, and for one whose message has just taken the turn (its
     stream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting
-    request notices on its next look (within `service_turn_queue_poll_seconds` on another replica),
-    or at its hand-over, and ends with `queue_cancelled`.
+    request notices at once (on another replica through the line's wake-up), or at its hand-over,
+    and ends with `queue_cancelled`.
     """
     front = state(request)
     entry = next(

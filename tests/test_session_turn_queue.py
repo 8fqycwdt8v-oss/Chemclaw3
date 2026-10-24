@@ -70,7 +70,9 @@ def _stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Identity enforced, in-process stores obtained through their real factories, a fast poll."""
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(settings, "entra_required", True)
-    monkeypatch.setattr(settings, "service_turn_queue_poll_seconds", 0.05)
+    # Several cases hold a waiter at the head and act between two of its looks, which nothing
+    # notifies in process; a short fallback makes those looks frequent.
+    monkeypatch.setattr(turns_module, "idle_poll_seconds", lambda: 0.05)
     monkeypatch.setattr(turns_module, "reauthorize", _reauthorize_by_header)
     members_module.session_member_store.cache_clear()
     store_module.plan_approval_store.cache_clear()
