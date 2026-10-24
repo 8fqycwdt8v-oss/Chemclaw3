@@ -9,16 +9,20 @@ turn with its own principal once its ticket is at the head and the turn claim is
 dispatcher, so no row carries authority.
 
 The waiter refreshes its lease each time it asks its position; a dead waiter's lease lapses, the
-rows behind it stop counting it, and the next enqueue sweeps it.
+rows behind it stop counting it, and the next enqueue sweeps it. It asks when woken — a ticket
+leaving and a turn claim released each notify the session on `TURN_QUEUE_CHANNEL` in their own
+transaction — and otherwise every `idle_poll_seconds`, which keeps its lease refreshed and bounds
+what no notification announces (a lapsed claim or ticket, a lost wake-up).
 
 Durable where sessions are durable (replicas must share one order), in-process otherwise. Durable
 rows cascade from `session_owners`, so deleting or erasing a session takes its queue with it, which
 a waiter sees as its ticket being gone.
 """
 
+import asyncio
 import itertools
 import time
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, NamedTuple, Protocol
@@ -26,12 +30,24 @@ from typing import Literal, NamedTuple, Protocol
 import psycopg
 from psycopg.rows import TupleRow
 
-from chemclaw.agent.session_store import _session_connection, _session_dsn
+from chemclaw.agent.session_store import TURN_QUEUE_CHANNEL, _session_connection, _session_dsn
+from chemclaw.core.config import settings
+from chemclaw.core.notify import NOTIFY, woken_by
 
 #: Why an enqueue was refused. `full`: the session holds its cap of waiting messages. `waiting`:
 #: this sender already has one waiting here — one each, so nobody can fill the queue and a retried
 #: POST queues at most one duplicate.
 Refusal = Literal["full", "waiting"]
+
+#: Fallback asks per turn-claim lease while a waiter has had no wake-up: often enough to keep its
+#: ticket (leased for one claim lease) alive and to see a crashed holder's claim lapse, rare enough
+#: to cost nothing.
+_IDLE_POLLS_PER_LEASE = 4
+
+
+def idle_poll_seconds() -> float:
+    """How long a waiting message parks without a wake-up before it asks its place anyway."""
+    return settings.service_turn_claim_lease_seconds / _IDLE_POLLS_PER_LEASE
 
 
 class QueueRefused(Exception):
@@ -74,6 +90,13 @@ class TurnQueue(Protocol):
 
     async def waiting(self, session_id: str) -> list[QueuedMessage]:
         """Every live ticket in `session_id`, first in line first."""
+        ...
+
+    def woken(self, session_id: str) -> AbstractAsyncContextManager[asyncio.Event]:
+        """An event set when another process may have moved `session_id`'s line, while open.
+
+        Subscribe before asking the position, and `clear()` before each ask.
+        """
         ...
 
 
@@ -161,8 +184,11 @@ class SessionTurnQueue:
             async with conn.cursor() as cur:
                 await cur.execute(_LEAVE, (session_id, ticket))
                 row = await cur.fetchone()
+                removed = row is not None and bool(row[0])
+                if removed:
+                    await cur.execute(NOTIFY, (TURN_QUEUE_CHANNEL, session_id))
             await conn.commit()
-        return row is not None and bool(row[0])
+        return removed
 
     async def waiting(self, session_id: str) -> list[QueuedMessage]:
         """The live line, first in line first."""
@@ -172,6 +198,10 @@ class SessionTurnQueue:
                 return [
                     QueuedMessage(int(row[0]), str(row[1]), row[2]) for row in await cur.fetchall()
                 ]
+
+    def woken(self, session_id: str) -> AbstractAsyncContextManager[asyncio.Event]:
+        """Set by a `leave` or a turn-claim release on `session_id` in any process."""
+        return woken_by(self._dsn, TURN_QUEUE_CHANNEL, session_id, idle_poll_seconds)
 
 
 def _refusal(senders: list[str], sender: str, capacity: int) -> Refusal | None:
@@ -256,3 +286,7 @@ class InMemoryTurnQueue:
             QueuedMessage(entry.ticket, entry.sender, entry.enqueued_at)
             for entry in self._live(session_id)
         ]
+
+    def woken(self, session_id: str) -> AbstractAsyncContextManager[asyncio.Event]:
+        """Never set: the line is this process's, whose waiters `api/state.QueueSignal` wakes."""
+        return nullcontext(asyncio.Event())

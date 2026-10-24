@@ -446,18 +446,7 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
-        # A waiting message's poll also refreshes its lease (`agent/session_queue`), so a poll at or
-        # above the lease lapses every ticket between two asks and every queued message ends as
-        # withdrawn.
-        if self.service_turn_queue_poll_seconds >= self.service_turn_claim_lease_seconds:
-            raise ValueError(
-                f"service_turn_queue_poll_seconds ({self.service_turn_queue_poll_seconds:g}) must "
-                "be below service_turn_claim_lease_seconds "
-                f"({self.service_turn_claim_lease_seconds:g}): a waiting message refreshes its "
-                "place in line each time it asks, so at or above the lease every place lapses "
-                "between asks and every queued message reads as withdrawn."
-            )
-        # The same shape for relayed requests to a running turn (`agent/turn_remotes`).
+        # A relayed request to a running turn is refreshed each poll (`agent/turn_remotes`).
         if self.service_turn_relay_poll_seconds >= self.service_turn_relay_lease_seconds:
             raise ValueError(
                 f"service_turn_relay_poll_seconds ({self.service_turn_relay_poll_seconds:g}) must "

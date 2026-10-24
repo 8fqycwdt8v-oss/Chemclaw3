@@ -7670,7 +7670,7 @@
     },
     "/sessions/{session_id}/queue/{ticket}": {
       "delete": {
-        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions, and for one whose message has just taken the turn (its\nstream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting\nrequest notices on its next look (within `service_turn_queue_poll_seconds` on another replica),\nor at its hand-over, and ends with `queue_cancelled`.",
+        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions, and for one whose message has just taken the turn (its\nstream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting\nrequest notices at once (on another replica through the line's wake-up), or at its hand-over,\nand ends with `queue_cancelled`.",
         "operationId": "withdraw_queued_sessions__session_id__queue__ticket__delete",
         "parameters": [
           {

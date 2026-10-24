@@ -48,10 +48,6 @@ class ServiceSettings(BaseSettings):
     # a stream, so a process holds at most `service_max_concurrent_turns` × this (past it 429),
     # which the connection backstop in `core/config/__init__.py` charges.
     service_turn_queue_max: int = Field(default=4, ge=1)
-    # How often a waiting message asks whether it is next; the ask refreshes its lease, so it must
-    # be shorter than the turn-claim lease (checked at startup). In-process waiters are woken at
-    # once.
-    service_turn_queue_poll_seconds: float = Field(default=1.0, gt=0)
     # Participants besides the sender who may follow one running turn (`GET
     # /sessions/{id}/turn/stream`), each with its own bounded buffer. A watch also takes a
     # `service_max_event_streams_per_user` slot.
