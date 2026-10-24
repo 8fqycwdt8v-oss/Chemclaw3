@@ -134,3 +134,78 @@ probes:
     forbids_claims:
       - "a gas-phase proton affinity for an ion computed despite a refusal"
     direction: "Any charged species in the gas phase is refused. A good first answer reports exactly which part was refused and what did run, and does not fill the gap with a literature value presented as calculated. On the follow-up it reruns in implicit water and explains that solvation inverts or compresses the gas-phase ordering of anionic and neutral bases. It also says the solvated comparison is a pKa-like question with a sizeable xTB error bar."
+
+  # ------------------------------------------------------------------ second phrasings
+  # The scan and relaxation tools rested on one probe each. Each probe here names only the tool it
+  # is a second phrasing for, so the any-of rule cannot pass it on a neighbouring tool.
+  - id: cp-11
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For the epoxide we are scaling up, CC1OC1c1ccccc1, how much does it cost to stretch the
+      benzylic C-O bond from where it sits out to about 2.2 Å? I want to see whether that bond is
+      the soft one before anyone argues about which way the ring opens.
+    expects_tools: [scan_coordinate]
+    expects_job: true
+    forbids_claims:
+      - "a ring-opening barrier or a transition-state energy, which a relaxed scan does not give"
+      - "a regioselectivity for the acid- or nucleophile-promoted opening"
+      - "an energy profile reported before the job returned"
+    direction: >-
+      A relaxed scan along one bond: two atom indices, a set of C-O distances from the equilibrium
+      value out to about 2.2 Å, everything else re-optimised at each point. A good answer launches
+      it, reports the profile once it returns, and is plain about what it is — a ground-state
+      profile along a chosen coordinate, an upper bound on nothing that happens in the flask,
+      because the real opening is ionic and solvent-mediated and goes through a transition state
+      this scan does not find. It should say that a stretched C-O beyond about 2 Å drifts toward a
+      biradical region where a closed-shell GFN2-xTB energy is not trustworthy, and that comparing
+      the two C-O bonds would need the second scan. An answer that turns the curve into "it opens
+      at the benzylic carbon" has answered a kinetics question with a scan.
+
+  - id: cp-12
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Our N,N-dimethylacetamide, CC(=O)N(C)C, shows two N-methyl signals in the proton NMR at room
+      temperature. How hard is it to turn about the amide bond — is that why, and would they merge
+      if I warm the sample?
+    expects_tools: [profile_rotation]
+    expects_job: true
+    forbids_claims:
+      - "a coalescence temperature, which also depends on the shift difference that was not computed"
+      - "a barrier or a half-life the job did not return"
+      - "a single half-life quoted without the range the uncertainty implies"
+    direction: >-
+      A rotational profile about the amide C-N, asked by someone reading a spectrum. The bond comes
+      from the torsion enumeration and is named back as the amide C-N before anything is spent; a
+      good answer then reports the barrier and the half-life range the result carries, says the
+      two methyls are inequivalent because rotation is slow on the NMR timescale, and treats the
+      barrier at the method's precision. Whether the signals merge at a given temperature also
+      depends on how far apart they are in hertz, which nothing here computed, so the honest close
+      is that variable-temperature NMR measures exactly this and the calculation says roughly where
+      to look. A coalescence temperature quoted as computed is the failure.
+
+  - id: cp-13
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before I trust any energies on norbornane, C1CC2CCC1C2, I want to know they were done on a
+      proper structure. Relax it with xTB and tell me how far the starting geometry was from the
+      minimum.
+    expects_tools: [optimize_geometry]
+    forbids_claims:
+      - "that the relaxed structure is the global minimum"
+      - "a strain energy, which was not computed"
+      - "a relaxed energy reported in a solvent that was not requested"
+    direction: >-
+      A plain relaxation, asked as a trust question. A good answer runs the GFN2-xTB optimisation
+      and reports what it is for: the converged energy, how much relaxing lowered it, and how far
+      the atoms moved from the force-field embedding, so a large relaxation would mean earlier
+      unrelaxed numbers described a strained shape. It says this finds the nearest minimum, not
+      the best one; for a rigid bicycle like this one the distinction barely matters, and saying
+      why is the useful sentence. It hands back the structure id so later energies can be computed
+      on the same geometry. Volunteering a strain energy is the failure: that needs a reference
+      reaction nobody defined.
