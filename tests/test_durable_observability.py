@@ -850,7 +850,11 @@ def test_a_cancelled_job_is_listed_as_cancelled_not_failed() -> None:
     assert broker == "CANCELED"
     assert detail == "cancelled"
     assert listed == detail
-    assert [record.state for record in recorded] == ["cancelled"]
+    # Each record's job id and reason in the message: two records for one cancelled run has been
+    # seen only on loaded CI runners, and which run wrote the extra one is the open question.
+    assert [record.state for record in recorded] == ["cancelled"], [
+        (record.job_id, record.state, record.failure_reason) for record in recorded
+    ]
 
 
 def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(

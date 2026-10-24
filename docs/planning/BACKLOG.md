@@ -41,6 +41,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `src/chemclaw/cli/restore_drill.py::kg_checks`, `src/chemclaw/core/restore_check.py::load_knowledge_rows`.
 - [ ] **A helper's report carries no "derived from untrusted reading" marking** [M] — first measure whether injected instructions
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
+- [ ] **A cancelled job is sometimes recorded twice, `failed` then `cancelled`** [S] — twice on CI runners, never in 85 local runs;
+  the assertion now names each record's job and reason, so read the next failure; `durable/connector_job.py::ConnectorJobWorkflow.run`.
 - [ ] **`make live-turn-cost` reads WORSE on a clean tree against its recorded case** [S] — 998,772 measured (128 tools, mock gateway) vs 900,198
   recorded, exit 1, nothing absent; re-record (`ARGS=--emit`) once the 11% prefix growth is accepted, or find it.
 
