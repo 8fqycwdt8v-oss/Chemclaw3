@@ -348,14 +348,16 @@ async def remote_compute(session: BackendSession, request: WireRequest) -> Resul
     return payload
 
 
-async def remote_call(request: WireRequest) -> ResultPayload:
+async def remote_call(
+    request: WireRequest, *, timeout_seconds: float | None = None
+) -> ResultPayload:
     """One round trip to a tool that has no cache row, in its own session.
 
     For `embed_structure` and `combine_structures`, which `calculation_key` refuses. They run on the
     server because their output feeds a key: a geometry from a different RDKit build would change
-    every downstream `structure_id`.
+    every downstream `structure_id`. `timeout_seconds` is `calc_session`'s.
     """
-    async with calc_session() as session:
+    async with calc_session(timeout_seconds) as session:
         return await remote_compute(session, request)
 
 
@@ -364,14 +366,17 @@ async def remote_call(request: WireRequest) -> ResultPayload:
 CalibratedRequest = PredictSolubilityRequest | PredictPkaRequest
 
 
-async def remote_version(request: CalibratedRequest) -> str:
+async def remote_version(
+    request: CalibratedRequest, *, timeout_seconds: float | None = None
+) -> str:
     """The `calc_version` this tool would stamp on a result, without computing one.
 
     The only way to learn a calculator's current version, which `calculator_trust` needs because the
     calibration ledger is keyed exactly on version. The molecule is required by `calculation_key`
     but does not affect the version; callers pass `settings.calc_version_probe_smiles`.
+    `timeout_seconds` is `calc_session`'s.
     """
-    async with calc_session() as session:
+    async with calc_session(timeout_seconds) as session:
         identity = await _identity(session, request)
     version = identity.get("calc_version")
     if not isinstance(version, str) or not version:

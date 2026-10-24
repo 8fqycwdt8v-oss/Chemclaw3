@@ -31,10 +31,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
-- [ ] **The calc claim's `LISTEN` dials `postgres_dsn`, not the session endpoint** [S] — `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint` requires `session_store_dsn` first for `LISTEN`;
-  behind a transaction-mode pooler its wake-up can be lost and a waiter falls back to polling; `science/calc/postgres_store.py`, `science/calc/flight.py::PostgresClaims`.
-- [ ] **The other inline calc tools wait `calc_server_timeout_seconds` past the hop that cancels them** [S] — every `cached_remote` in the calc server and `compose.relax`
-  default to a backend bound above `calc`'s `request_timeout`; lower each through `_within_the_hop`; `connectors/calc/server/tools.py::_within_the_hop`, `connectors/calc/remote.py::calc_session`.
 - [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms), a cluster run on `rpc` that proves no hop with a shorter idle or read timeout (mesh sidecar, load balancer, ingress at 60 s) cuts a long call, and a decision on `/rpc` having no `cancel_on_timeout` counterpart; then delete the MCP path for backends:
   `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `short_connect_client`, `invoke`), `connectors/calc/remote.py::_open_transport`, `ingest/labels/labeller.py::_open_transport`, `core/backend_rpc.py::BackendSession`, the `calc_transport` setting and `tests/test_backend_rpc_fleet.py`'s MCP arms.
 - [ ] **A NaN or infinity is refused in a request but not in an answer over `/rpc`** [S] — `/rpc` returns such a float as null while MCP's text carries it; fleet contract decision (reject in the tool or declare null), then pin in `tests/test_backend_rpc_fleet.py`;
@@ -54,8 +50,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   cores it took 26–46 s, three serial runs); `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **An evicted array leaves its result row listed as whole** [S] — eviction never touches `calculation_results`, so `find` lists and `known` confirms a row whose `*_artifact` hash
-  `ArrayOffloadingStore.get` treats as a miss; strip, mark or exclude it there; `science/calc/artifacts.py::ArrayOffloadingStore.find`, `science/calc/postgres_store.py::PostgresStore.known`.
 
 ### Where the field moved past us
 

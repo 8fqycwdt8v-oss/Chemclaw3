@@ -669,7 +669,9 @@ async def _calibrated(property_name: str) -> tuple[str, str]:
             "be scored against measurements."
         )
     request, unit = entry
-    version = await remote_version(request(smiles=settings.calc_version_probe_smiles))
+    version = await remote_version(
+        request(smiles=settings.calc_version_probe_smiles), timeout_seconds=_within_the_hop()
+    )
     return version, unit
 
 
@@ -864,7 +866,7 @@ async def _starting_geometry(smiles: str, structure_id: str) -> Structure:
     while `smiles` is what the answer is reported under.
     """
     if not structure_id:
-        return await compose.embed(smiles)
+        return await compose.embed(smiles, timeout_seconds=_within_the_hop())
     structure = await require_structure(default_structure_store(), structure_id)
     named = require_canonical_smiles(smiles)
     if structure.smiles is not None and require_canonical_smiles(structure.smiles) != named:
@@ -892,7 +894,9 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
         The method, charge, and total energy in Hartree.
     """
     payload, _ = await cached_remote(
-        default_store(), ComputeXtbEnergyRequest(smiles=smiles, charge=charge)
+        default_store(),
+        ComputeXtbEnergyRequest(smiles=smiles, charge=charge),
+        timeout_seconds=_within_the_hop(),
     )
     return XtbResult.model_validate(payload)
 
@@ -911,7 +915,9 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     Returns:
         The predicted log solubility, its uncertainty, and the model used.
     """
-    payload, _ = await cached_remote(default_store(), PredictSolubilityRequest(smiles=smiles))
+    payload, _ = await cached_remote(
+        default_store(), PredictSolubilityRequest(smiles=smiles), timeout_seconds=_within_the_hop()
+    )
     result = SolubilityResult.model_validate(payload)
     await _log_prediction(
         "solubility",
@@ -948,7 +954,9 @@ async def predict_pka(smiles: str) -> PkaResult:
         The predicted pKa, which site it describes, the protonation/deprotonation energy,
         and the uncertainty.
     """
-    payload, _ = await cached_remote(default_store(), PredictPkaRequest(smiles=smiles))
+    payload, _ = await cached_remote(
+        default_store(), PredictPkaRequest(smiles=smiles), timeout_seconds=_within_the_hop()
+    )
     result = PkaResult.model_validate(payload)
     await _log_prediction(
         "pka", _version_of(payload, "predict_pka"), smiles, result.pka, result.uncertainty, "pKa"
@@ -992,26 +1000,32 @@ async def compute_electronic_properties(
     # `xtb.properties` row.
     if not structure_id:
         payload, _ = await cached_remote(
-            default_store(), ComputeElectronicPropertiesRequest(smiles=smiles, solvent=solvent)
+            default_store(),
+            ComputeElectronicPropertiesRequest(smiles=smiles, solvent=solvent),
+            timeout_seconds=_within_the_hop(),
         )
         return ElectronicProperties.model_validate(payload)
     structure = await _starting_geometry(smiles, structure_id)
     payload, _ = await cached_remote(
         default_store(),
         ComputePropertiesAtRequest(structure=wire_structure(structure), solvent=solvent),
+        timeout_seconds=_within_the_hop(),
     )
     return ElectronicProperties.model_validate(payload)
 
 
-def _within_the_hop(seconds: float) -> float:
+def _within_the_hop(seconds: float | None = None) -> float:
     """`seconds`, lowered so the backend wait ends before the call that reached this tool is cut.
 
     Every tool here is reached through `calc`'s own endpoint, whose `request_timeout` bounds the
     queued activity and the direct session alike, and which cancels the tool when it fires: a
     longer backend wait is then cut mid-run and stores nothing, with no error the caller can read.
     Ending first by the read grace (half the hop, if shorter) makes the timeout this tool's own,
-    named, failure.
+    named, failure. `None` is the default backend bound, `calc_server_timeout_seconds`; so every
+    remote call made here passes this.
     """
+    if seconds is None:
+        seconds = settings.calc_server_timeout_seconds
     endpoint = discovered()["calc"][1].endpoint
     if not isinstance(endpoint, HttpEndpoint):
         raise TypeError(f"the calc bundle's endpoint is {type(endpoint).__name__}, not HTTP")
@@ -1148,6 +1162,7 @@ async def predict_site_reactivity(
             default_store(),
             # `mode` and `top_n` withheld, as below.
             ComputeFukuiAtRequest(structure=wire_structure(structure)),
+            timeout_seconds=_within_the_hop(),
         )
         result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
         limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
@@ -1158,6 +1173,7 @@ async def predict_site_reactivity(
         # holds every atom, so `ranked_for` re-ranks and re-slices locally and one row serves every
         # mode and size.
         PredictSiteReactivityRequest(smiles=smiles),
+        timeout_seconds=_within_the_hop(),
     )
     result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
     limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
@@ -1201,7 +1217,10 @@ async def optimize_geometry(
     # `relax_structure` derive the same key while returning different payloads, so caching either
     # poisons the other. The full result is stored and the summary derived here.
     relaxed, _ = await compose.relax(
-        default_store(), await _starting_geometry(smiles, structure_id), solvent
+        default_store(),
+        await _starting_geometry(smiles, structure_id),
+        solvent,
+        timeout_seconds=_within_the_hop(),
     )
     return OptimizationSummary.of(relaxed)
 
@@ -1255,7 +1274,9 @@ async def compute_thermochemistry(
         symmetry_number=symmetry_number,
         temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
     )
-    _, result, _ = await compose.relax_to_minimum(default_store(), structure, solvent, thermo)
+    _, result, _ = await compose.relax_to_minimum(
+        default_store(), structure, solvent, thermo, timeout_seconds=_within_the_hop()
+    )
     limit = top_bands if top_bands > 0 else settings.xtb_ir_bands_top_n
     # The imaginary mode's 3N-vector is refinement machinery, not something a model can
     # read; the frequency itself is already in `imaginary_frequencies_cm`.
@@ -1281,7 +1302,9 @@ async def predict_developability_profile(smiles: str) -> DescriptorProfile:
         The descriptor panel plus the two rule-of-thumb flags.
     """
     payload, _ = await cached_remote(
-        default_store(), PredictDevelopabilityProfileRequest(smiles=smiles)
+        default_store(),
+        PredictDevelopabilityProfileRequest(smiles=smiles),
+        timeout_seconds=_within_the_hop(),
     )
     return DescriptorProfile.model_validate(payload)
 
@@ -1323,5 +1346,7 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
     """
     # The expensive half is a cached pKa on the server's own key; the Crippen sum and the
     # Henderson-Hasselbalch term are local, so a repeat never recomputes.
-    payload, _ = await cached_remote(default_store(), PredictPkaRequest(smiles=smiles))
+    payload, _ = await cached_remote(
+        default_store(), PredictPkaRequest(smiles=smiles), timeout_seconds=_within_the_hop()
+    )
     return logd_from_pka(PkaResult.model_validate(payload), ph)

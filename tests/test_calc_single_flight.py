@@ -16,9 +16,11 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 
 from chemclaw.core import db, notify
@@ -469,6 +471,64 @@ async def test_a_waiter_wakes_on_the_release_notification(
     assert latency < 2.0, f"woken {latency:.3f}s after the release committed; the poll is 100s"
     print(f"\nrelease committed to waiter returned: {latency * 1000:.0f} ms")
     holder.join()
+
+
+@asynccontextmanager
+async def _empty_database() -> AsyncIterator[str]:
+    """A DSN on a fresh, empty database of the test server, dropped afterwards; skips if refused.
+
+    A notification reaches only listeners on the database it was sent in, so a session endpoint on
+    another database is what tells "wakes on the endpoint the waiter listens on" from "wakes on the
+    claims' own database".
+    """
+    name = f"chemclaw_wake_{uuid.uuid4().hex[:12]}"
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    server = psycopg.conninfo.make_conninfo("", **base)
+    try:
+        async with await psycopg.AsyncConnection.connect(server, autocommit=True) as conn:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+    except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - env-dependent
+        pytest.skip("this role cannot CREATE DATABASE, which a second session endpoint needs")
+    try:
+        yield psycopg.conninfo.make_conninfo("", **{**base, "dbname": name})
+    finally:
+        async with await psycopg.AsyncConnection.connect(server, autocommit=True) as conn:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+async def test_a_waiter_listens_and_is_woken_on_the_session_endpoint(
+    flight_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LISTEN` dials `session_store_dsn`, and the release's `NOTIFY` reaches it there.
+
+    Behind a transaction-mode pooler a `LISTEN` on `postgres_dsn` loses its notifications, so the
+    session endpoint is what it must dial; that endpoint may be another database, so the `NOTIFY`
+    must go there too. With the poll pushed out to minutes, only the notification can wake the
+    waiter inside the assertion's bound.
+    """
+    monkeypatch.setattr(settings, "calc_claim_lease_seconds", 600.0)  # poll every 100 s
+    async with _empty_database() as session_dsn:
+        monkeypatch.setattr(settings, "session_store_dsn", session_dsn)
+        key = _key()
+        holder = _Contender(key, hold=1.0)
+        await _until(lambda: _async(holder.computes == 1))
+
+        started = time.perf_counter()
+        result = await cached_compute(PostgresStore(), key, _never, wait_seconds=30.0)
+        waited = time.perf_counter() - started
+        holder.join()
+        listened = {
+            dsn
+            for dsn, channel in notify._LISTENERS[asyncio.get_running_loop()]
+            if channel == flight.CHANNEL
+        }
+
+    assert result == ({"value": 1}, True)
+    assert listened == {session_dsn}, (
+        "the waiter listened somewhere other than the session endpoint"
+    )
+    assert waited < 5.0, f"woken {waited:.3f}s after it began waiting; the poll is 100 s"
 
 
 async def test_a_waiter_cancelled_while_the_listener_connects_leaves_no_registration(
