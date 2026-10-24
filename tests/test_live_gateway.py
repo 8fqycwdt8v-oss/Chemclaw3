@@ -33,7 +33,10 @@ def _run(args: list[str], live_dir: Path, **extra: str) -> subprocess.CompletedP
 
 
 def test_up_refuses_without_a_vendor_key_and_writes_nothing(tmp_path: Path) -> None:
-    """With no key in the environment the script stops before it mints a token or starts anything."""
+    """With no key in the environment the script stops before it mints a token or starts a process.
+
+    Nothing reaches the run directory: no token, no pidfile.
+    """
     result = _run(["up"], tmp_path)
     assert result.returncode != 0
     assert "no vendor key" in result.stderr
