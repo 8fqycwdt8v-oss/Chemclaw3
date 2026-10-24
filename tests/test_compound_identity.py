@@ -568,6 +568,27 @@ def test_the_solvate_rule_changed_no_shipped_reagent() -> None:
     assert shrunk == {"lithium diisopropylamide", "HATU", "TBTU"}
 
 
+def test_a_salt_in_a_solvent_is_not_the_solvent() -> None:
+    """An inorganic salt written beside a neutral solvent is neither the solvent nor the bare salt.
+
+    The ions balance each other, so the organic fragment is not their parent; the species is kept
+    whole, as a solvate is. A charged organic fragment still loses the ion that balances it.
+    """
+    for salt, solvent in (
+        ("[Li+].[AlH4-]", "C1CCOC1"),
+        ("[Na+].[H-]", "C1CCOC1"),
+        ("[Na+].[BH4-]", "CO"),
+    ):
+        written = f"{salt}.{solvent}"
+        assert compound_id(written) != compound_id(solvent), f"{written} took the solvent's id"
+        assert compound_id(written) != compound_id(salt), f"{written} took the bare salt's id"
+        assert set(standard_smiles(written).split(".")) == {
+            *standard_smiles(salt).split("."),
+            standard_smiles(solvent),
+        }
+    assert compound_id("[Na+].[O-]C(=O)c1ccccc1.[Na+].[Cl-]") == compound_id("OC(=O)c1ccccc1")
+
+
 def test_an_organic_salt_keeps_one_identity_however_its_proton_was_drawn() -> None:
     """An organic salt keeps one identity however its proton was drawn.
 
@@ -786,6 +807,12 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("[CH-]1C=CC=C1", "C1=CCC=C1"),
     ("CC(C)(C)P(C(C)(C)C)[C-]1C=CC=C1", "CC(C)(C)P(C1C=CC=C1)C(C)(C)C"),
     (_DPPF_PD_G3, _DPPF_PD_G3_STANDARD),
+    # `std14`: ions beside a neutral organic fragment balance each other, so a salt in a solvent is
+    # kept whole. Under `std13` all three took the solvent's id. See
+    # `test_a_salt_in_a_solvent_is_not_the_solvent`.
+    ("[Li+].[AlH4-].C1CCOC1", "C1CCOC1.[AlH4-].[Li+]"),
+    ("[Na+].[H-].C1CCOC1", "C1CCOC1.[H-].[Na+]"),
+    ("[Na+].[BH4-].CO", "CO.[BH4-].[Na+]"),
     # `std13`: a metal keeps its hydrides through the disconnection and the neutralisation, and a
     # metal drawn with bonds takes the charge that conserves its fragment's. Under `std12` the
     # first two lost their hydride, the aluminium ones gained or lost one, and the palladate was
@@ -1081,7 +1108,7 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     `tests/test_label_enrichment.py`. A bump permanently doubles the fingerprint tables
     (`durable/retention.py`); recovery is `make rekey-compounds` (`tests/test_compound_rekey.py`).
     """
-    assert STANDARDIZATION_VERSION == "std13", (
+    assert STANDARDIZATION_VERSION == "std14", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"
