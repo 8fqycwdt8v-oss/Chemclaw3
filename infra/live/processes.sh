@@ -664,11 +664,16 @@ sys.exit(asyncio.run(main()))
 PY
 }
 
-up() {
-  mkdir -p "$RUN_DIR"
+# What `up` needs before it starts anything; `restart` asks it too, before its kill.
+lane_preconditions() {
   command -v uv >/dev/null 2>&1 || die "uv not found"
   pg_isready -h 127.0.0.1 -p "${CHEMCLAW_LIVE_PGPORT:-5432}" >/dev/null 2>&1 \
-    || die "postgres is not up — run infra/live/bootstrap.sh first"
+    || die "postgres is not up (pg_isready on 127.0.0.1:${CHEMCLAW_LIVE_PGPORT:-5432}) — run infra/live/bootstrap.sh first"
+}
+
+up() {
+  mkdir -p "$RUN_DIR"
+  lane_preconditions
 
   local python
   python="$(python_bin)"
@@ -937,6 +942,7 @@ this checkout, or set CHEMCLAW_MCP_REPO. Nothing has been killed."
 could not bring it back after the kill. Nothing has been killed.
 $(printf '%s' "$settings_error" | tail -4)"
   fi
+  ( lane_preconditions ) || die "refusing to restart $name: \`up\` could not bring it back after the kill. Nothing has been killed."
   local pid
   pid="$(cat "$pidfile")"
   # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a
