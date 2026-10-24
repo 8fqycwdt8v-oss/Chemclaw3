@@ -54,8 +54,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
-- [ ] **A rewritten artifact strands its old blob, and an evicted one leaves its row served** [M] — `_UPSERT_LINK` moves the link with no sweep (deleting in place raced an insert), and
-  eviction never touches `calculation_results`, so `find`/`known`/backfill name a dead hash; `science/calc/postgres_artifacts.py::_UPSERT_LINK`, `durable/artifact_eviction.py::_evict_cold_artifacts`.
+- [ ] **An evicted array leaves its result row listed as whole** [S] — eviction never touches `calculation_results`, so `find` lists and `known` confirms a row whose `*_artifact` hash
+  `ArrayOffloadingStore.get` treats as a miss; strip, mark or exclude it there; `science/calc/artifacts.py::ArrayOffloadingStore.find`, `science/calc/postgres_store.py::PostgresStore.known`.
 
 ### Where the field moved past us
 
