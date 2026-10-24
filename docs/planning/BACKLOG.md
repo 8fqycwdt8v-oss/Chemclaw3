@@ -22,8 +22,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **`similar_reactions` and the design precedent check still serve a fingerprint hit with no record** [S] — the retriever now passes only servable records, but the tool keeps "unindexed is not withdrawn",
   so a hit `expand_note` refuses is still cited; owner call whether one rule holds; `connectors/rxnfp/server/tools.py::similar_reactions`, `agent/protocol_design_tools.py::uncited_precedent`.
-- [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
-  `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
   with `data/evals/profiles/tools-removed.yaml` as baseline (needs gateway credit); `cli/live_probes.py::_AB_BASELINE_PROFILE`.
 - [ ] **`hybrid` ranks better than `graph` with a real embedder, but 21 probes cannot flip the default** [M] — `make retrieval-arms` on `nomic-embed-text`
@@ -33,8 +31,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms), a cluster run on `rpc` that proves no hop with a shorter idle or read timeout (mesh sidecar, load balancer, ingress at 60 s) cuts a long call, and a decision on `/rpc` having no `cancel_on_timeout` counterpart; then delete the MCP path for backends:
   `core/mcp_session.py` (`open_session`, `cancel_on_timeout`, `short_connect_client`, `invoke`), `connectors/calc/remote.py::_open_transport`, `ingest/labels/labeller.py::_open_transport`, `core/backend_rpc.py::BackendSession`, the `calc_transport` setting and `tests/test_backend_rpc_fleet.py`'s MCP arms.
-- [ ] **A NaN or infinity is refused in a request but not in an answer over `/rpc`** [S] — `/rpc` returns such a float as null while MCP's text carries it; fleet contract decision (reject in the tool or declare null), then pin in `tests/test_backend_rpc_fleet.py`;
-  `core/backend_rpc.py::RpcSession.invoke`, `tests/test_backend_rpc.py::test_the_client_passes_an_answer_through_as_the_server_serialized_it`.
+- [ ] **Core does not pin that a backend's non-finite answer is a refusal on both transports** [S] — the fleet kit refuses it (`D-2026-10-23-a-non-finite-answer-is-a-refusal`, Chemclaw3-mcp#179) and pins it itself;
+  no shipped `calc`/`rxnlabel` tool returns one, so a pin here needs a probe app from the sibling kit; `tests/test_backend_rpc_fleet.py`, `core/backend_rpc.py::RpcSession._unstructured`.
 - [ ] **A note written in one activity is unseen by a later one on another worker pod until the sync** [M] — each pod commits into its own
   clone; no shipped workflow reads its own write, so drive one first; `kg/git_writer.py`, `durable/template_activities.py::run_agent_step`.
 - [ ] **The drill's `kg-validate` still reads a notes directory, not the Postgres store** [S] — the `kg_*` tables are restored and counted, but their notes are not what is validated until W4.10;
@@ -64,8 +62,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
   structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
 
-- [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
-  give them a durable record and a walk, or declare the loss; `publish/hooks.py::publish_tool_result`, `connectors/results/workflows.py::_walk`.
 - [ ] **A sink cannot tell a superseded-epoch calculation from a current one** [M] — the backfill skips superseded rows, but one published live before an epoch bump stays beside
   its successor, both `status = 'valid'`; carry the epoch on `ResultRecord` (a contract and DDL change) or mark the old row superseded; `publish/record.py::ResultRecord`.
 
@@ -122,7 +118,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **A cancellation lost while waiting for a pooled connection** — `psycopg_pool` still uses `asyncio.wait_for` · *Revisit:* a pool release without it, or Python ≥ 3.12.
 - **`mcp` 2.x** — a deliberate two-repo migration, not a bump · *Revisit:* a decision to pay for it; re-run `tests/test_connector_transport.py` and `tests/test_connector_identity.py`.
 - **Front door on `stream_events(version="v3")`** — built, measured, reverted: usage per block is lost · *Revisit:* upstream emits usage per content block or the raw stream.
-- **Prompt-cache control on the production provider** (REV-9) — `langchain_openai` exposes no `cache_control` · *Revisit:* upstream exposes it; first read `chemclaw_cache_read_tokens_total`.
+- **Prompt-cache control on a deployment's gateway** (REV-9) — the live lane caches at its own gateway (`D-2026-10-24-the-live-lane-caches-through-a-local-gateway`); a deployment's gateway must inject `cache_control` itself, and `langchain_openai` sends none · *Revisit:* a deployment names its gateway; first read `chemclaw_cache_read_tokens_total`.
 - **Delta representation for the checkpointer's `messages` channel** — writes are quadratic in thread length · *Revisit:* `DeltaChannel` leaves beta, or WAL/replication lag is attributed to it.
 - **`/readyz` cannot bound a Postgres that accepts and stops answering** — psycopg's cancel re-wait is unbounded · *Revisit:* psycopg bounds `AsyncConnection.wait`'s re-wait.
 
