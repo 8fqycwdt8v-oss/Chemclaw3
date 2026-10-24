@@ -38,8 +38,9 @@ LIMITS: tuple[str, ...] = (
     "and a person's own judgement leave nothing here.",
     "An empty section means this system recorded nothing for it, which is not the same as nothing "
     "having happened — a window outside retention reads identically.",
-    "A section named in `truncated` is a prefix, not the whole of it: this pack reads a bounded "
-    "number of rows per store, oldest first. Read the counts as lower bounds there.",
+    "A section named in `truncated` is the session's most recent rows, not the whole of it: this "
+    "pack reads a bounded number of rows per store, newest first, and what it drops is the "
+    "oldest. Read the counts as lower bounds there.",
     "A knowledge note written inside a turn appears here as the tool call that wrote it, not by "
     "its note id: nothing stores the id of a note against the session that wrote it. A note a "
     "durable run recorded does carry its id, on that job.",
@@ -198,8 +199,8 @@ class EvidencePack(BaseModel):
     #: presented a truncated turn's evidence as a completed turn's.
     turns: list[PackTurn] = Field(default_factory=list)
     limits: tuple[str, ...] = LIMITS
-    #: Sections that hit the per-store row cap, so what is shown is a prefix, not the whole record.
-    #: Without this a capped section reads as complete, and the dropped rows are the most recent.
+    #: Sections that hit the per-store row cap, so what is shown is the newest rows, not the whole
+    #: record. Without this a capped section reads as complete.
     truncated: tuple[str, ...] = ()
 
     @property
@@ -235,7 +236,12 @@ _Section = TypeVar("_Section", bound=BaseModel)
 
 
 async def _section(model: type[_Section], sql: str, params: tuple[Any, ...]) -> list[_Section]:
-    """Every row the query returned, already the model it belongs to.
+    """Every row the query returned, already the model it belongs to, oldest first.
+
+    Each query orders newest first under its `LIMIT`, so a capped section keeps the session's
+    latest rows (its last external change, its last refusal) and drops the oldest; the rows are
+    reversed here so a reader still sees them in the order they happened. Each `ORDER BY` ends on a
+    unique column, so rows written in one transaction keep a fixed order.
 
     `class_row` binds each selected column by name, so the SELECT list and the model are one
     declaration and a mismatched column is a `ValidationError` at the read, never a silent swap.
@@ -248,7 +254,7 @@ async def _section(model: type[_Section], sql: str, params: tuple[Any, ...]) -> 
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         async with conn.cursor(row_factory=class_row(model)) as cur:
             await cur.execute(sql, params)
-            return await cur.fetchall()
+            return list(reversed(await cur.fetchall()))
 
 
 async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
@@ -263,26 +269,27 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
         # cannot be lost. `ts AS at` because `class_row` binds by name.
         "SELECT tool, outcome, actor, ts AS at, latency_ms, "
         "CASE WHEN outcome = 'refused' THEN detail ELSE '' END AS detail "
-        "FROM audit_events WHERE session_id = %s ORDER BY ts LIMIT %s",
+        "FROM audit_events WHERE session_id = %s ORDER BY ts DESC, id DESC LIMIT %s",
         (session_id, limit),
     )
     jobs = await _section(
         PackJob,
         "SELECT job_id, connector, job, rationale, requested_by, summary, state, "
         "failure_reason, note_id, completed_at FROM job_records WHERE session_id = %s "
-        "ORDER BY completed_at LIMIT %s",
+        "ORDER BY completed_at DESC, job_id DESC LIMIT %s",
         (session_id, limit),
     )
     effects = await _section(
         PackEffect,
         "SELECT effect_id, system, job, reversal, state, approved_by, external_ref, "
-        "attempted_at FROM effects WHERE session_id = %s ORDER BY attempted_at LIMIT %s",
+        "attempted_at FROM effects WHERE session_id = %s "
+        "ORDER BY attempted_at DESC, effect_id DESC LIMIT %s",
         (session_id, limit),
     )
     approvals = await _section(
         PackApproval,
         "SELECT plan_hash, approved, actor, decided_at AS at FROM plan_approvals "
-        "WHERE session_id = %s ORDER BY decided_at LIMIT %s",
+        "WHERE session_id = %s ORDER BY decided_at DESC, id DESC LIMIT %s",
         (session_id, limit),
     )
     turns = await _section(
@@ -292,7 +299,8 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
         "SELECT correlation_id, outcome, completed, recorded_at AS at, compacted, "
         "context_unreducible, answer_confidence, COALESCE(review_required, false) AS "
         "review_required, error_code "
-        "FROM turn_costs WHERE session_id = %s ORDER BY recorded_at LIMIT %s",
+        "FROM turn_costs WHERE session_id = %s "
+        "ORDER BY recorded_at DESC, correlation_id DESC LIMIT %s",
         (session_id, limit),
     )
     # A section that came back exactly full is a section that may have more behind it. Reported

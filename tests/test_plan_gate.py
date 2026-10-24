@@ -503,22 +503,43 @@ async def test_spending_never_raises_when_the_store_is_unreachable(
 ) -> None:
     """A turn must not fail on its way out because the approval store hiccupped.
 
-    The gate still fails closed on the next call regardless — an unreadable decision is not an
-    approval — so a swallowed error costs one extra approval rather than authorizing anything.
+    The gate still fails closed on the next call — an unreadable decision is not an approval — so a
+    swallowed error costs one extra approval rather than authorizing anything. Asserted on a plan
+    that *was* approved before the store went down, so the write it refuses is one a working store
+    would have let through.
     """
 
     class _Broken:
         async def decision(self, *_: Any) -> None:
             raise RuntimeError("store is down")
 
-        async def record(self, *_: Any) -> None:
+        async def consume_all(self, *_: Any) -> None:
             raise RuntimeError("store is down")
-
-    monkeypatch.setattr(store_module, "plan_approval_store", lambda: _Broken())
 
     session = _Session("broken-store")
     await _set_plan(session, ["a step"])
+    await _approve(approvals, session)
+    # The gate's own binding: `plan_gate` imported the factory by name, so patching the store
+    # module would leave the gate reading the working store.
+    monkeypatch.setattr(plan_gate_module, "plan_approval_store", lambda: _Broken())
+
     await consume_turn_approval(session.session_id)  # must not raise
+
+    ran = False
+
+    async def _handler(_request: Any) -> Any:
+        nonlocal ran
+        ran = True
+
+    request = tool_request("record_knowledge_note")
+    object.__setattr__(request, "state", {"todos": _todos(session)})
+    token = set_current_session_id(session.session_id)
+    try:
+        with pytest.raises(RuntimeError, match="store is down"):
+            await run_middleware(enforce_plan_approval, request, _handler)
+    finally:
+        reset_current_session_id(token)
+    assert not ran, "an unreadable approval authorized a state-changing call"
 
 
 # --- "nothing" is not an approvable plan, and a spent approval stays spent ---------------------
