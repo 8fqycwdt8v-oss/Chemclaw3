@@ -827,17 +827,24 @@ def precedent_consulted(
         return _ok(
             "precedent_consulted", "note", "no uncited precedent was offered for this design"
         )
-    named = "; ".join(
-        f"{hit.id} ({hit.similarity:.2f})" for hit in precedent[:_MAX_NAMED_PRECEDENT]
-    )
-    more = len(precedent) - _MAX_NAMED_PRECEDENT
+    readable = [hit for hit in precedent if hit.record_readable]
+    unreadable = len(precedent) - len(readable)
+    named = "; ".join(f"{hit.id} ({hit.similarity:.2f})" for hit in readable[:_MAX_NAMED_PRECEDENT])
+    more = len(readable) - _MAX_NAMED_PRECEDENT
     tail = f", and {more} more" if more > 0 else ""
-    return _fail(
-        "precedent_consulted",
-        "note",
-        f"the record holds {len(precedent)} similar run(s) this design does not cite: {named}"
-        f"{tail}. Read them before running this — or say why they do not apply",
-    )
+    parts: list[str] = []
+    if readable:
+        parts.append(
+            f"the record holds {len(readable)} similar run(s) this design does not cite: "
+            f"{named}{tail}. Read them before running this — or say why they do not apply"
+        )
+    if unreadable:
+        # Offered for recall only: nothing in the record can be read, so no claim may stand on it.
+        parts.append(
+            f"{unreadable} more similar run(s) are indexed but their record is not readable here "
+            "— do not quote details from them or cite them as precedent"
+        )
+    return _fail("precedent_consulted", "note", "; ".join(parts))
 
 
 #: How many precedents to name before the detail is the problem. A design that ignored twenty near

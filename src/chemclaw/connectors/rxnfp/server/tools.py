@@ -13,7 +13,11 @@ than the labelling server so search does not depend on a background service.
 
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.ingest.eln.records import ReactionRecordStore, default_record_store
+from chemclaw.ingest.eln.records import (
+    ReactionRecordStore,
+    default_record_store,
+    readable_or_marked,
+)
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import (
@@ -56,6 +60,8 @@ async def similar_reactions(
 
     Each hit's `id` is the reaction's **note id**, so it can be passed straight to `expand_note`
     for the full recipe. `top_k` and `threshold` (Tanimoto floor) default to the configured values.
+    A hit with `record_readable: false` is a run the index holds but whose record cannot be read
+    here: `expand_note` refuses it, so quote nothing from it and do not cite it as support.
 
     **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means no reaction
     has been indexed and the question was not answered — never report it as "we have no precedent".
@@ -67,12 +73,9 @@ async def similar_reactions(
     be both, and `verdict` says so when it is.
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
-    # The index knows bits and a label; whether the run still stands is the record store's. A hit
-    # whose record is missing is still served (unindexed is not withdrawn); a citation-only record,
-    # which can only be a stale row here, is dropped.
-    withdrawn = await _records.structurally_withheld(
-        [(match.source, match.id) for match in search.hits]
-    )
+    # The index knows bits and a label; whether the run still stands is the record store's. A
+    # withdrawn or citation-only hit is dropped; one with no record stays, marked unreadable.
+    hits = await readable_or_marked(_records, search.hits)
     return search.model_copy(
         update={
             "unsearched": await _records.citation_only(reaction_smiles),
@@ -80,8 +83,7 @@ async def similar_reactions(
             # bare id two sites hold resolves to neither.
             "hits": [
                 match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
-                for match in search.hits
-                if (match.source, match.id) not in withdrawn
+                for match in hits
             ],
         }
     )

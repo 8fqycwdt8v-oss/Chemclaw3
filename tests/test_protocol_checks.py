@@ -1406,6 +1406,35 @@ def test_precedent_consulted_names_the_runs_the_design_did_not_cite() -> None:
     assert "ord-9f2" in verdict.detail and "0.91" in verdict.detail
 
 
+def test_an_unreadable_precedent_is_not_offered_to_be_read_or_cited() -> None:
+    """A hit with no readable record is counted and warned about, never named as something to open.
+
+    Alone it still produces the note (recall), but the advice is the opposite of "read them".
+    """
+    hits = [UncitedPrecedent(id="ord-gone", similarity=0.95, record_readable=False)]
+
+    verdict = precedent_consulted(_protocol(), hits)
+
+    assert not verdict.passed and verdict.severity == "note"
+    assert "ord-gone" not in verdict.detail
+    assert "Read them" not in verdict.detail
+    assert "1 more similar run(s)" in verdict.detail
+    assert "do not quote details" in verdict.detail
+
+
+def test_readable_and_unreadable_precedent_are_reported_apart() -> None:
+    """Readable hits keep their wording and count; the unreadable ones get their own clause."""
+    hits = [
+        UncitedPrecedent(id="ord-9f2", similarity=0.91),
+        UncitedPrecedent(id="ord-gone", similarity=0.95, record_readable=False),
+    ]
+
+    detail = precedent_consulted(_protocol(), hits).detail
+
+    assert "holds 1 similar run(s)" in detail and "ord-9f2" in detail
+    assert "ord-gone" not in detail and "1 more similar run(s)" in detail
+
+
 def test_uncited_precedent_is_a_note_rather_than_a_blocker() -> None:
     """Uncited precedent is a note rather than a blocker.
 

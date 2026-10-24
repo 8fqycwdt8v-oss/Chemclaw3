@@ -27,7 +27,11 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.ord import RecordTier, RoleSpecies
 from chemclaw.kg.note import ProcessConditions, note_id_for_reaction, require_note_slug
-from chemclaw.science.fingerprints.store import CITATION_ONLY_NAMED_MAX, CitationOnlyRecords
+from chemclaw.science.fingerprints.store import (
+    CITATION_ONLY_NAMED_MAX,
+    CitationOnlyRecords,
+    Match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -707,6 +711,26 @@ def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | Non
             ", ".join(sorted(set(stored) - set(known))),
         )
     return ProcessConditions(**known)
+
+
+async def readable_or_marked(records: ReactionRecordStore, hits: Sequence[Match]) -> list[Match]:
+    """`hits` a structure search may serve: withheld ones dropped, unreadable ones flagged.
+
+    The one rule for `similar_reactions` and the design precedent check. A run the source withdrew,
+    or amended to citation-only, is dropped. A run with no record at all stays in the answer
+    with `record_readable=False`, because the index holds a fingerprint the application cannot
+    delete and recall is worth keeping, but nothing in the record can be quoted. Order is kept.
+    """
+    refs = [(hit.source, hit.id) for hit in hits]
+    withheld = await records.structurally_withheld(refs)
+    live = [hit for hit in hits if (hit.source, hit.id) not in withheld]
+    servable = await records.servable([(hit.source, hit.id) for hit in live])
+    return [
+        hit
+        if (hit.source, hit.id) in servable
+        else hit.model_copy(update={"record_readable": False})
+        for hit in live
+    ]
 
 
 def _pair_off(refs: Sequence[tuple[str, str]], found: set[tuple[str, str]]) -> set[tuple[str, str]]:

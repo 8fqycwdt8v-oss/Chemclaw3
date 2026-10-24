@@ -22,15 +22,15 @@
   "overlay": null,
   "profile": "default",
   "prefix": {
-    "tool_schemas": 64622,
+    "tool_schemas": 64670,
     "instructions": 3934,
     "skill_descriptions": 3283,
-    "total": 71839
+    "total": 71887
   },
   "totals": {
     "every-request": {
       "entries": 180,
-      "tokens": 72483
+      "tokens": 72531
     },
     "conditional": {
       "entries": 18,
@@ -38,7 +38,7 @@
     },
     "on-demand": {
       "entries": 114,
-      "tokens": 105390
+      "tokens": 105547
     }
   },
   "entries": [
@@ -1553,9 +1553,9 @@
       "kind": "mcp-docstring",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
       "residence": "every-request",
-      "tokens": 237,
-      "chars": 929,
-      "sha256": "85c7cb4d00326847",
+      "tokens": 282,
+      "chars": 1110,
+      "sha256": "65ef591d7c131baf",
       "also_counted_in": [
         "tool:similar_reactions"
       ]
@@ -2066,9 +2066,9 @@
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
       "residence": "on-demand",
-      "tokens": 976,
-      "chars": 3887,
-      "sha256": "406b22c9f6b09c0c"
+      "tokens": 1133,
+      "chars": 4514,
+      "sha256": "169132bae17fccf1"
     },
     {
       "id": "mcp-output:rxnfp:substrate_precedent",
@@ -4904,9 +4904,9 @@
       "kind": "mcp-tool-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
       "residence": "every-request",
-      "tokens": 345,
-      "chars": 1362,
-      "sha256": "66c26cee4958232d"
+      "tokens": 393,
+      "chars": 1553,
+      "sha256": "440c17b9cc922834"
     },
     {
       "id": "tool:start_optimization_campaign",
