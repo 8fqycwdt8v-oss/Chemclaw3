@@ -60,7 +60,7 @@ default chart values dial these servers:
 | `rxnpredict` | connector, `connectors.rxnpredict.url` | 8857 |
 | `calc` | **backend**, `CHEMCLAW_CALC_SERVER_URL` (called inside the calculation cache on a miss) | 8860 |
 | `rxnlabel` | **backend**, `CHEMCLAW_RXNLABEL_SERVER_URL` (called by the reaction-label drain) | 8865 |
-| `props`, `thermalsafety`, `kinetics`, `unitops`, `suitability` | connectors, **off** by default in `values.yaml` | 8850, 8851, 8852, 8853, 8892 |
+| `props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`, `chembl` | connectors, **off** by default in `values.yaml` | 8850, 8851, 8852, 8853, 8892, 8862 |
 
 `Chemclaw3-mcp:MODULES.md` is the authoritative port registry. Two names exist for `calc`, and
 they are different things. The chart's `chemclaw-connector-calc` is this repository's `calc`
@@ -412,7 +412,7 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 | `optionalKeys.rxnlabelToken` | `CHEMCLAW_RXNLABEL_TOKEN` | every pod, plus `chemclaw-mcp-rxnlabel` | reaction labelling fails |
 | `optionalKeys.mcpFaceToken` | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the face answers 401 |
 | `optionalKeys.{llmFallbackApiKey,vectorStoreApiKey,temporalApiKey,sessionStoreDsn}` | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | every pod | that feature stays off |
-| `optionalKeys.{propsToken,thermalsafetyToken,kineticsToken,unitopsToken,suitabilityToken,pyexecToken}` | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and the name `pyexec`'s manifest gives `auth.token_env` | every pod. **The matching fleet server needs the same value.** | nothing until the bundle is enabled; then every call to it is refused |
+| `optionalKeys.{propsToken,thermalsafetyToken,kineticsToken,unitopsToken,suitabilityToken,chemblToken,pyexecToken}` | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, `CHEMCLAW_CHEMBL_TOKEN`, and the name `pyexec`'s manifest gives `auth.token_env` | every pod. **The matching fleet server needs the same value.** | nothing until the bundle is enabled; then every call to it is refused |
 
 A bundle you switch on later needs no Secret-plumbing edit: each fleet bundle's slot ships, named
 after its manifest's `auth.token_env`. Add the key to the Secret when you enable the bundle.
@@ -605,11 +605,24 @@ Deploy the fleet **before** the backend. The backend dials it, and the release o
 | `rxnlabel` | `Chemclaw3-mcp` chart entry `servers.rxnlabel` (formerly `servers/rxnlabel/deploy/*.yaml`) | `CHEMCLAW_RXNLABEL_TOKEN` | `chemclaw-mcp-rxnlabel:8865` |
 
 These five are the servers the shipped chart turns on. The off-by-default servers (`props` 8850,
-`thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
+`thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `chembl` 8862, `pyexec` 8899) follow
 the same pattern with `CHEMCLAW_<NAME>_TOKEN`; switching one on also needs
 `connectors.<name>.enabled: true` and its token in `chemclaw-secrets` (the slot and the egress port
 ship, §5); its manifest is in the image like the others'. The full
 per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operations.md` §3.
+
+**`chembl` serves third-party share-alike data, in two tiers.** Its subset of ChEMBL release 37 is
+CC BY-SA 3.0, and every answer carries the credit, release, licence and a statement of the changes
+made as a structured `attribution` field, which an answer derived from it must keep. The **full**
+tier (about 300,000 compounds, 271 MB) is not committed anywhere: it is built into the release
+image by the fleet's Jenkins build (`CHEMBL_TIER=full`), which downloads the 5.8 GB release from
+`ftp.ebi.ac.uk` at build time, so that build needs egress to that host and about 36 GB of scratch.
+A bare `docker build` and the fleet's pull-request image job produce the **fixture** tier instead:
+13 named compounds, 0.6 MB, enough to prove the wiring and nothing a chemist should rely on for a
+miss. The tier is on the pod's `/healthz` (`datasets`) and in every answer's
+`attribution.data_tier`; check one of them before enabling `connectors.chembl`
+(`Chemclaw3-mcp:servers/chembl/README.md`). Distributing the image outside the legal entity that
+holds it distributes the subset under CC BY-SA 3.0.
 
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
 (`Chemclaw3-mcp:manifests/<name>/connector.yaml`, or `Chemclaw3-mcp:manifests-internal/<name>/connector.yaml`
