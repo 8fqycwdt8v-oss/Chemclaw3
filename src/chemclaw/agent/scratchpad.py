@@ -495,7 +495,7 @@ def filesystem_permissions() -> list[Any]:
     and a blanket write-deny closes the rest.
 
     The rules must also be handed to the `FilesystemMiddleware` instance
-    `langgraph_agent._middleware` substitutes (as `_permissions=`);
+    `langgraph_agent._middleware` substitutes (as `permissions=`);
     `create_deep_agent(permissions=…)` reaches only its own instance. Riding the middleware list
     also carries them into helpers.
 

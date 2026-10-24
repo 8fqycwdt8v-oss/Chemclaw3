@@ -117,7 +117,7 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
     return {
         "name": GENERAL_PURPOSE,
         "description": (
-            "A helper that works in its own context window and reports back a single summary. "
+            "A helper that works in its own context window. "
             "Spawn one — or several at once — when a task splits into independent pieces whose "
             "intermediate reading would otherwise crowd this conversation: sweeping several "
             "evidence sources in parallel, or working through a long search whose steps do not "
@@ -126,8 +126,7 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
             "look anything up that you can look up, and it cannot start a durable job, record a "
             "note, record an answer or ask the chemist anything. Do those here, yourself, after "
             "reading what it found. It is never a way to reach something you cannot reach "
-            "yourself. Give it the full context in the prompt, since it sees nothing of this "
-            "conversation, and say exactly what to return."
+            "yourself."
         ),
         "runnable": runnable,
     }

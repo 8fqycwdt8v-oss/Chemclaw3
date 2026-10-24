@@ -22,15 +22,15 @@
   "overlay": null,
   "profile": "default",
   "prefix": {
-    "tool_schemas": 64622,
+    "tool_schemas": 64595,
     "instructions": 3934,
     "skill_descriptions": 3283,
-    "total": 71839
+    "total": 71812
   },
   "totals": {
     "every-request": {
       "entries": 180,
-      "tokens": 72483
+      "tokens": 72456
     },
     "conditional": {
       "entries": 18,
@@ -4283,9 +4283,9 @@
       "kind": "upstream-tool-schema",
       "owner": "upstream:deepagents.FilesystemMiddleware",
       "residence": "every-request",
-      "tokens": 278,
-      "chars": 1094,
-      "sha256": "5824ccac365897d8"
+      "tokens": 280,
+      "chars": 1103,
+      "sha256": "b60712e742671d93"
     },
     {
       "id": "tool:estimate_stability_trend",
@@ -4616,9 +4616,9 @@
       "kind": "upstream-tool-schema",
       "owner": "upstream:deepagents.FilesystemMiddleware",
       "residence": "every-request",
-      "tokens": 449,
-      "chars": 1777,
-      "sha256": "624395d92621dd59"
+      "tokens": 424,
+      "chars": 1680,
+      "sha256": "545142965039ee04"
     },
     {
       "id": "tool:read_plate_results",
@@ -4985,9 +4985,9 @@
       "kind": "upstream-tool-schema",
       "owner": "upstream:deepagents.SubAgentMiddleware",
       "residence": "every-request",
-      "tokens": 895,
-      "chars": 3561,
-      "sha256": "a65cb8d3cd2ae668"
+      "tokens": 891,
+      "chars": 3548,
+      "sha256": "35b71869ffd83ec1"
     },
     {
       "id": "tool:watch_for",

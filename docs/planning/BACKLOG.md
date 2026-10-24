@@ -69,11 +69,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A sink cannot tell a superseded-epoch calculation from a current one** [M] — the backfill skips superseded rows, but one published live before an epoch bump stays beside
   its successor, both `status = 'valid'`; carry the epoch on `ResultRecord` (a contract and DDL change) or mark the old row superseded; `publish/record.py::ResultRecord`.
 
-### Everything else
-
-- [ ] **deepagents 0.7.32 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and `edit_file` text, so it ships behind
-  `docs/guides/model-text-evaluation.md`; 0.7.31+ also takes `FilesystemMiddleware(permissions=)` publicly, so the `_permissions` shim in `agent/langgraph_agent.py::_middleware` goes with it.
-
 ## Upstream watch
 
 On a dependency bump, ask per line: does upstream now do this, and better? A changed answer needs an ADR.
