@@ -101,10 +101,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-#: What compiling a graph imports and importing this module does not: `deepagents` (with the three
-#: provider SDKs it pulls in) and the backends and middleware subclassed from it.
+#: What a first turn imports and importing this module does not: `deepagents`, the backends and
+#: middleware subclassed from it, and the provider wrapper `llm_provider` builds the model with
+#: (`deepagents` does not import it).
 _GRAPH_MODULES = (
     "deepagents",
+    "langchain_openai",
     "chemclaw.agent.scratchpad",
     "chemclaw.skills.backends",
 )

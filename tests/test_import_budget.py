@@ -1,11 +1,10 @@
 """Importing the front door stays cheap: the heavy stacks load when something uses them.
 
 `chemclaw.api.app` is imported by every worker, CLI and test collector that touches the API. The
-agent framework's provider SDKs (about two thirds of `import deepagents`), the document parsers and
-the numerical stack's sparse, linear-algebra and statistics parts each cost a second or more, and
-none is needed until a turn compiles a graph or a tool uses one. A new module-level import that
-brings one back fails here with the module that did it named by `python -X importtime`, which is
-how to find it.
+agent framework and the provider SDKs, the document parsers and the numerical stack's sparse,
+linear-algebra and statistics parts each cost a second or more, and none is needed until a turn
+compiles a graph or a tool uses one. A new module-level import that brings one back fails here
+with the module that did it named by `python -X importtime`, which is how to find it.
 
 Measured in a fresh interpreter, because `sys.modules` of the test process already holds whatever
 earlier tests imported.
@@ -92,4 +91,37 @@ def test_importing_the_front_door_stays_inside_its_module_budget() -> None:
     assert isinstance(count, int) and count <= _MODULE_CEILING, (
         f"importing chemclaw.api.app loads {count} modules against a ceiling of {_MODULE_CEILING}; "
         "see the heaviest with `python -X importtime`, and lazy-import before raising the ceiling"
+    )
+
+
+_WARM_PROBE = """
+import json, sys
+from chemclaw.agent.langgraph_agent import prepare_imports
+from chemclaw.agent.llm_provider import build_chat_model
+prepare_imports()
+warmed = set(sys.modules)
+build_chat_model()
+print(json.dumps(sorted(name for name in set(sys.modules) - warmed if name in %r)))
+"""
+
+
+def test_the_startup_warm_up_loads_the_provider_sdk_a_first_turn_builds() -> None:
+    """`prepare_imports` leaves building the turn's chat model nothing heavy to import.
+
+    The front door waits for the warm-up before serving, so whatever it misses the first turn pays.
+    The provider wrapper is named there itself: `deepagents` no longer imports it on the way. Only
+    the packages are checked: the SDK client still loads its few resource modules on construction.
+    """
+    roots = ("openai", "langchain_openai", "anthropic", "langchain_anthropic")
+    done = subprocess.run(
+        [sys.executable, "-c", _WARM_PROBE % (roots,)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    late = json.loads(done.stdout.strip().splitlines()[-1])
+    assert late == [], (
+        f"building the chat model after `prepare_imports` still imported {late[:5]} "
+        f"({len(late)} modules); add the provider module to `langgraph_agent._GRAPH_MODULES`"
     )
