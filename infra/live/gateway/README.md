@@ -12,6 +12,6 @@ make live-up                            # the lane now dials the gateway
 bash infra/live/gateway/up.sh down
 ```
 
-The vendor key stays in the gateway's environment. The lane gets a local token (`.live/run/gateway.token`,
+The vendor key stays in the gateway's environment. The lane gets a local token (`.live/gateway/gateway.token`,
 mode 0600) as `CHEMCLAW_LLM_API_KEY`. `CHEMCLAW_LIVE_GATEWAY_PORT` and `CHEMCLAW_LIVE_GATEWAY_MODEL`
 override the port and the model id `env` prints.

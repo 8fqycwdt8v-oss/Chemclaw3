@@ -17,6 +17,7 @@ from tests.siblings import REPO_ROOT
 
 _UP = REPO_ROOT / "infra/live/gateway/up.sh"
 _CONFIG = REPO_ROOT / "infra/live/gateway/litellm.yaml"
+_PROCESSES = REPO_ROOT / "infra/live/processes.sh"
 
 
 def _run(args: list[str], live_dir: Path, **extra: str) -> subprocess.CompletedProcess[str]:
@@ -35,14 +36,14 @@ def _run(args: list[str], live_dir: Path, **extra: str) -> subprocess.CompletedP
 def test_up_refuses_without_a_vendor_key_and_writes_nothing(tmp_path: Path) -> None:
     """With no key in the environment the script stops before it mints a token or starts a process.
 
-    Nothing reaches the run directory: no token, no pidfile.
+    Nothing reaches the gateway's directory: no token, no pidfile.
     """
     result = _run(["up"], tmp_path)
     assert result.returncode != 0
     assert "no vendor key" in result.stderr
-    run_dir = tmp_path / "run"
-    assert not (run_dir / "gateway.token").exists()
-    assert not (run_dir / "gateway.pid").exists()
+    gateway_dir = tmp_path / "gateway"
+    assert not (gateway_dir / "gateway.token").exists()
+    assert not (gateway_dir / "gateway.pid").exists()
 
 
 def test_env_refuses_before_up_and_never_prints_the_vendor_key(tmp_path: Path) -> None:
@@ -50,8 +51,8 @@ def test_env_refuses_before_up_and_never_prints_the_vendor_key(tmp_path: Path) -
     secret = "sk-ant-test-never-printed"
     assert _run(["env"], tmp_path, ANTHROPIC_API_KEY=secret).returncode != 0
 
-    (tmp_path / "run").mkdir()
-    (tmp_path / "run" / "gateway.token").write_text("sk-lane-local\n", encoding="utf-8")
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "gateway.token").write_text("sk-lane-local\n", encoding="utf-8")
     result = _run(["env"], tmp_path, ANTHROPIC_API_KEY=secret)
     assert result.returncode == 0, result.stderr
     assert "export CHEMCLAW_LLM_API_KEY=sk-lane-local" in result.stdout
@@ -74,3 +75,31 @@ def test_the_gateway_version_is_pinned_exactly() -> None:
     """The process that holds the key runs one reviewed release, never whatever resolves today."""
     text = _UP.read_text(encoding="utf-8")
     assert 'readonly LITELLM_SPEC="litellm[proxy]==' in text
+
+
+def test_stopping_the_lane_leaves_the_gateway_and_its_token(tmp_path: Path) -> None:
+    """`processes.sh down` stops the lane's processes, not the gateway that a restart cannot start.
+
+    The gateway needs the vendor key to start, which a shell restarting the lane need not hold.
+    """
+    lane = subprocess.Popen(["sleep", "60"])
+    gateway = subprocess.Popen(["sleep", "60"])
+    try:
+        (tmp_path / "run").mkdir()
+        (tmp_path / "run" / "api.pid").write_text(f"{lane.pid}\n", encoding="utf-8")
+        (tmp_path / "gateway").mkdir()
+        (tmp_path / "gateway" / "gateway.pid").write_text(f"{gateway.pid}\n", encoding="utf-8")
+        (tmp_path / "gateway" / "gateway.token").write_text("sk-lane-local\n", encoding="utf-8")
+        env = {"PATH": os.environ["PATH"], "CHEMCLAW_LIVE_DIR": str(tmp_path)}
+        result = subprocess.run(
+            ["bash", str(_PROCESSES), "down"], env=env, capture_output=True, text=True, timeout=30
+        )
+        assert result.returncode == 0, result.stderr
+        assert lane.wait(timeout=10) is not None, "the lane's own process was not stopped"
+        assert gateway.poll() is None, "stopping the lane stopped the gateway"
+        assert (tmp_path / "gateway" / "gateway.token").exists()
+    finally:
+        for proc in (lane, gateway):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()

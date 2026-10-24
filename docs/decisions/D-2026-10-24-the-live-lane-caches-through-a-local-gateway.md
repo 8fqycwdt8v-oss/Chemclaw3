@@ -46,7 +46,8 @@ a translation fault.
 ## Consequences
 
 - The vendor key lives only in the gateway's environment; ChemClaw authenticates to it with a token
-  `up.sh` mints under `.live/run/` (0600). `tests/test_live_gateway.py` holds both.
+  `up.sh` mints under `.live/gateway/` (0600) — outside the lane's `run/`, so `make live-down`
+  leaves the gateway running. `tests/test_live_gateway.py` holds both.
 - LiteLLM holds the key, so its version is pinned in `up.sh` and bumped by hand, never by
   Dependabot.
 - A deployment's gateway is outside this decision: whether it caches is its own configuration

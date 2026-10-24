@@ -9,7 +9,7 @@
 #
 # The vendor key is read from ANTHROPIC_API_KEY (or the variable literally named `API-KEY`) and
 # only ever lives in the gateway's environment. ChemClaw authenticates to the gateway with a local
-# token minted here (0600 under .live/run/), never with the vendor key.
+# token minted here (0600 under .live/gateway/), never with the vendor key.
 #
 # Usage: up.sh [up|down|env]    `env` prints the CHEMCLAW_LLM_* exports for the lane's shell.
 
@@ -18,7 +18,9 @@ set -euo pipefail
 readonly HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "$HARNESS_DIR/../../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
-readonly RUN_DIR="$LIVE_DIR/run"
+# Its own directory, not the lane's `run/`: `processes.sh down` stops every pidfile there and drops
+# its tokens, and a restarted lane has no vendor key to start the gateway again.
+readonly RUN_DIR="$LIVE_DIR/gateway"
 readonly PIDFILE="$RUN_DIR/gateway.pid"
 readonly TOKENFILE="$RUN_DIR/gateway.token"
 readonly PORT="${CHEMCLAW_LIVE_GATEWAY_PORT:-4000}"
