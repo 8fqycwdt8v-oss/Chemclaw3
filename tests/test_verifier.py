@@ -7,6 +7,7 @@ returned, and `ungrounded_parameter_shapes` scans for method parameters no tool 
 """
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse
 from langchain_core.language_models import GenericFakeChatModel
 from pydantic import SecretStr, ValidationError
 
-from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.framing import ENVELOPE_TAG, frame_untrusted
 from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
@@ -1272,3 +1273,54 @@ def test_no_capability_tool_is_short_enough_to_collide_with_english() -> None:
         f"capability tool name(s) a bare-token scan could read out of ordinary prose: {short}. "
         "Either rename, or narrow `promised_uncalled_tools` further."
     )
+
+
+# The shape of `ich_impurity_limit(substance="dichloromethane")` (the same fixture is in
+# `tests/test_quantities.py`): each limit is an object with a `value` and a separate `unit`.
+_ICH_DICHLOROMETHANE = json.dumps(
+    {
+        "query": "dichloromethane",
+        "limit": {
+            "substance": "Dichloromethane",
+            "limit_class": "Class 2",
+            "limits": [
+                {"basis": "PDE", "value": 6.0, "unit": "mg/day"},
+                {"basis": "concentration limit", "value": 600.0, "unit": "ppm"},
+            ],
+        },
+    },
+    indent=2,
+)
+
+
+def _framed(body: str) -> str:
+    """`body` as the trace records it: inside the live retrieved-note envelope."""
+    framed = frame_untrusted(body, note_id="safety:ich_impurity_limit")
+    assert framed.startswith(f"<{ENVELOPE_TAG} "), "the fixture is not the production shape"
+    return framed
+
+
+def test_a_limit_a_tool_filed_as_value_and_unit_is_not_ungrounded() -> None:
+    """A correct answer over `ich_impurity_limit`'s own numbers is not sent back for revision.
+
+    The tool files `"value": 6.0, "unit": "mg/day"` as two fields, so the printed form the pattern
+    looks for never appears in its text; live, every such answer was flagged and went through a
+    revision round (and the round's note once cost the model the chemist's question).
+    """
+    answer = "Dichloromethane is Class 2 under ICH Q3C: a PDE of 6.0 mg/day, or 600 ppm."
+    assert ungrounded_parameter_shapes(answer, [_framed(_ICH_DICHLOROMETHANE)]) == []
+    assert ungrounded_parameter_shapes(answer, [_ICH_DICHLOROMETHANE]) == [], "bare JSON too"
+
+
+def test_a_structured_result_grounds_only_the_unit_it_filed() -> None:
+    """The unit is read from the object that states it, and every other class still fires.
+
+    A result that filed `6.0 ppm` produced a ppm limit and no daily limit; an answer that states
+    both is caught on the one nobody produced, and an unrelated shape is untouched.
+    """
+    ppm_only = _framed('{"limit": {"value": 6.0, "unit": "ppm"}}')
+    answer = "The limit is 6.0 mg/day (6.0 ppm); run it at 1.0 mL/min."
+    assert ungrounded_parameter_shapes(answer, [ppm_only]) == [
+        "flow rate: 1.0 mL/min",
+        "ICH daily limit: 6.0 mg/day",
+    ]
