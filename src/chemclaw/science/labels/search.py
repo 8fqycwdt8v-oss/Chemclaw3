@@ -8,13 +8,14 @@ a coverage sentence, because on a half-labelled corpus a count is a lower bound.
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from chemclaw.core.chem import standard_smiles
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring
 from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
 from chemclaw.science.fingerprints.store import FingerprintStore, find_matches
 from chemclaw.science.labels.facets import Facet, FrequencyReport
 from chemclaw.science.labels.molecules import CorpusMolecules
-from chemclaw.science.labels.records import CorpusCoverage, ReactionLabel
+from chemclaw.science.labels.records import CorpusCoverage, LabelTier, ReactionLabel
 from chemclaw.science.labels.store import LabelIndex
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
@@ -27,7 +28,18 @@ class Precedent(BaseModel):
     source: str
     reaction_id: str
     citation: str
-    reaction_smiles: str
+    tier: LabelTier = Field(
+        default=LabelTier.STRUCTURED,
+        description=(
+            "`citation-only` marks a record whose source named a species without its structure: "
+            "it has no `reaction_smiles` or `named_reaction`, `agents` groups its species by the "
+            "source's own role, and a species the source only named is not listed. Cite it for "
+            "what it states and read it with `expand_note`."
+        ),
+    )
+    reaction_smiles: str | None = Field(
+        default=None, description="The reaction as recorded; None for a citation-only record."
+    )
     named_reaction: str | None = None
     temperature_c: float | None = None
     time_h: float | None = None
@@ -55,6 +67,7 @@ class Precedent(BaseModel):
             source=row.source,
             reaction_id=row.reaction_id,
             citation=row.citation,
+            tier=row.tier,
             reaction_smiles=row.record_smiles,
             named_reaction=row.named_reaction,
             temperature_c=row.temperature_c,
@@ -97,10 +110,17 @@ class PrecedentSearch(BaseModel):
                 "NO PRECEDENT FOUND IN THE LABELLED CORPUS. "
                 f"{self.coverage.verdict} Say which of those this is before concluding anything: "
                 "an unlabelled corpus cannot answer, and an empty answer from a labelled one is a "
-                "genuine negative over the structured records it holds — never over a record the "
-                "verdict says was not searched."
+                "genuine negative over the records it searched (the structured ones, and the "
+                "citation-only ones where the verdict says it counted them) — never over a record "
+                "the verdict says was not searched."
             )
+        cited = sum(1 for hit in self.hits if hit.tier is LabelTier.CITATION_ONLY)
         head = f"{len(self.hits)} precedent(s) found."
+        if cited:
+            head = (
+                f"{len(self.hits)} precedent(s) found: {len(self.hits) - cited} structured and "
+                f"{cited} citation-only (each marked `tier`)."
+            )
         if self.truncated:
             return (
                 f"PARTIAL: {head} The result hit its page cap, so this is a sample rather than the "
@@ -124,9 +144,11 @@ async def substrate_precedents(
 ) -> PrecedentSearch:
     """Answers: has this substrate been used in other reactions, and as what?
 
-    Exact on the standardized structure; for "like this" the caller runs a similarity pass first, so
-    a near-miss is never presented as a match.
+    Exact on the standardized structure (the query is standardized here, so a Kekule or otherwise
+    non-canonical spelling finds the same rows); for "like this" the caller runs a similarity pass
+    first, so a near-miss is never presented as a match.
     """
+    smiles = standard_smiles(smiles)
     facet = Facet(
         species_smiles=smiles,
         species_roles=frozenset({role}) if role is not None else frozenset(),
@@ -199,6 +221,7 @@ async def workup_precedents(
     Hits are filtered to reactions that recorded a workup; one that wrote nothing down is not a
     workup precedent.
     """
+    reagent_smiles = standard_smiles(reagent_smiles)
     facet = Facet(species_smiles=reagent_smiles)
     found = await _search(
         index, facet, version, f"workups recorded for reactions using {reagent_smiles}", limit

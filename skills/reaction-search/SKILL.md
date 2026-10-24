@@ -97,11 +97,22 @@ correctly but uses them well (G6).
   ran: report that the fingerprint index has not been populated and that an operator must build
   it. Do not say "we have no precedent for this" — that claim needs a corpus to be false about.
 - **A complete index is not the whole ELN.** A citation-only record (the source named a species
-  without its structure) is in no structure index, even through the species it does draw. Every
-  structural result counts these under `unsearched` (on `coverage` for the precedent tools) and
-  says so in `verdict`. When it names records that list your queried structure, read them with
+  without its structure) is in no fingerprint index, so no similarity, named-reaction or
+  product-structure search reaches it, even through the species it does draw. A result that cannot
+  reach the tier counts these under `unsearched` (on `coverage` for the precedent tools) and says
+  so in `verdict`. When it names records that list your queried structure, read them with
   `expand_note` and cite them for what they state — an empty structural answer is then not "no
   in-house precedent".
+- **A species-keyed answer counts the citation-only tier, and marks it.** `substrate_precedent`,
+  `workup_precedent` and `reagent_frequency` without a named reaction or product group count these
+  records beside the structured ones: a hit carries `tier: citation-only` (no `reaction_smiles`, no
+  `named_reaction`), a roll-up splits `structured_count` from `citation_only_count`, and `coverage`
+  says `citation_only` records were searched. Give the two tiers' numbers apart and name the tier
+  of every figure. Their roles are the source's own word (`reagent`, `catalyst`, `solvent`,
+  `starting-material`), never refined, so a `ligand` or `base` filter finds structured records only:
+  ask for `reagent` and `catalyst` to see what the citation-only tier used. A species the source
+  only named is never matched, so an absent coupling partner is not "unused". `NOT COUNTED` in a
+  verdict means citation-only records on file have no label row yet: a lower bound, say so.
 
 ## Reading a frequency roll-up
 
@@ -114,7 +125,9 @@ correctly but uses them well (G6).
   evidence; three hundred of four hundred is. The denominator is reactions that recorded *that
   role* — a run whose ligand nobody wrote down is not evidence that no ligand was used.
 - **`median_yield_percent` is over the runs that reported a yield**, and it is `null` when none
-  did. A null is not a zero and must not be rendered as one.
+  did. A null is not a zero and must not be rendered as one. It is over the structured reactions
+  only; `citation_only_median_yield_percent` is the citation-only tier's, and the two are never
+  pooled.
 - **Prefer `rxno_id` to `named_reaction`.** NameRxn, Rxn-INSIGHT and RXNO are three name strings
   for one transformation. Matching the string answers from whichever fraction of the corpus used
   that spelling — silently, and looking complete.

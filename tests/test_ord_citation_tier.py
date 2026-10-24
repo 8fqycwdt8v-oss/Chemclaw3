@@ -2,10 +2,12 @@
 
 Per `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`, a record naming a
 species without its structure is ingested citable and excluded from structure and similarity
-search. Pinned from production entry points: the adapter carries the name verbatim; sync writes no
-fingerprint, molecule or label row; no structure search returns one (even with a stale
-fingerprint); a chemist reaching one by citation is told its tier outside the framed text; and the
-structural memory miners never see one.
+search; per `D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier` it has a label row of
+the record phase only, which the species-keyed facet tools count and mark. Pinned from production
+entry points: the adapter carries the name verbatim; sync writes no fingerprint or molecule row and
+a label row with nothing derived; no structure search returns one (even with a stale fingerprint);
+a chemist reaching one by citation is told its tier outside the framed text; and the structural
+memory miners never see one.
 """
 
 import asyncio
@@ -40,6 +42,7 @@ from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.facets import Facet
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.pg import migrated_db_or_skip
 
@@ -303,10 +306,11 @@ def test_a_named_product_beside_a_drawn_one_is_two_products() -> None:
 
 
 def test_the_sync_stores_a_citation_only_record_and_indexes_nothing(tmp_path: Path) -> None:
-    """The write half of the exclusion: no DRFP row, no molecule row, no label row.
+    """The write half of the exclusion: no DRFP row, no molecule row, and a label row of its own.
 
     The structured control rides in the same batch, so an empty index cannot pass by the sync
-    having written nothing at all.
+    having written nothing at all. The citation-only label row holds what was drawn and nothing
+    derived, and the labeller's scan never offers it.
     """
     adapter = _write(
         tmp_path,
@@ -317,13 +321,14 @@ def test_the_sync_stores_a_citation_only_record_and_indexes_nothing(tmp_path: Pa
     )
     stores = _Stores()
 
-    async def _run() -> tuple[Any, dict[str, RecordTier], set[str], int]:
+    async def _run() -> tuple[Any, dict[str, RecordTier], set[str], int, list[str]]:
         summary = await stores.sync(adapter)
         tiers = {r.reaction_id: r.tier for r in await stores.records.all_records()}
         fingerprinted = {r.id for r in await stores.reactions.all_records()}
-        return summary, tiers, fingerprinted, await stores.labels.count()
+        offered = [r.reaction_id for r in await stores.labels.stale("v-test", 100)]
+        return summary, tiers, fingerprinted, await stores.labels.count(), offered
 
-    summary, tiers, fingerprinted, labels = asyncio.run(_run())
+    summary, tiers, fingerprinted, labels, offered = asyncio.run(_run())
 
     assert sorted(summary.ingested) == ["suzuki-cited", "suzuki-drawn"]
     assert summary.citation_only == ["suzuki-cited"]
@@ -332,7 +337,8 @@ def test_the_sync_stores_a_citation_only_record_and_indexes_nothing(tmp_path: Pa
         "suzuki-drawn": RecordTier.STRUCTURED,
     }
     assert fingerprinted == {"suzuki-drawn"}
-    assert labels == 1
+    assert labels == 2
+    assert offered == ["suzuki-drawn"], "the labeller is offered the structured row only"
     molecules = {r.id for r in asyncio.run(stores.molecules.all_records())}
     assert _PARTNER_SMILES in molecules, "the structured control indexed its molecules"
     assert _QUINOLINE in molecules  # from the control, which charges the same quinoline
@@ -542,8 +548,9 @@ async def test_the_durable_store_keeps_the_tier_and_withholds_it_from_structure_
 
 # --- every structural answer says what it did not search -------------------------------------
 #
-# The citation-only exclusion stays, but every structural verdict states it and names a record that
-# lists the queried structure, so an empty answer is not read as "no in-house data".
+# Structure and similarity search stay closed to the tier, and every such verdict states it and
+# names a record that lists the queried structure, so an empty answer is not read as "no in-house
+# data". A facet keyed on a drawn species counts the tier instead, and marks it.
 
 # A quinoline only the structured control draws, so a query for it is one the tier cannot answer.
 _BROMOQUINOLINE = "Brc1ccc2ncccc2c1"
@@ -607,10 +614,11 @@ def _verdict(payload: dict[str, Any]) -> str:
 def test_a_structural_negative_names_the_citation_only_record_that_draws_the_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A structural negative names the citation-only record that draws the query, via MCP.
+    """The structure and similarity tools stay closed to the tier and point to what they miss.
 
     Driven from `server.call_tool` because the MCP payload is what the model reads. The query is in
-    Kekulé form so the record is reached through canonicalisation.
+    Kekule form so the record is reached through canonicalisation. The fingerprint tools never gain
+    the record, however the label index now holds it.
     """
     monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
     stores = _synced_and_labelled(tmp_path)
@@ -618,22 +626,14 @@ def test_a_structural_negative_names_the_citation_only_record_that_draws_the_que
     kekule = "ClC1=CC2=CC=CN=C2C=C1"  # 6-chloroquinoline, which only the cited record draws
     cited = note_id_for_reaction("suzuki-cited", _SOURCE)
 
-    answers = {
-        "substrate_precedent": _payload(rxnfp, "substrate_precedent", {"smiles": kekule}),
-        "substructure_matches": _payload(molfp, "substructure_matches", {"query": kekule}),
-        "workup_precedent": _payload(rxnfp, "workup_precedent", {"reagent_smiles": kekule}),
-    }
-    for tool, payload in answers.items():
-        assert payload["hits"] == [], f"{tool}: the precondition — nothing indexed draws it"
-        verdict = _verdict(payload)
-        # The citation-only clause leads, so a reader stopping at the first sentence cannot
-        # take the indexed negative for the answer.
-        assert verdict.startswith(("NOT SEARCHED", "NO PRECEDENT IN THE LABELLED CORPUS — BUT")), (
-            tool,
-            verdict,
-        )
-        assert cited in verdict and "expand_note" in verdict, (tool, verdict)
-        assert "Do NOT report that no in-house precedent exists" in verdict, (tool, verdict)
+    payload = _payload(molfp, "substructure_matches", {"query": kekule})
+    assert payload["hits"] == [], "the precondition: nothing fingerprinted draws it"
+    verdict = _verdict(payload)
+    # The citation-only clause leads, so a reader stopping at the first sentence cannot
+    # take the indexed negative for the answer.
+    assert verdict.startswith("NOT SEARCHED"), verdict
+    assert cited in verdict and "expand_note" in verdict, verdict
+    assert "Do NOT report that no in-house precedent exists" in verdict, verdict
 
     # The similarity tools find the drawn analog, and still say the run outside the index exists.
     reaction = f"{kekule}.{_PARTNER_SMILES}>>{_PRODUCT_SMILES}"
@@ -644,46 +644,118 @@ def test_a_structural_negative_names_the_citation_only_record_that_draws_the_que
         payload = _payload(server, tool, arguments)
         assert payload["unsearched"]["giving_query"] == 1, (tool, payload["unsearched"])
         assert cited in _verdict(payload), (tool, _verdict(payload))
+        assert all(hit.get("id") != cited for hit in payload["hits"]), (tool, "the tier was served")
+
+    # The facets keyed on a neighbour or a derived key cannot reach it either, and say so.
+    for tool, arguments in (
+        ("conditions_for_similar_product", {"product_smiles": _PRODUCT_SMILES}),
+        ("conditions_for_similar_reaction", {"reaction_smiles": reaction}),
+        ("reactions_making_substructure", {"smarts": "c1ccc2ncccc2c1"}),
+    ):
+        payload = _payload(rxnfp, tool, arguments)
+        assert all(hit.get("tier") != "citation-only" for hit in payload["hits"]), tool
+        assert payload["coverage"]["citation_tier_searched"] is False, tool
+        assert "NOT SEARCHED: 1 citation-only" in _verdict(payload), (tool, _verdict(payload))
 
 
-def test_a_complete_coverage_says_it_counts_structured_records_only(
+def test_a_facet_on_a_drawn_species_counts_the_citation_only_record_and_marks_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A "COMPLETE" coverage is scoped to the label index, and the tier's count is said beside it.
+    """A structural negative that used to say "pointed to" now counts, tier-marked.
 
-    `reagent_frequency` asks about no structure, so it can only count — and must not name a record
-    it never checked.
+    The same Kekule query that found no precedent before the tier had a label row: the record is a
+    hit, marked `citation-only` with no reaction string and the source's own roles, the coverage
+    says the tier was searched, and no verdict claims the tier was outside the search.
+    """
+    stores = _synced_and_labelled(tmp_path)
+    _molfp, rxnfp = _tools_over(stores, monkeypatch)
+    kekule = "ClC1=CC2=CC=CN=C2C=C1"
+    cited = note_id_for_reaction("suzuki-cited", _SOURCE)
+
+    payload = _payload(rxnfp, "substrate_precedent", {"smiles": kekule})
+    [hit] = payload["hits"]
+    assert hit["citation"] == cited
+    assert hit["tier"] == "citation-only"
+    assert hit["reaction_smiles"] is None and hit["named_reaction"] is None
+    # The source's own roles: a base is a plain reagent here, never a refined `base`.
+    assert set(hit["agents"]) == {"reagent", "catalyst"}, hit["agents"]
+    assert payload["coverage"]["citation_tier_searched"] is True
+    assert payload["coverage"]["citation_only"] == 1
+    verdict = _verdict(payload)
+    assert verdict.startswith("1 precedent(s) found: 0 structured and 1 citation-only"), verdict
+    assert "CITATION-ONLY TIER: 1 citation-only record(s) were searched" in verdict
+    assert (
+        "NOT SEARCHED" not in verdict
+        and "unsearched" not in payload["coverage"]
+        or (payload["coverage"]["unsearched"] is None)
+    )
+
+    # A workup of the same species is counted the same way; the cited run recorded none.
+    workup = _payload(rxnfp, "workup_precedent", {"reagent_smiles": kekule})
+    assert workup["hits"] == []
+    assert "CITATION-ONLY TIER" in _verdict(workup)
+
+    # The control: a structure no run draws is a negative over both tiers, and says what it counted.
+    nothing = _payload(rxnfp, "substrate_precedent", {"smiles": "c1ccc2[nH]ccc2c1"})
+    assert nothing["hits"] == []
+    assert "CITATION-ONLY TIER" in _verdict(nothing)
+    assert "NO PRECEDENT FOUND" in _verdict(nothing)
+
+
+def test_a_complete_coverage_says_what_it_counts_and_the_tallies_split_by_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A "COMPLETE" coverage says it counts structured records and the tier beside them.
+
+    `reagent_frequency` asks about no structure, so it counts both tiers, each agent's count split
+    by the tier it comes from, and names no record it never checked.
     """
     stores = _synced_and_labelled(tmp_path)
     _molfp, rxnfp = _tools_over(stores, monkeypatch)
 
-    coverage = _payload(rxnfp, "reagent_frequency", {})["coverage"]
+    payload = _payload(rxnfp, "reagent_frequency", {})
+    coverage = payload["coverage"]
     assert coverage["labelled"] == coverage["total"] == 1
-    assert coverage["unsearched"] == {
-        "outside_index": 1,
-        "query_checked": False,
-        "giving_query": 0,
-        "examples": [],
-        "verdict": coverage["unsearched"]["verdict"],
-    }
-    assert coverage["verdict"].startswith("COMPLETE: all 1 matching reaction(s) in the label index")
-    assert "structured records" in coverage["verdict"]
-    assert "NOT SEARCHED: 1 citation-only ELN record(s)" in coverage["verdict"]
+    assert coverage["citation_only"] == 1 and coverage["citation_tier_searched"] is True
+    assert coverage["unsearched"] is None
+    assert coverage["verdict"].startswith(
+        "COMPLETE: all 1 matching structured reaction(s) in the label index"
+    )
+    assert "1 citation-only record(s) are counted beside them" in coverage["verdict"]
+    assert "NOT SEARCHED" not in coverage["verdict"]
     assert "suzuki-cited" not in coverage["verdict"]
 
+    assert (payload["structured_reactions"], payload["citation_only_reactions"]) == (1, 1)
+    assert payload["reactions_in_scope"] == 2
+    for agent in payload["agents"]:
+        assert agent["count"] == agent["structured_count"] + agent["citation_only_count"]
+    # The quinoline both runs charge is counted in both tiers, and the figures stay apart.
+    [quinoline] = [
+        a for a in payload["agents"] if a["smiles"] == "Clc1ccc2ncccc2c1" and a["role"] != "product"
+    ]
+    assert (quinoline["structured_count"], quinoline["citation_only_count"]) == (0, 1)
+    assert "1 citation-only" in payload["verdict"]
 
-def test_a_query_no_citation_only_record_draws_is_counted_and_qualified_not_cited(
+    # A named-reaction narrowing cannot be answered by a tier with nothing derived: structured
+    # only, and the verdict points to the tier instead of counting it.
+    narrowed = _payload(rxnfp, "reagent_frequency", {"named_reaction": "Suzuki coupling"})
+    assert narrowed["citation_only_reactions"] == 0
+    assert narrowed["coverage"]["citation_tier_searched"] is False
+    assert "NOT SEARCHED: 1 citation-only ELN record(s)" in narrowed["coverage"]["verdict"]
+
+
+def test_a_query_no_citation_only_record_draws_is_counted_over_both_tiers_and_cites_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The control: the count is still said, no record is named, and the check's blind side is."""
+    """The control: only the structured control is a hit, and the tier's absence is said."""
     stores = _synced_and_labelled(tmp_path)
     molfp, rxnfp = _tools_over(stores, monkeypatch)
 
     payload = _payload(rxnfp, "substrate_precedent", {"smiles": _BROMOQUINOLINE})
-    assert payload["hits"], "the precondition: the drawn control is a labelled precedent"
+    assert [hit["tier"] for hit in payload["hits"]] == ["structured"]
     verdict = _verdict(payload)
-    assert "NOT SEARCHED: 1 citation-only" in verdict
-    assert "None of them lists the queried structure" in verdict and "text check" in verdict
+    assert verdict.startswith("1 precedent(s) found.")
+    assert "CITATION-ONLY TIER: 1 citation-only record(s) were searched" in verdict
     assert "suzuki-cited" not in verdict
 
     empty = _payload(molfp, "substructure_matches", {"query": "c1ccc2[nH]ccc2c1"})  # indole
@@ -691,6 +763,30 @@ def test_a_query_no_citation_only_record_draws_is_counted_and_qualified_not_cite
     # Indexed answer first when no citation-only record is named, now scoped to what it covered.
     assert empty["verdict"].startswith("No indexed molecule matched this query.")
     assert "genuine negative result over the indexed records" in empty["verdict"]
+
+
+def test_a_record_stored_before_the_tier_had_label_rows_is_said_to_be_uncounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A citation-only record on file with no label row is outside every facet and says so.
+
+    Stored by the record store alone, the way an entry synced before the tier had rows is. The
+    facet counts none of it, and the verdict does not let the lower bound pass for a total.
+    """
+    stores = _synced_and_labelled(tmp_path)
+    older = record_from_ord_reaction(_map(_flow_suzuki("suzuki-before-the-tier")))
+    asyncio.run(stores.records.record([older], _SOURCE))
+    _molfp, rxnfp = _tools_over(stores, monkeypatch)
+
+    payload = _payload(rxnfp, "reagent_frequency", {})
+    coverage = payload["coverage"]
+    assert coverage["citation_only"] == 1
+    assert coverage["unsearched"]["awaiting_label_row"] is True
+    assert coverage["unsearched"]["outside_index"] == 1
+    assert (
+        "NOT COUNTED: 1 citation-only ELN record(s) on file have no label row yet"
+        in (coverage["verdict"])
+    )
 
 
 def test_only_a_citable_citation_only_record_is_counted() -> None:
@@ -824,14 +920,17 @@ def _facets(stores: _Stores, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str]
     )
 
 
-def test_an_entry_amended_to_citation_only_leaves_every_facet_answer_until_it_is_drawn_again(
+def test_an_entry_amended_to_citation_only_changes_tier_in_every_facet_answer_and_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The amend path, from the sync to the MCP payload: counted while drawn, gone once half-drawn.
+    """The amend path, from the sync to the MCP payload: structured, citation-only, structured.
 
-    The control is the same entry before the amendment and after a second one that draws it again,
-    so the empty answer in between is the tier's doing and not the query's.
+    The label row is replaced by the new tier's own, so the entry is counted once at every step and
+    the figures it contributes move tiers with it. The control is the same entry before the
+    amendment and after a second one that draws it again.
     """
+    from chemclaw.core.chem import standard_smiles
+
     stores = _Stores()
     cited = note_id_for_reaction("suzuki-amended", _SOURCE)
     asyncio.run(stores.sync(_Exporting((_drawn("suzuki-amended"), None))))
@@ -842,12 +941,28 @@ def test_an_entry_amended_to_citation_only_leaves_every_facet_answer_until_it_is
     half = _half_drawn("suzuki-amended", "2023-05-01T09:00:00Z")
     summary = asyncio.run(stores.sync(_Exporting((half, None))))
     assert summary.citation_only == ["suzuki-amended"]
-    assert asyncio.run(stores.labels.count()) == 1, "the precondition: the old label row is there"
-    assert _facets(stores, monkeypatch) == ([], 0, 0)
+    assert asyncio.run(stores.labels.count()) == 1, "one row per entry, replaced and not added"
+    _molfp, rxnfp = _tools_over(stores, monkeypatch)
+    precedent = _payload(rxnfp, "substrate_precedent", {"smiles": standard_smiles(_QUINOLINE)})
+    assert [(h["citation"], h["tier"]) for h in precedent["hits"]] == [(cited, "citation-only")]
+    frequency = _payload(rxnfp, "reagent_frequency", {})
+    assert (frequency["structured_reactions"], frequency["citation_only_reactions"]) == (0, 1)
+    assert all(a["structured_count"] == 0 for a in frequency["agents"])
+    # The structured past left no derived phase and no refined role behind it.
+    [row] = asyncio.run(stores.labels.select(Facet(), "v-test", 10)).rows
+    assert row.tier.value == "citation-only" and row.named_reaction is None
+    assert {s.derived_role.value for s in row.species if s.derived_role} <= {
+        "starting-material",
+        "reagent",
+        "catalyst",
+        "solvent",
+    }
 
     redrawn = _drawn("suzuki-amended", amended="2023-06-01T09:00:00Z")
     asyncio.run(stores.sync(_Exporting((redrawn, None))))
-    # The same reaction as before, so the derived phase it kept is current again without a pass.
+    # Structured again: a new reaction string, so it is stale until a labeller has looked.
+    assert _facets(stores, monkeypatch) == ([], 0, 0)
+    _label_everything(stores)
     assert _facets(stores, monkeypatch) == drawn
 
 

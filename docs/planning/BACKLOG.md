@@ -61,8 +61,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Knowledge and records
 
-- [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
-  structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
+- [ ] **A citation-only record is counted by a facet answer: implemented, held for live eval (#694)** [S] — built per
+  `D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier` (owner decision 2026-10-24); the row is deleted when the `make model-text-eval` reads ship, or the batch is reverted.
 
 - [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
   give them a durable record and a walk, or declare the loss; `publish/hooks.py::publish_tool_result`, `connectors/results/workflows.py::_walk`.

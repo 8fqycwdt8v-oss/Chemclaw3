@@ -74,6 +74,23 @@ class Facet(BaseModel):
         description="Restrict to these registry sources. Empty means all.",
     )
 
+    @property
+    def reaches_citation_only(self) -> bool:
+        """Whether a citation-only row can answer this facet: it narrows on nothing derived.
+
+        A citation-only row has a drawn species, a role the source recorded, conditions and a
+        yield, and nothing derived: no named reaction, no product structure, no fingerprint for a
+        neighbour to be found by. A facet narrowing on any of those is a structure or similarity
+        question, which stays closed to the tier; every other facet counts it.
+        """
+        return not (
+            self.named_reaction
+            or self.rxno_id
+            or self.product_smiles
+            or self.product_functional_group
+            or self.reaction_keys
+        )
+
 
 class FacetSelection(BaseModel):
     """The reactions a facet selected, what fraction of them is labelled, and whether it truncated.
@@ -96,16 +113,32 @@ class AgentCount(BaseModel):
 
     `share` is of the reactions that *named a species in this role*, not of all matching reactions —
     a reaction whose ligand nobody recorded is not evidence that no ligand was used, so counting it
-    in the denominator would make every ligand look rarer than it is.
+    in the denominator would make every ligand look rarer than it is. The two tiers are counted in
+    their own fields and medianed apart, because a citation-only record's role is the source's own
+    word and a structured one's is refined from the structure: one number over both would not say
+    which it describes.
     """
 
     model_config = ConfigDict(frozen=True)
 
     role: SpeciesRole
     smiles: str
-    count: int = Field(ge=1)
+    count: int = Field(ge=1, description="Reactions in both tiers: structured + citation-only.")
+    structured_count: int = Field(ge=0, description="Of `count`, the structured reactions.")
+    citation_only_count: int = Field(
+        ge=0,
+        description=(
+            "Of `count`, the citation-only records: the source's own recorded role, nothing "
+            "derived, a species it only named never counted."
+        ),
+    )
     share: float = Field(ge=0.0, le=1.0)
-    median_yield_percent: float | None = None
+    median_yield_percent: float | None = Field(
+        default=None, description="Median over the structured reactions' recorded yields only."
+    )
+    citation_only_median_yield_percent: float | None = Field(
+        default=None, description="Median over the citation-only records' recorded yields only."
+    )
 
 
 class FrequencyReport(BaseModel):
@@ -115,7 +148,15 @@ class FrequencyReport(BaseModel):
 
     agents: list[AgentCount] = Field(default_factory=list)
     reactions_in_scope: int = Field(
-        default=0, ge=0, description="Labelled reactions the roll-up counted over."
+        default=0,
+        ge=0,
+        description="Reactions counted over, in both tiers: structured + citation-only.",
+    )
+    structured_reactions: int = Field(
+        default=0, ge=0, description="Of `reactions_in_scope`, the labelled structured ones."
+    )
+    citation_only_reactions: int = Field(
+        default=0, ge=0, description="Of `reactions_in_scope`, the citation-only records."
     )
     coverage: CorpusCoverage
     truncated: bool = False
@@ -134,9 +175,10 @@ class FrequencyReport(BaseModel):
                 "used' or 'none is known' — it means nothing matching was labelled and recorded."
             )
         head = (
-            f"Counted over {self.reactions_in_scope} labelled reaction(s). Popularity is not "
-            "suitability: a frequent reagent is the field's default, not a recommendation for this "
-            "substrate."
+            f"Counted over {self.reactions_in_scope} reaction(s): {self.structured_reactions} "
+            f"labelled structured and {self.citation_only_reactions} citation-only, each agent's "
+            "count split the same way. Popularity is not suitability: a frequent reagent is the "
+            "field's default, not a recommendation for this substrate."
         )
         if self.truncated:
             return (

@@ -566,7 +566,7 @@ async def _reaction_fingerprints(tag: str) -> InMemoryFingerprintStore:
         _suzuki(tag),
     ):
         await store.add(
-            record_for_reaction(row.reaction_id, transformation_of(row.record_smiles)).model_copy(
+            record_for_reaction(row.reaction_id, transformation_of(row.reaction_string)).model_copy(
                 update={"source": row.source}
             )
         )

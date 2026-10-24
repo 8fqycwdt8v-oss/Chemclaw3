@@ -22,15 +22,15 @@
   "overlay": null,
   "profile": "default",
   "prefix": {
-    "tool_schemas": 64622,
+    "tool_schemas": 64704,
     "instructions": 3934,
     "skill_descriptions": 3283,
-    "total": 71839
+    "total": 71921
   },
   "totals": {
     "every-request": {
       "entries": 180,
-      "tokens": 72483
+      "tokens": 72565
     },
     "conditional": {
       "entries": 18,
@@ -38,7 +38,7 @@
     },
     "on-demand": {
       "entries": 114,
-      "tokens": 105390
+      "tokens": 109714
     }
   },
   "entries": [
@@ -1541,9 +1541,9 @@
       "kind": "mcp-docstring",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
       "residence": "every-request",
-      "tokens": 196,
-      "chars": 766,
-      "sha256": "93684c711bc69bcb",
+      "tokens": 239,
+      "chars": 939,
+      "sha256": "868b895d260de494",
       "also_counted_in": [
         "tool:reagent_frequency"
       ]
@@ -1565,9 +1565,9 @@
       "kind": "mcp-docstring",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
       "residence": "every-request",
-      "tokens": 172,
-      "chars": 671,
-      "sha256": "43ca2d243b8cb56b",
+      "tokens": 205,
+      "chars": 804,
+      "sha256": "10641634c34207b6",
       "also_counted_in": [
         "tool:substrate_precedent"
       ]
@@ -2012,81 +2012,81 @@
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/molfp/server/tools.py:similar_molecules",
       "residence": "on-demand",
-      "tokens": 1266,
-      "chars": 5045,
-      "sha256": "d32fdd9ce618d2da"
+      "tokens": 1437,
+      "chars": 5732,
+      "sha256": "a7398ea642f58bc7"
     },
     {
       "id": "mcp-output:molfp:substructure_matches",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/molfp/server/tools.py:substructure_matches",
       "residence": "on-demand",
-      "tokens": 1266,
-      "chars": 5045,
-      "sha256": "d32fdd9ce618d2da"
+      "tokens": 1437,
+      "chars": 5732,
+      "sha256": "a7398ea642f58bc7"
     },
     {
       "id": "mcp-output:rxnfp:conditions_for_similar_product",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_product",
       "residence": "on-demand",
-      "tokens": 1400,
-      "chars": 5582,
-      "sha256": "f57eb38b379ad5f0"
+      "tokens": 1959,
+      "chars": 7819,
+      "sha256": "1672d281579bb01c"
     },
     {
       "id": "mcp-output:rxnfp:conditions_for_similar_reaction",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:conditions_for_similar_reaction",
       "residence": "on-demand",
-      "tokens": 1400,
-      "chars": 5582,
-      "sha256": "f57eb38b379ad5f0"
+      "tokens": 1959,
+      "chars": 7819,
+      "sha256": "1672d281579bb01c"
     },
     {
       "id": "mcp-output:rxnfp:reactions_making_substructure",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reactions_making_substructure",
       "residence": "on-demand",
-      "tokens": 1400,
-      "chars": 5582,
-      "sha256": "f57eb38b379ad5f0"
+      "tokens": 1959,
+      "chars": 7819,
+      "sha256": "1672d281579bb01c"
     },
     {
       "id": "mcp-output:rxnfp:reagent_frequency",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
       "residence": "on-demand",
-      "tokens": 1506,
-      "chars": 6006,
-      "sha256": "3256e1e19cb2041e"
+      "tokens": 2220,
+      "chars": 8862,
+      "sha256": "bd3344d0bac42a5e"
     },
     {
       "id": "mcp-output:rxnfp:similar_reactions",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:similar_reactions",
       "residence": "on-demand",
-      "tokens": 976,
-      "chars": 3887,
-      "sha256": "406b22c9f6b09c0c"
+      "tokens": 1148,
+      "chars": 4574,
+      "sha256": "099c037c728c7f96"
     },
     {
       "id": "mcp-output:rxnfp:substrate_precedent",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
       "residence": "on-demand",
-      "tokens": 1400,
-      "chars": 5582,
-      "sha256": "f57eb38b379ad5f0"
+      "tokens": 1959,
+      "chars": 7819,
+      "sha256": "1672d281579bb01c"
     },
     {
       "id": "mcp-output:rxnfp:workup_precedent",
       "kind": "mcp-output-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:workup_precedent",
       "residence": "on-demand",
-      "tokens": 1400,
-      "chars": 5582,
-      "sha256": "f57eb38b379ad5f0"
+      "tokens": 1959,
+      "chars": 7819,
+      "sha256": "1672d281579bb01c"
     },
     {
       "id": "profile:computation:description",
@@ -3563,9 +3563,9 @@
       "kind": "skill-body",
       "owner": "skills/reaction-search/SKILL.md",
       "residence": "on-demand",
-      "tokens": 2765,
-      "chars": 11044,
-      "sha256": "d43982545532be4a"
+      "tokens": 3066,
+      "chars": 12248,
+      "sha256": "97f1d0b134c21a08"
     },
     {
       "id": "skill-body:reaction-thermodynamics",
@@ -4634,9 +4634,9 @@
       "kind": "mcp-tool-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:reagent_frequency",
       "residence": "every-request",
-      "tokens": 358,
-      "chars": 1413,
-      "sha256": "c07a2da7242d984a"
+      "tokens": 404,
+      "chars": 1597,
+      "sha256": "ec29dd535403dbfe"
     },
     {
       "id": "tool:recall_observations",
@@ -4940,9 +4940,9 @@
       "kind": "mcp-tool-schema",
       "owner": "src/chemclaw/connectors/rxnfp/server/tools.py:substrate_precedent",
       "residence": "every-request",
-      "tokens": 273,
-      "chars": 1074,
-      "sha256": "69ba05c9a144b68d"
+      "tokens": 309,
+      "chars": 1218,
+      "sha256": "850262ed1405cce8"
     },
     {
       "id": "tool:substructure_matches",
