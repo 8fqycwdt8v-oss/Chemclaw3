@@ -82,7 +82,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Everything else
 
-- [ ] **Follow-ups the architecture programme's reviews recorded** [M] — note-store search cap, kept-session metric, `gc.freeze()` after startup, test-logger hygiene; each is written up in `docs/planning/programme-deferred-2026-10.md` §D–E; anchor `durable/retry.py::retry_for`.
 - [ ] **deepagents 0.7.31 waits on the live model-text evaluation** [S] — the bump rewrites upstream's `task`, `read_file` and
   `edit_file` text, so it ships behind `docs/guides/model-text-evaluation.md`, which needs a gateway; the code is ready on `deps/deepagents-0.7.31`.
 

@@ -57,11 +57,32 @@ class _Errors(logging.Handler):
         self.lines.append(self.format(record))
 
 
+#: The loggers `uvicorn.Config` reconfigures through `logging.config.dictConfig` when it is built:
+#: own handlers, `propagate=False`. Left that way they stop reaching the root logger (and pytest's
+#: `caplog`) for the rest of the process, so a server restores them when its test ends.
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def _logger_state() -> list[tuple[logging.Logger, list[logging.Handler], bool, int, bool]]:
+    """Each uvicorn logger with its handlers, `propagate`, level and `disabled`, as they are now."""
+    loggers = [logging.getLogger(name) for name in _UVICORN_LOGGERS]
+    return [(lg, list(lg.handlers), lg.propagate, lg.level, lg.disabled) for lg in loggers]
+
+
+def _restore(state: list[tuple[logging.Logger, list[logging.Handler], bool, int, bool]]) -> None:
+    """Put each logger back as `_logger_state` found it."""
+    for lg, handlers, propagate, level, disabled in state:
+        lg.handlers[:] = handlers
+        lg.propagate, lg.level, lg.disabled = propagate, level, disabled
+
+
 class ServerThread:
     """A uvicorn server on a background thread; use as a context manager around one test."""
 
     def __init__(self, app: Any, port: int = 0, **config: Any) -> None:
         """Serve `app` on loopback `port` (0: OS picks); `config` goes to `uvicorn.Config`."""
+        # Before `uvicorn.Config`, which is what rewrites them.
+        self._loggers = _logger_state()
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.bind(("127.0.0.1", port))
@@ -97,6 +118,7 @@ class ServerThread:
             return self
         self._server.should_exit = True
         self._socket.close()
+        _restore(self._loggers)
         reason = "; ".join(errors.lines) or "nothing logged"
         if not settled:
             raise TimeoutError(
@@ -118,3 +140,4 @@ class ServerThread:
         self._server.should_exit = True
         self._thread.join(timeout=SHUTDOWN_SECONDS)
         self._socket.close()
+        _restore(self._loggers)
