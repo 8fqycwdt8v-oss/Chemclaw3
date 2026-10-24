@@ -28,13 +28,16 @@ from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_i
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.model_prose import ModelProse
-from chemclaw.core.quantities import labelled_values
+from chemclaw.core.quantities import labelled_values, parsed_result
 from chemclaw.kg.note import cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.harness import Claim, groundable_ids, verify_claims
 from chemclaw.spend.ledger import off_stream_metering
 
 logger = logging.getLogger(__name__)
+
+#: How deep `unreadable_ids` looks into a result; a hit list sits a level or two down.
+_MAX_RESULT_DEPTH = 6
 
 # The method-parameter shapes `ungrounded_parameter_shapes` looks for, keyed by the name reported
 # when one fires. Regexes, not config: they define the check; a deployment only toggles it.
@@ -434,12 +437,40 @@ def _mentions(text: str, note_id: str) -> bool:
     return re.search(rf"(?<![\w-]){re.escape(note_id)}(?![\w-])", text) is not None
 
 
+def unreadable_ids(output: str) -> set[str]:
+    """Ids a tool result lists only as hits marked `record_readable: false`.
+
+    A structure search keeps a run it indexed but cannot read, flagged so the answer does not quote
+    it. Such an id is mentioned in the result, but nothing was retrieved for it, so it cannot ground
+    a citation. An id also listed readable is not in the set.
+    """
+    marked: set[str] = set()
+    readable: set[str] = set()
+
+    def walk(node: object, depth: int) -> None:
+        if depth > _MAX_RESULT_DEPTH:
+            return
+        if isinstance(node, dict):
+            hit_id = node.get("id")
+            if isinstance(hit_id, str) and "record_readable" in node:
+                (readable if node["record_readable"] is not False else marked).add(hit_id)
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(parsed_result(output), 0)
+    return marked - readable
+
+
 def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChunk]:
     """Build the turn's evidence from what its tools actually returned.
 
     A cited id is seen when it appears in a tool result's text as a whole token (`_mentions`), so
     wikilinks, bare slugs and JSON read alike, and a longer id (`reaction-12`) cannot ground a
-    shorter one (`reaction-1`). Outputs no citation matched are kept under a synthetic
+    shorter one (`reaction-1`). A hit the result marks `record_readable: false` does not count as
+    seen (`unreadable_ids`). Outputs no citation matched are kept under a synthetic
     `tool-output-N` id so the judge still reads them; no citation can match that id, so they add
     evidence, never grounding.
     """
@@ -449,7 +480,12 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
         text = output.strip()
         if not text:
             continue
-        grounded = [note_id for note_id in citations if _mentions(output, note_id)]
+        unreadable = unreadable_ids(output)
+        grounded = [
+            note_id
+            for note_id in citations
+            if _mentions(output, note_id) and note_id not in unreadable
+        ]
         if grounded:
             chunks.extend(
                 EvidenceChunk(content=text, source_note_id=note_id, retriever="tool")

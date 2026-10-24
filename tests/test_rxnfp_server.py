@@ -157,6 +157,58 @@ def test_a_withdrawn_reaction_is_not_served_as_a_precedent(
     )
 
 
+def test_a_hit_with_no_record_is_served_and_marked_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fingerprint hit whose record is gone stays in the answer, flagged and said in the verdict.
+
+    Three runs are indexed: one with a record, one with none, one withdrawn. The flag is a field,
+    not only prose, and the readable hit is unchanged.
+    """
+    store = InMemoryFingerprintStore(definition=reaction_definition())
+    for stem in ("rxn-live", "rxn-orphan", "rxn-pulled"):
+        asyncio.run(store.add(record_for_reaction(stem, _ESTER_ETHYL)))
+    records = InMemoryReactionRecordStore()
+    asyncio.run(
+        records.record(
+            [
+                ReactionRecord(reaction_id="rxn-live", body="b", source="eln"),
+                ReactionRecord(
+                    reaction_id="rxn-pulled",
+                    body="b",
+                    source="eln",
+                    retracted_at=datetime(2026, 3, 4, tzinfo=UTC),
+                ),
+            ],
+            "eln-json",
+        )
+    )
+
+    payload = _structured(store, monkeypatch, records)
+
+    readable = {hit["id"]: hit["record_readable"] for hit in payload["hits"]}
+    assert readable == {"reaction-rxn-live": True, "reaction-rxn-orphan": False}
+    assert "record_readable: false" in payload["verdict"]
+    assert "1 hit(s)" in payload["verdict"]
+
+
+def test_a_search_of_readable_hits_says_nothing_about_readability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verdict names the unreadable clause only when a hit is unreadable."""
+    store = InMemoryFingerprintStore(definition=reaction_definition())
+    asyncio.run(store.add(record_for_reaction("rxn-live", _ESTER_ETHYL)))
+    records = InMemoryReactionRecordStore()
+    asyncio.run(
+        records.record([ReactionRecord(reaction_id="rxn-live", body="b", source="eln")], "eln-json")
+    )
+
+    payload = _structured(store, monkeypatch, records)
+
+    assert [hit["record_readable"] for hit in payload["hits"]] == [True]
+    assert "record_readable" not in payload["verdict"]
+
+
 def test_two_sites_behind_one_entry_id_are_cited_apart(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two sites behind one entry id are cited apart, with source-qualified citations.
 

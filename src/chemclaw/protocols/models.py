@@ -317,6 +317,9 @@ class UncitedPrecedent(BaseModel):
     similarity: float = Field(ge=0.0, le=1.0)
     #: What the record calls it.
     label: str = ""
+    #: False when the index holds the run but its record cannot be read here: it is offered for
+    #: recall, and nothing may be quoted from it or built on it.
+    record_readable: bool = True
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 

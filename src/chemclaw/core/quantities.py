@@ -89,6 +89,19 @@ def _payload(text: str) -> str:
     return framed["body"] if framed else body
 
 
+def parsed_result(text: str) -> object | None:
+    """A tool result's JSON, read through its handle line and framing envelope; `None` if it is not.
+
+    Never raises: `json.loads` raises `RecursionError` (not a `ValueError`) on deep nesting, and a
+    pathological result must yield nothing, never end the turn's stream.
+    """
+    try:
+        parsed: object = json.loads(_payload(text))
+    except (ValueError, TypeError, RecursionError):
+        return None
+    return parsed
+
+
 def labelled_values(text: str) -> list[Quantity]:
     """Every number a JSON result returned, with the key the tool filed it under.
 
@@ -96,11 +109,8 @@ def labelled_values(text: str) -> list[Quantity]:
     from prose; its figures still appear unnamed in `numbers`. Deduplicated on (label, value), in
     first-seen order. A framed result is read through its envelope.
     """
-    try:
-        parsed = json.loads(_payload(text))
-    except (ValueError, TypeError, RecursionError):
-        # `json.loads` raises `RecursionError` (not a `ValueError`) on deep nesting; a pathological
-        # result must yield no labels, never end the turn's stream.
+    parsed = parsed_result(text)
+    if parsed is None:
         return []
     seen: dict[tuple[str, float], Quantity] = {}
     for quantity in _walk(parsed, prefix="", depth=0):

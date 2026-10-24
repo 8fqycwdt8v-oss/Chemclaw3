@@ -25,7 +25,7 @@ from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_text import get_current_user_texts
-from chemclaw.ingest.eln.records import default_record_store
+from chemclaw.ingest.eln.records import default_record_store, readable_or_marked
 from chemclaw.kg.note import external_record_ref
 from chemclaw.kg.store import note_store
 from chemclaw.memory.failure import failures_against, observation_of
@@ -323,7 +323,8 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     cites: writing hits into `design.evidence` would let `evidence_present` pass on an ungrounded
     design. Already-cited hits are dropped by comparing in the citation's own spelling
     (`external_record_ref`), and so are runs no structure search may serve (withdrawn, or amended to
-    citation-only). Never raises; failures are counted through `degraded()`.
+    citation-only). A run with no readable record is kept and marked, cited or not. Never raises;
+    failures are counted through `degraded()`.
     """
     reaction = design.request.reaction_smiles.strip()
     if not reaction:
@@ -331,11 +332,9 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     cited = {external_record_ref(ref.ref)[1] for ref in design.evidence if ref.ref}
     try:
         search = await find_similar_reactions(default_reaction_store(), reaction)
-        # The index holds a fingerprint the app role cannot delete; whether its run may be offered
-        # at all is the record's to say, as in `similar_reactions`.
-        withheld = await default_record_store().structurally_withheld(
-            [(hit.source, hit.id) for hit in search.hits]
-        )
+        # The index holds a fingerprint the app role cannot delete; whether its run may be offered,
+        # and whether it may be read, is the record's to say — the rule `similar_reactions` applies.
+        hits = await readable_or_marked(default_record_store(), search.hits)
     except Exception as exc:
         degraded(
             logger,
@@ -350,9 +349,16 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     # raise.
     try:
         return [
-            UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
-            for hit in search.hits
-            if hit.id not in cited and (hit.source, hit.id) not in withheld
+            UncitedPrecedent(
+                id=hit.id,
+                similarity=hit.similarity,
+                label=hit.label,
+                record_readable=hit.record_readable,
+            )
+            for hit in hits
+            # An unreadable run stays even when cited: the citation cannot be followed, and the
+            # check is where the chemist is told so.
+            if hit.id not in cited or not hit.record_readable
         ]
     except ValidationError as exc:
         degraded(

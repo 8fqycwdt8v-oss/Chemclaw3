@@ -20,8 +20,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Answers that are wrong without saying so
 
-- [ ] **`similar_reactions` and the design precedent check still serve a fingerprint hit with no record** [S] — the retriever now passes only servable records, but the tool keeps "unindexed is not withdrawn",
-  so a hit `expand_note` refuses is still cited; owner call whether one rule holds; `connectors/rxnfp/server/tools.py::similar_reactions`, `agent/protocol_design_tools.py::uncited_precedent`.
+- [ ] **`similar_reactions` and the design precedent check: a fingerprint hit with no record is cited but marked** [S] — implemented, held for live eval (#692): the owner chose "cite, but mark" (`record_readable: false`),
+  one helper for both; ship behind `make model-text-eval` (probes `rx-03,rx-04,rx-06,rx-07,pt-04`, plus one seeded orphan-fingerprint probe); `ingest/eln/records.py::readable_or_marked`.
 - [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
   `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`

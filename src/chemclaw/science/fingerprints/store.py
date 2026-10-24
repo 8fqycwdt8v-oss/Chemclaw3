@@ -103,12 +103,25 @@ class Match(BaseModel):
     global (see `FingerprintRecord.source`). It is on the hit because a hit is what a citation is
     spelled from: with two sites behind one entry id, `note_id_for_reaction(hit.id)` alone names
     both runs and neither, and only the search knows which one it matched.
+
+    `record_readable` is whether the run's record can be read here. The index holds a fingerprint
+    the application cannot delete, so a hit may stand for a run whose record is gone; it is kept
+    (recall) and flagged, because the model may say a similar run is indexed and may not say what
+    it recorded.
     """
 
     id: str
     label: str
     similarity: float
     source: str = ""
+    record_readable: bool = Field(
+        default=True,
+        description=(
+            "False: the index holds this run but its record is not readable here (`expand_note` "
+            "refuses it). Do not quote conditions, yields or any detail from it and do not cite it "
+            "as support; at most say that a similar run is indexed."
+        ),
+    )
 
 
 HitT = TypeVar("HitT", bound=BaseModel)
@@ -249,6 +262,13 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         that stops reading early does not write "no in-house precedent" about a run on file.
         """
         indexed = self._indexed_verdict()
+        unreadable = sum(1 for hit in self.hits if getattr(hit, "record_readable", True) is False)
+        if unreadable:
+            indexed = (
+                f"{indexed} {unreadable} hit(s) are marked `record_readable: false`: the run is "
+                "indexed but its record is not readable here, so quote nothing from it and do "
+                "not cite it as support."
+            )
         outside = self.unsearched.verdict if self.unsearched is not None else ""
         if not outside:
             return indexed

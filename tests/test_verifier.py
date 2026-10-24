@@ -27,6 +27,7 @@ from chemclaw.agent.verifier import (
     score_answer,
     turn_evidence,
     ungrounded_parameter_shapes,
+    unreadable_ids,
     verify_answer,
     verify_turn_answer,
 )
@@ -364,6 +365,50 @@ def test_a_numeric_id_is_not_grounded_by_a_longer_one_sharing_its_digits() -> No
     assert turn_evidence("See [[reaction-1]].", [other]) == [
         EvidenceChunk(content=other, source_note_id="tool-output-0", retriever="tool")
     ]
+
+
+def _hits_output(*hits: dict[str, object]) -> str:
+    """A `similar_reactions` result as the model receives it: JSON over `hits`."""
+    return json.dumps({"subject": "reaction", "hits": list(hits)})
+
+
+def test_a_hit_marked_unreadable_does_not_ground_a_citation() -> None:
+    """A run the search lists as `record_readable: false` is mentioned but retrieved nothing.
+
+    Citing it must fall through to the unmatched tool output, so the gate does not pass an answer
+    that built a claim on a record nobody could read; its readable neighbour still grounds.
+    """
+    output = _hits_output(
+        {"id": "reaction-live", "label": "x", "similarity": 0.9, "record_readable": True},
+        {"id": "reaction-gone", "label": "y", "similarity": 0.8, "record_readable": False},
+    )
+    answer = "See [[reaction-live]] and [[reaction-gone]]."
+
+    evidence = turn_evidence(answer, [output])
+
+    assert [chunk.source_note_id for chunk in evidence] == ["reaction-live"]
+    assert unreadable_ids(output) == {"reaction-gone"}
+
+
+def test_an_unreadable_hit_alone_leaves_the_citation_ungrounded() -> None:
+    """The deterministic gate marks an answer whose only citation is an unreadable hit."""
+    output = _hits_output(
+        {"id": "reaction-gone", "label": "y", "similarity": 0.8, "record_readable": False}
+    )
+
+    result = asyncio.run(verify_turn_answer("It gave 84% [[reaction-gone]].", [output]))
+
+    assert result.confidence == 0.0
+
+
+def test_an_id_listed_readable_elsewhere_in_the_result_stays_grounded() -> None:
+    """Only an id with no readable entry is excluded."""
+    output = _hits_output(
+        {"id": "reaction-x", "label": "y", "similarity": 0.8, "record_readable": False},
+        {"id": "reaction-x", "label": "y", "similarity": 0.8, "record_readable": True},
+    )
+
+    assert unreadable_ids(output) == set()
 
 
 def test_an_id_the_turn_really_did_retrieve_is_still_grounded() -> None:

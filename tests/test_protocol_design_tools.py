@@ -9,7 +9,7 @@ design `structure_experiment_request` opened, which is why `_open` runs before e
 import asyncio
 import inspect
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -23,7 +23,8 @@ from chemclaw.core.turn_text import (
     reset_current_user_texts,
     set_current_user_texts,
 )
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
+from chemclaw.protocols.checks import precedent_consulted
 from chemclaw.protocols.models import (
     ChargeLine,
     EvidenceRef,
@@ -1073,8 +1074,8 @@ def test_a_precedent_the_design_already_cites_is_not_reported_as_uncited(
         ],
     )
     monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
-    # Holds neither run, so neither is withheld: what is dropped here is the citation alone.
-    monkeypatch.setattr(tools, "default_record_store", InMemoryReactionRecordStore)
+    # Holds both runs, so both are readable: what is dropped here is the citation alone.
+    monkeypatch.setattr(tools, "default_record_store", _records_holding("ord-9f2", "ord-aaa"))
     monkeypatch.setattr(
         tools,
         "find_similar_reactions",
@@ -1084,6 +1085,57 @@ def test_a_precedent_the_design_already_cites_is_not_reported_as_uncited(
     found = asyncio.run(tools.uncited_precedent(design))
 
     assert [one.id for one in found] == ["ord-aaa"]
+
+
+def _records_holding(*reaction_ids: str) -> Callable[[], InMemoryReactionRecordStore]:
+    """A record-store factory whose store holds a structured record for each of `reaction_ids`."""
+    store = InMemoryReactionRecordStore()
+    asyncio.run(
+        store.record(
+            [ReactionRecord(reaction_id=one, body="b", source="eln") for one in reaction_ids], "eln"
+        )
+    )
+    return lambda: store
+
+
+def test_a_hit_with_no_record_is_offered_marked_and_never_dropped_as_cited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run the index holds and no record backs is kept, flagged, and does not count as read.
+
+    `ord-gone` has no record; the design cites it, which must not hide it, because the citation
+    cannot be followed. `ord-live` is readable and cited, so it is dropped as before.
+    """
+    design = ExperimentDesign(
+        request=ExperimentRequest(title="SM-3", goal="couple it", reaction_smiles="CC>>CCO"),
+        evidence=[
+            EvidenceRef(kind="precedent", ref="reaction-ord-live", summary="ran at 80 C"),
+            EvidenceRef(kind="precedent", ref="reaction-ord-gone", summary="ran at 60 C"),
+        ],
+    )
+    monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
+    monkeypatch.setattr(tools, "default_record_store", _records_holding("ord-live", "ord-new"))
+    monkeypatch.setattr(
+        tools,
+        "find_similar_reactions",
+        lambda store, smiles: _resolved(
+            _search([_hit("ord-live"), _hit("ord-gone"), _hit("ord-new"), _hit("ord-orphan")])
+        ),
+    )
+
+    found = asyncio.run(tools.uncited_precedent(design))
+
+    assert {one.id: one.record_readable for one in found} == {
+        "ord-gone": False,
+        "ord-new": True,
+        "ord-orphan": False,
+    }
+    check = precedent_consulted(design, found)
+    assert "do not quote details" in check.detail
+    assert "ord-new" in check.detail
+    assert "ord-gone" not in check.detail and "ord-orphan" not in check.detail, (
+        "an unreadable run is named as something to read"
+    )
 
 
 def test_a_design_with_no_reaction_smiles_does_not_search(
