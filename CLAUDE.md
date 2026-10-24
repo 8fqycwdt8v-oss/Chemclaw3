@@ -147,3 +147,5 @@ with `printenv 'API-KEY'`; never print or commit it). Map it onto `CHEMCLAW_LLM_
 beside a gateway named by `CHEMCLAW_LLM_BASE_URL` and `CHEMCLAW_LLM_MODEL` —
 `infra/live/e2e-full-stack/up.sh` does exactly that. With no gateway, the lane runs against
 `chemclaw.cli.mock_llm` on loopback and needs no key.
+Against Anthropic, start `infra/live/gateway/up.sh` and use its `env`: the vendor's compatible
+endpoint does not cache, so a lane pointed at it bills every turn's full prefix.
