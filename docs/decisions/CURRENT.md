@@ -20,6 +20,7 @@ full ledger in record order; an ADR marked `**Superseded-by:**` has been replace
 - The harness is adopted whole and every default it brings is a decision made here — [D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently](D-2026-08-15-a-harness-is-adopted-whole-or-its-defaults-are-inherited-silently.md).
 - The runaway cap is a first-party `before_model` counter, not upstream's `ModelCallLimitMiddleware` — [D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped](D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped.md).
 - One gateway is the only LLM provider; nothing in `src/` dials a vendor — [D-2026-09-04-a-gateway-is-the-only-provider](D-2026-09-04-a-gateway-is-the-only-provider.md).
+- The live lane reaches Anthropic through a local caching gateway (`infra/live/gateway/`), not the vendor's compatible endpoint — [D-2026-10-24-the-live-lane-caches-through-a-local-gateway](D-2026-10-24-the-live-lane-caches-through-a-local-gateway.md).
 - `src/` is all the code; packages are grouped by layer and the map is enforced — [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md), [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md).
 - An in-memory implementation is a test oracle unless a configuration selects it — [D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend](D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend.md).
 
