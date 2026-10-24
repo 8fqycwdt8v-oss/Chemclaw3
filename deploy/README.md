@@ -167,6 +167,8 @@ site's own) additionally needs its manifest mounted — see "Attaching a connect
 this image does not ship". The five process-development bundles (`props`, `thermalsafety`,
 `kinetics`, `unitops`, `suitability`) ship `enabled: false`: each one enabled costs prompt prefix
 on every model call.
+`chembl` (compounds and aggregated bioactivity from a CC BY-SA 3.0 subset of ChEMBL) ships
+`enabled: false` on the same terms; its egress port and `CHEMCLAW_CHEMBL_TOKEN` slot are in the chart.
 
 ### 6. Write the values file — what the chart refuses to render without
 

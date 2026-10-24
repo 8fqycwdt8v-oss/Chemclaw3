@@ -288,6 +288,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_THERMALSAFETY_TOKEN",
         "CHEMCLAW_KINETICS_TOKEN",
         "CHEMCLAW_UNITOPS_TOKEN",
+        "CHEMCLAW_CHEMBL_TOKEN",
         "CHEMCLAW_SUITABILITY_TOKEN",
         "CHEMCLAW_PYEXEC_TOKEN",
     }

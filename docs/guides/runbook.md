@@ -792,6 +792,9 @@ obligations as the three above — host, port, bearer (`CHEMCLAW_PROPS_TOKEN`,
 `CHEMCLAW_SUITABILITY_TOKEN`) — plus a fourth that the other three do not have: it costs prefix on
 **every** model call, not only on the calls that use it, so enable the ones a site's chemists
 actually ask for rather than the set.
+A sixth, `chembl` (compound identity and aggregated bioactivity from a CC BY-SA 3.0 subset of ChEMBL),
+is declared and off on the same terms with `CHEMCLAW_CHEMBL_TOKEN`; which data tier its image carries
+is in `docs/guides/deployment.md`.
 
 **`chem` is declared by the fleet and served elsewhere.** Its capability and its manifest are
 `Chemclaw3-mcp`'s (`servers/chem`), so this release renders no Deployment and no Service for it and dials the address
