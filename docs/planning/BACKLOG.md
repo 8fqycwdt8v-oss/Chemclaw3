@@ -43,8 +43,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   propagate (`make live-delegation`); `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`.
 - [ ] **A cancelled job is sometimes recorded twice, `failed` then `cancelled`** [S] — twice on CI runners, never in 85 local runs;
   the assertion now names each record's job and reason, so read the next failure; `durable/connector_job.py::ConnectorJobWorkflow.run`.
-- [ ] **`make live-turn-cost` reads WORSE on a clean tree against its recorded case** [S] — 998,772 measured (128 tools, mock gateway) vs 900,198
-  recorded, exit 1, nothing absent; re-record (`ARGS=--emit`) once the 11% prefix growth is accepted, or find it.
+- [ ] **`make live-turn-cost` scores whatever tool surface the lane booted with** [S] — the same workload read 0.90 (recorded), 1.00 (a clean boot, 128 tools) and 1.29
+  (14 connectors, eval profiles); record the surface (tool count, schema bytes) in the case and refuse a mismatch with exit 3, then re-record; `cli/live_turn_cost.py`.
 
 ### Where the field moved past us
 
