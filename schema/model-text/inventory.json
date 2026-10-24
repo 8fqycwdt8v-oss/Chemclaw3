@@ -37,8 +37,8 @@
       "tokens": 3292
     },
     "on-demand": {
-      "entries": 114,
-      "tokens": 105390
+      "entries": 115,
+      "tokens": 105519
     }
   },
   "entries": [
@@ -2500,6 +2500,15 @@
       "tokens": 18,
       "chars": 53,
       "sha256": "09114a813e0a169a"
+    },
+    {
+      "id": "prose:chemclaw.spend.guard:SPEND_WRAP_UP_NOTE",
+      "kind": "prose-constant",
+      "owner": "src/chemclaw/spend/guard.py:SPEND_WRAP_UP_NOTE",
+      "residence": "on-demand",
+      "tokens": 129,
+      "chars": 499,
+      "sha256": "ff090ce6169517b4"
     },
     {
       "id": "prose:chemclaw.spend.guard:WRAP_UP_NOTE",
