@@ -72,16 +72,32 @@ class Quantity:
 _MAX_DEPTH = 6
 
 
+# The envelope a framed tool result arrives in: `<retrieved-note-<nonce> id="…">`, the payload, the
+# matching close. The model and the trace both see the framed text, so a parser that wants the
+# payload has to look through it. `core` cannot import the framing module, so this names only the
+# shape, and a payload that is not wrapped this way is read as it stands.
+_ENVELOPE = re.compile(
+    r"\A\s*<retrieved-note-(?P<nonce>[0-9a-f]+)\b[^>]*>\n(?P<body>.*)\n</retrieved-note-(?P=nonce)>\s*\Z",
+    re.DOTALL,
+)
+
+
+def _payload(text: str) -> str:
+    """The result's own text: no handle line, and no framing envelope around it."""
+    body = without_handle_line(text)
+    framed = _ENVELOPE.match(body)
+    return framed["body"] if framed else body
+
+
 def labelled_values(text: str) -> list[Quantity]:
     """Every number a JSON result returned, with the key the tool filed it under.
 
     Strict, unlike `returned_values`: a non-JSON result yields nothing rather than labels guessed
     from prose; its figures still appear unnamed in `numbers`. Deduplicated on (label, value), in
-    first-seen order.
+    first-seen order. A framed result is read through its envelope.
     """
     try:
-        # A stamped result is JSON followed by its handle line, which is no part of the payload.
-        parsed = json.loads(without_handle_line(text))
+        parsed = json.loads(_payload(text))
     except (ValueError, TypeError, RecursionError):
         # `json.loads` raises `RecursionError` (not a `ValueError`) on deep nesting; a pathological
         # result must yield no labels, never end the turn's stream.

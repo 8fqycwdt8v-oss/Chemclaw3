@@ -5,7 +5,10 @@ failures: JSON-escaped quotes in a retrieved-note envelope, and emphasis (`**200
 masses in a charge table.
 """
 
+import json
+
 from chemclaw.core.quantities import (
+    Quantity,
     is_rounding_of,
     labelled_values,
     returned_values,
@@ -205,3 +208,47 @@ def test_the_same_label_and_value_is_recorded_once() -> None:
         ("rows.1.mass_g", 2.0),
         ("total_g", 2.0),
     ]
+
+
+# `ich_impurity_limit(substance="dichloromethane")` as the live lane returned it on 2026-10-24: the
+# number and its unit are separate fields of one object. Structure and keys are verbatim; the
+# free-text fields are shortened.
+_ICH_DICHLOROMETHANE = json.dumps(
+    {
+        "query": "dichloromethane",
+        "limit": {
+            "substance": "Dichloromethane",
+            "guideline": "ICH Q3C(R9), Residual Solvents, ICH Step 4 (2024)",
+            "limit_class": "Class 2",
+            "class_meaning": "Class 2 — solvents to be limited.",
+            "limits": [
+                {"basis": "PDE", "value": 6.0, "unit": "mg/day"},
+                {"basis": "concentration limit", "value": 600.0, "unit": "ppm"},
+            ],
+            "citation": "ICH Q3C(R9), Residual Solvents, ICH Step 4 (2024), Table 2",
+        },
+        "verdict": "Dichloromethane: quote the citation with the number.",
+    },
+    indent=2,
+)
+
+_HANDLE = " \n⟨r:a39e9bd0a138⟩"
+
+
+def test_a_framed_result_is_read_through_its_envelope() -> None:
+    """The trace and the model both see the framed text, so the named values must come through it.
+
+    Read bare, a framed result yielded no labelled value at all: the whole text is not JSON.
+    """
+    tag = "retrieved-note-f244c1767fbfb6b1"
+    framed = f'<{tag} id="safety:ich_impurity_limit">\n{_ICH_DICHLOROMETHANE}\n</{tag}>'
+    quantities = labelled_values(framed + _HANDLE)
+    assert Quantity("limit.limits.0.value", 6.0, "mg/day") in quantities
+    assert Quantity("limit.limits.1.value", 600.0, "ppm") in quantities
+    assert labelled_values(_ICH_DICHLOROMETHANE) == quantities, "the bare form is unchanged"
+
+
+def test_an_envelope_that_does_not_close_on_its_own_nonce_is_not_unwrapped() -> None:
+    """Only a matching open and close tag is an envelope; anything else is read as it stands."""
+    mismatched = f'<retrieved-note-aaaa id="x">\n{_ICH_DICHLOROMETHANE}\n</retrieved-note-bbbb>'
+    assert labelled_values(mismatched) == []
