@@ -57,7 +57,7 @@ address the sink refuses every record for) is booked batch-wide like an outage a
 
 ## What deliberately does not publish
 
-Two things reach a publish hook and are dropped on purpose. Both are written down here because a
+Three things reach a publish hook and are dropped on purpose. All are written down here because a
 hook that drops silently is otherwise indistinguishable from a defect.
 
 **A BO campaign.** `connectors/bo/workflows.py` stamps `payload_kind="CampaignResult"`, and no
@@ -78,6 +78,13 @@ prunes, already content-addressed in the artifact store, and re-projecting them 
 frequency in any case — a wavenumber is an eigenvalue of the *mass-weighted* matrix and the row
 carries no elements. The frequencies reach a store through the third hook instead, as part of
 `ThermochemistryResult`.
+
+**A tool composite whose enqueue failed.** A `ThermochemistryResult` or `LogdResult` has no cache
+row and no job record, so the backfill cannot find one whose enqueue failed
+(`D-2026-10-23-a-lost-tool-composite-is-recovered-by-asking-again`). The failure is counted
+(`chemclaw_result_publish_failures_total` or `chemclaw_result_projection_failures_total`), and the
+recovery is to call the tool again once the cause is fixed: both recompose from cached primitives,
+so the identical record is re-queued at no SCF cost.
 
 ## The three hooks
 
