@@ -846,3 +846,46 @@ def test_restarting_the_labeller_is_sent_to_the_script_that_owns_it(tmp_path: Pa
     )
     assert done.returncode != 0
     assert "bash infra/live/processes.sh restart rxnlabel" in done.stdout
+
+
+# ---------------------------------------------------------------- restarts and the lane secret
+
+
+@pytest.mark.parametrize(("script", "prefix"), [(_PROCESSES, ""), (_UP, "e2e-")])
+def test_a_restarted_process_keeps_the_log_of_the_one_it_replaced(
+    tmp_path: Path, script: Path, prefix: str
+) -> None:
+    """`start` twice under one name leaves both runs' output, each under its own marker.
+
+    `restart` is kill-then-start; a truncating start erased the log of the process whose death
+    the storm's chaos family was checking.
+    """
+    live, run = tmp_path / ".live", tmp_path / ".live/run"
+    run.mkdir(parents=True)
+    driver = (
+        f"LIVE_DIR={live}\nRUN_DIR={run}\n"
+        "log() { :; }\nrunning() { return 1; }\n"
+        f"{_function(script, 'start')}"
+        "start probe sh -c 'echo first-run'\nwait\n"
+        "start probe sh -c 'echo second-run'\nwait\n"
+    )
+    _bash(driver, _clean_env())
+    text = (live / f"{prefix}probe.log").read_text(encoding="utf-8")
+    assert "first-run" in text and "second-run" in text, text
+    assert text.index("first-run") < text.index("second-run")
+    assert text.count("probe starting at") == 2, text
+
+
+def test_every_lane_process_frames_with_one_persisted_envelope_secret() -> None:
+    """`up` exports one envelope secret before it starts anything, and persists it for a restart.
+
+    Unset, each process picks its own nonce, so two processes frame the same content differently
+    and a restarted one matches neither.
+    """
+    body = _function(_PROCESSES, "up")
+    exported = body.index("export CHEMCLAW_FRAMING_ENVELOPE_SECRET\n")
+    first_start = min(body.index(verb) for verb in ("start_fleet_bundles", "start connectors"))
+    assert exported < first_start, "a process starts before the lane's secret is exported"
+    written = re.search(r"\( umask 077\n(.*?)\} > \"\$RUN_DIR/connector-env\.sh\"", body, re.S)
+    assert written is not None, "`up` no longer writes connector-env.sh in one block"
+    assert "export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q" in written.group(1)

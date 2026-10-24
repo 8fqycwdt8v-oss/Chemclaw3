@@ -46,10 +46,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **2026-09-27 live-run fixes unverified against a real model** [S] — re-run pc-03, a capping delegation probe and a revised
   answer; `connectors/calc/compose.py::require_solvent_for_ions`, `api/runner.py::_REVISION_NOTE`, `spend/guard.py`.
 - [ ] **Connectors dev server stalled 52 s under probe load** [S] — reproduce on an idle host before fixing; `cli/connectors_dev.py`.
-- [ ] **Live-lane papercuts** [S] — `cli/live_storm.py` rejects `--families D,H`; `infra/live/processes.sh restart api` truncates the
-  log; the lane leaves `CHEMCLAW_FRAMING_ENVELOPE_SECRET` unset so two processes frame differently.
-- [ ] **Envelope-nonce prefix test hit its 180 s timeout under load** [S] — time it on an idle host before loosening;
-  `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
+- [ ] **Envelope-nonce prefix test hit its 180 s timeout under load** [S] — time it on an idle host before loosening (at load 8–12 on 12
+  cores it took 26–46 s, three serial runs); `tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`.
 - [ ] **The same three questions cost 2.1x more on one boot than another** [M] — record bound tool names and the schema gauge per
   boot (`make live-turn-cost`); a tool-binding race is the leading, unproven candidate.
 - [ ] **An evicted array leaves its result row listed as whole** [S] — eviction never touches `calculation_results`, so `find` lists and `known` confirms a row whose `*_artifact` hash
