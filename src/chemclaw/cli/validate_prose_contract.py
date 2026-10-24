@@ -491,6 +491,8 @@ def _connector_token_envs() -> set[str]:
     # because their manifests are deliberately not mounted.
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
     declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
+    # The Teams bridge's bot secret: read by `rooms/identity.py` from the variable this names.
+    declared.add(settings.teams_bot_credential_token_env.removeprefix("CHEMCLAW_").lower())
     # Core's own read-only MCP face: its bearer name is a setting's value because the face must
     # never be addressable as a connector.
     declared.add(settings.mcp_face_token_env.removeprefix("CHEMCLAW_").lower())

@@ -279,6 +279,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_CALC_TOKEN",
         "CHEMCLAW_RXNPREDICT_TOKEN",
         "CHEMCLAW_RXNLABEL_TOKEN",
+        "CHEMCLAW_TEAMS_BOT_CREDENTIAL",
         "CHEMCLAW_LLM_FALLBACK_API_KEY",
         "CHEMCLAW_VECTOR_STORE_API_KEY",
         "CHEMCLAW_TEMPORAL_API_KEY",

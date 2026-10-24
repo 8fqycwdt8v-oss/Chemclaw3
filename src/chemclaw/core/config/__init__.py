@@ -48,6 +48,7 @@ from chemclaw.core.config.retrieval import (
     NOTE_INDEX_SOURCES,
     RetrievalSettings,
 )
+from chemclaw.core.config.rooms import RoomSettings
 from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
@@ -78,6 +79,7 @@ __all__ = [
     "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
+    "RoomSettings",
     "ServiceSettings",
     "Settings",
     "SourcesSettings",
@@ -222,6 +224,7 @@ class Settings(
     HypothesisSettings,
     DeliverySettings,
     PublishSettings,
+    RoomSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 

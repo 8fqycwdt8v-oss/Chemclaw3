@@ -386,6 +386,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `Measurement`s the tier takes.
     ("chemclaw.agent", "chemclaw.analytical"),
     ("chemclaw.publish", "chemclaw.core"),
+    # The Teams room bridge is a client of the front door's public routes over HTTP: a leaf on the
+    # kernel (config, the HTTP facts), importing neither `api` nor `agent`, so a message cannot
+    # reach the turn by any path but a token the front door validates.
+    ("chemclaw.rooms", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
     ("chemclaw.cli", "chemclaw.publish"),

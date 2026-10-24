@@ -294,6 +294,17 @@ def test_every_destination_shaped_setting_is_on_the_allowlist_it_derives() -> No
         otel_endpoint=f"https://{hosts['otel_endpoint']}:4317",
         vector_store_provider="qdrant",
         vector_store_url=f"https://{hosts['vector_store_url']}:6333",
+        # The Teams bridge dials these four only when it is on.
+        teams_bridge_enabled=True,
+        teams_bot_app_id="app",
+        teams_tenant_id="t",
+        teams_api_scope="api://x/s",
+        teams_sso_connection_name="c",
+        teams_sso_resource_uri="api://botid-app",
+        teams_bindings_file="/var/bindings.json",
+        teams_api_base_url=f"https://{hosts['teams_api_base_url']}",
+        teams_authority_url=f"https://{hosts['teams_authority_url']}",
+        teams_openid_metadata_url=f"https://{hosts['teams_openid_metadata_url']}/config",
     )
 
     allowed = netguard.derive_allowed(settings)

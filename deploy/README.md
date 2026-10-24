@@ -102,6 +102,7 @@ The chart **names** Secrets and never fills them; populate them with an
 | `CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`, `CHEMCLAW_CALC_TOKEN`, `CHEMCLAW_RXNLABEL_TOKEN` | optional to the chart, **required by the capability** | bearers this release presents to the fleet servers; unset, every call to that server is refused |
 | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | optional to the chart, **required by the capability** | bearers for the connector servers this release runs itself (both ends read the same variable) |
 | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and `pyexec`'s (`secrets.optionalKeys.pyexecToken`) | only when that bundle is enabled | bearers for the fleet bundles that ship off; slotted already, so enabling one is the `connectors:` line plus this key |
+| `CHEMCLAW_TEAMS_BOT_CREDENTIAL` | only with the Teams room bridge | the bot registration's client secret, read by the bridge's own Deployment; unset, it signs nobody in |
 | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the read-only MCP face's bearer; unset, it answers 401 |
 | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | optional | the failover gateway, a non-pgvector store, Temporal Cloud, a split session database |
 
