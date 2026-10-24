@@ -1286,3 +1286,108 @@ def test_project_payload_separates_a_projector_that_raised_from_a_payload_with_n
 async def _counting_enqueue(records: Any) -> int:
     """Stand in for the queue write: this pair of assertions is about the projection."""
     return len(records)
+
+
+async def test_every_requester_of_one_calculation_is_named_on_its_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second chemist's identical run adds a publication rather than being dropped.
+
+    Driven through `cached_compute`, the cache hook production calls: A computes, B hits, B hits
+    again in the same session, the record is delivered, then C hits. The set of actors the sink is
+    sent must be every requester, each once, and a delivered row returns to the queue for C alone.
+    """
+    from chemclaw.core.logging import bind_claimed_caller, reset_claimed_caller
+    from chemclaw.durable import publish_results
+    from chemclaw.science.calc.store import CalculationKey, InMemoryStore, cached_compute
+
+    sent: list[list[str]] = []
+
+    class _Sink:
+        async def deliver(self, records: Any) -> None:
+            sent.extend([p.actor for p in record.publications] for record in records)
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    store = InMemoryStore()
+    key = CalculationKey.build("pka", "v1", inputs={"smiles": "CCO"})
+
+    async def compute() -> dict[str, Any]:
+        return {"smiles": "CCO", "pka": 4.2}
+
+    async def ask(actor: str, session: str, turn: str) -> None:
+        token = bind_claimed_caller(actor, session, turn)
+        try:
+            await cached_compute(store, key, compute)
+        finally:
+            reset_claimed_caller(token)
+
+    async def row() -> tuple[str, int, list[str]]:
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts, document FROM result_publications WHERE sink = 'alpha'"
+            )
+            rows = await cursor.fetchall()
+        assert len(rows) == 1, rows
+        state, attempts, document = rows[0]
+        return state, attempts, [p["actor"] for p in document["publications"]]
+
+    await ask("alice", "s-a", "t-1")
+    await ask("bob", "s-b", "t-2")
+    await ask("bob", "s-b", "t-3")
+    assert await row() == ("pending", 0, ["alice", "bob"])
+
+    outcome = await publish_results._drain_one("alpha", _Sink(), 10)
+    assert outcome.delivered == 1 and sent == [["alice", "bob"]], (outcome, sent)
+
+    await ask("carol", "s-c", "t-4")
+    assert await row() == ("pending", 0, ["carol"]), (
+        "a delivered row returns to the queue carrying only the publication not yet sent"
+    )
+
+
+async def test_a_publication_added_mid_delivery_is_not_marked_delivered_unsent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass delivering the older document cannot mark delivered a row it did not fully send.
+
+    Adding a publication resets `attempts`, the lease's fence, so the in-flight pass's mark misses
+    and the row stays queued for the publication that pass never carried.
+    """
+    from chemclaw.publish.record import Publication
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+
+    def _for(actor: str) -> ResultRecord:
+        return ResultRecord(
+            calc_ref="shared",
+            calc_type="pka",
+            subject=Subject(
+                kind="molecule",
+                members=[SubjectMember(ordinal=0, role="subject", smiles="CCO")],
+                label="CCO",
+            ),
+            conditions=Conditions(),
+            level=TheoryLevel(method="GFN2-xTB"),
+            publications=[Publication(actor=actor, session_id=f"s-{actor}")],
+        )
+
+    assert await outbox.enqueue([_for("alice")]) == 1
+    claimed = await outbox.claim("alpha", 10)
+    assert await outbox.enqueue([_for("bob")]) == 1, "a new requester is added, not dropped"
+    assert await outbox.enqueue([_for("bob")]) == 0, "a repeat of one requester is dropped"
+    await outbox.mark_delivered([row.lease for row in claimed])
+
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute("SELECT state, document FROM result_publications")
+        state, document = (await cursor.fetchall())[0]
+    assert state == "pending"
+    assert [p["actor"] for p in document["publications"]] == ["alice", "bob"]
