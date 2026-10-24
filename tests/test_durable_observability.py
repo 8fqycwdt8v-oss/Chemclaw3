@@ -857,6 +857,50 @@ def test_a_cancelled_job_is_listed_as_cancelled_not_failed() -> None:
     ]
 
 
+def test_the_close_of_an_evicted_run_records_nothing_and_tells_nobody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GeneratorExit` leaves the wrapper at once: no ledger settle, no record, no push-back.
+
+    An evicted run's coroutine can be collected while another workflow's loop is current, where
+    `in_workflow()` is true. Seen on CI: a job the previous test left running was recorded
+    `failed: GeneratorExit` through the next test's workflow.
+    """
+    import datetime as _dt
+    import types
+
+    class _Suspend:
+        def __await__(self) -> Any:
+            yield
+
+    async def _approve(*_args: Any) -> str:
+        await _Suspend()
+        return ""
+
+    calls: list[str] = []
+
+    def _spy(name: str) -> Any:
+        async def _called(*_args: Any, **_kwargs: Any) -> bool:
+            calls.append(name)
+            return True
+
+        return _called
+
+    monkeypatch.setattr(workflow, "in_workflow", lambda: True)
+    monkeypatch.setattr(workflow, "now", lambda: _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC))
+    monkeypatch.setattr(workflow, "info", lambda: types.SimpleNamespace(workflow_id="evicted"))
+    wrapper = ConnectorJobWorkflow()
+    monkeypatch.setattr(wrapper, "_approve_effect", _approve)
+    for name in ("_settle_effect", "_record_run", "_notify_failure"):
+        monkeypatch.setattr(wrapper, name, _spy(name))
+
+    running = wrapper.run(_JOB)
+    running.send(None)
+    with pytest.raises(GeneratorExit):
+        running.throw(GeneratorExit())
+    assert calls == []
+
+
 def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
