@@ -969,3 +969,43 @@ def test_the_lane_env_hands_a_later_shell_the_run_dir_the_lane_keeps_its_pids_in
     assert "export CHEMCLAW_LIVE_RUN_DIR=%q" in body
     line = next(row for row in body.splitlines() if "CHEMCLAW_LIVE_RUN_DIR" in row)
     assert '"$RUN_DIR"' in line, "the exported value is not the lane's run dir"
+
+
+def test_restart_refuses_before_killing_when_the_settings_it_would_use_do_not_load(
+    tmp_path: Path,
+) -> None:
+    """`processes.sh restart` checks `Settings` first, so a refused start leaves the process alive.
+
+    The storm's admission sweep restarted the front door with a cap its connection limit was not
+    sized for: `up` died on the `Settings` error after the kill and the lane had no front door. A
+    stand-in process stays up, and its pid file stays, when the settings are invalid.
+    """
+    run = tmp_path / "run"
+    run.mkdir()
+    standin = subprocess.Popen(["sleep", "60"])
+    try:
+        (run / "api.pid").write_text(f"{standin.pid}\n", encoding="utf-8")
+        env = _clean_env(
+            CHEMCLAW_LIVE_DIR=str(tmp_path),
+            CHEMCLAW_MCP_REPO=str(tmp_path),  # present, so the checkout precondition passes
+            CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS="32",  # 552 sockets needed, 512 allowed
+        )
+        result = subprocess.run(
+            ["bash", str(_PROCESSES), "restart", "api"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "refusing to restart api" in result.stderr, result.stderr
+        assert "service_max_connections" in result.stderr, result.stderr
+        assert standin.poll() is None, (
+            "the process was killed although its replacement cannot start"
+        )
+        assert (run / "api.pid").exists()
+    finally:
+        standin.kill()
+        standin.wait()
