@@ -48,8 +48,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   question; `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`.
 - [ ] **The default prompt names `find_past_jobs` but never `find_calculations`** [S] — the molecule-level "already computed" read is named only in the `evidence`/`computation` profiles;
   add it to the research-loop block behind a `make live-ab` arm; `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`.
-- [ ] **`fetch_artifact` refuses every artifact this release stores and is still bound** [S] — kept only for older notes' `artifact_refs`; unbind it from the `computation`/`evidence`
-  profiles, or bind it only when a text artifact exists, behind a live eval; `connectors/calc/server/tools.py::fetch_artifact`.
 - [ ] **A chat-room connector over a shared session** [M] — owner call between a Teams bridge on each sender's
   own token and declining (proposal PR #640); the queue/stream UI shipped in `Chemclaw3_ui`.
 - [ ] **Profile routing is not compared on answers** [M] — the corpus exists (`data/evals/routing/profile-routing.yaml`, checked offline by `tests/test_routing_corpus.py`);
