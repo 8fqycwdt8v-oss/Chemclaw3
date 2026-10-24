@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -1046,3 +1047,18 @@ def test_restart_refuses_before_killing_when_postgres_does_not_answer(tmp_path: 
     finally:
         standin.kill()
         standin.wait()
+
+
+def test_the_soak_reads_the_free_disk_space_the_filesystem_reports(tmp_path: Path) -> None:
+    """`free_gb` prints whole GiB free under the checkout, on GNU and BSD `df` alike.
+
+    A `df` flag one platform refuses printed nothing, which the loop read as zero and stopped the
+    soak at round 1 for want of disk on a machine with tens of GB free.
+    """
+    script = _LIVE / "soak.sh"
+    out = _bash(
+        f"REPO_ROOT={shlex.quote(str(tmp_path))}\n{_function(script, 'free_gb')}free_gb",
+        {"PATH": os.environ["PATH"]},
+    )
+    expected = shutil.disk_usage(tmp_path).free // 2**30
+    assert abs(int(out.strip()) - expected) <= 1, out
