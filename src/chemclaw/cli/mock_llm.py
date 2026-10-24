@@ -377,6 +377,8 @@ class MockLlm:
         self._chain: BoundedLru[str, str] = BoundedLru(20_000)
         self.requests = 0
         self.by_behaviour: dict[str, int] = {}
+        # The tool surface of the newest request that carried one: what a measured turn was sent.
+        self.last_surface: dict[str, int] | None = None
         self._default = self._behaviours[0] if self._behaviours else Behaviour(name="empty")
 
     def select(self, payload: dict[str, Any]) -> Behaviour:
@@ -412,6 +414,19 @@ class MockLlm:
         """Count one served request, per behaviour."""
         self.requests += 1
         self.by_behaviour[behaviour.name] = self.by_behaviour.get(behaviour.name, 0) + 1
+
+    def note_surface(self, payload: dict[str, Any]) -> None:
+        """Keep the tool count and serialized schema size of a request that sent tools.
+
+        A request with none (a compaction summary) is skipped, so the reading stays the surface
+        the agent's own calls were bound to.
+        """
+        tools = payload.get("tools")
+        if isinstance(tools, list) and tools:
+            self.last_surface = {
+                "tools": len(tools),
+                "schema_bytes": len(json.dumps(tools, sort_keys=True).encode("utf-8")),
+            }
 
 
 def _fragments(document: str, count: int) -> list[str]:
@@ -489,6 +504,7 @@ def decide_turn(mock: MockLlm, payload: dict[str, Any]) -> DecidedTurn | JSONRes
     the routes because they are protocol-specific.
     """
     behaviour = mock.select(payload)
+    mock.note_surface(payload)
     # Later passes of the same turn answer instead of calling again (`already_has_tool_results`).
     # `dataclasses.replace`, not mutation: the catalogue is shared across concurrent turns. The text
     # is carried through unchanged, even when empty, so `f-no-text` stays a turn that writes
@@ -847,7 +863,13 @@ def build_app(mock: MockLlm) -> FastAPI:
     @app.get("/__mock/stats")
     async def stats() -> Any:
         """What the mock was asked for — the storm's proof that no real model was called."""
-        return JSONResponse({"requests": mock.requests, "by_behaviour": mock.by_behaviour})
+        return JSONResponse(
+            {
+                "requests": mock.requests,
+                "by_behaviour": mock.by_behaviour,
+                "last_surface": mock.last_surface,
+            }
+        )
 
     return app
 
