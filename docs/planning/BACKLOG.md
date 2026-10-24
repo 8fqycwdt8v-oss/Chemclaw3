@@ -61,7 +61,7 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Knowledge and records
 
-- [ ] **A citation-only record is counted by a facet answer: implemented, held for live eval (PR #NNN)** [S] — built per
+- [ ] **A citation-only record is counted by a facet answer: implemented, held for live eval (#694)** [S] — built per
   `D-2026-10-23-a-facet-on-a-drawn-species-counts-the-citation-tier` (owner decision 2026-10-24); the row is deleted when the `make model-text-eval` reads ship, or the batch is reverted.
 
 - [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
