@@ -3,7 +3,9 @@
 A miss is claimed in Postgres before it is computed (D-011 extended: a result being computed by
 someone else is awaited, not recomputed). The winner heartbeats a lease while it computes; the
 others wait for its result, woken by `NOTIFY` and by a bounded poll for the notifications a dropped
-connection loses.
+connection loses. The wake-up travels on the session endpoint (`session_store_dsn`, else
+`postgres_dsn`), since a `LISTEN` behind a transaction-mode pooler loses its notifications; the
+`NOTIFY` goes to that same endpoint, because a notification reaches only listeners on its database.
 
 Invariants: every lease comparison is the database's `now()`, never a process clock; a waiter holds
 no claim, so its timeout or cancellation leaves the holder's work and the row untouched; a holder's
@@ -132,8 +134,12 @@ class PostgresClaims:
     """The claim table's operations, one short transaction each, and the wake-ups waiters get."""
 
     def __init__(self, dsn: str) -> None:
-        """Claim against the database at `dsn`, the one holding `calculation_results`."""
+        """Claim against the database at `dsn`, the one holding `calculation_results`.
+
+        Wake-ups use the session endpoint, which may be a second server: see the module docstring.
+        """
         self._dsn = dsn
+        self._wake_dsn = settings.session_store_dsn or settings.postgres_dsn
 
     @staticmethod
     def lease_seconds() -> float:
@@ -208,15 +214,37 @@ class PostgresClaims:
 
         Only the attempt's own row: a holder that was taken over cannot remove its successor's.
         """
-        async with db.connection(self._dsn, operation="calc_claim") as conn:
-            await conn.execute(_RELEASE, (claim.slot, claim.attempt))
-            await conn.execute(NOTIFY, (CHANNEL, _topic(claim.slot)))
+        await self._settle_and_wake(_RELEASE, (claim.slot, claim.attempt), claim.slot)
 
     async def fail(self, claim: Claim, error: str) -> None:
         """Record that this attempt failed, for its waiters, and wake them."""
+        await self._settle_and_wake(
+            _FAIL, (error[:_ERROR_CHARS], claim.slot, claim.attempt), claim.slot
+        )
+
+    async def _settle_and_wake(self, statement: str, params: tuple[str, ...], slot: str) -> None:
+        """Run `statement`, then notify `slot`'s waiters on the endpoint they listen on.
+
+        One transaction when that endpoint is the claims' own DSN. Otherwise the notification is
+        sent after the commit, and a failure to send it is logged, not raised: the statement has
+        landed, and a waiter that is not woken finds it on its next poll.
+        """
         async with db.connection(self._dsn, operation="calc_claim") as conn:
-            await conn.execute(_FAIL, (error[:_ERROR_CHARS], claim.slot, claim.attempt))
-            await conn.execute(NOTIFY, (CHANNEL, _topic(claim.slot)))
+            await conn.execute(statement, params)
+            if self._wake_dsn == self._dsn:
+                await conn.execute(NOTIFY, (CHANNEL, _topic(slot)))
+                return
+        try:
+            async with db.connection(self._wake_dsn, operation="calc_claim") as conn:
+                await conn.execute(NOTIFY, (CHANNEL, _topic(slot)))
+        except Exception:
+            degraded(
+                logger,
+                "calc_claim",
+                "could not wake the waiters on %s; they see it on their next poll",
+                slot,
+                level=logging.WARNING,
+            )
 
     @asynccontextmanager
     async def watch(self, slot: str) -> AsyncIterator[asyncio.Event]:
@@ -225,7 +253,7 @@ class PostgresClaims:
         Never the only way to learn of a release: the caller also polls, so a missed notification
         costs one poll interval, not a hang.
         """
-        async with woken_by(self._dsn, CHANNEL, _topic(slot), _retry_seconds) as event:
+        async with woken_by(self._wake_dsn, CHANNEL, _topic(slot), _retry_seconds) as event:
             yield event
 
 

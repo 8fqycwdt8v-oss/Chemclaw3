@@ -9,10 +9,12 @@ travels its real chain.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import pytest
 
 import chemclaw.connectors.calc.server.tools as calc_tools
+from chemclaw.connectors.calc import compose
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
@@ -64,33 +66,88 @@ async def test_electronic_properties_tool_returns_the_populated_result(
     assert server.count("compute_electronic_properties") == 1
 
 
-async def test_the_two_binary_only_calculators_wait_no_longer_than_the_hop_that_reaches_them(
-    server: FakeCalcServer,
-) -> None:
-    """The binary-only calculators wait for the backend less than the `calc` endpoint's own bound.
-
-    The `xtb` binary's budget (`calc_atomic_timeout_seconds`) is longer than the `request_timeout`
-    of the call reaching these tools, which cancels them when it fires; a backend wait past it is
-    cut with no error to read. The fake does not implement these tools, so the calls fail; what is
-    asserted is the session's read bound, recorded before dispatch.
-    """
+def _calc_hop() -> float:
+    """The `request_timeout` of the `calc` endpoint every tool here is reached through."""
     from chemclaw.connectors.registry import discovered, request_timeout_seconds
 
     endpoint = discovered()["calc"][1].endpoint
     assert endpoint is not None
-    hop = request_timeout_seconds(endpoint)
+    return request_timeout_seconds(endpoint)
+
+
+async def test_every_inline_calculator_waits_no_longer_than_the_hop_that_reaches_them(
+    server: FakeCalcServer,
+) -> None:
+    """Each tool's backend sessions are bounded below the `calc` endpoint's own `request_timeout`.
+
+    That endpoint cancels the tool when it fires, so a backend wait past it (the default
+    `calc_server_timeout_seconds`, or the `xtb` binary's `calc_atomic_timeout_seconds`) is cut
+    mid-run with nothing stored and no error to read. What is asserted is each session's read
+    bound, recorded before dispatch; the fake implements neither binary-only calculator, so those
+    two calls fail after their session opened.
+    """
+    hop = _calc_hop()
+    assert settings.calc_server_timeout_seconds > hop, "the clamp is only exercised past the hop"
     assert settings.calc_atomic_timeout_seconds > hop, "the clamp is only exercised past the hop"
+    relaxed = await calc_tools.optimize_geometry("CCO")
+    calls: dict[str, Callable[[], Awaitable[object]]] = {
+        "compute_xtb_energy": lambda: calc_tools.compute_xtb_energy("O"),
+        "predict_solubility": lambda: calc_tools.predict_solubility("CCO"),
+        "predict_pka": lambda: calc_tools.predict_pka("CC(=O)O"),
+        "predict_logd": lambda: calc_tools.predict_logd("CC(=O)O"),
+        "compute_electronic_properties": lambda: calc_tools.compute_electronic_properties("CCO"),
+        "compute_electronic_properties@structure": lambda: calc_tools.compute_electronic_properties(
+            "CCO", structure_id=relaxed.structure_id
+        ),
+        "predict_site_reactivity": lambda: calc_tools.predict_site_reactivity("Oc1ccccc1"),
+        "predict_site_reactivity@structure": lambda: calc_tools.predict_site_reactivity(
+            "CCO", structure_id=relaxed.structure_id
+        ),
+        "optimize_geometry": lambda: calc_tools.optimize_geometry("CCN"),
+        "compute_thermochemistry": lambda: calc_tools.compute_thermochemistry("CCO"),
+        "predict_developability_profile": lambda: calc_tools.predict_developability_profile("CCO"),
+        "calculator_trust": lambda: calc_tools.calculator_trust("pka"),
+        "compute_atomic_descriptors": lambda: calc_tools.compute_atomic_descriptors("O"),
+        "compute_surface_potential": lambda: calc_tools.compute_surface_potential("O"),
+    }
+    for name, call in calls.items():
+        before = len(server.timeouts)
+        try:
+            await call()
+        except Exception:
+            pass  # only the sessions it opened are under test
+        waits = server.timeouts[before:]
+        assert waits, f"{name} opened no backend session, so this proves nothing about it"
+        assert all(wait is not None and 0 < wait < hop for wait in waits), (name, waits, hop)
 
-    for call in (
-        calc_tools.compute_atomic_descriptors,
-        calc_tools.compute_surface_potential,
-    ):
-        with pytest.raises(Exception):  # noqa: B017 - the fake server has no handler for either
-            await call("O")
 
-    waits = server.timeouts[-2:]
-    assert len(waits) == 2
-    assert all(wait is not None and 0 < wait < hop for wait in waits), (waits, hop)
+def test_every_remote_call_in_the_calc_server_names_its_backend_wait() -> None:
+    """Every remote call in `server/tools.py` passes `timeout_seconds`; none takes the default.
+
+    A source guard beside the behavioural test above: a new tool calling `cached_remote` or a
+    composite without the hop's bound would be cut by the endpoint instead of timing out itself.
+    """
+    import ast
+    import inspect
+
+    remote = {"cached_remote", "remote_call", "remote_version"}
+    tree = ast.parse(inspect.getsource(calc_tools))
+    found: list[tuple[int, bool]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        named = isinstance(func, ast.Name) and func.id in remote
+        composed = (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "compose"
+            and inspect.iscoroutinefunction(getattr(compose, func.attr, None))
+        )
+        if named or composed:
+            found.append((node.lineno, any(k.arg == "timeout_seconds" for k in node.keywords)))
+    assert len(found) >= 14, f"the guard found only {len(found)} remote calls; it is not looking"
+    assert all(bounded for _, bounded in found), [line for line, bounded in found if not bounded]
 
 
 async def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
