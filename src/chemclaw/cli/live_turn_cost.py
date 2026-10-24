@@ -20,6 +20,10 @@ while `/readyz` stays green (measured: one 4-bundle process answering past the b
 front door counts each such absence (`chemclaw_connectors_unreachable_total`), so a run during
 which that counter moved scored a different surface and is not compared.
 
+The case also records that surface as the mock gateway saw it (`/__mock/stats`' `last_surface`:
+tool count and schema bytes), and a run sent a different one is not compared either: the score
+follows the lane's configuration (connectors enabled, profiles), not only the code.
+
 Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached or the
 run was degraded (never counted as a pass).
 """
@@ -190,20 +194,36 @@ def _case(turns: list[TurnCost]) -> EvalCase:
     )
 
 
-def _recorded_value() -> float | None:
-    """The committed case's score, or None when it has not been emitted yet."""
+def _recorded_case() -> EvalCase | None:
+    """The committed case, or None when it has not been emitted yet."""
     cases = {case.id: case for case in load_eval_cases(settings.eval_case_dir)}
-    case = cases.get(CASE_ID)
-    return None if case is None else get_metric("turn_cost_ratio")(case).value
+    return cases.get(CASE_ID)
 
 
-def _emit(turns: list[TurnCost], path: Path) -> None:
+async def _mock_surface() -> dict[str, int] | None:
+    """The tool surface the mock gateway last saw, or None from a gateway that keeps no stats."""
+    stats_url = settings.llm_base_url.rstrip("/").removesuffix("/v1") + "/__mock/stats"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            response = await client.get(stats_url)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    surface = response.json().get("last_surface")
+    return surface if isinstance(surface, dict) else None
+
+
+def _emit(turns: list[TurnCost], path: Path, surface: dict[str, int] | None) -> None:
     """Write the measured turns out as the recorded case, front matter and prose together."""
+    reference: dict[str, object] = {"baseline_tokens": BASELINE_TOKENS}
+    if surface is not None:
+        reference["surface"] = surface
     body = {
         "id": CASE_ID,
         "metrics": ["turn_cost_ratio"],
         "output": {"turns": [turn.model_dump(include=set(_EMITTED)) for turn in turns]},
-        "reference": {"baseline_tokens": BASELINE_TOKENS},
+        "reference": reference,
     }
     path.write_text(
         "---\n"
@@ -248,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         driven = asyncio.run(_drive(args.base_url))
         turns = asyncio.run(_recorded(driven.session_id))
+        surface = asyncio.run(_mock_surface())
     except (httpx.HTTPError, OSError) as exc:
         # `httpx.HTTPError` is the front door; `OSError` is the database (`core/db` raises
         # `ConnectionError`). Other driver errors are deliberately not caught, so a malformed query
@@ -277,14 +298,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.emit:
         path = Path(settings.eval_case_dir) / f"{CASE_ID}.md"
-        _emit(turns, path)
+        _emit(turns, path, surface)
         print(f"recorded {len(turns)} measured turn(s) to {path}")
         return 0
 
-    recorded = _recorded_value()
-    if recorded is None:
+    case = _recorded_case()
+    if case is None:
         print(f"no recorded case {CASE_ID!r} to compare against; run with --emit first")
         return 3
+    recorded_surface = (case.reference or {}).get("surface")
+    if recorded_surface is not None and surface is not None and surface != recorded_surface:
+        print(
+            f"not comparable, not scored: the recorded case was sent {recorded_surface} and these "
+            f"turns {surface}; run it on the lane the case was recorded on, or re-record (--emit)"
+        )
+        return 3
+    recorded = get_metric("turn_cost_ratio")(case).value
     band = drift_band(recorded, settings.eval_drift_epsilon)
     delta = result.value - recorded
     print(f"recorded {recorded:.6g}, delta {delta:+.4g}, band {band:.4g}")
