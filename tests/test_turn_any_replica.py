@@ -15,6 +15,7 @@ are driven at the routes a client calls:
 import asyncio
 import json
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
@@ -395,3 +396,81 @@ def test_a_request_names_one_turn_so_the_next_turn_never_serves_it() -> None:
     for_next, for_old = asyncio.run(_run())
     assert for_next == [], "a request for an ended turn reached the next one"
     assert len(for_old) == 1
+
+
+#: A relay lease long enough that its fallback poll (`idle_poll_seconds`, a quarter of it) is far
+#: from anything the wake-up tests below accept: an answer that only the fallback could deliver
+#: takes about ten seconds, and they allow three.
+_LONG_LEASE = 40.0
+_WOKEN_WITHIN = 3.0
+
+
+def test_a_held_turn_is_read_on_a_wake_up_and_not_on_every_relay_poll(
+    two_replicas: Callable[[], tuple[_Gated, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The holder and a remote view read their rows when notified, and otherwise only rarely.
+
+    With the relay poll at 0.05 s, one idle second used to cost the holder twenty reads and the
+    view twenty more. Now both read about once, and a Stop and a follow sent to B still reach A
+    within `_WOKEN_WITHIN` — which, with the fallback at ten seconds, only a notification explains.
+    """
+    monkeypatch.setattr(settings, "service_turn_relay_lease_seconds", _LONG_LEASE)
+    reads = {"pending": 0, "poll": 0}
+    real_pending, real_poll = TurnRemotes.pending, TurnRemotes.poll
+
+    async def _pending(self: TurnRemotes, *args: Any) -> Any:
+        reads["pending"] += 1
+        return await real_pending(self, *args)
+
+    async def _poll(self: TurnRemotes, *args: Any) -> Any:
+        reads["poll"] += 1
+        return await real_poll(self, *args)
+
+    monkeypatch.setattr(TurnRemotes, "pending", _pending)
+    monkeypatch.setattr(TurnRemotes, "poll", _poll)
+    agent, (a, b) = two_replicas()
+
+    async def _idle_reads(name: str) -> int:
+        """How many times `name` is read in one idle second."""
+        before = reads[name]
+        await asyncio.sleep(1.0)
+        return reads[name] - before
+
+    async def _run() -> dict[str, Any]:
+        with a, b:
+            async with (
+                httpx.AsyncClient(base_url=a.base, timeout=60) as on_a,
+                httpx.AsyncClient(base_url=b.base, timeout=60) as on_b,
+            ):
+                session_id = await _shared_session(on_a)
+                sender = asyncio.create_task(_post(on_a, session_id, "hold ana", _as(_ANA)))
+                await _until(lambda: agent.started == ["hold ana"])
+                await _until(lambda: reads["pending"] > 0)  # the holder is in its held loop
+                holder_idle = await _idle_reads("pending")
+
+                attached = asyncio.Event()
+                began = time.monotonic()
+                watcher = asyncio.create_task(_watch(on_b, session_id, _BEN, attached))
+                await asyncio.wait_for(attached.wait(), 30)
+                follow_took = time.monotonic() - began
+                view_idle = await _idle_reads("poll")
+
+                began = time.monotonic()
+                stopped = await on_b.post(f"/sessions/{session_id}/turn/stop", headers=_as(_ANA))
+                stop_took = time.monotonic() - began
+                await asyncio.wait_for(sender, 30)
+                await asyncio.wait_for(watcher, 30)
+                return {
+                    "holder_idle": holder_idle,
+                    "view_idle": view_idle,
+                    "follow_took": follow_took,
+                    "stop_took": stop_took,
+                    "stopped": stopped.json(),
+                }
+
+    seen = asyncio.run(_run())
+    assert seen["stopped"] == {"stopped": True}, seen
+    assert seen["holder_idle"] <= 2, f"the holder read its requests on every relay poll: {seen}"
+    assert seen["view_idle"] <= 2, f"the remote view read its frames on every relay poll: {seen}"
+    assert seen["follow_took"] < _WOKEN_WITHIN, f"the follow waited for a fallback poll: {seen}"
+    assert seen["stop_took"] < _WOKEN_WITHIN, f"the Stop waited for a fallback poll: {seen}"

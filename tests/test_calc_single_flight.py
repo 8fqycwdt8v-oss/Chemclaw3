@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from chemclaw.core import db
+from chemclaw.core import db, notify
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.science.calc import flight
@@ -345,7 +345,7 @@ async def test_a_cancelled_waiter_leaks_neither_claim_nor_listener(flight_on: No
 
     waiter = asyncio.create_task(cached_compute(PostgresStore(), key, _never))
     await asyncio.sleep(0.5)
-    listener = flight._listener_for(settings.postgres_dsn)
+    listener = notify.listener_for(settings.postgres_dsn, flight.CHANNEL, flight._retry_seconds)
     assert listener._events, "the waiter should be registered for a wake-up"
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -476,10 +476,10 @@ async def test_a_waiter_cancelled_while_the_listener_connects_leaves_no_registra
 ) -> None:
     """Cancelling during the `LISTEN` handshake does not strand a registration or a connection."""
 
-    async def slow(self: flight._Listener, ready: asyncio.Event) -> None:
+    async def slow(self: notify.Listener, ready: asyncio.Event) -> None:
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(flight._Listener, "_run", slow)
+    monkeypatch.setattr(notify.Listener, "_run", slow)
     key = _key()
     holder = _Contender(key, hold=1.5)
     await _until(lambda: _async(holder.computes == 1))
@@ -490,7 +490,7 @@ async def test_a_waiter_cancelled_while_the_listener_connects_leaves_no_registra
     with pytest.raises(asyncio.CancelledError):
         await waiter
 
-    listener = flight._listener_for(settings.postgres_dsn)
+    listener = notify.listener_for(settings.postgres_dsn, flight.CHANNEL, flight._retry_seconds)
     assert not listener._events and listener._task is None
     holder.join()
 
@@ -500,11 +500,11 @@ async def test_a_missed_notification_costs_one_poll_not_a_hang(
 ) -> None:
     """With the listener never delivering, the poll finds the finished result."""
 
-    async def deaf(self: flight._Listener, ready: asyncio.Event) -> None:
+    async def deaf(self: notify.Listener, ready: asyncio.Event) -> None:
         ready.set()
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(flight._Listener, "_run", deaf)
+    monkeypatch.setattr(notify.Listener, "_run", deaf)
     key = _key()
     holder = _Contender(key, hold=1.0)
     await _until(lambda: _async(holder.computes == 1))
