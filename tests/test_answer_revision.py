@@ -598,8 +598,8 @@ def test_neither_the_revision_prompt_nor_the_retracted_answer_stays_on_the_threa
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
-    # `_turn_checkpointer` builds a saver only on the Postgres store; off it there is no second
-    # record to diverge from and nothing to withdraw.
+    # Off the Postgres store `graph_checkpointer`'s saver dies with the turn, so nothing would
+    # outlive it to assert on.
     monkeypatch.setattr(settings, "session_store", "postgres")
     agent = _RevisingAgent()
 

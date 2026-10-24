@@ -22,7 +22,13 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langgraph.types import Durability
 
 from chemclaw.agent.plan_gate import plan_identity
@@ -104,7 +110,7 @@ def root_depth(graph: Any) -> int:
 
 async def graph_events(
     graph: Any,
-    message: str,
+    message: str | HumanMessage,
     *,
     config: dict[str, Any],
     trace: ToolCallTrace,
@@ -119,7 +125,7 @@ async def graph_events(
 
     Args:
         graph: The compiled graph for this turn, already holding this turn's connector tools.
-        message: The chemist's message.
+        message: The chemist's message, or the `system_note` a mid-turn re-entry continues with.
         config: The invocation config, carrying `configurable.thread_id` so a checkpointed session
             continues rather than restarting.
         trace: The turn's `ToolCallTrace`, shared with the runner, whose answer gate reads `outputs`

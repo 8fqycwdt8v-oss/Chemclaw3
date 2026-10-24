@@ -70,9 +70,8 @@ def test_a_front_door_process_holds_three_pools(monkeypatch: pytest.MonkeyPatch)
 
     async def _run() -> tuple[int, int]:
         await migrated_db_or_skip()
-        from chemclaw.agent.checkpointer import close_checkpointer
+        from chemclaw.agent.checkpointer import close_checkpointer, graph_checkpointer
         from chemclaw.api.app import create_app
-        from chemclaw.api.runner import _turn_checkpointer
 
         app = create_app()
         async with app.router.lifespan_context(app):
@@ -81,7 +80,7 @@ def test_a_front_door_process_holds_three_pools(monkeypatch: pytest.MonkeyPatch)
                 transport=httpx.ASGITransport(app=app), base_url="http://probe"
             ) as client:
                 assert (await client.get("/readyz")).status_code in (200, 503)
-            await _turn_checkpointer()
+            await graph_checkpointer()
             try:
                 return len(db._all_pools()), db._process_max_connections()
             finally:
@@ -183,7 +182,7 @@ def test_only_the_front_door_reaches_the_checkpointers_pool() -> None:
     why the scan names the two functions rather than the module.
     """
     openers = _modules_containing(
-        "import checkpointer", "import memory_store", "process_checkpointer"
+        "import checkpointer", "import memory_store", "graph_checkpointer"
     )
     assert {module.split("/")[0] for module in openers} <= {"agent", "api", "cli"}, (
         f"a module outside the front door reaches the checkpointer's pool: {sorted(openers)}. "
@@ -312,9 +311,8 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
     )
 
     async def _front_door() -> tuple[int, list[tuple[tuple[str, str] | None, int]]]:
-        from chemclaw.agent.checkpointer import close_checkpointer
+        from chemclaw.agent.checkpointer import close_checkpointer, graph_checkpointer
         from chemclaw.api.app import create_app
-        from chemclaw.api.runner import _turn_checkpointer
 
         app = create_app()
         async with app.router.lifespan_context(app):
@@ -323,7 +321,7 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
                 transport=httpx.ASGITransport(app=app), base_url="http://probe"
             ) as client:
                 assert (await client.get("/readyz")).status_code in (200, 503)
-            await _turn_checkpointer()
+            await graph_checkpointer()
             try:
                 return len(db._all_pools()), [
                     (pg_endpoint(str(pool.conninfo)), int(pool.max_size))

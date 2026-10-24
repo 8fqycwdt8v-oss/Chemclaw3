@@ -162,21 +162,24 @@ class ChemclawState(PlanningState):
     handoffs: NotRequired[Annotated[int, TurnTotal(int)]]
 
 
-def turn_input(message: str, message_id: str | None = None) -> dict[str, Any]:
-    """The graph input that starts one turn: the user's message.
+def turn_input(message: str | HumanMessage, message_id: str | None = None) -> dict[str, Any]:
+    """The graph input that starts one turn (the user's message) or continues it (a system note).
 
     Per-turn reset comes from the untracked channels, not from here. Kept as a function so the
     turn's input shape (the `("user", message)` tuple the graph coerces) is written once for its
     callers.
 
     Args:
-        message: The user's message for this turn.
+        message: The user's message for this turn, or an already-built message (a
+            `compaction.system_note` the runner continues the turn with), passed through unchanged.
         message_id: The id to give the message in the thread, so the turn's start can be found
             again (`agent/turn_resume.py`); the graph mints one when omitted.
 
     Returns:
         The mapping to pass to `ainvoke`/`astream`.
     """
+    if isinstance(message, HumanMessage):
+        return {"messages": [message]}
     if message_id is None:
         return {"messages": [("user", message)]}
     return {"messages": [HumanMessage(content=message, id=message_id)]}
