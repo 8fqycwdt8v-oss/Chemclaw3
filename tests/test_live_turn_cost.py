@@ -5,6 +5,8 @@ the request, a recorded case written rather than measured, and a comparison that
 """
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -69,8 +71,8 @@ def test_a_worsening_drift_is_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) ->
     recorded = _recorded_case_turns()
 
     def _serve(turns: list[TurnCost]) -> None:
-        async def _drive(base_url: str) -> str:
-            return "fixed-session"
+        async def _drive(base_url: str) -> lane.Driven:
+            return lane.Driven("fixed-session", ())
 
         async def _read(session_id: str) -> list[TurnCost]:
             return turns
@@ -108,8 +110,8 @@ def test_an_unreachable_lane_is_never_a_pass(monkeypatch: pytest.MonkeyPatch) ->
     the shape of every gate this wave went looking for.
     """
 
-    async def _drive(base_url: str) -> str:
-        return "fixed-session"
+    async def _drive(base_url: str) -> lane.Driven:
+        return lane.Driven("fixed-session", ())
 
     async def _none(session_id: str) -> list[TurnCost]:
         return []
@@ -117,6 +119,67 @@ def test_an_unreachable_lane_is_never_a_pass(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(lane, "_drive", _drive)
     monkeypatch.setattr(lane, "_recorded", _none)
     assert lane.main([]) == 3
+
+
+def _front_door(scrapes: list[str]) -> ThreadingHTTPServer:
+    """A socket speaking the three routes `_drive` uses; `/metrics` answers `scrapes` in order."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self._reply(scrapes.pop(0))
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            self._reply('{"session_id": "s1"}' if self.path == "/sessions" else "data: {}\n\n")
+
+        def _reply(self, body: str) -> None:
+            payload = body.encode()
+            self.send_response(200)
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_a_run_that_lost_a_connector_is_not_compared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn that ran without a connector's tools was sent another prompt, so it is not scored.
+
+    Two boots of one commit billed 900,198 and 429,076 for the same questions because a handshake
+    outlasting the open bound drops that bundle's tools for the breaker window while `/readyz`
+    stays green. Driven through `main` against a real socket: the recorded turns exit 0 while the
+    front door's counter is still, exit 3 when it moves between the first and last question, and a
+    connector already absent before the run is not the run's.
+    """
+    recorded = _recorded_case_turns()
+
+    async def _read(session_id: str) -> list[TurnCost]:
+        return recorded
+
+    monkeypatch.setattr(lane, "_recorded", _read)
+    still = "chemclaw_durable_unreachable_total 0.0\n"
+
+    def seven(count: int) -> str:
+        return f'chemclaw_connectors_unreachable_total{{connector="bo"}} {count}.0\n'
+
+    for scrapes, expected in (
+        ([still, still], 0),
+        ([still, seven(3)], 3),
+        ([seven(7), seven(9)], 3),
+        ([seven(7), seven(7)], 0),
+    ):
+        server = _front_door(scrapes)
+        try:
+            url = f"http://127.0.0.1:{server.server_port}"
+            assert lane.main(["--base-url", url]) == expected, scrapes
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 def test_the_emitted_case_carries_no_identity(tmp_path: Path) -> None:
