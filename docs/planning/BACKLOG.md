@@ -52,8 +52,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 - [ ] **Tool schemas are 72% description** [M] — whether shorter `Args:`/`Returns:` still route correctly is a `make live-ab`
   question; `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`.
-- [ ] **Enumeration and scan tools rest on one probe each** [S] — add second phrasings for `enumerate_*`, `scan_coordinate`,
-  `profile_rotation`, `optimize_geometry` in `data/evals/probes/`, ranked by `audit_events` once a deployment exists.
 - [ ] **The default prompt names `find_past_jobs` but never `find_calculations`** [S] — the molecule-level "already computed" read is named only in the `evidence`/`computation` profiles;
   add it to the research-loop block behind a `make live-ab` arm; `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`.
 - [ ] **`fetch_artifact` refuses every artifact this release stores and is still bound** [S] — kept only for older notes' `artifact_refs`; unbind it from the `computation`/`evidence`
@@ -112,6 +110,7 @@ Standings derived at `temporalio` 1.31.0, `langchain` 1.3.15, `langgraph` 1.2.11
 - **`X-Chemclaw-Actor` as durable attribution** — the header is unauthenticated · *Revisit:* an OBO exchange or a signed actor memo on core's MCP calls.
 - **Push-to-registry + `helm upgrade` rollout, run** — written, never run · *Revisit:* a registry, namespace and the Jenkins credential ids in `deploy/jenkins/README.md`.
 - **The core chart consuming the fleet's, and a chart for `Chemclaw3_ui`** — `Chemclaw3-mcp` ships `deploy/helm/chemclaw-fleet` and the kind lane renders it (`deploy/kind/render-fleet.sh`), but this chart does not depend on it, so each `connectors.<name>.url`, port and token key is written here and held against its render by `tests/test_helm_chart.py` (W6.8); the UI still ships plain manifests (W6.9) · *Revisit:* the rollout row above closes.
+- **Probe phrasings ranked by real use** — every `enumerate_*`, `scan_coordinate`, `profile_rotation` and `optimize_geometry` has a second phrasing in `data/evals/probes/`, chosen without usage data, so which tools deserve a third is unknown · *Revisit:* a deployment's `audit_events` say which tools chemists call most.
 - **Live-retriever drift over the deployment's own graph** — the drift job scores the fixture corpus only · *Revisit:* a deployment with a populated graph and labelled cases.
 - **A live target for the results store** — the publish path is built, no real sink exists, so outbox pruning (`retention_result_publications_days` ships off) and drain throughput are unsized · *Revisit:* a deployment sets `CHEMCLAW_RESULT_SINKS` to a real database.
 - **Backup and restore on a real CloudNativePG cluster** — the template is schema-validated and the drill runs in containers; neither has met the operator, the Barman plugin or a real bucket (the `import` and `recovery` bootstraps, RTO at real size, the exported metric names the `chemclaw.backup` alerts read, `firstRecoverabilityPoint` under the plugin) · *Revisit:* a cluster with the operator and plugin: install `chemclaw-postgres`, rehearse a restore into a scratch namespace and time it (`docs/guides/runbook.md` § Backup, restore and PITR).

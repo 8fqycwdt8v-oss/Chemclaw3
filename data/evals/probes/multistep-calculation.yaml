@@ -761,3 +761,167 @@ probes:
       treats a gap inside the method's uncertainty as no separation. It is a thermodynamic order of
       finished isomers, not a regioselectivity for any chlorination, and an answer that slides
       from one to the other has answered a different question.
+
+  # Second phrasings for the free enumerators, which rested on one probe each. Same reasoning as
+  # the `run_*` block above: no deployment's `audit_events` rank them yet, so each gets one more
+  # question from a different starting point, and each names only its enumerator so a pass cannot
+  # come from a neighbouring tool under the any-of rule.
+
+  - id: ms-30
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      The spectroscopist wants to know which forms of our 2-aminothiazole, Nc1nccs1, she should
+      consider when she assigns the NMR — the drawn amine might not be the only thing in the tube.
+      Can you list the forms it could exist as?
+    expects_tools: [enumerate_tautomers]
+    forbids_claims:
+      - "a population, ratio or dominant form, which needs a calculation this question did not ask for"
+      - "a chemical shift for any form"
+      - "a tautomer that the enumeration did not return"
+    direction: >-
+      The same enumeration as the hydroxypyridine probe, asked by someone assigning a spectrum
+      rather than arguing about a filing. A good answer builds the set with the structural
+      enumerator — the amino form and the imino form at least — and reports each as a SMILES the
+      spectroscopist can draw. It says the enumeration is a graph operation: it lists what is
+      possible and is silent about what is present, so it narrows the assignment without making
+      it. The next step it can name is a free-energy ranking over this set in the NMR solvent. It
+      must not predict shifts, and "the amine dominates" from memory is the failure even when it is
+      the textbook answer.
+
+  - id: ms-31
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We are about to run a salt screen on CN1CCN(CC1)c1ccc(cc1)C(=O)O. Before I pick
+      counterions, which sites on it can actually take or lose a proton, and what charged forms
+      does that give?
+    expects_tools: [enumerate_protonation_states]
+    forbids_claims:
+      - "a pKa value for any site"
+      - "a recommended counterion or a salt that will crystallise"
+      - "a microstate that combines two ionisations, which the single-toggle enumeration does not produce"
+    direction: >-
+      A salt-screen planning question answered by the microstate set. There are three candidate
+      sites — the carboxylic acid, the alkyl piperazine nitrogen and the aryl nitrogen, which is
+      aniline-like and far less basic — and a good answer lists the single-toggle forms the
+      enumerator returns, saying that each site is toggled on its own so the zwitterion is not in
+      the set until it is enumerated again from a member. The counterion choice depends on pKa
+      differences that were not computed, so the useful close names what would supply them (a pKa
+      prediction or a microstate ranking in water) rather than choosing acids from memory. Picking
+      a salt here is the failure: the question asked for the forms, not the screen's outcome.
+
+  - id: ms-32
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      The certificate of analysis for our 2-aminocyclohexanol, NC1CCCCC1O, just says "mixture of
+      isomers". What could actually be in the bottle?
+    expects_tools: [enumerate_stereoisomers]
+    forbids_claims:
+      - "an isomer ratio, which only the supplier's analysis could give"
+      - "a relative energy or a favoured isomer, which needs a calculation"
+      - "that the enantiomers can be told apart by any calculation available here"
+    direction: >-
+      Two unassigned ring centres, so four stereoisomers: the cis pair and the trans pair, each a
+      pair of enantiomers. A good answer lists them as structures with their relationships named,
+      because that is what tells the asker what "mixture" can mean — cis and trans are
+      diastereomers, separable by ordinary chromatography and distinguishable by NMR, while the
+      enantiomers within a pair need a chiral method. It says the enumeration says what could be
+      present and nothing about the proportions, which are the supplier's to report. Ranking them
+      or guessing the cis:trans ratio from the usual synthesis is the failure.
+
+  - id: ms-33
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For the thermal-hazard review on 2-MeTHF, CC1CCCO1, I want a list of every bond that could
+      break homolytically and the two fragments each one gives — no numbers yet, just what we
+      would be asking the calculation to cover.
+    expects_tools: [enumerate_bond_cleavages]
+    forbids_claims:
+      - "a bond dissociation energy, a ranking or a weakest bond, none of which has been computed"
+      - "that ring bonds are included in the list"
+      - "a peroxide-formation rate or an onset temperature"
+    direction: >-
+      The scoping half of a bond survey, asked by a hazard reviewer. A good answer lists the
+      distinct acyclic single bonds with the fragment pair each gives and says what the list leaves
+      out and why: ring bonds are excluded because breaking one opens the ring into a biradical
+      rather than two fragments, so the ring C-O and C-C bonds a hazard reviewer may care about are
+      not in this set and need a different question. It notes that symmetry-equivalent bonds
+      collapse to one entry. The hazard the asker is worried about — the alpha C-H next to the ring
+      oxygen — is in the list, and naming it as the one to look at is fine as long as it is not
+      ranked weakest: that is the survey's job, not the enumeration's.
+
+  - id: ms-34
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I am drafting the forced-degradation protocol for paracetamol, CC(=O)Nc1ccc(O)cc1. Which
+      degradation products should the HPLC method be able to separate? I need structures to put in
+      the protocol.
+    expects_tools: [enumerate_degradants]
+    forbids_claims:
+      - "a degradant ranked, weighted or given a likelihood"
+      - "a retention time, a response factor or a specification limit for any candidate"
+      - "that the list is comprehensive, or that a structure absent from it cannot form"
+    direction: >-
+      The planning side of the same tool the peak-assignment probe uses: here the list sets what a
+      stability-indicating method must resolve, before any peak exists. A good answer proposes
+      candidates with the transform that produced each, grouped by stress condition — amide
+      hydrolysis to 4-aminophenol and acetic acid is the one the method must not miss. The limit
+      matters more than usual here: the transform set is short and named, and an oxidative product
+      a chemist would expect from a phenol may not be in it, which says something about the set
+      rather than about the compound — so the protocol still needs its own unknown-peak handling,
+      and nothing here orders the candidates by rate. Adding structures from memory as though the
+      tool returned them, or quoting pharmacopoeial impurity limits, is the failure.
+
+  - id: ms-35
+    section: 8
+    persona: manager
+    bucket: A
+    question: >-
+      Regulatory is asking us to justify which regioisomers of our starting material,
+      3-bromotoluene, Cc1cccc(Br)c1, we test for. Can you give me the full list of positional
+      isomers so we can show we have covered them?
+    expects_tools: [enumerate_substitutions]
+    forbids_claims:
+      - "an expected abundance or a likelihood for any regioisomer"
+      - "that the list covers impurities other than positional isomers of these two groups"
+      - "a regulatory threshold or a specification for any isomer"
+    direction: >-
+      A completeness question, which is exactly what an enumeration can answer and a ranking
+      cannot. A good answer keeps the methyl and the bromine on the ring in every distinct
+      arrangement — the 2-, 3- and 4-bromotoluenes, with the drawn meta isomer included — after
+      collapsing symmetry-equivalent results, and says the list is complete for positional isomers
+      of these two groups on this ring and for nothing else: a dibromo, a des-bromo or a benzyl
+      bromide impurity is a different question. It should say that which isomers a given bromination
+      route makes, and in what proportion, is a property of the route the enumeration knows nothing
+      about.
+
+  - id: ms-36
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Before we decide what to compute on CC(=O)N(C)c1ccccc1C, which bonds in it can actually
+      rotate? I want to know where the flexibility is, named so I can tell them apart.
+    expects_tools: [enumerate_torsions]
+    forbids_claims:
+      - "a rotational barrier, a half-life or a rotamer population, none of which was computed"
+      - "atom indices for a torsion that were not taken from the enumeration"
+      - "that a ring bond is rotatable"
+    direction: >-
+      The step the rotation-profile probe grades first, asked on its own. A good answer lists the
+      rotatable bonds the enumerator returns by their labels — the amide C-N and the aryl-to-
+      nitrogen bond — in words a chemist can check against the drawing, and separates them from the
+      methyl tops it also lists, which carry no dihedral to scan because the free-rotor treatment
+      already covers them. It says this is a structural read with no energy in it. It can say which
+      bond a later profile would be worth spending on, and why an amide C-N is usually the slow
+      one, as long as no barrier is quoted. Working out indices by hand, or presenting a barrier
+      from memory, is the failure.

@@ -282,6 +282,29 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     )
 
 
+#: Tools whose routing is held to more than one wording, beside every `enumerate_*`.
+_TWO_PHRASINGS_EXTRA = frozenset({"scan_coordinate", "profile_rotation", "optimize_geometry"})
+
+
+def test_each_enumerator_and_scan_tool_is_asked_two_ways_one_of_them_alone() -> None:
+    """Every `enumerate_*` and scan tool is named by two probes, one of which names nothing else.
+
+    One wording measures one sentence's routing. `expects_tools` is any-of, so a probe that also
+    names a neighbour passes without this tool being called: only a sole expectation proves it.
+    """
+    enumerators = {name for name in available_tool_names() if name.startswith("enumerate_")}
+    assert enumerators, "no `enumerate_*` tool is on the surface; this test proves nothing"
+    subjects = enumerators | _TWO_PHRASINGS_EXTRA
+    named = dict.fromkeys(subjects, 0)
+    alone = dict.fromkeys(subjects, 0)
+    for probe in _probes():
+        for name in subjects.intersection(probe.expects_tools):
+            named[name] += 1
+            alone[name] += probe.expects_tools == [name]
+    thin = sorted(name for name in subjects if named[name] < 2 or alone[name] < 1)
+    assert not thin, f"{thin} lack two probes naming them, or one naming them alone"
+
+
 def test_a_tool_the_deployment_does_not_bind_is_not_scored_as_a_miss() -> None:
     """A tool the deployment does not bind is not scored as a miss.
 
