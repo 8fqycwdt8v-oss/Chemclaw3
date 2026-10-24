@@ -1,6 +1,6 @@
 # deepagents: let a caller hand `create_deep_agent` its own `HarnessProfile`
 
-**File against:** `langchain-ai/deepagents`. **Status:** filed as [deepagents#7236](https://github.com/langchain-ai/deepagents/issues/7236) (2026-10-24); reproduced on 0.7.32. **Reproduced on:**
+**File against:** `langchain-ai/deepagents`. **Status:** filed as [deepagents#7236](https://github.com/langchain-ai/deepagents/issues/7236) (2026-10-24) — closed the same day by the repository's triage bot, which refuses issues filed through the API; re-file by hand from the issue template; reproduced on 0.7.32. **Reproduced on:**
 deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here).
 
 ## Title

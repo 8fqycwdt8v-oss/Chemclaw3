@@ -56,8 +56,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   own token and declining (proposal PR #640); the queue/stream UI shipped in `Chemclaw3_ui`.
 - [ ] **Profile routing is not compared on answers** [M] — the corpus exists (`data/evals/routing/profile-routing.yaml`, checked offline by `tests/test_routing_corpus.py`);
   run each case under its `worded_like`, its `needs` and the default agent against a live model and grade on `direction`; a router only after (`D-2026-08-15` deleted automatic routing).
-- [ ] **Five upstream reports are open; pin each fix as it lands** [S] — deepagents#7236, #7237, langchain#41449, #41450 (filed) and langgraph#9267 (another reporter); status per draft in
-  `docs/planning/upstream-issues/`; `core/graph_durability.py::ignoring_inherited_durability`, `agent/compaction.py::OffLoopContextEditing`.
+- [ ] **Four upstream reports need re-filing by hand; pin each fix as it lands** [S] — deepagents#7236, #7237, langchain#41449, #41450 were closed by a triage bot that refuses
+  API-filed issues (use the issue template); langgraph#9267 (another reporter) is open; drafts in `docs/planning/upstream-issues/`; `core/graph_durability.py`, `agent/compaction.py`.
 
 ### Knowledge and records
 

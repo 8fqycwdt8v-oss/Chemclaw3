@@ -1,6 +1,6 @@
 # deepagents: `SkillsMiddleware` cannot declare a run-scoped listing, and always adds a model hook
 
-**File against:** `langchain-ai/deepagents`. **Status:** parts 1–3 filed as [deepagents#7237](https://github.com/langchain-ai/deepagents/issues/7237) (2026-10-24); part 4 is fixed upstream (0.7.32 no longer matches `PrivateStateAttr` by identity). **Observed on:**
+**File against:** `langchain-ai/deepagents`. **Status:** parts 1–3 filed as [deepagents#7237](https://github.com/langchain-ai/deepagents/issues/7237) (2026-10-24) — closed the same day by the repository's triage bot, which refuses issues filed through the API; re-file by hand from the issue template; part 4 is fixed upstream (0.7.32 no longer matches `PrivateStateAttr` by identity). **Observed on:**
 deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here). Four independent requests;
 file them separately if upstream prefers.
 
