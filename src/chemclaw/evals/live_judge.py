@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from functools import cache
 from typing import Any, Literal, get_args
 
+from langchain_core.exceptions import ModelError
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -206,7 +207,17 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     # Through the seam, so the judge and the agent share one transport configuration (base URL, TLS
     # CA bundle).
     client: Any = _judge_client()
-    response = await client.ainvoke([SystemMessage(_SYSTEM), HumanMessage(_prompt(probe, outcome))])
+    # A refused or failed judge call is the absence of a verdict, like an unparseable reply: raised,
+    # it would discard every grade the run had already gathered.
+    try:
+        response = await client.ainvoke(
+            [SystemMessage(_SYSTEM), HumanMessage(_prompt(probe, outcome))]
+        )
+    except ModelError as exc:
+        logger.warning("judge call failed for %s: %s", probe.id, exc)
+        return Judgement(
+            probe_id=probe.id, verdict="ungraded", reason=f"judge call failed: {str(exc)[:200]}"
+        )
     # `.text` rather than `.content`: an answer may arrive as a list of content blocks, and this is
     # the accessor that flattens it — the same read `_prompt` would otherwise have to do by hand.
     text = str(response.text).strip()
