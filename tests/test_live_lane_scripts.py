@@ -889,3 +889,15 @@ def test_every_lane_process_frames_with_one_persisted_envelope_secret() -> None:
     written = re.search(r"\( umask 077\n(.*?)\} > \"\$RUN_DIR/connector-env\.sh\"", body, re.S)
     assert written is not None, "`up` no longer writes connector-env.sh in one block"
     assert "export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q" in written.group(1)
+
+
+def test_the_lane_env_hands_a_later_shell_the_run_dir_the_lane_keeps_its_pids_in() -> None:
+    """`up` writes `CHEMCLAW_LIVE_RUN_DIR=$RUN_DIR` into the env file `processes.sh env` prints.
+
+    That is what lets `make live-jobs` (whose `--run-dir` default reads it) find the lane's pid
+    files when the lane's state is not under the working directory.
+    """
+    body = _function(_PROCESSES, "up")
+    assert "export CHEMCLAW_LIVE_RUN_DIR=%q" in body
+    line = next(row for row in body.splitlines() if "CHEMCLAW_LIVE_RUN_DIR" in row)
+    assert '"$RUN_DIR"' in line, "the exported value is not the lane's run dir"

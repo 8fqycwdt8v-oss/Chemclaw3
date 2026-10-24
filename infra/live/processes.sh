@@ -757,6 +757,7 @@ up() {
     { printf '%s\n' "$connector_exports"
       printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
       printf 'export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q\n' "$CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+      printf 'export CHEMCLAW_LIVE_RUN_DIR=%q\n' "$RUN_DIR"
       for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
     } > "$RUN_DIR/connector-env.sh"
   )
