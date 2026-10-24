@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import pathlib
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest import mock
@@ -164,3 +165,31 @@ def test_a_terminal_failure_ends_the_wait_rather_than_being_polled_past(
     status, _ = asyncio.run(live_jobs._await_terminal("wf"))
     assert status == WorkflowExecutionStatus.FAILED
     assert broker.asked == 2
+
+
+def test_the_run_dir_follows_the_variable_the_lane_env_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`make live-jobs` reads the lane's pid files from the exported run dir, not the working dir.
+
+    A lane whose state lives elsewhere (`CHEMCLAW_LIVE_DIR`) exports `CHEMCLAW_LIVE_RUN_DIR` in the
+    env `processes.sh env` prints, so a shell that took it finds the wedged-worker pid file. The
+    default used to be a literal `.live/run` that no environment could move: the check reported
+    'no worker-calc.pid' against a healthy lane.
+    """
+    seen: list[pathlib.Path] = []
+
+    async def _fake_run_smoke(run_dir: pathlib.Path) -> SmokeRun:
+        seen.append(run_dir)
+        return SmokeRun(workflow_id="wf", checks=[Check("c", True, "ok")])
+
+    monkeypatch.setattr(live_jobs, "run_smoke", _fake_run_smoke)
+    monkeypatch.setenv("CHEMCLAW_LIVE_RUN_DIR", str(tmp_path / "elsewhere" / "run"))
+
+    assert live_jobs.main(["--report", str(tmp_path / "report.md")]) == 0
+    assert seen == [tmp_path / "elsewhere" / "run"]
+
+    seen.clear()
+    explicit = tmp_path / "explicit"
+    assert live_jobs.main(["--run-dir", str(explicit), "--report", str(tmp_path / "r2.md")]) == 0
+    assert seen == [explicit], "an explicit --run-dir still wins over the setting"

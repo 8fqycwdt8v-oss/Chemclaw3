@@ -351,14 +351,22 @@ def report(run: SmokeRun) -> str:
     return "\n".join(lines)
 
 
+#: The variable `infra/live/processes.sh env` exports with the lane's pid directory, so a shell that
+#: took the lane's environment finds it wherever the lane's state lives (`CHEMCLAW_LIVE_DIR`).
+LANE_RUN_DIR_ENV = "CHEMCLAW_LIVE_RUN_DIR"
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the smoke and write its report; exit non-zero if any check failed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--run-dir",
         type=Path,
-        default=Path(".live/run"),
-        help="where infra/live/processes.sh keeps its pid files (the wedged-worker check reads it)",
+        default=Path(os.environ.get(LANE_RUN_DIR_ENV, ".live/run")),
+        help=(
+            "where infra/live/processes.sh keeps its pid files (the wedged-worker check reads it); "
+            f"default: ${LANE_RUN_DIR_ENV}, which `processes.sh env` exports, else .live/run"
+        ),
     )
     parser.add_argument(
         "--report",
