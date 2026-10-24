@@ -240,6 +240,14 @@ spec:
             - name: CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES
               value: {{ $cfg.maxConcurrentActivities | quote }}
             {{- end }}
+            {{- /* The bundle's own workflow-cache ceiling when it declares one, for the same
+                   reason and by the same override: what a *cached* workflow costs depends on the
+                   bundle (`bo` parks campaigns whose state grows with their rounds), so the
+                   fleet-wide number that fits a trivial workflow does not fit it. */}}
+            {{- if $cfg.maxCachedWorkflows }}
+            - name: CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS
+              value: {{ $cfg.maxCachedWorkflows | quote }}
+            {{- end }}
             {{- include "chemclaw.workerMetricsEnv" $ | nindent 12 }}
             {{- include "chemclaw.env" $ | nindent 12 }}
           envFrom:

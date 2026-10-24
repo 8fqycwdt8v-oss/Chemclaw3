@@ -1,6 +1,6 @@
 # D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core — what bounds a cached BO campaign's memory
 
-**Status:** proposed · **Date:** 2026-10-24
+**Status:** accepted · **Date:** 2026-10-24 · Decided by the owner 2026-10-24: option 3 now, option 1 later.
 
 ## Context
 
@@ -61,17 +61,46 @@ Stub activities run in another process. Twenty `BoCampaignWorkflow` runs (Reizma
 
 ## Decision
 
-Proposed: **option 1, with option 3 as the interim**. Option 1 removes the term that grows with
-campaign size, which is the only term the deployment cannot bound by configuration. Option 3 makes
-the present bo worker safe now: a ceiling of `0.5 × request / fit(R_declared)`, for example 370 at
-R = 30 on 1Gi. When option 1 lands, `tests/test_workers.py` can cover `bo` with the measured
-per-round coefficient rather than a placeholder.
+Decided by the owner 2026-10-24: **option 3 now, option 1 later.**
+
+**Now (option 3).** The bo worker gets its own cache ceiling, `connectors.bo.maxCachedWorkflows`
+in the chart, rendered as `CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS` on that Deployment only. That is
+the existing `worker_max_cached_workflows` setting, ENV-overridable like every other, set per
+Deployment the way `maxConcurrentActivities` already is; the fleet-wide 750 stays for every other
+worker. No Python changes.
+
+The value is derived, not chosen: a ceiling of `0.5 × request / fit(R)`, with the same half-of-the-
+request share the fleet-wide test uses, the bo worker's 1Gi request, and the fit above.
+
+- At the spec's default `n_rounds = 10`: fit = 620 KiB, so 524,288 KiB / 620 = 845. The shipped 750
+  already fits one default campaign per slot.
+- At 30 rounds, three times the default, so a lengthened campaign is covered: fit = 1,418 KiB, so
+  524,288 / 1,418 = 369. Shipped **360**, rounded down.
+
+`tests/test_workers.py::test_the_bo_workers_cache_fits_the_memory_a_campaign_costs_it` holds the
+chart's value at both lengths against the chart's request, and fails with the override removed
+(750 × 1,418 KiB = 1,039 MiB against 512). A second test holds that the template renders the key.
+A campaign past the ceiling is evicted and replayed from history on its next task: CPU and broker
+traffic, and the quadratic replay cost measured above, not a wrong answer. It only occurs with more
+than 360 campaigns parked on one worker.
+
+**Later (option 1).** Pass the campaign history to `propose_next` and `record_campaign_run` by
+reference to the campaign store, so an activity input stays the same size however long the
+campaign runs. It is the only option that removes the R² term, and it needs a versioned rollout for
+runs in flight, so it is recorded as the follow-up in `docs/planning/BACKLOG.md` and not done here.
+When it lands, the ceiling is re-derived from the measured per-round coefficient and the
+per-workflow constants in the test are replaced.
 
 ## Consequences
 
-- The per-workflow assertion in `tests/test_workers.py` stays as it is for the other workflows. It
-  covers `bo` once option 1 or 3 is in place.
-- The workflow-cache backlog row now names the holder; it closes with whichever option is taken.
+- The fleet-wide assertion in `tests/test_workers.py` stays as it is for the other workflows; `bo`
+  has its own, at the measured per-round cost.
+- The ceiling bounds the number of cached campaigns, not the size of one. A single campaign past
+  about 100 rounds still costs several MiB until option 1 lands (`bo_max_rounds` allows 500).
+- The workflow-cache backlog row is rewritten to the by-reference follow-up and stays open.
 
-Revisit when: a release of temporalio stops holding a cached run's activity inputs (re-run the
-harness that produced the table above), or `bo_max_evaluations` drops below about 100.
+Revisit when: `bo_max_evaluations` is raised above 2000 or `bo_max_rounds` above 500 (the
+ceiling's 30-round shape was sized against those limits), or a release of temporalio stops holding
+a cached run's activity inputs (re-run the harness that produced the table above, then option 1 may
+be unnecessary). The follow-up itself is done when `tests/test_workers.py` no longer carries the
+`_BO_CACHED_RUN_PER_ROUND_SQUARED_KIB` term.

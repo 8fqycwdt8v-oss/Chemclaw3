@@ -6,8 +6,10 @@ is caught here rather than on a live queue. Core runs one worker; expensive work
 connector jobs on their bundle's own queue (D-118).
 """
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
@@ -128,6 +130,100 @@ def test_the_workflow_cache_fits_the_memory_the_chart_asks_for() -> None:
         "else. Lower worker_max_cached_workflows, or raise resources.worker.requests.memory in "
         "the chart, and say which in the commit message"
     )
+
+
+#: What a cached `BoCampaignWorkflow` costs, in KiB, for R rounds of batch 1: a fit through the
+#: measured points (620 / 1416 / 2916 KiB live malloc at R = 10 / 30 / 60). Almost all of it is the
+#: SDK core's native run state, which grows with the history the activity inputs carry, so the
+#: Python-side constants above do not describe it. D-2026-10-24-a-cached-bo-campaign-grows-with-its-
+#: rounds-in-the-sdk-core holds the table.
+_BO_CACHED_RUN_FIXED_KIB = 284.0
+_BO_CACHED_RUN_PER_ROUND_KIB = 31.5
+_BO_CACHED_RUN_PER_ROUND_SQUARED_KIB = 0.21
+
+#: The campaign length the bo worker's ceiling is asserted at: three times the spec's default, so a
+#: chemist who lengthens a campaign is not the one who finds out what the ceiling was sized for.
+_BO_ROUNDS_THE_CEILING_IS_ASSERTED_AT = 30
+
+
+def _bo_cached_run_kib(rounds: int) -> float:
+    return (
+        _BO_CACHED_RUN_FIXED_KIB
+        + _BO_CACHED_RUN_PER_ROUND_KIB * rounds
+        + _BO_CACHED_RUN_PER_ROUND_SQUARED_KIB * rounds**2
+    )
+
+
+def _bo_worker_cache_ceiling_and_request(chart: dict[str, Any]) -> tuple[int, str]:
+    """The cache ceiling the bo worker runs with, and its memory request, as the chart sets them.
+
+    The bundle's own `maxCachedWorkflows` when it declares one, else the fleet-wide setting the
+    ConfigMap hands every worker; likewise `resources` against the shared worker budget.
+    """
+    bundle = chart["connectors"]["bo"]
+    ceiling = int(
+        bundle.get("maxCachedWorkflows")
+        or chart["config"].get(
+            "CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS", settings.worker_max_cached_workflows
+        )
+    )
+    resources = bundle.get("resources") or chart["resources"]["worker"]
+    return ceiling, resources["requests"]["memory"]
+
+
+def test_the_bo_workers_cache_fits_the_memory_a_campaign_costs_it() -> None:
+    """A parked campaign is the costliest workflow this system caches, so bo has its own ceiling.
+
+    The fleet-wide bound above is asserted at ~530 KiB a workflow; a campaign costs 620 KiB at the
+    spec's default ten rounds and 1.4 MiB at thirty, and its cost grows with the history, not with
+    anything the worker can see. So the bo Deployment carries `connectors.bo.maxCachedWorkflows`,
+    and this holds it at both lengths against the same share of the same request. Removing the
+    override puts the fleet's 750 back, which this reds at thirty rounds.
+    """
+    import yaml
+
+    from chemclaw.science.bo.problem import CampaignSpec
+
+    default_rounds = CampaignSpec.model_fields["n_rounds"].default
+    assert default_rounds <= _BO_ROUNDS_THE_CEILING_IS_ASSERTED_AT, (
+        f"the spec's default is {default_rounds} rounds, past the "
+        f"{_BO_ROUNDS_THE_CEILING_IS_ASSERTED_AT} the bo worker's ceiling is asserted at, so its "
+        "own default campaign is not covered"
+    )
+
+    chart = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "deploy/helm/chemclaw/values.yaml").read_text()
+    )
+    ceiling, request = _bo_worker_cache_ceiling_and_request(chart)
+    budget = _kibibytes(request) * _THE_SHARE_OF_THE_REQUEST_THE_CACHE_MAY_CLAIM
+    for rounds in (default_rounds, _BO_ROUNDS_THE_CEILING_IS_ASSERTED_AT):
+        cache = ceiling * _bo_cached_run_kib(rounds)
+        assert cache <= budget, (
+            f"{ceiling} cached bo campaigns at {rounds} rounds "
+            f"({_bo_cached_run_kib(rounds):.0f} KiB each) is "
+            f"{cache / 1024:.0f} MiB against a bo worker request of {request}, over the "
+            f"{budget / 1024:.0f} MiB the cache may claim. Lower connectors.bo.maxCachedWorkflows, "
+            "or raise the bo worker's memory request, and say which in the commit message"
+        )
+
+
+def test_the_connector_worker_deployment_arms_the_bundles_own_cache_ceiling() -> None:
+    """`maxCachedWorkflows` is only a number in values.yaml unless the template sends it.
+
+    Read off the template, as the neighbouring entrypoint test reads the constructor: the key must
+    become `CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS` on the worker container, which is the variable
+    `Settings.worker_max_cached_workflows` reads and `connectors/worker.py` hands to the SDK.
+    """
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "deploy/helm/chemclaw/templates/deployment-connectors.yaml"
+    ).read_text()
+    assert re.search(
+        r"if \$cfg\.maxCachedWorkflows \}\}\s*\n"
+        r"\s*- name: CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS\s*\n"
+        r"\s*value: \{\{ \$cfg\.maxCachedWorkflows \| quote \}\}",
+        template,
+    ), "the connector worker Deployment does not render connectors.<name>.maxCachedWorkflows"
 
 
 def test_every_worker_entrypoint_arms_the_cache_ceiling_it_declares() -> None:

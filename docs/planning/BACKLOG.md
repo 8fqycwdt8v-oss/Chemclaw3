@@ -15,8 +15,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Untrusted input and privileged surfaces
 
-- [ ] **A cached BO campaign holds ~40 KiB per round in the SDK core, so the worker cache bound does not cover `bo`** [M] — not a leak (cache at 1: 120–200 KiB live per run); cached: 620 / 1416 / 2916 KiB at
-  10 / 30 / 60 rounds, under 250 KiB of it Python; owner call between options in PR #680 (history by reference, rounds per run, a bo cache ceiling); `connectors/bo/workflows.py`, `tests/test_workers.py`.
+- [ ] **Pass a BO campaign's round history to its activities by reference** [M] — `propose_next`/`record_campaign_run` take the whole history, so a cached run costs ~284 + 31.5 R + 0.21 R² KiB in the SDK core;
+  by-reference removes the R² term, with a versioned rollout for in-flight runs. Not now: `connectors.bo.maxCachedWorkflows` bounds it (D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core). Trigger: `bo_max_rounds`/`bo_max_evaluations` raised, or a 30-round campaign evicted in production; `tests/test_workers.py::test_the_bo_workers_cache_fits_the_memory_a_campaign_costs_it`.
 
 ### Answers that are wrong without saying so
 

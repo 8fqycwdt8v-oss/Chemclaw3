@@ -467,6 +467,15 @@ connectors:
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
     worker: true
+    # **This worker's own workflow-cache ceiling** (`CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS` on this
+    # Deployment only; the fleet-wide 750 stays for every other worker). A cached
+    # `BoCampaignWorkflow` costs about 284 + 31.5 R + 0.21 R^2 KiB for R rounds (measured, mostly
+    # native SDK-core state: D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core),
+    # so 750 only fits a 1Gi request up to ~12 rounds. 360 is half the request over a 30-round
+    # campaign (512 MiB / 1,418 KiB = 369, rounded down); `tests/test_workers.py` holds it at 30 and
+    # at the spec's default `n_rounds`. A campaign evicted past it replays from history on its next
+    # task: CPU and broker traffic, never a wrong answer.
+    maxCachedWorkflows: 360
     # `predict_outcome` is queued (`connector.yaml` `queued:`); its surrogate fit runs on this
     # bundle's one server pod, so two in flight is what that pod serves without thrashing.
     interactive:
