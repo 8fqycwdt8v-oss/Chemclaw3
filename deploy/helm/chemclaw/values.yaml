@@ -562,6 +562,18 @@ connectors:
     enabled: false
     server: true
     url: http://chemclaw-mcp-suitability:8892/mcp
+  chembl:
+    # Compound identity and aggregated bioactivity from a vendored subset of ChEMBL release 37
+    # (`Chemclaw3-mcp`'s `servers/chembl`, port 8862). **The data is CC BY-SA 3.0** and every
+    # answer carries the credit, release and licence as a structured `attribution` field; an
+    # answer derived from it must keep that. Off like the bundles above: enabling it is a
+    # deployment decision, and the same two operator obligations apply (a
+    # `networkPolicy.egressDestinations` entry for the host, and `CHEMCLAW_CHEMBL_TOKEN`). A
+    # release image carries the full subset, a bare build the fixture (`attribution.data_tier`
+    # says which; `docs/guides/deployment.md`).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-chembl:8862/mcp
   pyexec:
     # The fleet's bounded, offline Python sandbox (`Chemclaw3-mcp`'s `servers/pyexec`, port 8899).
     # Its manifest arrives with the others through `chemclaw-contracts` and declares
@@ -631,6 +643,7 @@ extraConnectors:
     - bo
     - calc
     - chem
+    - chembl
     - kinetics
     - molfp
     - props
@@ -1543,8 +1556,8 @@ secrets:
     # a degraded one.
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
     # The same kind again, for the fleet bundles that ship **off**: the five process-development
-    # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and
-    # `pyexec`. Each name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
+    # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`), `chembl`
+    # and `pyexec`. Each name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
     # although every one of those bundles is disabled by default, because `optional: true` makes an
     # absent key harmless — the variable is simply unset in a pod that never dials the bundle —
     # while a missing slot made "enable a bundle" a Secret-plumbing edit too: without it the bearer
@@ -1556,6 +1569,7 @@ secrets:
     kineticsToken: "CHEMCLAW_KINETICS_TOKEN"
     unitopsToken: "CHEMCLAW_UNITOPS_TOKEN"
     suitabilityToken: "CHEMCLAW_SUITABILITY_TOKEN"
+    chemblToken: "CHEMCLAW_CHEMBL_TOKEN"
     pyexecToken: "CHEMCLAW_PYEXEC_TOKEN"
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
@@ -2202,6 +2216,9 @@ networkPolicy:
     kinetics: 8852
     unitops: 8853
     suitability: 8892
+    # `chembl` (`connectors.chembl` above), on the same terms as the five: a port for a disabled
+    # bundle opens nothing, and its absence is the failure that looks like the server being down.
+    chembl: 8862
     # `pyexec`, the fleet's Python sandbox (`connectors.pyexec` above), on the same terms.
     pyexec: 8899
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
