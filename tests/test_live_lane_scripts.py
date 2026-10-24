@@ -1009,3 +1009,40 @@ def test_restart_refuses_before_killing_when_the_settings_it_would_use_do_not_lo
     finally:
         standin.kill()
         standin.wait()
+
+
+def test_restart_refuses_before_killing_when_postgres_does_not_answer(tmp_path: Path) -> None:
+    """`up` dies on a Postgres it cannot reach, so `restart` asks first and leaves the process up.
+
+    A shell without `pg_isready` on its PATH, or a stopped database, killed the front door and
+    then refused to start it: a lane with no front door, from a restart.
+    """
+    with socket.socket() as probe:  # a port nothing listens on once this closes
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    run = tmp_path / "run"
+    run.mkdir()
+    standin = subprocess.Popen(["sleep", "60"])
+    try:
+        (run / "api.pid").write_text(f"{standin.pid}\n", encoding="utf-8")
+        env = _clean_env(
+            CHEMCLAW_LIVE_DIR=str(tmp_path),
+            CHEMCLAW_MCP_REPO=str(tmp_path),
+            CHEMCLAW_LIVE_PGPORT=str(closed_port),
+        )
+        result = subprocess.run(
+            ["bash", str(_PROCESSES), "restart", "api"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "refusing to restart api" in result.stderr, result.stderr
+        assert standin.poll() is None, "the process was killed although `up` cannot start"
+        assert (run / "api.pid").exists()
+    finally:
+        standin.kill()
+        standin.wait()
