@@ -1,0 +1,19 @@
+# The live lane's caching gateway: OpenAI chat completions in, Anthropic Messages out.
+# Two breakpoints: the system message (so tools + system, the per-request prefix, are cached across
+# turns) and the last message (so each model call in a turn reads the earlier calls' history).
+# Anthropic allows four; these two are the ones a ChemClaw turn reuses. Any model id is routed to
+# Anthropic as-is, so CHEMCLAW_LLM_MODEL stays the vendor's id.
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      cache_control_injection_points:
+        - location: message
+          role: system
+        - location: message
+          index: -1
+litellm_settings:
+  drop_params: true
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

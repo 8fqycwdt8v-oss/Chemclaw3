@@ -420,8 +420,8 @@ async def test_the_client_passes_an_answer_through_as_the_server_serialized_it(
 ) -> None:
     """Response side of the finite-number difference: a null stays null, a NaN literal parses.
 
-    Over `/rpc` the server's JSON encoder decides what a NaN becomes (the fleet's answers carry
-    null); MCP's text channel carries whatever was printed. The client repairs neither.
+    The client repairs neither: what a non-finite answer becomes is the server's contract
+    (`D-2026-10-23-a-non-finite-answer-is-a-refusal`), not something decoded here.
     """
     fake = _calc_backend()
     fake.answers["predict_solubility"] = lambda body: PlainTextResponse(
