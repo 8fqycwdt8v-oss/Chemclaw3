@@ -69,7 +69,7 @@ readonly MCP_REPO="$(REPO_ROOT="$MAIN_CHECKOUT"; sibling_repo CHEMCLAW_MCP_REPO 
 
 # Every fleet server this lane deploys, and the chart connector each one serves (blank: a backend
 # core dials directly, not a bound connector — `calc_server_url`, `rxnlabel_server_url`).
-readonly -a FLEET=(calc chem kinetics props pyexec rxnlabel rxnpredict safety suitability thermalsafety unitops)
+readonly -a FLEET=(calc chem chembl kinetics props pyexec rxnlabel rxnpredict safety suitability thermalsafety unitops)
 connector_of() { case "$1" in calc | rxnlabel) printf '' ;; *) printf '%s' "$1" ;; esac; }
 
 require_tools() {
