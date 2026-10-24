@@ -340,7 +340,7 @@ Secrets, then restart the server pods and the core pods together. Calls fail wit
 | Per session / per user turns and tokens | `CHEMCLAW_BUDGET_ENABLED` (false; chart `true`), `CHEMCLAW_BUDGET_MAX_TURNS_PER_SESSION` (100), `CHEMCLAW_BUDGET_MAX_TOKENS_PER_SESSION` (2 000 000), `CHEMCLAW_BUDGET_MAX_TURNS_PER_USER` (1000), `CHEMCLAW_BUDGET_MAX_TOKENS_PER_USER` (20 000 000) | 429 `session turn budget exhausted (N turns)` / `user token budget exhausted (N tokens)` |
 | Budget window | `CHEMCLAW_BUDGET_WINDOW_HOURS` (24, rolling per principal) | |
 | Early warning | `CHEMCLAW_BUDGET_WARN_FRACTION` (0.8) | WARNING `<scope> <unit> budget N% spent …`; `chemclaw_budget_warnings_total` |
-| Per-turn spend | `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` (chart 3 000 000) | SSE `spend_cap_reached` |
+| Per-turn spend | `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` (chart 3 300 000) | SSE `spend_cap_reached` |
 | Per-turn model calls | `CHEMCLAW_HARNESS_MAX_LOOP_ITERATIONS` (25) | SSE `loop_cap_reached` |
 | Thread size | `CHEMCLAW_SESSION_MAX_THREAD_BYTES` (1.5 MiB) | 429 `This conversation has reached its size limit …` |
 | Request rate | `CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` / `_BURST` (chart 120 / 30) | 429 `too many requests` + `Retry-After` |

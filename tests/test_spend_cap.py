@@ -463,20 +463,28 @@ def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
         )
 
 
+#: What a lawful turn can make: the loop cap's calls, its tool-less wrap-up call
+#: (`guard.AnswerAtTheCap`), and one more call's bill, because the cap is checked before a call and
+#: a request may run past `agent_context_token_budget` by the size of its newest tool results.
+_LAWFUL_CALLS = settings.harness_max_loop_iterations + 2
+
+
 def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
     """The turn cap stays above what the other two guards authorise.
 
-    A lawful turn is at most `harness_max_loop_iterations` calls of at most
-    `agent_context_token_budget` each, and the whole prefix is billed every call. A cap below that
-    product silently supersedes the loop cap. This holds the shipped default; a deployment may set a
-    smaller cost budget deliberately.
+    A lawful turn is at most `harness_max_loop_iterations` calls plus the loop cap's wrap-up call
+    (and one call's overshoot), of about `agent_context_token_budget` each, and the whole prefix is
+    billed every call. A cap below that product silently supersedes the loop cap: the turn is cut
+    off before the call that writes its answer. This holds the shipped default; a deployment may
+    set a smaller cost budget deliberately.
     """
-    lawful_ceiling = settings.harness_max_loop_iterations * settings.agent_context_token_budget
+    lawful_ceiling = _LAWFUL_CALLS * settings.agent_context_token_budget
     assert settings.agent_max_turn_billed_tokens >= lawful_ceiling, (
         f"the turn cap ({settings.agent_max_turn_billed_tokens:,}) is below the "
-        f"{lawful_ceiling:,} tokens that {settings.harness_max_loop_iterations} model calls at "
-        f"agent_context_token_budget already authorise, so it refuses lawful turns and makes the "
-        "loop cap unreachable"
+        f"{lawful_ceiling:,} tokens that {_LAWFUL_CALLS} model calls at "
+        f"agent_context_token_budget already authorise ({settings.harness_max_loop_iterations} "
+        "calls, the loop cap's wrap-up call, and one call's overshoot), so it refuses lawful "
+        "turns and makes the loop cap's answer unreachable"
     )
 
 
@@ -490,3 +498,32 @@ def test_the_turn_cap_funds_more_calls_than_the_loop_cap_permits() -> None:
         f"the loop cap permits {settings.harness_max_loop_iterations}; the tighter guard is the "
         "one nobody configured"
     )
+
+
+def test_a_turn_the_loop_cap_stops_still_gets_the_call_that_writes_its_answer() -> None:
+    """With the shipped caps, a turn that runs to the loop cap is not cut off by the spend cap.
+
+    Live (2026-10-24, claude-sonnet-5-5, 91 turns): 22 deep-research turns ended `spend_cap_reached`
+    with no answer, billing 3.04M tokens each, while the loop cap's wrap-up call, which would have
+    written one, was never made. Calls there averaged 2-3% above the context budget. Driven here on
+    a compiled graph with the shipped defaults and that per-call size; the budget is the axis, so
+    the control is a cap derived the old way (loop cap x budget, no wrap-up), which loses it.
+    """
+    per_call = int(settings.agent_context_token_budget * 1.03)
+    calls = settings.harness_max_loop_iterations + 1
+
+    def run() -> dict[str, Any]:
+        graph = build_langgraph_agent(model=_Model(messages=iter(_billing(*[per_call] * calls))))
+        return asyncio.run(graph.ainvoke(turn_input("sweep everything on aryl chlorides")))
+
+    shipped = run()
+    assert shipped["loop_capped"], "the turn did not reach the loop cap, so nothing was tested"
+    assert not spend_capped(shipped), "the spend cap cut the turn off before its wrap-up call"
+    assert shipped["billed_tokens"] >= settings.harness_max_loop_iterations * per_call
+
+    # The control: the cap this tree shipped before, the loop cap's calls at the budget and no more.
+    old_cap = settings.harness_max_loop_iterations * settings.agent_context_token_budget
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "agent_max_turn_billed_tokens", old_cap)
+        control = run()
+    assert spend_capped(control), "the control cap did not bite, so this test cannot see the defect"

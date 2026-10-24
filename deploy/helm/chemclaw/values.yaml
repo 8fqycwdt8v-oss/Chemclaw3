@@ -1323,7 +1323,7 @@ config:
   # And the alternative was never "no cap" but an unbounded one: measured, one turn billed 250,000
   # tokens against a 1,000-token session cap, which neither half of `BUDGET_ENABLED` can see.
   #
-  # **3,000,000 is a runaway backstop, not a budget — and the first number here was not one.**
+  # **3,300,000 is a runaway backstop, not a budget — and the first number here was not one.**
   # This shipped at 300,000, chosen from a measured 250,000-token runaway. A review four days later
   # found that measurement predated a sevenfold growth in the static prefix: because the provider
   # bills prompt *and* completion on every call, with cached tokens included, 300,000 funded
@@ -1331,8 +1331,10 @@ config:
   # turn with one correction did not finish, and the loop cap could no longer move at all.
   #
   # The value is now derived rather than chosen: the ceiling of a *lawful* turn is what the two
-  # guards already authorise, `harness_max_loop_iterations` calls each bounded by
-  # `agent_context_token_budget`. Only a bug exceeds that. `tests/test_spend_cap.py` holds the
+  # guards already authorise: `harness_max_loop_iterations` calls, the loop cap's wrap-up call and
+  # one call's overshoot, each bounded by `agent_context_token_budget`. Only a bug exceeds that. The
+  # wrap-up call was left out of the first derivation (3,000,000), and 22 of 91 live deep-research
+  # turns were then stopped with no answer just before it. `tests/test_spend_cap.py` holds the
   # relation so the next prefix change cannot strand it silently.
   #
   # A deployment that wants a real cost *budget* sets a smaller number from its own
@@ -1342,7 +1344,7 @@ config:
   #
   # It is not what makes the deployment guarded: `harness_max_loop_iterations` still bounds the
   # loop, and that cap is on in every configuration.
-  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "3000000"
+  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "3300000"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
