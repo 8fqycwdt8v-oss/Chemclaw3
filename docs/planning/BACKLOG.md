@@ -60,8 +60,6 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 - [ ] **A citation-only record is pointed to by a facet answer, never counted in it** [M] — owner call: is a facet on a drawn species the
   structure search `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` excludes? If not, a label row with no derivation (`ingest/labels/record.py::record_phase`) and its verdict and skill text behind a live eval.
 
-- [ ] **A tool composite whose enqueue failed can never be republished** [M] — `ThermochemistryResult`/`LogdResult` have no cache row and no job record, so no backfill walk finds them;
-  give them a durable record and a walk, or declare the loss; `publish/hooks.py::publish_tool_result`, `connectors/results/workflows.py::_walk`.
 - [ ] **A sink cannot tell a superseded-epoch calculation from a current one** [M] — the backfill skips superseded rows, but one published live before an epoch bump stays beside
   its successor, both `status = 'valid'`; carry the epoch on `ResultRecord` (a contract and DDL change) or mark the old row superseded; `publish/record.py::ResultRecord`.
 
