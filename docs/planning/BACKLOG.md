@@ -26,8 +26,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
   `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
   with `data/evals/profiles/tools-removed.yaml` as baseline (needs gateway credit); `cli/live_probes.py::_AB_BASELINE_PROFILE`.
-- [ ] **`hybrid` retrieval is worse than `graph`; fusion knobs are measured no-ops** [M] — measure an `openai_compatible` embedder
-  with `make retrieval-arms` before quoting any number; `D-2026-09-15-a-weight-small-enough-to-work-is-a-removal-spelled-as-a-number`.
+- [ ] **`hybrid` ranks better than `graph` with a real embedder, but 21 probes cannot flip the default** [M] — `make retrieval-arms` on `nomic-embed-text`
+  (`D-2026-10-24-an-orthogonal-dense-leg-ranks-better-and-does-not-yet-change-the-default`) shows equal recall and a better mean rank; grow the labelled gold set to 100 pairs over 40 probes, or fix a deployment embedder, then re-run and flip under that ADR's option 3.
 
 ### Operating it
 
