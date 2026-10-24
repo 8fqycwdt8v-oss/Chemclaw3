@@ -20,6 +20,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Answers that are wrong without saying so
 
+- [ ] **`similar_reactions` and the design precedent check still serve a fingerprint hit with no record** [S] — the retriever now passes only servable records, but the tool keeps "unindexed is not withdrawn",
+  so a hit `expand_note` refuses is still cited; owner call whether one rule holds; `connectors/rxnfp/server/tools.py::similar_reactions`, `agent/protocol_design_tools.py::uncited_precedent`.
 - [ ] **A salt dissolved in one organic solvent standardizes to the solvent** [S] — `[Li+].[AlH4-].C1CCOC1` and `[Na+].[H-].C1CCOC1` share THF's
   `compound_id`, `[Na+].[BH4-].CO` methanol's: ions that balance each other are stripped as the solvent's counterions; needs an owner decision on the strip rule, `core/chem.py::standardize`.
 - [ ] **Tool-utility results used a control arm that also swaps the prompt** [M] — re-run `make live-ab` / `make live-benchmark`
@@ -29,6 +31,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Operating it
 
+- [ ] **The calc claim's `LISTEN` dials `postgres_dsn`, not the session endpoint** [S] — `D-2026-10-08-the-pool-count-stays-and-a-pooler-gets-a-session-endpoint` requires `session_store_dsn` first for `LISTEN`;
+  behind a transaction-mode pooler its wake-up can be lost and a waiter falls back to polling; `science/calc/postgres_store.py`, `science/calc/flight.py::PostgresClaims`.
 - [ ] **The other inline calc tools wait `calc_server_timeout_seconds` past the hop that cancels them** [S] — every `cached_remote` in the calc server and `compose.relax`
   default to a backend bound above `calc`'s `request_timeout`; lower each through `_within_the_hop`; `connectors/calc/server/tools.py::_within_the_hop`, `connectors/calc/remote.py::calc_session`.
 - [ ] **Backend RPC is built but off: `calc_transport` defaults to `mcp`** [M] — flip after the in-cluster `make bench-backend-rpc` (cache-hit p50 ≤ 10 ms), a cluster run on `rpc` that proves no hop with a shorter idle or read timeout (mesh sidecar, load balancer, ingress at 60 s) cuts a long call, and a decision on `/rpc` having no `cancel_on_timeout` counterpart; then delete the MCP path for backends:
