@@ -13,14 +13,23 @@ The expectation is an ordinary eval case, `CASE_ID`, written by `--emit` and com
 `eval_drift_epsilon`; refreshing it is as deliberate as `make eval-baseline`. The arithmetic
 fixture stays, as the only case exercising cache weighting and unanswered turns.
 
-Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached (never
-counted as a pass).
+A turn's bill follows the tool surface it was sent, and a connector whose handshake outlasts
+`connector_open_timeout_seconds` is left off that surface for `connector_breaker_window_seconds`
+while `/readyz` stays green (measured: one 4-bundle process answering past the bound drops 31 of
+128 tools, 85 KB of schema, and the same three questions bill 737,892 instead of 997,912). The
+front door counts each such absence (`chemclaw_connectors_unreachable_total`), so a run during
+which that counter moved scored a different surface and is not compared.
+
+Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached or the
+run was degraded (never counted as a pass).
 """
 
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 
@@ -128,14 +137,36 @@ async def _recorded(session_id: str) -> list[TurnCost]:
     ]
 
 
-async def _drive(base_url: str) -> str:
-    """Ask every question in `WORKLOAD` on one session and return its id.
+class Driven(NamedTuple):
+    """What one run of `WORKLOAD` left behind: the session, and the connectors it ran without."""
+
+    session_id: str
+    absent: tuple[str, ...]
+
+
+_ABSENCE = re.compile(r'^chemclaw_connectors_unreachable_total\{connector="([^"]+)"\} (\S+)$')
+
+
+async def _absences(client: httpx.AsyncClient) -> dict[str, float]:
+    """The front door's per-connector count of turns that ran without that connector.
+
+    A family with no increment has no line, so a connector absent from the text has a count of 0.
+    """
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    found = (_ABSENCE.match(line) for line in response.text.splitlines())
+    return {m.group(1): float(m.group(2)) for m in found if m}
+
+
+async def _drive(base_url: str) -> Driven:
+    """Ask every question in `WORKLOAD` on one session; return its id and the connectors it lacked.
 
     The event stream is drained and discarded — this grades nothing — but `open_session` is reused
     so session opening cannot diverge from the probes.
     """
     timeout = httpx.Timeout(settings.live_probe_timeout_seconds)
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout, trust_env=False) as client:
+        before = await _absences(client)
         session_id = await open_session(client)
         for question in WORKLOAD:
             async with client.stream(
@@ -144,7 +175,9 @@ async def _drive(base_url: str) -> str:
                 response.raise_for_status()
                 async for _ in response.aiter_lines():
                     pass
-        return session_id
+        after = await _absences(client)
+        absent = tuple(sorted(name for name, count in after.items() if count > before.get(name, 0)))
+        return Driven(session_id, absent)
 
 
 def _case(turns: list[TurnCost]) -> EvalCase:
@@ -213,8 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        session_id = asyncio.run(_drive(args.base_url))
-        turns = asyncio.run(_recorded(session_id))
+        driven = asyncio.run(_drive(args.base_url))
+        turns = asyncio.run(_recorded(driven.session_id))
     except (httpx.HTTPError, OSError) as exc:
         # `httpx.HTTPError` is the front door; `OSError` is the database (`core/db` raises
         # `ConnectionError`). Other driver errors are deliberately not caught, so a malformed query
@@ -223,6 +256,13 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     if not turns:
         print(f"the lane ran {len(WORKLOAD)} turn(s) and the ledger holds none of them")
+        return 3
+    if driven.absent:
+        print(
+            f"degraded run, not scored: {', '.join(driven.absent)} did not come up for these "
+            "turns, so they were sent a smaller tool surface than the recorded case — see the "
+            "front door's log for the cause"
+        )
         return 3
 
     result = get_metric("turn_cost_ratio")(_case(turns))
