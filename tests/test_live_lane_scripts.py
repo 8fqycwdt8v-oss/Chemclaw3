@@ -321,6 +321,74 @@ def test_wait_for_pollers_passes_on_a_polled_queue_and_names_an_unpolled_one(
     assert "worker-ghost (connector-ghost)" in unpolled.stderr
 
 
+def test_wait_for_pollers_rides_out_a_rate_limited_broker(tmp_path: Path) -> None:
+    """A broker that refuses with `RESOURCE_EXHAUSTED` is asked again, not reported as a failure.
+
+    A dev server under its namespace rate limit answers the lane's own describe calls that way; a
+    restart that died on it killed the front door and never started it again. A burst of describe
+    calls holds the limiter shut while the check starts, then stops so the broker recovers.
+    """
+    import asyncio
+
+    from temporalio.worker import Worker
+
+    from chemclaw.connectors.queued_call import call_queued_tool
+    from chemclaw.connectors.queued_workflow import QueuedToolWorkflow
+    from tests.temporal_env import start_local_env_or_skip
+
+    async def _measure() -> tuple[Any, int]:
+        env = await start_local_env_or_skip(
+            dynamic_config=("frontend.namespaceRPS=5", "frontend.namespaceBurstRatio=1")
+        )
+        async with env:
+            address = env.client.service_client.config.target_host
+            async with Worker(
+                env.client,
+                task_queue="connector-fixture-interactive",
+                workflows=[QueuedToolWorkflow],
+                activities=[call_queued_tool],
+            ):
+                burst = asyncio.create_task(_burst(env.client, seconds=3.0))
+                result = await asyncio.to_thread(
+                    _wait_for_pollers, tmp_path, address, "interactive-worker-fixture"
+                )
+                refused = await burst
+            return result, refused
+
+    result, refused = asyncio.run(_measure())
+    assert refused > 0, "the broker never rate-limited during the check, so it was not tested"
+    assert result.returncode == 0, result.stderr
+    assert "connector-fixture-interactive" in result.stdout
+
+
+async def _burst(client: Any, *, seconds: float) -> int:
+    """Hold the namespace limiter shut for `seconds`; how many calls it refused meanwhile."""
+    import asyncio
+    import time
+
+    from temporalio.api.enums.v1 import TaskQueueType
+    from temporalio.api.taskqueue.v1 import TaskQueue
+    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+    from temporalio.service import RPCError, RPCStatusCode
+
+    refused = 0
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            await client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=client.namespace,
+                    task_queue=TaskQueue(name="connector-fixture-interactive"),
+                    task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+                )
+            )
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.RESOURCE_EXHAUSTED:
+                refused += 1
+        await asyncio.sleep(0.01)
+    return refused
+
+
 def test_wait_for_pollers_reports_a_dead_worker_at_once(tmp_path: Path) -> None:
     """A worker whose pid is gone is named, not waited out for the whole budget."""
     import asyncio
