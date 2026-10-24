@@ -15,8 +15,8 @@ Provenance for older rows: `docs/archive/findings-2026-08.md` and git history.
 
 ### Untrusted input and privileged surfaces
 
-- [ ] **Worker workflow-cache bound rests on placeholders** [S] — sample cached state of `BoCampaignWorkflow` and calc workflows on a real broker;
-  `core/config/temporal.py::worker_max_cached_workflows`, `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
+- [ ] **A worker's memory grows with a BO campaign's rounds whether or not the run stays cached** [M] — parked on the `make up` broker (macOS footprint, 2 runs): calc 146 KiB, a fresh campaign 253 KiB, under the
+  530 KiB per workflow `tests/test_workers.py` asserts; but 30 rounds 1.6 MiB cached vs 1.3–1.5 MiB with the cache at 1, 100 rounds 6.6 MiB; find the holder before the bound covers `bo`; `connectors/bo/workflows.py`.
 
 ### Answers that are wrong without saying so
 
