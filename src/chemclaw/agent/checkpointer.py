@@ -855,15 +855,17 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         return _guarded()
 
 
-async def process_checkpointer() -> Any:
-    """Turn state for a process that keeps **one** graph alive for its whole run.
+async def graph_checkpointer() -> Any:
+    """Thread state for one compiled graph: the CLI's whole run, or one front-door turn.
 
-    Durable where a database exists, `InMemorySaver` otherwise. Differs from
-    `api/runner._turn_checkpointer`, which returns `None` without a database because the front door
-    compiles a graph per turn. Lives here so the CLI need not import `langgraph` (layering).
+    Durable where a database exists, otherwise an `InMemorySaver` that lives as long as the graph
+    it is built into. Never `None`: a turn re-enters its own thread (the revision round, the
+    mid-turn job resume), and a graph with no saver starts that run on an empty thread, so the
+    model is sent the runner's note without the chemist's question. Lives here so callers need not
+    import `langgraph` (layering).
 
     Returns:
-        A checkpointer to build a long-lived graph on and to read that session's plan from.
+        A checkpointer to build the graph on and to read that thread back from.
     """
     if settings.session_store == "postgres":
         return await checkpointer()

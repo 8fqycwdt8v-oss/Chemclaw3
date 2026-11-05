@@ -835,9 +835,8 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
 
     `create_agent` and `create_deep_agent` both bake `recursion_limit=9999`; config passed at
     `ainvoke` wins. The ceiling is the backstop under the loop cap, which is the graceful stop that
-    still sends the partial answer. Asserted against the derivation from the two settings. The
-    superstep cost per iteration was measured by binary search as `6*N + 8` over several N;
-    re-measure when the middleware stack changes.
+    still sends the partial answer. Asserted against the derivation from the two settings; that the
+    derivation sits above the real cost is `tests/test_cli.py`'s step-ceiling test.
     """
     config = turn_config("session-1")
 

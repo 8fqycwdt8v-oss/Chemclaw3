@@ -17,7 +17,7 @@ from typing import Any, NamedTuple
 
 from chemclaw.agent.audit import AuditSink
 from chemclaw.agent.audit_store import PostgresAuditSink
-from chemclaw.agent.checkpointer import process_checkpointer
+from chemclaw.agent.checkpointer import graph_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.state import answer_text, turn_config, turn_input
@@ -46,7 +46,7 @@ _WORKFLOW_COMMANDS = {"/workflows", "/approve-workflow", "/forget-workflow"}
 
 # The session id every CLI run uses: fixed, so it is a stable checkpointer `thread_id` and a
 # terminal session resumes across invocations under `session_store=postgres`
-# (`checkpointer.process_checkpointer`). Single-user admin, so nothing collides.
+# (`checkpointer.graph_checkpointer`). Single-user admin, so nothing collides.
 _CLI_SESSION_ID = "cli"
 
 # Exit status of a one-shot `-m` run whose printed answer is incomplete; `1` means it never started.
@@ -128,7 +128,7 @@ async def converse(
     """Run one turn on the graph under `session_id` and return its answer **and its notice**.
 
     `session_id` is the checkpointer's `thread_id`, so reusing it continues the conversation; the
-    store is `checkpointer.process_checkpointer`'s choice. `earlier` is the operator's previous
+    store is `checkpointer.graph_checkpointer`'s choice. `earlier` is the operator's previous
     prompts in this REPL, oldest first.
     """
     # Stamp the chemist's own words for the turn, so `protocols` can check a `basis="stated"` quote
@@ -176,7 +176,7 @@ async def _run(args: argparse.Namespace) -> int:
                     f"warning: connector {name!r} is unreachable; its tools are unavailable",
                     file=sys.stderr,
                 )
-            saver = await process_checkpointer()
+            saver = await graph_checkpointer()
             agent = _build_cli_agent(args, actor, connectors, saver)
             if args.message is not None:
                 turn = await converse(agent, args.message)

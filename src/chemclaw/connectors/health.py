@@ -8,7 +8,9 @@ unreachable connector does not stop the service, but its absence is visible.
 A bundle is asked one question per half it has, and its verdict is the worse of them (`_folded`):
 an HTTP `health_url` is probed directly; `jobs:` asks whether anything polls the bundle's queue
 (`unpolled` if not); `queued:` tools ask the same of `connector-<name>-interactive`. A bundle with
-none of these is `unprobed`, which is not counted as unhealthy.
+none of these is `unprobed`, which is not counted as unhealthy. A bundle the deployment would use
+but cannot (`registry.unusable`: a malformed manifest, a `stdio` endpoint with stdio off) is
+`refused`, which is.
 
 Only a successful `DescribeTaskQueue` is a verdict; a broker that could not be asked is `unknown`,
 which is logged but neither counts nor gates, so a Temporal restart is not a boot failure. Only
@@ -29,23 +31,24 @@ from temporalio.client import Client
 
 from chemclaw.connectors.queues import bundle_queue, interactive_queue
 from chemclaw.connectors.reachability import record_reachability
-from chemclaw.connectors.registry import enabled, health_url, queues_tools
+from chemclaw.connectors.registry import enabled, health_url, queues_tools, unusable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.temporal_client import connect
 
 logger = logging.getLogger(__name__)
 
-ConnectorState = Literal["healthy", "unreachable", "unpolled", "unknown", "unprobed"]
+ConnectorState = Literal["refused", "healthy", "unreachable", "unpolled", "unknown", "unprobed"]
 
 #: The states meaning "this capability cannot be used right now"; the gauge and the
 #: `connectors_required` gate share this one definition of down.
-UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unpolled"})
+UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"refused", "unreachable", "unpolled"})
 
 #: Worst first: the tie-break `_folded` uses between two verdicts about one connector. Undetermined
 #: ranks above healthy because a half that could not be asked is no evidence of health; `unprobed`
 #: is last so it only ever describes a bundle with nothing to ask.
 _SEVERITY: tuple[ConnectorState, ...] = (
+    "refused",
     "unreachable",
     "unpolled",
     "unknown",
@@ -261,7 +264,10 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     bound = settings.connector_health_timeout_seconds if budget is None else budget
     endpoints: list[tuple[str, str]] = []
     queues: list[QueueTarget] = []
-    unprobed: list[ConnectorHealth] = []
+    unasked: list[ConnectorHealth] = [
+        ConnectorHealth(name=name, state="refused", detail=reason)
+        for name, reason in unusable().items()
+    ]
     for manifest in enabled():
         # Through the registry, never off the manifest: `connector_urls` moves where a connector
         # really is.
@@ -279,11 +285,11 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
         if not probe_url and not manifest.jobs and not queues_tools(manifest):
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
             # HTTP endpoint that declares no health route and queues nothing.
-            unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
+            unasked.append(ConnectorHealth(name=manifest.name, state="unprobed"))
     probed, polled = await asyncio.gather(
         _probe_endpoints(endpoints, bound), _probe_queues(queues, bound)
     )
-    return _folded([*probed, *polled, *unprobed])
+    return _folded([*probed, *polled, *unasked])
 
 
 async def check_connectors_at_startup() -> list[ConnectorHealth]:

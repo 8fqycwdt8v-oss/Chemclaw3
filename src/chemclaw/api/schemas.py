@@ -9,7 +9,7 @@ set the route reads and passes in.
 
 from collections.abc import Collection, Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
@@ -147,6 +147,24 @@ class QueuedMessageOut(BaseModel):
     enqueued_at: datetime
     position: int
     mine: bool
+
+
+class HealthzOut(BaseModel):
+    """`GET /healthz` — liveness only: the process is up. Readiness is `GET /readyz`."""
+
+    status: Literal["ok"] = "ok"
+
+
+class TurnStopOut(BaseModel):
+    """What `POST /sessions/{id}/turn/stop` answers.
+
+    `stopped` is whether the turn has ended. `deferred` is true only for `?reason=unload`, when the
+    stop waits out the reattach grace and may yet be cancelled by a reattach; it is omitted, not
+    false, everywhere else, so the body of a plain stop is `{"stopped": true}`.
+    """
+
+    stopped: bool
+    deferred: bool = False
 
 
 class RunningTurnOut(BaseModel):

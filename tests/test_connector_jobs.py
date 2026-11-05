@@ -523,6 +523,29 @@ def test_the_run_is_stamped_with_the_plan_step_it_was_launched_for(client: _Fake
     assert payload.plan_hash == "plan-hash-1"
 
 
+def test_the_chat_launch_carries_the_jobs_declared_effect(
+    monkeypatch: pytest.MonkeyPatch, client: _FakeClient
+) -> None:
+    """An irreversible effect reaches the wrapper with its approver, so the run waits for approval.
+
+    Each field defaults to "no effect" on the wire, so a launch that forgot one would run the job
+    without the approval its manifest declared and nothing would fail.
+    """
+    from chemclaw.connectors.manifest import EffectSpec
+
+    monkeypatch.setattr("chemclaw.core.config.settings.effect_approval_role", "qa-approver")
+    spec = _SPEC.model_copy(
+        update={
+            "expensive": True,
+            "effect": EffectSpec(system="the QMS", reversal="irreversible"),
+        }
+    )
+    _launch(build_job_tool("calc", spec), smiles="CCO")
+    payload: ConnectorJobInput = client.calls[0]["input"]
+    assert (payload.effect_system, payload.effect_reversal) == ("the QMS", "irreversible")
+    assert payload.effect_approver == "qa-approver"
+
+
 def test_a_launch_outside_any_plan_stamps_the_empty_link(client: _FakeClient) -> None:
     """A template step or CLI call says "not launched from a plan step", never a stale one."""
     tool = build_job_tool("calc", _SPEC)

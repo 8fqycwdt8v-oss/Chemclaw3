@@ -49,7 +49,7 @@ free and is what lets a validator resolve a tool name and a `SKILL.md` name the 
 judgment about; binding puts every one of that bundle's schemas ahead of the system message on
 **every** model call, which `tests/test_context_floor.py` charges to `PREFIX_BOUND` and
 `core/config/agent.py` turns into both compaction thresholds. The five process-development bundles
-(`props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and `pyexec` take that shape, the
+(`props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`), `chembl` and `pyexec` take that shape, the
 flag being in the fleet's manifest. An explicit
 enable-list is deliberately **not** filtered by the flag: it says what silence means, not what a
 deployment may ask for, and a bundle no configuration could reach would be a control whose

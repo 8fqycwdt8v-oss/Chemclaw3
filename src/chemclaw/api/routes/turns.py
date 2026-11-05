@@ -24,7 +24,7 @@ from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from chemclaw.agent.exhibit_notes import resolve_exhibit_refs
-from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
+from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue, idle_poll_seconds
 from chemclaw.agent.session_store import RunningTurn, owner_permits
 from chemclaw.agent.turn_remotes import Holding
 from chemclaw.agent.turn_resume import ResumePoint, log_refusal, resume_point
@@ -56,6 +56,7 @@ from chemclaw.api.schemas import (
     QueuedMessageOut,
     RunningTurnOut,
     SessionQueueOut,
+    TurnStopOut,
     session_title,
 )
 from chemclaw.api.state import (
@@ -519,33 +520,37 @@ async def _start_turn(
         a participant — and a final `queue_cancelled` frame. Authority is re-read at the head
         (`_refusal_at_the_head`).
         """
+        if ticket is None:
+            return
         shown: int | None = None
-        while ticket is not None:
-            mine = ticket
-            place = await queue.position(session_id, mine, lease)
-            if place is None:
-                _left_line()
-                yield _withdrawn("Your message was withdrawn before it ran.")
-                return
-            if place == 0:
-                refusal = await _refusal_at_the_head()
-                if refusal is not None:
+        async with queue.woken(session_id) as moved:
+            while ticket is not None:
+                moved.clear()
+                mine = ticket
+                place = await queue.position(session_id, mine, lease)
+                if place is None:
                     _left_line()
-                    await _leave_line(queue, session_id, mine)
-                    signal.notify()
-                    yield _withdrawn(refusal)
-                    return
-                outcome = await _take_the_turn(mine)
-                if outcome == "taken":
-                    yield sse_frame(TurnStartedEvent(ticket=mine))
-                    return
-                if outcome == "withdrawn":
                     yield _withdrawn("Your message was withdrawn before it ran.")
                     return
-            if place != shown:
-                shown = place
-                yield sse_frame(QueuedEvent(ticket=mine, position=place))
-            await signal.wait(settings.service_turn_queue_poll_seconds)
+                if place == 0:
+                    refusal = await _refusal_at_the_head()
+                    if refusal is not None:
+                        _left_line()
+                        await _leave_line(queue, session_id, mine)
+                        signal.notify()
+                        yield _withdrawn(refusal)
+                        return
+                    outcome = await _take_the_turn(mine)
+                    if outcome == "taken":
+                        yield sse_frame(TurnStartedEvent(ticket=mine))
+                        return
+                    if outcome == "withdrawn":
+                        yield _withdrawn("Your message was withdrawn before it ran.")
+                        return
+                if place != shown:
+                    shown = place
+                    yield sse_frame(QueuedEvent(ticket=mine, position=place))
+                await signal.wait(idle_poll_seconds(), moved)
 
     def _shed() -> dict[str, str]:
         """The frame a turn that found no free slot ends on, counted so shedding is visible.
@@ -908,7 +913,7 @@ async def stop_turn(
     principal: CurrentUser,
     live: CurrentSession,
     reason: Literal["unload"] | None = None,
-) -> dict[str, bool]:
+) -> TurnStopOut:
     """Stop the session's running turn — the one way to cancel work in flight.
 
     A member stops only their own turn, the owner any. 404 when nothing is running, except that a
@@ -945,11 +950,11 @@ async def stop_turn(
             session_id,
             grace,
         )
-        return {"stopped": False, "deferred": True}
+        return TurnStopOut(stopped=False, deferred=True)
     await turn.stop()
     METRICS.increment("chemclaw_turns_stopped_total")
     logger.info("session %s's turn was stopped by request", session_id)
-    return {"stopped": True}
+    return TurnStopOut(stopped=True)
 
 
 async def _held_elsewhere(front: FrontDoorState, session_id: str) -> Holding | None:
@@ -977,7 +982,7 @@ async def _stop_elsewhere(
     principal: Principal,
     live: LiveSession,
     reason: Literal["unload"] | None,
-) -> dict[str, bool]:
+) -> TurnStopOut:
     """Stop a turn another replica holds: authorize here, then ask the holder and wait for it.
 
     Sender-or-owner is applied from the claim's recorded sender before anything is written, so the
@@ -990,7 +995,7 @@ async def _stop_elsewhere(
     # resumes a dead turn.
     if holding is None and reason != "unload":
         if await _stop_dead_turn(front, session_id, principal, live):
-            return {"stopped": True}
+            return TurnStopOut(stopped=True)
         # Nothing was there to end, or a resume took it first: look again before saying 404.
         holding = await _held_elsewhere(front, session_id)
     if holding is None or relay is None:
@@ -1007,9 +1012,9 @@ async def _stop_elsewhere(
             headers={"Retry-After": _retry_after_hint()},
         )
     if answer.state == "deferred":
-        return {"stopped": False, "deferred": True}
+        return TurnStopOut(stopped=False, deferred=True)
     logger.info("session %s's turn on another replica was stopped by request", session_id)
-    return {"stopped": True}
+    return TurnStopOut(stopped=True)
 
 
 async def _stop_dead_turn(
@@ -1109,8 +1114,8 @@ async def withdraw_queued(
     404 for a ticket this session's line does not hold, including another session's, so tickets
     cannot be guessed across sessions, and for one whose message has just taken the turn (its
     stream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting
-    request notices on its next look (within `service_turn_queue_poll_seconds` on another replica),
-    or at its hand-over, and ends with `queue_cancelled`.
+    request notices at once (on another replica through the line's wake-up), or at its hand-over,
+    and ends with `queue_cancelled`.
     """
     front = state(request)
     entry = next(
@@ -1445,7 +1450,7 @@ def register(app: FastAPI) -> None:
             }
         },
     )(post_message)
-    app.post("/sessions/{session_id}/turn/stop")(stop_turn)
+    app.post("/sessions/{session_id}/turn/stop", response_model_exclude_defaults=True)(stop_turn)
     app.get(
         "/sessions/{session_id}/turn/stream",
         responses={

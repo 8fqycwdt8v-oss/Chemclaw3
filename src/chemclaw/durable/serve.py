@@ -17,7 +17,7 @@ from functools import partial
 from temporalio.worker import Interceptor, Worker
 
 from chemclaw.connectors import session_pool as connector_sessions
-from chemclaw.core import backend_rpc, db
+from chemclaw.core import backend_rpc, db, heap
 from chemclaw.core.config import settings
 from chemclaw.core.deployment import (
     bind_deployment_gauges,
@@ -140,6 +140,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
             # release's workflows' activities against it.
             await verify_deployment()
             bind_deployment_gauges()
+            # Last before the first poll, for the reason `core/heap.py` gives.
+            heap.freeze_startup_heap(component)
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
             # Refreshes the open-jobs gauge from the broker (`durable/job_metrics.py`). Kept alive

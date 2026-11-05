@@ -828,3 +828,66 @@ def test_the_sentence_does_not_read_as_two_sentences_with_a_stray_bracket() -> N
     ):
         assert message.endswith("(session s1).")
         assert ". (session" not in message
+
+
+# --------------------------------------------------------------------------------------------
+# FastAPI's own OpenTelemetry stays off: `core/tracing.py` is the one span source.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_framework_records_no_request_span_under_an_installed_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a real provider installed, FastAPI records no span of its own for a request.
+
+    FastAPI reads the global provider per request and, by default, opens a span for every one.
+    The global is patched rather than set, because `set_tracer_provider` is once per process. The
+    exporter must see *something* first, so a blind instrument cannot pass this.
+    """
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel_trace, "get_tracer_provider", lambda: provider)
+
+    with otel_trace.get_tracer_provider().get_tracer("control").start_as_current_span("control"):
+        pass
+    assert [span.name for span in exporter.get_finished_spans()] == ["control"]
+
+    client = TestClient(_app(_FakeAgent()))
+    assert client.get("/healthz").status_code == 200
+    framework = [
+        span.name
+        for span in exporter.get_finished_spans()
+        if span.instrumentation_scope is not None and span.instrumentation_scope.name == "fastapi"
+    ]
+    assert framework == [], f"FastAPI recorded its own request spans: {framework}"
+
+
+def test_every_fastapi_app_this_repository_builds_turns_framework_telemetry_off() -> None:
+    """Every `FastAPI(...)` under `src/` passes `telemetry=NO_FRAMEWORK_TELEMETRY`.
+
+    The behavioural test above drives the front door; this holds the connector server and the
+    dev tools to the same switch, and asserts it found the front door so its scope is not empty.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "src"
+    built: dict[str, bool] = {}
+    for path in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "FastAPI":
+                switched = any(
+                    keyword.arg == "telemetry"
+                    and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == "NO_FRAMEWORK_TELEMETRY"
+                    for keyword in node.keywords
+                )
+                built[f"{path.relative_to(root)}:{node.lineno}"] = switched
+    assert any(site.startswith("chemclaw/api/app.py") for site in built), built
+    assert all(built.values()), {site: on for site, on in built.items() if not on}

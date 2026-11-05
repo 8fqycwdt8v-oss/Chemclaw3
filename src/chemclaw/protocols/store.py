@@ -24,7 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -808,6 +808,9 @@ def revision_kind(design: ExperimentDesign) -> RevisionKind:
 #: has no procedure, so neither word can be true of it.
 _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
+#: The statuses that assert there is *no* procedure, so a design whose head holds one refuses them.
+_REFUSES_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"requested"})
+
 
 #: Which lifecycle move each status permits, as data rather than a chain of `if`s.
 #:
@@ -821,6 +824,23 @@ _LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
     "executed": frozenset({"abandoned"}),
     "abandoned": frozenset({"draft"}),
 }
+
+
+def lifecycle_rules() -> dict[str, JsonValue]:
+    """The three rules `require_movable` enforces, as data a client can draw its buttons from.
+
+    Published on `StatusIn` in the API contract, so a surface offers only the moves that can
+    succeed without transcribing this module. Self-transitions are always permitted and are not
+    listed. Lists are sorted, so the rendered document is stable.
+    """
+    legal: dict[str, JsonValue] = {
+        status: list[JsonValue](sorted(moves)) for status, moves in _LEGAL_MOVES.items()
+    }
+    return {
+        "x-legal-moves": legal,
+        "x-statuses-needing-a-protocol": list[JsonValue](sorted(_NEEDS_A_PROTOCOL)),
+        "x-statuses-refusing-a-protocol": list[JsonValue](sorted(_REFUSES_A_PROTOCOL)),
+    }
 
 
 def require_movable(current: DesignStatus, status: DesignStatus, head_kind: RevisionKind) -> None:
@@ -846,7 +866,7 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
             f"this design holds only the structured ask, so it cannot be {status!r}: there is no "
             "procedure to approve or to have run. Draft the protocol first."
         )
-    if status == "requested" and head_kind == "protocol":
+    if status in _REFUSES_A_PROTOCOL and head_kind == "protocol":
         raise UnstorableDocument(
             "this design holds a procedure, so it cannot go back to 'requested', which means it "
             "holds only the structured ask. Abandon it, or draft over it — a revision moves a "

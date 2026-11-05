@@ -2,9 +2,11 @@
 
 The turn's pump lives in its starting process, so other replicas go through rows
 (`agent/turn_remotes.TurnRemotes`). The asking replica authorizes first, writes a request and waits;
-the holder (`TurnRelay.run`, polling only while it holds a turn) answers with the same calls its
+the holder (`TurnRelay.run`, reading only while it holds a turn) answers with the same calls its
 routes make — an ordinary `DetachableTurn.watch` view whose frames it relays into rows, or
-`stop()`/`defer_stop()`. A request is a lease, not durable work.
+`stop()`/`defer_stop()`. A request is a lease, not durable work. Every wait is woken by the store's
+notification and re-reads its rows on `idle_poll_seconds` only as a fallback, so an idle held turn
+or an idle remote view costs a statement per fallback poll rather than per relay poll.
 """
 
 import asyncio
@@ -16,11 +18,20 @@ from typing import Any, NamedTuple
 
 import psycopg
 
-from chemclaw.agent.turn_remotes import Holding, Kind, Request, State, TurnRemotes
+from chemclaw.agent.turn_remotes import (
+    REQUESTS,
+    Holding,
+    Kind,
+    Request,
+    State,
+    TurnRemotes,
+    idle_poll_seconds,
+)
 from chemclaw.api.detach import DetachableTurn, RunningTurns, Watch, _draft_call_id, lagged_frame
 from chemclaw.api.state import TurnLease, claim_holder
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.notify import wait_woken
 
 logger = logging.getLogger(__name__)
 
@@ -63,23 +74,31 @@ class TurnRelay:
     # -- the holding process -------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Answer other replicas' requests for this process's turns, every poll, until cancelled.
+        """Answer other replicas' requests for this process's turns, until cancelled.
 
-        A failed poll is logged and retried next interval, so a database blip delays one remote Stop
-        rather than ending the loop.
+        While nothing is held the loop only looks at this process's memory, so an idle replica
+        issues no statement and holds no `LISTEN`. While a turn is held it reads on every wake-up
+        and on the fallback poll. A failed read is logged and retried on the next one, so a
+        database blip delays one remote Stop rather than ending the loop.
         """
         while True:
-            try:
-                await self.poll()
-            except (ConnectionError, psycopg.Error):
-                METRICS.increment("chemclaw_turn_relay_poll_failures_total")
-                logger.warning(
-                    "could not read the requests other replicas addressed to this process's turns; "
-                    "retrying in %ss",
-                    settings.service_turn_relay_poll_seconds,
-                    exc_info=True,
-                )
-            await asyncio.sleep(settings.service_turn_relay_poll_seconds)
+            if not self._held() and not self._relays:
+                await asyncio.sleep(settings.service_turn_relay_poll_seconds)
+                continue
+            async with self._store.woken(REQUESTS) as woken:
+                while self._held() or self._relays:
+                    woken.clear()
+                    try:
+                        await self.poll()
+                    except (ConnectionError, psycopg.Error):
+                        METRICS.increment("chemclaw_turn_relay_poll_failures_total")
+                        logger.warning(
+                            "could not read the requests other replicas addressed to this "
+                            "process's turns; retrying within %ss",
+                            idle_poll_seconds(),
+                            exc_info=True,
+                        )
+                    await wait_woken(woken, idle_poll_seconds())
 
     def _held(self) -> dict[tuple[str, str], tuple[DetachableTurn, TurnLease]]:
         """Every turn this process holds, keyed by the `(session_id, holder)` its claim carries."""
@@ -260,24 +279,29 @@ class TurnRelay:
         request_id = await self._store.ask(session_id, holding.holder, kind, actor, lease)
         try:
             deadline = time.monotonic() + lease
-            while True:
-                answer = await self._store.refresh(request_id, lease)
-                if answer is None:
-                    return request_id, Answer(None, "")
-                if answer[0] in settled:
-                    return request_id, Answer(*answer)
-                current = await self._store.holding(session_id)
-                if current is None or current.holder != holding.holder:
-                    # The turn ended; read the answer once more, since a stop's teardown releases
-                    # the claim before the holder writes `stopped`. Only an unanswered request means
-                    # "not running".
-                    last = await self._store.refresh(request_id, lease)
-                    if last is None or last[0] == "asked":
+            # Subscribed after the insert and before the first read, so an answer written in
+            # between is read rather than missed.
+            async with self._store.woken(request_id) as woken:
+                while True:
+                    woken.clear()
+                    answer = await self._store.refresh(request_id, lease)
+                    if answer is None:
                         return request_id, Answer(None, "")
-                    return request_id, Answer(*last)
-                if time.monotonic() >= deadline:
-                    return request_id, Answer(*answer)
-                await asyncio.sleep(settings.service_turn_relay_poll_seconds)
+                    if answer[0] in settled:
+                        return request_id, Answer(*answer)
+                    current = await self._store.holding(session_id)
+                    if current is None or current.holder != holding.holder:
+                        # The turn ended; read the answer once more, since a stop's teardown
+                        # releases the claim before the holder writes `stopped`. Only an unanswered
+                        # request means "not running".
+                        last = await self._store.refresh(request_id, lease)
+                        if last is None or last[0] == "asked":
+                            return request_id, Answer(None, "")
+                        return request_id, Answer(*last)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return request_id, Answer(*answer)
+                    await wait_woken(woken, min(idle_poll_seconds(), remaining))
         except BaseException:
             self.forget(request_id)
             raise
@@ -329,7 +353,7 @@ class TurnRelay:
     async def view(
         self, request_id: str, session_id: str, holder: str
     ) -> AsyncGenerator[dict[str, str], None]:
-        """The relayed frames of one followed turn, polled from rows until the holder ends them.
+        """The relayed frames of one followed turn, read from rows until the holder ends them.
 
         If the holder dies (its claim gone for one quiet lease) or the request vanishes, the view
         ends without a final event, as a local view does when its process dies; the reattach that
@@ -338,22 +362,24 @@ class TurnRelay:
         lease = settings.service_turn_relay_lease_seconds
         quiet_since = time.monotonic()
         try:
-            while True:
-                answer, frames = await self._store.poll(request_id, lease)
-                for frame in frames:
-                    if frame is None:
+            async with self._store.woken(request_id) as woken:
+                while True:
+                    woken.clear()
+                    answer, frames = await self._store.poll(request_id, lease)
+                    for frame in frames:
+                        if frame is None:
+                            return
+                        yield frame
+                    if answer is None:
                         return
-                    yield frame
-                if answer is None:
-                    return
-                now = time.monotonic()
-                if frames:
-                    quiet_since = now
-                elif now - quiet_since >= lease:
-                    current = await self._store.holding(session_id)
-                    if current is None or current.holder != holder:
-                        return
-                    quiet_since = now
-                await asyncio.sleep(settings.service_turn_relay_poll_seconds)
+                    now = time.monotonic()
+                    if frames:
+                        quiet_since = now
+                    elif now - quiet_since >= lease:
+                        current = await self._store.holding(session_id)
+                        if current is None or current.holder != holder:
+                            return
+                        quiet_since = now
+                    await wait_woken(woken, idle_poll_seconds())
         finally:
             self.forget(request_id)

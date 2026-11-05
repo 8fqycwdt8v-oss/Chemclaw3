@@ -6,7 +6,6 @@ raised in workflow code makes the SDK retry the task forever, holding the workfl
 `REJECT_DUPLICATE`. Most tests run offline; one needs a real server to prove the run terminates.
 """
 
-import ast
 import asyncio
 import logging
 from collections.abc import Iterator
@@ -18,8 +17,7 @@ from pydantic import ValidationError
 from temporalio import activity, workflow
 
 from chemclaw.agent.authz import AuthorizationError
-from chemclaw.connectors.jobs import ConnectorJobError
-from chemclaw.connectors.manifest import JobSpec
+from chemclaw.connectors.jobs import ConnectorJobError, job_terms
 from chemclaw.connectors.registry import ConnectorError, enabled, find_job
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
@@ -28,6 +26,7 @@ from chemclaw.core.session_context import get_current_session_id
 from chemclaw.durable import template_activities
 from chemclaw.durable.connector_job import (
     ConnectorJobInput,
+    ConnectorJobResult,
     child_execution_timeout,
     finish_headroom,
     wrapper_execution_timeout,
@@ -132,47 +131,106 @@ def test_a_declared_job_resolves_to_its_connector_and_queue(fixture_bundle: str)
     assert resolved.payload == {"subject": "benzene"}
 
 
-def _template_path_job_input_fields() -> set[str]:
-    """Which `ConnectorJobInput` fields `TemplateWorkflow`'s literal actually names.
+_EFFECT_BUNDLE = """\
+name: qms
+description: a bundle whose one job changes another system irreversibly
+jobs:
+  - name: file_deviation
+    workflow: FileDeviationWorkflow
+    summary: File a deviation in the QMS.
+    expensive: true
+    effect: {system: the QMS, reversal: irreversible}
+    params:
+      - {name: subject, type: string, description: What the deviation is about.}
+"""
 
-    Read off the AST, so a comment naming a field cannot satisfy the check.
-    """
-    source = (
-        Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable" / "template_job.py"
-    ).read_text()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ConnectorJobInput":
-            return {keyword.arg for keyword in node.keywords if keyword.arg}
-    raise AssertionError("durable/template_job.py no longer builds a ConnectorJobInput literal")
+
+@pytest.fixture
+def effect_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[str]:
+    """A discovered bundle whose one job declares an irreversible effect, read from disk."""
+    bundle = tmp_path / "qms"
+    bundle.mkdir()
+    (bundle / "connector.yaml").write_text(_EFFECT_BUNDLE, encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.effect_approval_role", "qa-approver")
+    yield "file_deviation"
 
 
-def test_every_manifest_field_the_job_wrapper_reads_survives_the_template_path(
-    fixture_bundle: str,
+def test_the_resolver_carries_the_terms_the_chat_tool_would(effect_bundle: str) -> None:
+    """A template step resolves to exactly the `JobTerms` the chat tool launches the job with."""
+    _connector, job = find_job(effect_bundle)
+    resolved = asyncio.run(authorize_job_step(_step(effect_bundle, subject="batch 7")))
+    assert resolved.terms() == job_terms(job).terms()
+    assert (resolved.effect_reversal, resolved.effect_approver) == ("irreversible", "qa-approver")
+
+
+_CAPTURED: list[ConnectorJobInput] = []
+
+
+@workflow.defn(name="ConnectorJobWorkflow", sandboxed=False)
+class _CapturingJobWrapper:
+    """Stands in for the job wrapper and keeps the input the template handed it."""
+
+    @workflow.run
+    async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
+        """Record the input and report success, so the template completes."""
+        _CAPTURED.append(job)
+        return ConnectorJobResult(summary="filed")
+
+
+async def test_a_template_step_hands_the_wrapper_the_jobs_declared_effect(
+    effect_bundle: str,
 ) -> None:
-    """Every manifest field the job wrapper reads survives the template path.
+    """An irreversible job run as a template step still reaches the wrapper's approval wait.
 
-    A dropped field silently means something else on that path (e.g. `awaits_answer` defaulting to
-    the five-hour ceiling). The set is derived as `JobSpec` ∩ `ConnectorJobInput`, so a new field is
-    covered on the day it is declared. Both `ResolvedJob` and what is passed on are asserted.
+    `_approve_effect` keys on `effect_reversal` and `effect_approver`; their wire defaults mean "no
+    effect", so a template path that dropped them would file the deviation unapproved. Driven
+    through `TemplateWorkflow` against a real test server, with only the wrapper replaced.
     """
-    declared = set(JobSpec.model_fields) & set(ConnectorJobInput.model_fields)
-    assert declared, "the intersection is empty; this test has stopped asking anything"
-    missing = declared - set(ResolvedJob.model_fields)
-    assert not missing, (
-        f"{sorted(missing)} is declared on a manifest and read by ConnectorJobInput but is not "
-        "carried by ResolvedJob, so the template path silently substitutes its default"
+    from datetime import timedelta
+
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_job import TemplateRunInput
+    from chemclaw.templates.manifest import Template
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    _CAPTURED.clear()
+    template = Template.model_validate(
+        {
+            "name": "file-one",
+            "summary": "File one deviation.",
+            "inputs": [],
+            "steps": [
+                {
+                    "id": "file",
+                    "kind": "job",
+                    "job": effect_bundle,
+                    "arguments": {"subject": "batch 7"},
+                }
+            ],
+        }
     )
-    not_passed = declared - _template_path_job_input_fields()
-    assert not not_passed, (
-        f"TemplateWorkflow builds its ConnectorJobInput without {sorted(not_passed)}, so a job "
-        "launched from a template is configured differently from the same job launched from chat"
-    )
-    # And the resolver fills them from the manifest rather than leaving the model's defaults.
-    _connector, job = find_job(fixture_bundle)
-    resolved = asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
-    assert {field: getattr(resolved, field) for field in declared} == {
-        field: getattr(job, field) for field in declared
-    }
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[TemplateWorkflow, _CapturingJobWrapper],
+            activities=[authorize_job_step, _swallow_record, _nothing_to_resume],
+        ):
+            await client.execute_workflow(
+                TemplateWorkflow.run,
+                TemplateRunInput(template=template, requested_by="tester"),
+                id="template-effect",
+                task_queue=settings.background_task_queue,
+                execution_timeout=timedelta(seconds=60),
+            )
+
+    (handed,) = _CAPTURED
+    assert (handed.effect_system, handed.effect_reversal) == ("the QMS", "irreversible")
+    assert handed.effect_approver == "qa-approver"
 
 
 def test_a_job_that_waits_on_a_person_is_unbounded_as_a_template_step_too(

@@ -13,7 +13,8 @@ hydrides and charge, atom maps cleared), keep the organic fragment and drop its 
 known solvents, `Uncharger`, then one tautomer per set with stereo preserved (RDKit's default would
 merge enantiomers). Dropping the counterion is declined where it is false: nothing organic remains
 (NaOH, K2CO3), the metal is the chemistry (`_metal_is_the_compound`), two or more fragments are
-organic (a solvate names no winner), or neutralizing would remove or invent a hydride
+organic (a solvate names no winner), the organic fragment is neutral so the ions balance each other
+(LiAlH4 in THF), or neutralizing would remove or invent a hydride
 (`_neutralization_is_protonation`). Alkali salts of
 organic acids (KOtBu, NaOMe, LDA) still collapse onto the acid, as sodium acetate does
 (`D-2026-09-09-a-map-number-is-not-a-molecule`; pinned in `tests/test_compound_identity.py`).
@@ -39,7 +40,7 @@ from chemclaw.core.ids import stable_hash
 # `chemclaw.cli.rekey_compounds` (`make rekey-compounds`) re-fingerprints shelved rows and writes a
 # `supersedes` link from each compound note's new id to its old one, so pre-bump citations still
 # resolve. `tests/test_compound_identity.py` pins what `standardize` does at this version.
-STANDARDIZATION_VERSION = "std13"
+STANDARDIZATION_VERSION = "std14"
 
 # The d- and f-block by atomic number (Sc-Zn, Y-Cd, La-Hg with the lanthanides, Ac onward): the
 # metals a synthesis uses to do the chemistry, so a species containing one is identified as the
@@ -323,11 +324,12 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         # The one organic fragment is the parent, by this module's own `_is_organic`; RDKit's
         # `FragmentParent` counts hydrogens and could pick ammonium over formate.
         #
-        # Each other fragment is discarded only if it is charged (an inorganic ion beside one
-        # organic fragment is its counterion), a solvent RDKit's list knows, or an ionisable neutral
-        # acid the organic fragment could be the salt of. Anything else neutral (H2O2, a co-former)
-        # keeps the string whole. Asked per spectator, so one unrecognised neutral does not preserve
-        # the others.
+        # Each other fragment is discarded only if it is charged and the organic fragment carries
+        # a charge for it to balance (its counterion), a solvent RDKit's list knows, or an
+        # ionisable neutral acid the organic fragment could be the salt of. Ions beside a neutral
+        # organic fragment balance each other: a salt in a solvent, kept whole like a solvate.
+        # Anything else neutral (H2O2, a co-former) keeps the string whole. Asked per spectator,
+        # so one unrecognised neutral does not preserve the others.
         survived = {
             Chem.MolToSmiles(f)
             for f in Chem.GetMolFrags(_KNOWN_SPECTATORS.remove(cleaned), asMols=True)
@@ -335,13 +337,19 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         # One of the ionisable neutral acids is a counterion only beside a fragment that could
         # have taken its proton; beside anything else it is a second component, and stays.
         salt_former = _can_take_the_proton(organic_fragments[0])
+        balances_the_parent = Chem.GetFormalCharge(organic_fragments[0]) != 0
         kept = [organic_fragments[0]] + [
             f
             for f in Chem.GetMolFrags(cleaned, asMols=True)
             if not _is_organic(f)
-            and Chem.GetFormalCharge(f) == 0
-            and Chem.MolToSmiles(f) in survived
-            and not (salt_former and Chem.MolToSmiles(f) in _IONISABLE_NEUTRAL_SPECTATORS)
+            and (
+                (Chem.GetFormalCharge(f) != 0 and not balances_the_parent)
+                or (
+                    Chem.GetFormalCharge(f) == 0
+                    and Chem.MolToSmiles(f) in survived
+                    and not (salt_former and Chem.MolToSmiles(f) in _IONISABLE_NEUTRAL_SPECTATORS)
+                )
+            )
         ]
         # Rebuilt from the kept fragments as one sanitized molecule; the common case (everything
         # else discarded) is the organic fragment itself.

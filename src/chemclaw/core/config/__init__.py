@@ -48,6 +48,7 @@ from chemclaw.core.config.retrieval import (
     NOTE_INDEX_SOURCES,
     RetrievalSettings,
 )
+from chemclaw.core.config.rooms import RoomSettings
 from chemclaw.core.config.service import ServiceSettings
 from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
@@ -78,6 +79,7 @@ __all__ = [
     "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
+    "RoomSettings",
     "ServiceSettings",
     "Settings",
     "SourcesSettings",
@@ -222,6 +224,7 @@ class Settings(
     HypothesisSettings,
     DeliverySettings,
     PublishSettings,
+    RoomSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 
@@ -290,6 +293,26 @@ class Settings(
             )
         )
         return longest
+
+    def socket_budget(self, turns: int | None = None) -> int:
+        """The sockets one process can occupy with `turns` admitted turns, headroom included.
+
+        `service_max_connections` must be at least this (`_guards_that_the_comments_already_demand`
+        refuses a smaller one at startup). Exposed so a caller that varies the turn cap, like the
+        storm's admission sweep, derives the connection limit that goes with it instead of guessing
+        a number the validator then refuses. Defaults to this process's own cap.
+
+        Turns and streams add rather than max: a turn holds its sender's stream plus up to
+        `service_turn_max_watchers` followers, and waiters are charged per process
+        (`turns` x `service_turn_queue_max`).
+        """
+        admitted = self.service_max_concurrent_turns if turns is None else turns
+        return (
+            self.service_max_event_streams_total
+            + admitted * (1 + self.service_turn_max_watchers)
+            + admitted * self.service_turn_queue_max
+            + self.service_connection_headroom
+        )
 
     def _fleet_pool_widths(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(one-connection pools, pg_pool_max_size pools)` on `postgres_dsn`'s server.
@@ -446,18 +469,7 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
-        # A waiting message's poll also refreshes its lease (`agent/session_queue`), so a poll at or
-        # above the lease lapses every ticket between two asks and every queued message ends as
-        # withdrawn.
-        if self.service_turn_queue_poll_seconds >= self.service_turn_claim_lease_seconds:
-            raise ValueError(
-                f"service_turn_queue_poll_seconds ({self.service_turn_queue_poll_seconds:g}) must "
-                "be below service_turn_claim_lease_seconds "
-                f"({self.service_turn_claim_lease_seconds:g}): a waiting message refreshes its "
-                "place in line each time it asks, so at or above the lease every place lapses "
-                "between asks and every queued message reads as withdrawn."
-            )
-        # The same shape for relayed requests to a running turn (`agent/turn_remotes`).
+        # A relayed request to a running turn is refreshed each poll (`agent/turn_remotes`).
         if self.service_turn_relay_poll_seconds >= self.service_turn_relay_lease_seconds:
             raise ValueError(
                 f"service_turn_relay_poll_seconds ({self.service_turn_relay_poll_seconds:g}) must "
@@ -489,11 +501,7 @@ class Settings(
         # enforces.
         per_turn = 1 + self.service_turn_max_watchers
         waiters = self.service_max_concurrent_turns * self.service_turn_queue_max
-        occupied = (
-            self.service_max_event_streams_total
-            + self.service_max_concurrent_turns * per_turn
-            + waiters
-        )
+        occupied = self.socket_budget() - self.service_connection_headroom
         if self.service_max_connections < occupied + self.service_connection_headroom:
             raise ValueError(
                 f"service_max_connections ({self.service_max_connections}) is below what this "

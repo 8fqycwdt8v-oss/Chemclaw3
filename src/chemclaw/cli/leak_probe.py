@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 import tracemalloc
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -204,6 +204,32 @@ def leaks(samples: Sequence[Sample]) -> bool:
     return bool(fit([s.rss_kb for s in samples]).resolved)
 
 
+#: The live lane's configuration (as `infra/live/processes.sh` pins it), by `Settings` field and the
+#: variable that overrides it: mock gateway, durable session store, required connectors. Loopback
+#: host, since `_refuse_unauthenticated_exposure` refuses 0.0.0.0 with `entra_required` off.
+_LANE_SETTINGS: tuple[tuple[str, str, object], ...] = (
+    ("llm_base_url", "CHEMCLAW_LLM_BASE_URL", "http://127.0.0.1:8820/v1"),
+    ("llm_model", "CHEMCLAW_LLM_MODEL", "mock"),
+    ("service_host", "CHEMCLAW_SERVICE_HOST", "127.0.0.1"),
+    ("entra_required", "CHEMCLAW_ENTRA_REQUIRED", False),
+    ("session_store", "CHEMCLAW_SESSION_STORE", "postgres"),
+    ("connectors_required", "CHEMCLAW_CONNECTORS_REQUIRED", True),
+)
+
+
+def _pin_lane_settings(environ: Mapping[str, str]) -> None:
+    """Set each lane value on the built `settings` unless `environ` names its variable.
+
+    Assigned rather than exported: `settings` is built when this module imports
+    `core.logging`, so an environment variable set inside `main` is never read.
+    """
+    from chemclaw.core.config import settings
+
+    for name, variable, value in _LANE_SETTINGS:
+        if variable not in environ:
+            setattr(settings, name, value)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Drive the turns, print the fits, and exit non-zero when RSS growth is resolvable."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -221,18 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     # The configured logging path, so this probe's output is redacted and context-stamped like any
     # process's.
     configure_logging()
-    # The live lane's configuration (as `infra/live/processes.sh` pins it): durable session store,
-    # required connectors, dedicated note checkout. Loopback host, since
-    # `_refuse_unauthenticated_exposure` refuses 0.0.0.0 with `entra_required` off.
-    for key, value in (
-        ("CHEMCLAW_LLM_BASE_URL", "http://127.0.0.1:8820/v1"),
-        ("CHEMCLAW_LLM_MODEL", "mock"),
-        ("CHEMCLAW_SERVICE_HOST", "127.0.0.1"),
-        ("CHEMCLAW_ENTRA_REQUIRED", "false"),
-        ("CHEMCLAW_SESSION_STORE", "postgres"),
-        ("CHEMCLAW_CONNECTORS_REQUIRED", "true"),
-    ):
-        os.environ.setdefault(key, value)
+    _pin_lane_settings(os.environ)
     # URLs come from `connectors_dev.build_composite()` itself, so the probe follows any change to
     # the dev runner. Assigned onto `settings` because the singleton is already built by the time
     # the URLs exist.

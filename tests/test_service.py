@@ -1297,13 +1297,20 @@ class _SharedTurnClaims:
             del self.holders[session_id]
 
 
-async def test_a_turn_running_on_another_worker_is_waited_for_not_run_beside() -> None:
+async def test_a_turn_running_on_another_worker_is_waited_for_not_run_beside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A turn already claimed by another process is waited for here, not admitted a second time.
 
     The front door runs several replicas, so the durable claim row is the only trace of the
     sibling's turn; seeding it stands in for the other worker. The message waits in the session's
-    line and runs only once that claim is released, without disturbing it.
+    line and runs only once that claim is released, without disturbing it. The seeded release
+    notifies nobody (the durable release does, `tests/test_turn_any_replica.py`), so the waiter's
+    fallback ask is shortened to find it.
     """
+    from chemclaw.api.routes import turns as turns_module
+
+    monkeypatch.setattr(turns_module, "idle_poll_seconds", lambda: 0.05)
     claims = _SharedTurnClaims()
     app = _app(owner_store=_FakeOwnerStore(), turn_claims=claims)
     async with asgi_client(app) as client:
@@ -2435,23 +2442,3 @@ def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() 
     message = str(excinfo.value)
     assert "service_max_connections" in message and "service_max_event_streams_total" in message
     assert "/healthz" in message
-
-
-def test_a_line_whose_poll_outlasts_its_lease_is_refused_at_startup() -> None:
-    """A waiter refreshes its place each time it asks, so a poll at or above the lease is refused.
-
-    Asked less often than the lease, every place lapses between asks and every queued message
-    reads as withdrawn without anybody withdrawing it (#503).
-    """
-    from chemclaw.core.config import Settings
-
-    assert settings.service_turn_queue_poll_seconds < settings.service_turn_claim_lease_seconds
-    with pytest.raises(ValueError) as excinfo:
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            service_turn_queue_poll_seconds=60.0,
-            service_turn_claim_lease_seconds=60.0,
-        )
-    message = str(excinfo.value)
-    assert "service_turn_queue_poll_seconds" in message
-    assert "service_turn_claim_lease_seconds" in message

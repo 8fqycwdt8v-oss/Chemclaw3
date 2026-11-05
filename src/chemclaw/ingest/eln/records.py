@@ -172,6 +172,13 @@ _SELECT_WITHHELD = (
     "WHERE reaction_id = ANY(%s) AND (retracted_at IS NOT NULL OR tier <> 'structured')"
 )
 
+# Which of a page of candidate ids a structure search may serve: held, structured and current. The
+# complement of `_SELECT_WITHHELD` plus the ids with no row at all.
+_SELECT_SERVABLE = (
+    "SELECT ingest_source, reaction_id FROM reaction_records "
+    "WHERE reaction_id = ANY(%s) AND retracted_at IS NULL AND tier = 'structured'"
+)
+
 _SELECT_BODIES = (
     "SELECT reaction_id, body FROM reaction_records "
     "WHERE ingest_source = %s AND reaction_id = ANY(%s)"
@@ -355,8 +362,7 @@ class ReactionRecordStore(Protocol):
     async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn.
 
-        Separate from `eligible`, which drops hits with no stored record; an unfiltered sweep must
-        keep those, so it asks only for the positive set of withdrawals. Per source, since
+        The positive set of withdrawals only, which is what the ELN sync asks. Per source, since
         `reaction_fingerprints` keys by source and one site's withdrawal must not drop another's
         run. An empty source matches any.
         """
@@ -368,6 +374,14 @@ class ReactionRecordStore(Protocol):
         `retracted` plus one clause, covering an entry amended from structured to citation-only
         whose old fingerprint row cannot be deleted. `retracted` stays separate because the sync
         asks only about withdrawal. An empty source matches any.
+        """
+        ...
+
+    async def servable(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` a cited structure hit may stand on: held, structured and not withdrawn.
+
+        Unlike `structurally_withheld`, a ref with no record is not servable: evidence citing it
+        would name a `reaction-` id `expand_note` refuses. An empty source matches any.
         """
         ...
 
@@ -451,6 +465,15 @@ class InMemoryReactionRecordStore:
             if record.retracted_at is not None or record.tier is not RecordTier.STRUCTURED
         }
         return _pair_off(refs, withheld)
+
+    async def servable(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` are held, structured and current; an empty source matches any."""
+        servable = {
+            key
+            for key, record in self._records.items()
+            if record.retracted_at is None and record.tier is RecordTier.STRUCTURED
+        }
+        return _pair_off(refs, servable)
 
     async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
         """The non-withdrawn citation-only records, and which list a spelling of `query`."""
@@ -613,6 +636,16 @@ class PostgresReactionRecordStore:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_WITHHELD, ([reaction_id for _, reaction_id in refs],))
+                rows = await cur.fetchall()
+        return _pair_off(refs, {(row[0], row[1]) for row in rows})
+
+    async def servable(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` are held, structured and current; an empty source matches any."""
+        if not refs:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_SERVABLE, ([reaction_id for _, reaction_id in refs],))
                 rows = await cur.fetchall()
         return _pair_off(refs, {(row[0], row[1]) for row in rows})
 

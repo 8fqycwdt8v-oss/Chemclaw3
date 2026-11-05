@@ -617,7 +617,6 @@ def test_a_stopped_turns_settle_lands_before_the_message_behind_it_runs(
         await real_finish(self, *args, **kwargs)
 
     monkeypatch.setattr(PostgresHistoryProvider, "finish_turn", _slow_finish)
-    monkeypatch.setattr(settings, "service_turn_queue_poll_seconds", 0.05)
 
     async def _reauthorized(request: Any, principal: Principal) -> Principal:
         return principal

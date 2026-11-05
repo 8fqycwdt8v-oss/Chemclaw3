@@ -39,6 +39,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | `templates/` | — | Step templates: the manifest, registry and resolver. |
 | `evals/` | — | The eval harness and metrics. |
 | `operations/` | — | The read-only operational model over what the system did: tool use, job runs, knowledge writes and spend. Counts and identifiers only. |
+| `rooms/` | 1 | A chat room as a surface of a shared session: the Teams bridge, a client of the front door's public routes that posts each message on its sender's own Entra on-behalf-of token and relays the queue and the answer back. Off until `CHEMCLAW_TEAMS_BRIDGE_ENABLED`; serves no tool and adds nothing the model reads. |
 | `deliver/` | — | The outbound delivery seam to a person (digests, reports, escalations), off until `CHEMCLAW_DELIVERY_CHANNELS` names a channel. Every message is redacted in the registry. |
 | `publish/` | — | The outbound result seam: computed values projected into typed records and delivered to a database this system does not own, off until `CHEMCLAW_RESULT_SINKS` names a sink. |
 | `cli/` | — | Every terminal entrypoint: `chat` and the validators and verifiers `make` invokes. |
@@ -49,7 +50,7 @@ Their concerns never merge; `tests/test_layering.py` enforces the import directi
 | --- | --- |
 | `knowledge/` | Layer 4's data: Markdown notes with frontmatter, one directory per note type. |
 | `skills/` | Layer 3: the global `SKILL.md` files not tied to one connector. |
-| `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/`, `templates/`, `profiles/`, `vendored/`, `eln-exports/`, `commitments/`. `data/README.md` names each setting. |
+| `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/`, `templates/`, `profiles/`, `vendored/`, `eln-exports/`, `commitments/`, `access/`. `data/README.md` names each setting. |
 | `tests/` | The suite, including the guards on declarations: packaging, the image, the Helm chart, the ADR ledger and the layering rules. |
 | `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations for this system's own database. |
 | `schema/` | Contracts this system publishes rather than runs. `result-store/`: schemas for databases it does **not** own, kept apart from `infra/sql/` because nothing here holds DDL on those stores. `api/`: the generated OpenAPI document the UI builds its types from, with its version rules. `model-text/`: the generated inventory of every string a model reads. |

@@ -189,7 +189,8 @@ class CalculatorSettings(BaseSettings):
     # Bound for calculations pinned to the `xtb` binary (`compute_atomic_descriptors`,
     # `compute_surface_potential`, or any once the server's engine is set to it), matched to the
     # server's `xtb_cli_timeout_seconds`. A shorter bound is a retryable abandonment that starts a
-    # duplicate run beside the orphaned one.
+    # duplicate run beside the orphaned one. The inline tools lower it to the `calc` endpoint's own
+    # `request_timeout` (`connectors/calc/server/tools.py::_within_the_hop`), which cancels them.
     calc_atomic_timeout_seconds: float = Field(default=3600.0, gt=0)
     # How long a pod's claim on a calculation miss survives without a heartbeat. This is how fast a
     # waiter notices that the pod computing a result was killed (takeover = lease + one poll), so

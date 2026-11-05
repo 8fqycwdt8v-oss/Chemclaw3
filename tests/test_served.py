@@ -6,6 +6,7 @@ included (uvicorn exits both with `sys.exit(3)`, which a thread drops silently).
 """
 
 import asyncio
+import logging
 import socket
 import threading
 from collections.abc import AsyncIterator
@@ -97,3 +98,31 @@ def test_a_port_is_held_from_construction_so_nothing_can_take_it_before_the_list
         intruder.bind(("127.0.0.1", server.port))
     with server:
         assert httpx.get(f"http://127.0.0.1:{server.port}/ping").status_code == 200
+
+
+@pytest.mark.parametrize("lifespan_raises", [False, True])
+def test_a_server_leaves_the_uvicorn_loggers_as_it_found_them(lifespan_raises: bool) -> None:
+    """After the test, uvicorn's loggers propagate to the root again, with their handlers back.
+
+    `uvicorn.Config` rewrites them with `dictConfig`; left so, a later test's `caplog` never sees
+    a uvicorn record. Both exits: a server that served, and one whose start failed.
+    """
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+    def _state() -> list[tuple[list[logging.Handler], bool, int, bool]]:
+        loggers = [logging.getLogger(name) for name in names]
+        return [(list(lg.handlers), lg.propagate, lg.level, lg.disabled) for lg in loggers]
+
+    async def _raise() -> None:
+        raise RuntimeError("lifespan failed")
+
+    before = _state()
+    server = ServerThread(_app(_raise if lifespan_raises else None))
+    assert _state() != before, "uvicorn no longer rewrites its loggers, so this asserts nothing"
+    if lifespan_raises:
+        with pytest.raises(RuntimeError):
+            server.__enter__()
+    else:
+        with server:
+            pass
+    assert _state() == before

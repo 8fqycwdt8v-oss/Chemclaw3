@@ -6,6 +6,7 @@ per-file schema can make:
 
 - a job that cannot be built (an unresolvable `params_model`);
 - an `inline_wait_seconds` at or beyond the deployment's turn timeout;
+- a `request_timeout` that would race the turn's deadline;
 - a `connector_urls` key naming no bundle, which would fall back to an unreachable dev default.
 """
 
@@ -19,6 +20,7 @@ from chemclaw.cli.validate_connectors import (
     _connector_urls_problems,
     _job_problems,
     _orphan_content_problems,
+    _request_timeout_problems,
 )
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.core.config import settings
@@ -70,6 +72,32 @@ def test_a_wait_comfortably_inside_the_turn_is_accepted() -> None:
 def test_a_job_with_no_inline_budget_is_not_checked_against_the_turn() -> None:
     """`inline_wait_seconds` is opt-in: a plain durable job never waits, so nothing to bound."""
     assert _job_problems(_manifest()) == []
+
+
+def test_a_request_timeout_that_races_the_turn_is_refused_and_clamped() -> None:
+    """A `request_timeout` at the turn timeout is refused here and never granted at run time.
+
+    Whichever deadline fires first is a race, so the call's recoverable timeout error might never
+    reach the model. The registry clamps it to the ceiling as well, for a deployment that lowers
+    the turn timeout after validation.
+    """
+    from chemclaw.connectors.registry import request_timeout_ceiling, request_timeout_seconds
+
+    turn = int(settings.service_turn_timeout_seconds)
+    racing = ConnectorManifest.model_validate(
+        {**_MANIFEST, "endpoint": {**_MANIFEST["endpoint"], "request_timeout": turn}}  # type: ignore[dict-item]
+    )
+    assert any("race the turn" in problem for problem in _request_timeout_problems(racing))
+    assert racing.endpoint is not None
+    granted = request_timeout_seconds(racing.endpoint)
+    assert granted == request_timeout_ceiling() < settings.service_turn_timeout_seconds
+
+    inside = ConnectorManifest.model_validate(
+        {**_MANIFEST, "endpoint": {**_MANIFEST["endpoint"], "request_timeout": 30}}  # type: ignore[dict-item]
+    )
+    assert _request_timeout_problems(inside) == []
+    assert inside.endpoint is not None
+    assert request_timeout_seconds(inside.endpoint) == 30
 
 
 def test_the_shipped_bundles_pass_their_own_gate() -> None:

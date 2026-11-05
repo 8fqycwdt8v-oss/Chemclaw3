@@ -413,16 +413,46 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
     return True
 
 
-#: Computations in flight by key, per event loop (an `asyncio.Future` belongs to one): a second
-#: miss in the process awaits the first. Across processes the claim table coordinates
-#: (`science/calc/flight.py`).
+@runtime_checkable
+class FlightScoped(Protocol):
+    """A result store built per call that names where its rows live, so equal stores share a flight.
+
+    Without it a store's flight scope is the object itself: right for a store held by its caller,
+    and too narrow for one constructed per call, which would never meet its own concurrent miss.
+    """
+
+    def flight_scope(self) -> str:
+        """A value equal for every instance persisting to the same place, and only for those."""
+        ...
+
+
+#: Computations in flight by store scope and key, per event loop (an `asyncio.Future` belongs to
+#: one): a second miss in the process on the same store awaits the first. Scoped by store, because
+#: a waiter joining another store's computation would get the answer while its own store never
+#: gets the row. Across processes the claim table coordinates (`science/calc/flight.py`).
 _Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
-_IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
+_IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, dict[object, _Ledger]]" = (
+    WeakKeyDictionary()
+)
 
 
-def _in_flight() -> _Ledger:
-    """This loop's slice of the single-flight ledger, created on first use."""
-    return _IN_FLIGHT.setdefault(asyncio.get_running_loop(), {})
+def _in_flight(store: "ResultStore") -> _Ledger:
+    """This loop's slice of the single-flight ledger for `store`, created on first use.
+
+    An emptied slice is dropped by `_left_flight`, so per-object scopes do not accumulate.
+    """
+    scope: object = store.flight_scope() if isinstance(store, FlightScoped) else id(store)
+    return _IN_FLIGHT.setdefault(asyncio.get_running_loop(), {}).setdefault(scope, {})
+
+
+def _left_flight(store: "ResultStore", slot: str) -> None:
+    """Clear `slot` from `store`'s slice of the ledger, and the slice itself once it is empty."""
+    scope: object = store.flight_scope() if isinstance(store, FlightScoped) else id(store)
+    scopes = _IN_FLIGHT.get(asyncio.get_running_loop(), {})
+    ledger = scopes.get(scope, {})
+    ledger.pop(slot, None)
+    if not ledger:
+        scopes.pop(scope, None)
 
 
 async def cached_compute(
@@ -469,11 +499,19 @@ async def cached_compute(
         logger.debug("calc cache hit: %s", key.as_str())
         record_metric(lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "hit"}))
         _credit_saved_seconds(hit.compute_seconds)
+        # A hit is another requester asking the same question: offered so the record names them
+        # too (the outbox adds a publication it does not hold, and drops a repeat).
+        await publish_stored_result(
+            key,
+            hit.result,
+            compute_seconds=hit.compute_seconds,
+            structure_id=hit.structure_id or structure_id,
+        )
         return hit.result, True
     slot = key.as_str()
     ledger = store.claims() if isinstance(store, ClaimsProvider) else None
     budget = wait_budget(wait_seconds)
-    in_flight = _in_flight()
+    in_flight = _in_flight(store)
     waiting = in_flight.get(slot)
     if waiting is not None:
         logger.debug("calc cache miss already computing elsewhere, awaiting: %s", slot)
@@ -485,6 +523,7 @@ async def cached_compute(
         # Credited once the joined computation finishes and its cost is known; never if it was
         # cancelled.
         _credit_saved_seconds(saved)
+        await publish_stored_result(key, result, compute_seconds=saved, structure_id=structure_id)
         return result, True
     # The future carries the computation's wall clock, which waiters need to credit what their join
     # saved.
@@ -500,9 +539,9 @@ async def cached_compute(
         started = time.perf_counter()
         result = checked_payload(key, await compute())
         elapsed = time.perf_counter() - started
-        # Offered before it is persisted, on misses only: a crash between the two then costs one
-        # recompute (the outbox de-duplicates), whereas persist-first would make every later call a
-        # hit that never publishes.
+        # Offered before it is persisted: a crash between the two then costs one recompute (the
+        # outbox de-duplicates), whereas persist-first would leave the record unpublished until a
+        # later hit or the backfill offered it.
         await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
         try:
             await store.put(
@@ -540,6 +579,9 @@ async def cached_compute(
                     lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "shared"})
                 )
                 _credit_saved_seconds(elapsed)
+                await publish_stored_result(
+                    key, result, compute_seconds=elapsed, structure_id=structure_id
+                )
         else:
             result, elapsed = await _produce()
             computed = True
@@ -553,7 +595,7 @@ async def cached_compute(
             future.exception()
         raise
     finally:
-        in_flight.pop(slot, None)
+        _left_flight(store, slot)
 
 
 async def _join(
@@ -603,10 +645,12 @@ async def publish_stored_result(
     structure_id: str = "",
     payload_kind: str = "",
 ) -> None:
-    """Offer a just-persisted primitive to the external results store, if one is configured.
+    """Offer a primitive to the external results store, if one is configured, for this caller.
 
-    Public so writers that bypass the cache can call it, before their `put`. Imported lazily
-    (layering, and no projection machinery without a sink). Never raises.
+    Called on a miss, a hit and a joined computation, so the record names every requester (the
+    outbox's `_ENQUEUE` adds a publication it does not hold). Public so writers that bypass the
+    cache can call it, before their `put`. Imported lazily (layering, and no projection machinery
+    without a sink). Never raises.
     """
     from chemclaw.publish.outbox import enqueue_payload
 

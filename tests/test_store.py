@@ -197,6 +197,56 @@ def test_concurrent_misses_on_one_key_share_one_computation() -> None:
     )
 
 
+def test_a_miss_on_another_store_does_not_join_this_stores_computation() -> None:
+    """Two stores missing one key compute separately, and each ends up holding the row.
+
+    Joining the other store's future would hand back the answer while this store never stores it.
+    Two `PostgresStore`s on one DSN do share, since they persist to the same table, which is what
+    `FlightScoped` says; the in-process ledger is left empty either way.
+    """
+    from chemclaw.science.calc.postgres_store import PostgresStore
+
+    release = asyncio.Event()
+    computes = 0
+
+    async def compute() -> dict[str, int]:
+        nonlocal computes
+        computes += 1
+        await release.wait()
+        return {"energy": 7}
+
+    async def _run() -> tuple[InMemoryStore, InMemoryStore]:
+        first, second = InMemoryStore(), InMemoryStore()
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+        tasks = [
+            asyncio.create_task(cached_compute(store, key, compute)) for store in (first, second)
+        ]
+        await asyncio.sleep(0)
+        assert computes == 2, "the second store joined the first store's computation"
+        release.set()
+        outcomes = await asyncio.gather(*tasks)
+        assert [cached for _, cached in outcomes] == [False, False]
+        assert await first.get(key) is not None and await second.get(key) is not None
+        assert not store_module._IN_FLIGHT.get(asyncio.get_running_loop()), "a slice was left"
+        return first, second
+
+    asyncio.run(_run())
+    assert (
+        PostgresStore("postgresql://a/x").flight_scope()
+        == PostgresStore("postgresql://a/x").flight_scope()
+    )
+    assert (
+        PostgresStore("postgresql://a/x").flight_scope()
+        != PostgresStore("postgresql://a/y").flight_scope()
+    )
+    # The array-offloading wrapper is built per call (`compose.py`), so equal wrappers must share.
+    from chemclaw.science.calc.artifacts import ArrayOffloadingStore, InMemoryArtifactStore
+
+    inner = InMemoryStore()
+    wrapped = [ArrayOffloadingStore(inner, InMemoryArtifactStore(), {}) for _ in range(2)]
+    assert wrapped[0].flight_scope() == wrapped[1].flight_scope()
+
+
 def test_a_second_event_loop_computes_rather_than_awaiting_the_first_loops_future() -> None:
     """A second event loop computes rather than awaiting the first loop's future.
 

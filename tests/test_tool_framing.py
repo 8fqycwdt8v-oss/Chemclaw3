@@ -27,10 +27,9 @@ from langchain_core.messages import ToolMessage
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict
 
-from chemclaw.agent.audit import EMPTY, AuditEvent, AuditSink, NullAuditSink, make_audit_middleware
+from chemclaw.agent.audit import EMPTY, AuditEvent, AuditSink, NullAuditSink
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK, envelope_delimiters
-from chemclaw.agent.langgraph_agent import build_langgraph_agent, tool_call_middleware
-from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.tool_framing import defanged_payload, frame_connector_results
 from chemclaw.agent.tool_result_shape import empty_result_notice, returned_nothing
 from chemclaw.agent.tool_result_size import bound_tool_results
@@ -395,19 +394,36 @@ def test_an_in_process_result_is_not_framed_a_second_time(monkeypatch: pytest.Mo
     assert contents[0].count(f"<{ENVELOPE_TAG} ") == 1, contents[0]
 
 
-def test_the_framer_sits_inside_the_converters_and_outside_the_trail() -> None:
-    """The framer sits inside the converters and outside the audit trail.
+def test_the_framer_sits_outside_the_trail(probe: int) -> None:
+    """The audit trail records what the tool returned; only the model reads the envelope.
 
-    Inside the converters, so a refusal this system composed is not wrapped as third-party data;
-    outside `audit` and `announce_tool_failures`, which record the tool's own result.
-    `tests/test_middleware_order.py` pins the compiled order.
+    Driven through a compiled graph and a live connector, so it is the composed order that is
+    asserted: a framer inside `audit` would put the envelope into the audit row.
     """
-    audit = make_audit_middleware(correlation_id="c", actor="a", sink=NullAuditSink())
-    chain = tool_call_middleware(audit, get_profile(None))
-    names = [getattr(entry, "name", type(entry).__name__) for entry in chain]
-    assert names.index("surface_domain_errors") < names.index("frame_connector_results")
-    assert names.index("frame_connector_results") < names.index("announce_tool_failures")
-    assert names.index("frame_connector_results") < names.index("audit_tool_calls")
+    trail = _Trail()
+    message = _connector_turn(probe, "echo", {"text": "toluene, 80 C"}, audit_sink=trail)
+    assert _unwrapped(_text_spans(message.content)[0]) == "toluene, 80 C"
+    (row,) = [event for event in trail.events if event.tool == "echo"]
+    assert row.outcome == "ok"
+    assert "toluene, 80 C" in row.detail
+    assert ENVELOPE_TAG not in row.detail, "the audit trail recorded the model's framing"
+
+
+def test_a_refusal_this_system_composed_is_not_framed_as_connector_data(
+    probe: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate's refusal of a connector call reaches the model unframed.
+
+    The converters sit outside the framer, so the refusal they compose is this system's speech,
+    not third-party data to cite. A framer outside them would envelope it, since the call is still
+    a connector's.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_authz_default", "deny")
+    message = _connector_turn(probe, "echo", {"text": "toluene, 80 C"})
+    text = "".join(_text_spans(message.content))
+    assert "not authorized" in text, text
+    assert ENVELOPE_TAG not in text, "a refusal this system wrote was framed as connector data"
 
 
 #: The two payload shapes the second bounding pass treats differently. An inert payload never

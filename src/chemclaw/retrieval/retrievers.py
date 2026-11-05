@@ -307,10 +307,11 @@ class ReactionMetadata(Protocol):
         """Which of `reaction_ids` pass `filters` and are current."""
         ...
 
-    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
-        """Which of `refs` — `(ingest_source, reaction_id)` — no structure search may serve.
+    async def servable(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — a cited structure hit may stand on.
 
-        Withdrawn by the source, or citation-only (a record naming a species without its structure).
+        Held, structured and not withdrawn: a fingerprint whose record write has not landed would
+        cite an id `expand_note` refuses.
         """
         ...
 
@@ -335,7 +336,7 @@ class FingerprintReactionRetriever:
         Only `FingerprintInputError` (not a reaction SMILES) yields empty; an index that refuses the
         search surfaces in the sweep's `sources_failed`. `type`/`tag`/`since`/`until` are applied by
         searching deeper, filtering through the records' eligibility gate, then truncating.
-        Withdrawn and citation-only records are dropped on both paths (`structurally_withheld`).
+        Withdrawn, citation-only and unrecorded hits are dropped on both paths (`servable`).
         """
         wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
         page = settings.fingerprint_top_k
@@ -353,9 +354,8 @@ class FingerprintReactionRetriever:
             matches = await self._eligible(matches, wanted, page)
         # On both paths: `eligible` answers a filter, this answers whether a hit may be served at
         # all.
-        asked = [(match.source, match.id) for match in matches]
-        withheld = await self._records.structurally_withheld(asked)
-        matches = [match for match in matches if (match.source, match.id) not in withheld]
+        servable = await self._records.servable([(match.source, match.id) for match in matches])
+        matches = [match for match in matches if (match.source, match.id) in servable]
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",

@@ -23,6 +23,7 @@ from fastapi import FastAPI
 
 from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
 from chemclaw.connectors.registry import enabled
+from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
 
@@ -102,7 +103,9 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
                 await stack.enter_async_context(app.router.lifespan_context(app))
             yield
 
-    composite = FastAPI(title="chemclaw-connectors-dev", lifespan=lifespan)
+    composite = FastAPI(
+        title="chemclaw-connectors-dev", lifespan=lifespan, telemetry=NO_FRAMEWORK_TELEMETRY
+    )
     for manifest in enabled():
         app = _local_app(manifest.name)
         if app is None:

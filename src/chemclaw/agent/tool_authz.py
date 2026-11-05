@@ -27,6 +27,7 @@ from chemclaw.agent.authz import (
 )
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.refusal_route import routed, sentence_of
+from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -200,8 +201,9 @@ def answered_failure(message: ToolMessage) -> ToolMessage:
     In-process and job tools fail by raising, and the converters answer with `_refusal_message`,
     which deliberately avoids `status="error"` (Anthropic's `is_error`, an invitation to retry). An
     MCP tool never raises: the adapter returns `ToolMessage(status="error")`. This clears that flag
-    so connector refusals read the same way. The server's words are kept verbatim; they are already
-    sanitized by `connectors/server.py`.
+    so connector refusals read the same way. The server's words are kept verbatim: whatever server
+    wrote them, `agent/tool_framing.py` defangs and bounds them before the model reads them, and
+    only a bundle served through `connectors/server.py` has also had its exceptions sanitized.
 
     Only what the model reads changes: the audit trail and `announce_tool_failures` run inside this
     converter and have already recorded the failure, which is why the flag is not cleared lower, at
@@ -282,7 +284,7 @@ def _refusal_message(request: Any, text: str, *, marked: bool = False) -> ToolMe
 @wrap_tool_call
 async def enforce_tool_authz(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Block a tool call the turn's user is not authorized for, else run it unchanged."""
-    authorize_tool(request.tool_call["name"])
+    authorize_tool(request.tool_call["name"], request.tool_call.get("args") or {})
     return await handler(request)
 
 
@@ -419,8 +421,13 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
             return _refusal_message(request, transport_error_result(request.tool_call["name"], exc))
         logger.exception("tool %s raised an unhandled error", request.tool_call["name"])
         return _refusal_message(request, unexpected_error_result())
-    failed = returned_failure(result)
-    return result if failed is None else answered_failure(failed)
+    if returned_failure(result) is None:
+        return result
+    # Rewritten in place, so a failure carried inside a `Command` keeps the command's other
+    # channels (a helper's spend) instead of being replaced by the bare message.
+    return rewritten_tool_messages(
+        result, lambda message: answered_failure(message) if message.status == "error" else message
+    )
 
 
 @wrap_tool_call

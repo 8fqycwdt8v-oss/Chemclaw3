@@ -2,7 +2,7 @@
 
 `BYTEA` over `artifact_blobs` + `calculation_artifacts` (`infra/sql/019_artifact_store.sql`):
 artifacts are at most a few megabytes and Postgres is the durable store already present. A write
-inserts the blob by content address and upserts the link.
+inserts the blob by content address (or refreshes its access stamp) and upserts the link.
 """
 
 import logging
@@ -20,12 +20,14 @@ from chemclaw.science.calc.artifacts import (
 
 logger = logging.getLogger(__name__)
 
-# Keyed by content address, so identical bytes are stored once; `DO NOTHING` because the address
-# *is* the content.
+# Keyed by content address, so identical bytes are stored once and never rewritten (the address
+# *is* the content). Writing them again is a use: the access stamp moves, so an idle blob a new
+# calculation has just linked to is not evicted with that link, and an eviction `DELETE` racing
+# this statement re-checks its idle predicate against the new stamp.
 _INSERT_BLOB = """
     INSERT INTO artifact_blobs (content_hash, codec, byte_size, stored_bytes, data)
     VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT ON CONSTRAINT artifact_blobs_pkey DO NOTHING
+    ON CONFLICT ON CONSTRAINT artifact_blobs_pkey DO UPDATE SET last_access_at = now()
 """
 
 _UPSERT_LINK = """

@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.store.memory import InMemoryStore
 from temporalio.service import RPCError, RPCStatusCode
 
+from chemclaw.agent import subscriptions
 from chemclaw.agent.behaviour_proposals import PostgresProposalStore, Proposal, content_hash
 from chemclaw.agent.session_events import record_session_event
 from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
@@ -87,6 +88,7 @@ class Ids:
     org_skill: str = "acme-house-skill"
     org_hash: str = "h"
     calc_ref: str = "acme-key#geometry.xyz"
+    watch: str = "0"
 
 
 @dataclass(frozen=True)
@@ -441,6 +443,16 @@ def _probes(ids: Ids) -> list[Probe]:
             kwargs={"json": {"fingerprint": ids.fingerprint}},
         ),
         Probe(("DELETE", "/workflows/{name}"), f"/workflows/{ids.workflow}", 204, last=True),
+        # --- standing queries ----------------------------------------------------------------
+        Probe(
+            ("GET", "/watches"),
+            "/watches",
+            200,
+            (200,),
+            own_contains=MARKER,
+            foreign_excludes=MARKER,
+        ),
+        Probe(("DELETE", "/watches/{watch_id}"), f"/watches/{ids.watch}", 204, last=True),
     ]
 
 
@@ -613,6 +625,9 @@ async def _seed(world: World, monkeypatch: pytest.MonkeyPatch, skills: InMemoryS
                 owner=PERSON, name=ids.workflow, summary=f"{MARKER} routine", document=document
             )
         )
+        await subscriptions.add(PERSON, f"{MARKER} watch", None)
+        (watch,) = await subscriptions.for_owner(PERSON)
+        ids.watch = str(watch.id)
     return ids
 
 

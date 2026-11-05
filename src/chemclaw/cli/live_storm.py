@@ -884,6 +884,21 @@ async def family_h_edges() -> list[Finding]:
     return findings
 
 
+def admission_env(cap: int) -> dict[str, str]:
+    """The front door's environment for one admission cap: the cap, and the sockets it needs.
+
+    A cap above what `service_max_connections` was sized for makes `Settings` refuse to load, and
+    the restart that carried it then left the lane without a front door. The connection limit goes
+    with the cap, derived from the same formula the validator uses (`Settings.socket_budget`).
+    """
+    return {
+        "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap),
+        "CHEMCLAW_SERVICE_MAX_CONNECTIONS": str(
+            max(settings.service_max_connections, settings.socket_budget(cap))
+        ),
+    }
+
+
 async def family_a_admission(
     *, sweep_turns: int, offered: int, repeats: int
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
@@ -907,11 +922,7 @@ async def family_a_admission(
             p50 = p95 = 0.0
             for _ in range(max(repeats, 1)):
                 await asyncio.to_thread(
-                    _lane,
-                    "processes.sh",
-                    "restart",
-                    "api",
-                    env={"CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS": str(cap)},
+                    _lane, "processes.sh", "restart", "api", env=admission_env(cap)
                 )
                 started = time.monotonic()
                 results = await storm("a-cheap", turns=sweep_turns, concurrency=offered)
@@ -1207,6 +1218,24 @@ async def run_storm(
     return findings, sweep
 
 
+def planned_families(text: str) -> list[str]:
+    """The family letters `--families` names, in the order given and each once.
+
+    Commas and whitespace separate letters (`D,H`, `D H` and `DH` are the same request); any other
+    character that is not a family is refused, so a typo cannot quietly shrink the run.
+
+    Raises:
+        ValueError: `text` names a family that does not exist, or none at all.
+    """
+    letters = [c for c in text.upper() if c != "," and not c.isspace()]
+    unknown = sorted(set(letters) - set(FAMILIES))
+    if unknown:
+        raise ValueError(f"unknown families {unknown}; known: {sorted(FAMILIES)}")
+    if not letters:
+        raise ValueError(f"no family named; known: {sorted(FAMILIES)}")
+    return list(dict.fromkeys(letters))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the storm and write its report; exit non-zero if a check failed *or* a family did not.
 
@@ -1230,10 +1259,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=Path(".live/storm.md"))
     args = parser.parse_args(argv)
 
-    planned = [letter for letter in args.families.upper() if letter in FAMILIES]
-    unknown = sorted(set(args.families.upper()) - set(FAMILIES))
-    if unknown:
-        parser.error(f"unknown families {unknown}; known: {sorted(FAMILIES)}")
+    try:
+        planned = planned_families(args.families)
+    except ValueError as refusal:
+        parser.error(str(refusal))
 
     configure_logging()
 

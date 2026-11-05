@@ -28,6 +28,7 @@ from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_i
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.model_prose import ModelProse
+from chemclaw.core.quantities import labelled_values
 from chemclaw.kg.note import cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.harness import Claim, groundable_ids, verify_claims
@@ -491,7 +492,10 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
         One `"<shape class>: <the matched text>"` per class that fired, in table order. Empty when
         the answer states no ungrounded shape.
     """
-    seen = "\n".join(tool_outputs)
+    # The text the tools returned, plus each structured number rendered beside its own unit: a tool
+    # that files `{"value": 6.0, "unit": "mg/day"}` has produced "6 mg/day" as much as one that
+    # prints it, and the patterns below look for the printed form.
+    seen = "\n".join([*tool_outputs, *_stated_with_unit(tool_outputs)])
     found: list[str] = []
     for name, pattern in _PARAMETER_SHAPES.items():
         match = pattern.search(answer)
@@ -499,6 +503,16 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
             continue
         found.append(f"{name}: {match.group(0).strip()}")
     return found
+
+
+def _stated_with_unit(tool_outputs: Sequence[str]) -> list[str]:
+    """`"6 mg/day"` for every number a structured tool result files under a unit of its own."""
+    return [
+        f"{quantity.value:g} {quantity.unit}"
+        for output in tool_outputs
+        for quantity in labelled_values(output)
+        if quantity.unit
+    ]
 
 
 def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[str]:

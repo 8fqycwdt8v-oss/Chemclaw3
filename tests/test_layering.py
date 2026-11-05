@@ -215,7 +215,7 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ),
     ("chemclaw.spend", "chemclaw.agent"): (
         "the per-turn guard is a middleware over `agent.state.ChemclawState` and its wrap-up note "
-        "is an `agent.compaction.request_note`; the usage ledger charges the prefix "
+        "is an `agent.compaction.system_note`; the usage ledger charges the prefix "
         "`agent.context_budget` measures"
     ),
     ("chemclaw.agent", "chemclaw.spend"): (
@@ -386,6 +386,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `Measurement`s the tier takes.
     ("chemclaw.agent", "chemclaw.analytical"),
     ("chemclaw.publish", "chemclaw.core"),
+    # The Teams room bridge is a client of the front door's public routes over HTTP: a leaf on the
+    # kernel (config, the HTTP facts), importing neither `api` nor `agent`, so a message cannot
+    # reach the turn by any path but a token the front door validates.
+    ("chemclaw.rooms", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
     ("chemclaw.cli", "chemclaw.publish"),
@@ -411,6 +415,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # `_ALLOWED_MODULE_EDGES`. Exactly one originates in `chemclaw.core` (the connector registry);
 # `test_core_has_one_lazy_exception_and_the_dict_says_which` holds that.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.api", "chemclaw.ingest"): (
+        "`access_check` asks the data-source registry which sources exist, once at startup, to "
+        "refuse an access policy naming one that does not. Lazy because the front door otherwise "
+        "never imports the ingest package"
+    ),
     ("chemclaw.hypotheses", "chemclaw.core"): (
         "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
         "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "

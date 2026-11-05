@@ -6,12 +6,13 @@
 
 With tenancy enabled the outbox rows are a tenant's: `--tenant <id>` or `--all-tenants`, and with
 neither the command refuses. Idempotent (the outbox's identity index) and safe while live. Rows with
-no projector are skipped; rows a projector cannot read are reported separately, since they need a
-code change. `--dry-run` projects too, so its counts match.
+no projector, or from a superseded calculation epoch, are skipped; rows a projector cannot read are
+reported separately, since they need a code change. `--dry-run` projects too, so its counts match.
 """
 
 import argparse
 import asyncio
+import functools
 import logging
 
 from chemclaw.core.logging import configure_logging
@@ -19,6 +20,7 @@ from chemclaw.core.tenancy import TenantError
 from chemclaw.core.tenant_cli import add_tenant_flags, for_chosen_tenants, refusal
 from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
 from chemclaw.publish.registry import publishing_enabled
+from chemclaw.science.calc.store import CALCULATION_EPOCH
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +43,16 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
     total_queued = total_failed = 0
-    for label, walk in (("calculation cache", backfill_cached), ("job records", backfill_jobs)):
+    cached = functools.partial(backfill_cached, current_epoch=CALCULATION_EPOCH)
+    for label, walk in (("calculation cache", cached), ("job records", backfill_jobs)):
         counts = await walk(dry_run=args.dry_run, batch=args.batch)
         total_queued += counts.queued
         total_failed += counts.failed
         # Row counts and the record count on separate lines: one row can decompose into several
         # records.
         logger.info(
-            "%s: %d row(s) seen = %d %s + %d skipped (no projector in this release) + "
+            "%s: %d row(s) seen = %d %s + %d skipped (no projector in this release, or a "
+            "superseded calculation epoch) + "
             "%d unreadable by this release's projector",
             label,
             counts.seen,

@@ -224,12 +224,15 @@ def radical_multiplicity(smiles: str) -> int:
     return 1 + sum(int(atom.GetNumRadicalElectrons()) for atom in mol.GetAtoms())
 
 
-async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
+async def embed(
+    smiles: str, run: RemoteRunner = plain, *, timeout_seconds: float | None = None
+) -> Structure:
     """The force-field-cleaned starting geometry for one molecule, from the server.
 
     Remote rather than local: a geometry embedded by a different RDKit build would be a different
     `structure_id`, and every downstream key would miss. Pass `run` from an activity — a slow embed
-    would otherwise trip the heartbeat timeout while the call is still running.
+    would otherwise trip the heartbeat timeout while the call is still running. `timeout_seconds`
+    bounds the backend wait, as in `relax`.
     """
     payload = await run(
         remote_call(
@@ -237,7 +240,8 @@ async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
                 smiles=smiles,
                 multiplicity=radical_multiplicity(smiles),
                 relax_with_force_field=True,
-            )
+            ),
+            timeout_seconds=timeout_seconds,
         ),
         f"starting geometry for {smiles}",
     )
@@ -250,11 +254,18 @@ async def relax(
     solvent: str | None,
     *,
     run: RemoteRunner = plain,
+    timeout_seconds: float | None = None,
 ) -> tuple[OptimizationResult, bool]:
-    """Relax one geometry to the nearest minimum, cached under the server's key."""
+    """Relax one geometry to the nearest minimum, cached under the server's key.
+
+    `timeout_seconds` bounds the backend wait (`calc_session`'s default when `None`); a tool
+    passes the bound of the call that reached it, which cancels it when it fires.
+    """
     payload, cached = await run(
         cached_remote(
-            store, RelaxStructureRequest(structure=wire_structure(structure), solvent=solvent)
+            store,
+            RelaxStructureRequest(structure=wire_structure(structure), solvent=solvent),
+            timeout_seconds=timeout_seconds,
         ),
         f"optimising {structure.smiles or structure.structure_id}",
     )
@@ -268,6 +279,7 @@ async def hessian(
     *,
     artifacts: ArtifactStore | None = None,
     run: RemoteRunner = plain,
+    timeout_seconds: float | None = None,
 ) -> tuple[HessianPayload, bool]:
     """Take the second derivatives at one geometry, cached under the server's key.
 
@@ -278,7 +290,7 @@ async def hessian(
     `cached_remote` is wrapped: packed arrays go to the content-addressed artifact store and the row
     keeps their hashes. Every Hessian passes through here, so the atom fence
     (`require_hessian_affordable`) lives here too, with a refusal that names this system's
-    alternatives.
+    alternatives. `timeout_seconds` bounds the backend wait, as in `relax`.
     """
     require_hessian_affordable(
         len(structure.elements), f"a Hessian of {structure.smiles or structure.structure_id}"
@@ -288,6 +300,7 @@ async def hessian(
         cached_remote(
             ArrayOffloadingStore(store, blobs, HESSIAN_ARRAYS),
             ComputeHessianRequest(structure=wire_structure(structure), solvent=solvent),
+            timeout_seconds=timeout_seconds,
         ),
         f"second derivatives of {structure.smiles or structure.structure_id}",
     )
@@ -304,6 +317,7 @@ async def relax_to_minimum(
     thermo: ThermoSettings | None = None,
     *,
     run: RemoteRunner = plain,
+    timeout_seconds: float | None = None,
 ) -> tuple[OptimizationResult, ThermochemistryResult, bool]:
     """Optimize until the geometry is a genuine minimum, then return it with its thermochemistry.
 
@@ -315,13 +329,18 @@ async def relax_to_minimum(
     Bounded by `settings.xtb_minimum_refinement_attempts`, after which the result is returned with
     `is_minimum=False`. The third element of the return is whether every underlying calculation was
     a cache hit; the RRHO arithmetic (temperature-dependent, milliseconds) is not counted.
+    `timeout_seconds` bounds each backend wait, as in `relax`.
     """
     thermo = thermo or ThermoSettings()
     current = structure
     cached = True
     for _ in range(settings.xtb_minimum_refinement_attempts + 1):
-        optimization, opt_cached = await relax(store, current, solvent, run=run)
-        matrix, hess_cached = await hessian(store, optimization.structure, solvent, run=run)
+        optimization, opt_cached = await relax(
+            store, current, solvent, run=run, timeout_seconds=timeout_seconds
+        )
+        matrix, hess_cached = await hessian(
+            store, optimization.structure, solvent, run=run, timeout_seconds=timeout_seconds
+        )
         # Off the event loop: a 3N x 3N eigendecomposition on a drug-sized molecule is real work,
         # and this coroutine shares its loop with every other in-flight request.
         result = await asyncio.to_thread(

@@ -785,6 +785,71 @@ async def test_a_job_check_runs_its_wrapper_once_on_the_queue_that_serves_it() -
     assert outcome["verdict"] == "inconclusive"
 
 
+#: Every input the capturing stand-in wrapper below was started with.
+_JOB_INPUTS: list[ConnectorJobInput] = []
+
+
+@workflow.defn(name="ConnectorJobWorkflow", sandboxed=False)
+class _CapturingConnectorJobWorkflow:
+    """Stands in for the connector-job wrapper and keeps the input the tournament handed it."""
+
+    @workflow.run
+    async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
+        _JOB_INPUTS.append(job)
+        return ConnectorJobResult(summary="ran")
+
+
+async def test_a_job_check_hands_the_wrapper_every_term_it_was_grounded_with() -> None:
+    """The terms grounding resolved reach the wrapper whole, the declared effect included.
+
+    Their wire defaults mean "no effect", so a launch that dropped one would run an irreversible job
+    without the approval its manifest declared.
+    """
+    _JOB_INPUTS.clear()
+    grounded = _grounded(
+        connector="calc",
+        job="compare_solvents",
+        job_workflow="CompareSolventsWorkflow",
+        task_queue="connector-calc",
+        payload={"reactants": ["CCO"]},
+        ran="compare_solvents(reactants=[[compound-x]])",
+        effect_system="the QMS",
+        effect_reversal="irreversible",
+        effect_approver="qa-approver",
+        timeout_seconds=600.0,
+    )
+
+    @activity.defn(name="ground_check_job")
+    async def ground(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> ht._GroundedJob:
+        return grounded
+
+    @activity.defn(name="read_check_result")
+    async def read(
+        check: DiscriminatingCheck, result: str, requested_by: str = "", correlation_id: str = ""
+    ) -> ht._CheckVerdict:
+        return ht._CheckVerdict(verdict="inconclusive")
+
+    field = [_hypothesis("a", "the first explanation")]
+    call = CheckCall(job="compare_solvents", subjects={"reactants": ["compound-x"]})
+    await asyncio.wait_for(
+        _run_with(
+            [ground, read],
+            _stubs(field=field, check_kind="computable", check_call=call),
+            _request("q-job-terms"),
+            children=[_CapturingConnectorJobWorkflow],
+        ),
+        timeout=60,
+    )
+
+    (handed,) = _JOB_INPUTS
+    assert handed.terms() == grounded.terms()
+
+
 async def test_a_template_check_that_cannot_be_grounded_is_reported_not_dropped() -> None:
     """A refusal is an outcome carrying its code, the same as on the other two halves."""
 

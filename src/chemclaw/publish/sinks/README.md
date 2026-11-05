@@ -30,7 +30,7 @@ config:                          # the driver's own keyword arguments — its si
   timeout_seconds: 30.0
 ```
 
-`name` and `tenant_id` are supplied by the registry and are refused inside `config:`. `verify_tls`
-is settable and must not be set false — an unverified TLS connection to a results store is an
-unauthenticated one — and a non-loopback `http://` URL is refused outright under `entra_required`.
+`name` and `tenant_id` are supplied by the registry and are refused inside `config:`. There is no
+`verify_tls` key — an unverified TLS connection to a results store is an unauthenticated one, so
+the driver always verifies — and a non-loopback `http://` URL is refused outright under `entra_required`.
 `make sink-validate` binds `config:` against the driver's signature, so a wrong key fails in CI.

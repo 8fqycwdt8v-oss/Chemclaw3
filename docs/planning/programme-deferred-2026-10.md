@@ -311,12 +311,8 @@ files and `ARCHITECTURE.md`).
   deliberately changed). After a sibling merges, merge `main` into the open branch and re-run its
   structure set; do not trust the last green.
 - **A full (generation-2) garbage collection holds the interpreter lock for its whole duration.**
-  On a 2.5-million-object heap one pass took 1.5–1.7 s and stalled the event loop whichever thread
-  triggered it. Tests that measure loop stalls freeze and disable the collector in their window; in
-  production the stall is real. Candidate fix: `gc.freeze()` after startup in the API and workers,
-  measured against RSS.
-- **`tests/served.py::ServerThread`** leaves uvicorn's loggers non-propagating with their own
-  handlers for the rest of the process; no test depends on it today. Snapshot/restore there.
+  Tests that measure loop stalls freeze and disable the collector in their window; in production
+  the front door and every worker freeze their startup heap before serving (`core/heap.py`).
 - **`tests/recorded_workflow_histories.py::_replay_on_a_private_loop`** is still inherently
   timing-sensitive (whether the SDK parks depends on its shutdown race); if it flakes, make `wedged`
   deterministic in the test.

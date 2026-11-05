@@ -5,6 +5,11 @@ in it. `require_supported_solvents` refuses a durable calc job at launch in both
 solvent shapes.
 """
 
+import json
+import subprocess
+import sys
+from collections.abc import Iterable
+
 import pytest
 
 from chemclaw.science.calc.solvents import (
@@ -29,11 +34,14 @@ class _Single:
         self.solvent = solvent
 
 
-def _tblite_accepts(name: str) -> bool:
-    """Whether the installed tblite will actually run GFN2-xTB with this ALPB solvent."""
-    import numpy as np
-    from tblite.interface import Calculator
+#: Run in a child: reads solvent names as JSON on stdin, prints the ones tblite accepts.
+_PROBE = """
+import json, sys
+import numpy as np
+from tblite.interface import Calculator
 
+accepted = []
+for name in json.load(sys.stdin):
     calculator = Calculator(
         "GFN2-xTB",
         np.array([8, 1, 1]),
@@ -42,8 +50,31 @@ def _tblite_accepts(name: str) -> bool:
     try:
         calculator.add("alpb-solvation", name)
     except RuntimeError:
-        return False
-    return True
+        continue
+    accepted.append(name)
+json.dump(accepted, sys.stdout)
+"""
+
+
+def _tblite_accepted(names: Iterable[str]) -> set[str]:
+    """The names the installed tblite will actually run GFN2-xTB with as an ALPB solvent.
+
+    Asked in a child process, never in this one: tblite's macOS wheel bundles its own `libomp`, and
+    a second OpenMP runtime initialised in a process that already holds torch's (or the reverse)
+    aborts it with "OMP: Error #15", killing whichever xdist worker later runs a BO test. The suite
+    process must never load `tblite.interface`; `test_the_probe_leaves_this_process_free_of_tblite`
+    holds that.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _PROBE],
+        input=json.dumps(sorted(names)),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    accepted: list[str] = json.loads(result.stdout)
+    return set(accepted)
 
 
 def test_every_name_in_the_set_is_one_tblite_accepts() -> None:
@@ -51,7 +82,7 @@ def test_every_name_in_the_set_is_one_tblite_accepts() -> None:
 
     Such a name would pass the precondition and fail inside the durable job.
     """
-    rejected = sorted(name for name in ALPB_SOLVENTS if not _tblite_accepts(name))
+    rejected = sorted(ALPB_SOLVENTS - _tblite_accepted(ALPB_SOLVENTS))
     assert not rejected, (
         f"ALPB_SOLVENTS lists {rejected}, which the installed tblite refuses — re-derive the set "
         "(the module docstring says how) rather than deleting the offending names by hand"
@@ -81,14 +112,21 @@ def test_no_solvent_tblite_accepts_is_missing_from_the_set() -> None:
         if b"," not in token
     }
     missing = sorted(
-        name
-        for name in candidates - set(ALPB_SOLVENTS)
-        if " " not in name and _tblite_accepts(name)
+        _tblite_accepted(name for name in candidates - set(ALPB_SOLVENTS) if " " not in name)
     )
     assert not missing, (
         f"tblite accepts {missing} for ALPB solvation but ALPB_SOLVENTS omits them, so a chemist "
         "asking for one is refused a calculation the method can do"
     )
+
+
+def test_the_probe_leaves_this_process_free_of_tblite() -> None:
+    """Asking tblite loads its OpenMP runtime into the child only, so a later torch import lives.
+
+    It asks once itself, so it cannot pass in a process that simply never asked.
+    """
+    assert _tblite_accepted(["water"]) == {"water"}
+    assert "tblite.interface" not in sys.modules, "tblite's compiled library was loaded in-process"
 
 
 def test_the_suggested_shortlist_only_names_supported_solvents() -> None:

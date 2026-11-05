@@ -225,17 +225,9 @@ class NoteRecordedEvent(BaseModel):
     never learns their contribution landed. This carries the reference back to the surface that
     produced it.
 
-    **The wire name was `note_proposed` and the event was never a proposal**
-    (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). Nothing reviews a note any more
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
-    `note_recorded`, and what a chemist reads has said "recorded" the whole time. The literal is an
-    SSE discriminator two repositories switch on, so the rename is a three-step deploy and **the
-    only ordering with no broken state is reader first**: `Chemclaw3_ui` shipped a reader that
-    accepts both names (its `shared/events.ts` carries the argument), this is the second step, and
-    the third — dropping the old name from that reader — is theirs and happens after this ships.
-    The reverse order silently drops the event in every browser not yet redeployed.
-
-    `evals/live.py` is this repository's own reader and accepts both for the same window.
+    Recorded, not proposed: nothing reviews a note
+    (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). The literal is an SSE
+    discriminator `Chemclaw3_ui` switches on, so renaming it is a reader-first deploy.
     """
 
     type: Literal["note_recorded"] = "note_recorded"

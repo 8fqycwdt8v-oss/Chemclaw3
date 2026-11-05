@@ -13,7 +13,7 @@ helper for defaults that name declarations shipping inside the installed package
 The sections: `agent` (model, skills, capabilities, compaction, spend), `llm` (the gateway seam),
 `service` (the front door: binding, limits, sessions, budgets), `entra` (identity and authorization),
 `temporal`, `store` (Postgres/pgvector and the calculation cache), `calculators`, `bo`,
-`fingerprints`, `labels`, `connectors`, `sources`, `eln`, `publish`, `deliver`, `kg`, `memory`,
+`fingerprints`, `labels`, `connectors`, `sources`, `eln`, `publish`, `deliver`, `rooms`, `kg`, `memory`,
 `retrieval`, `reports`, `hypotheses`, `evals` and `observability` (logging, the tool audit,
 OpenTelemetry). `dsn.py` is the annotated `str` a database DSN is declared as, so its password is
 not a `repr` away.

@@ -262,7 +262,11 @@ start() {
   fi
   # No subshell around the launch: with `( … & echo $! )` the recorded pid is the forked subshell,
   # which is exactly the off-by-one that made the signal above miss. `up()` has already cd'd.
-  nohup "$@" >"$LIVE_DIR/$name.log" 2>&1 &
+  # Appended under a marker, not truncated: `restart` kills a process and starts it again, and a
+  # truncating start erased the log of the very process whose death was under test.
+  printf '\n[live] %s starting at %s\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >>"$LIVE_DIR/$name.log"
+  nohup "$@" >>"$LIVE_DIR/$name.log" 2>&1 &
   echo $! >"$pidfile"
   log "$name started (pid $(cat "$pidfile"))"
 }
@@ -588,6 +592,7 @@ from pathlib import Path
 from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.connectors.queues import bundle_queue, interactive_queue
 from chemclaw.core.config import settings
@@ -612,14 +617,25 @@ def alive(worker: str) -> bool:
     return True
 
 
+# A broker that is busy, not wrong: asked again next round, within the same attempt budget. The
+# lane's own describe calls can trip a dev server's namespace rate limit, and a restart that died
+# on that left the front door stopped.
+TRANSIENT = {RPCStatusCode.RESOURCE_EXHAUSTED, RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED}
+
+
 async def polled(client, queue: str) -> bool:
     for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
-        answer = await client.workflow_service.describe_task_queue(
-            DescribeTaskQueueRequest(
-                namespace=client.namespace, task_queue=TaskQueue(name=queue), task_queue_type=kind
-            ),
-            timeout=timedelta(seconds=5),
-        )
+        try:
+            answer = await client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=client.namespace, task_queue=TaskQueue(name=queue), task_queue_type=kind
+                ),
+                timeout=timedelta(seconds=5),
+            )
+        except RPCError as exc:
+            if exc.status in TRANSIENT:
+                return False
+            raise
         if answer.pollers:
             return True
     return False
@@ -648,11 +664,16 @@ sys.exit(asyncio.run(main()))
 PY
 }
 
-up() {
-  mkdir -p "$RUN_DIR"
+# What `up` needs before it starts anything; `restart` asks it too, before its kill.
+lane_preconditions() {
   command -v uv >/dev/null 2>&1 || die "uv not found"
   pg_isready -h 127.0.0.1 -p "${CHEMCLAW_LIVE_PGPORT:-5432}" >/dev/null 2>&1 \
-    || die "postgres is not up — run infra/live/bootstrap.sh first"
+    || die "postgres is not up (pg_isready on 127.0.0.1:${CHEMCLAW_LIVE_PGPORT:-5432}) — run infra/live/bootstrap.sh first"
+}
+
+up() {
+  mkdir -p "$RUN_DIR"
+  lane_preconditions
 
   local python
   python="$(python_bin)"
@@ -663,6 +684,15 @@ up() {
   # what makes a second `up` — `restart <name>` is one — re-use the secrets the running servers
   # hold instead of minting new ones beside them. See `source_unset_only`.
   source_unset_only "$RUN_DIR/connector-env.sh"
+
+  # One envelope secret for every process in the lane, minted once and persisted with the
+  # credentials below. Unset, each process picks its own nonce (`agent/framing.py`), so the front
+  # door and a worker frame the same content differently, and a restarted one differs from both.
+  if [ -z "${CHEMCLAW_FRAMING_ENVELOPE_SECRET:-}" ]; then
+    CHEMCLAW_FRAMING_ENVELOPE_SECRET="$("$python" -c 'import secrets; print(secrets.token_hex(32))')" \
+      || die "could not mint the lane's envelope secret"
+  fi
+  export CHEMCLAW_FRAMING_ENVELOPE_SECRET
 
   # Addresses and credentials first, so every process below inherits both (see `connector_env`).
   #
@@ -743,6 +773,8 @@ up() {
   ( umask 077
     { printf '%s\n' "$connector_exports"
       printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
+      printf 'export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q\n' "$CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+      printf 'export CHEMCLAW_LIVE_RUN_DIR=%q\n' "$RUN_DIR"
       for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
     } > "$RUN_DIR/connector-env.sh"
   )
@@ -899,6 +931,18 @@ restart() {
   [ -d "$MCP_REPO" ] || die "refusing to restart $name: chem and safety are served by Chemclaw3-mcp,
 which is not at $MCP_REPO, so \`up\` could not bring the lane back after the kill. Clone it beside
 this checkout, or set CHEMCLAW_MCP_REPO. Nothing has been killed."
+  # The settings the new process would start with must load. `up` dies on a `Settings` error after
+  # the kill, and the storm's admission sweep did exactly that (a cap its connection limit was not
+  # sized for), leaving the lane with no front door: the same worse-than-found state as the missing
+  # checkout above, so it is refused the same way, before anything is killed.
+  local settings_error
+  if ! settings_error="$( ( source_unset_only "$RUN_DIR/connector-env.sh"; cd "$REPO_ROOT" \
+      && uv run python -c 'from chemclaw.core.config import Settings; Settings()' ) 2>&1 )"; then
+    die "refusing to restart $name: the settings it would start with do not validate, so \`up\`
+could not bring it back after the kill. Nothing has been killed.
+$(printf '%s' "$settings_error" | tail -4)"
+  fi
+  ( lane_preconditions ) || die "refusing to restart $name: \`up\` could not bring it back after the kill. Nothing has been killed."
   local pid
   pid="$(cat "$pidfile")"
   # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a

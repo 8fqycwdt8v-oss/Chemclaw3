@@ -35,7 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.ids import stable_hash
     from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.core.model_prose import ModelProse
-    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
+    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult, JobTerms
     from chemclaw.durable.governed_launch import audited_launch
     from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
@@ -909,13 +909,14 @@ async def ground_check_template(
         reset_current_identity(token)
 
 
-class _GroundedJob(BaseModel):
+class _GroundedJob(JobTerms):
     """A durable job whose every argument came from the record, ready to launch.
 
     Built in an activity because grounding reads the corpus and runs the job's declared
     `precondition`; launched from workflow code because a child workflow is a workflow's to start.
     Splitting it that way is also what puts the *validated* payload in history rather than the
-    model's proposal, which is `template_job`'s rule: never the raw arguments.
+    model's proposal, which is `template_job`'s rule: never the raw arguments. The inherited
+    `JobTerms` make a tournament-launched job behave exactly like the same job started from chat.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -924,11 +925,6 @@ class _GroundedJob(BaseModel):
     job: str = ""
     job_workflow: str = ""
     task_queue: str = ""
-    # Every manifest field the wrapper reads, so a tournament-launched job behaves exactly like the
-    # same job started from chat.
-    publish_to_graph: bool = False
-    timeout_seconds: float | None = None
-    awaits_answer: bool = False
     payload: dict[str, Any] = Field(default_factory=dict)
     ran: str = ""
     refusal_code: str = ""
@@ -959,7 +955,7 @@ async def ground_check_job(
     3. **`prepare_job_launch` runs**: params validation, trigger authorization and the job's
        `precondition` (e.g. refusing a solvent the method cannot model).
     """
-    from chemclaw.connectors.jobs import prepare_job_launch
+    from chemclaw.connectors.jobs import job_terms, prepare_job_launch
     from chemclaw.connectors.queues import bundle_queue
     from chemclaw.connectors.registry import ConnectorError, find_job
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params, structure_of
@@ -1030,10 +1026,8 @@ async def ground_check_job(
             job=spec.name,
             job_workflow=spec.workflow,
             task_queue=bundle_queue(connector),
-            publish_to_graph=spec.publish_to_graph,
-            timeout_seconds=spec.timeout_seconds,
-            awaits_answer=spec.awaits_answer,
             payload=payload,
+            **job_terms(spec).terms(),
             # Built from the accepted payload, never the model's proposal, so the report describes
             # the job that actually ran.
             ran=_job_line(spec.name, payload, call.subjects, structures, fields),
@@ -1862,9 +1856,7 @@ class HypothesisTournamentWorkflow:
                         workflow=plan.job_workflow,
                         task_queue=plan.task_queue,
                         payload=plan.payload,
-                        publish_to_graph=plan.publish_to_graph,
-                        timeout_seconds=plan.timeout_seconds,
-                        awaits_answer=plan.awaits_answer,
+                        **plan.terms(),
                         rationale=(
                             f"discriminating check for hypothesis {check.hypothesis_id!r}: "
                             f"{check.question}"

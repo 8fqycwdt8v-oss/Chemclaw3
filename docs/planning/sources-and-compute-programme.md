@@ -60,7 +60,7 @@ starts before its ADR is accepted.
 | B | On-demand tool binding | (1) keep static binding + `default_enabled`; (2) per-turn recompilation from a router; (3) compile the eligible surface, show the model only active groups (`wrap_model_call` filters `request.tools`) | **(3)**: execution path and authz unchanged, prefix bound becomes eager floor + bounded active groups | D-2026-09-20 (declaring vs binding), `test_context_floor` |
 | C | Structured source queries | (1) text-to-SQL by the model; (2) typed query tools generated from a declared `query:` binding; (3) only retrieve | **(2)**: bound parameters only, declared columns and operators, row caps; no model-authored SQL | D-2026-08-26 (driver signature is the schema) |
 | D | Generalised ingest | (1) one half per new shape (status quo); (2) **record kinds**: `ingest:` declares a `kind`, each kind owns model, store, evidence projection, query tool | **(2)**; reaction, commitment, document migrate onto it; measurement and plate are new | D-050, D-120, commitments ADR |
-| E | Where entitlement lives | (1) each half; (2) an `access:` block enforced by the registry, query tools and fan-out | **(2)**, the half's own check kept only for `read_document` | documents binding |
+| E | Where entitlement lives | (1) each half; (2) an `access:` block enforced by the registry, query tools and fan-out | **Withdrawn**: decided on `main` meanwhile by `D-2026-10-20-rights-are-a-role-file-not-code` and `D-2026-10-23-a-role-sees-only-its-tools-and-a-job-carries-signed-roles` (one role file; a role's uncallable tools withheld) | documents binding |
 | F | Long-running and cluster compute | (1) stay semiempirical-only; (2) per-engine bundles (old `qm` shape); (3) a **compute backend seam** (driver manifest + one `ExternalJobWorkflow`) with engine prepare/parse primitives in the fleet | **(3)** | D-2026-08-26-semiempirical-is-the-whole-tier (in part), CLAUDE.md "Not in this system", fleet "No DFT tier" |
 | G | Compute key contract | (1) calc-only; (2) every compute primitive serves `calculation_key`, the kit owns key derivation, `calc_version` includes engine version and backend image digest | **(2)** | D-011, fleet `engine/key.py` |
 | H | Template fan-out | (1) composites in code only; (2) bounded `map` and `select` steps; (3) a general workflow language | **(2)**; until-converged loops stay in job specs | D-2026-08-25-the-loop-is-a-composite-not-a-template (in part) |
@@ -79,8 +79,9 @@ a DFT tier in the fleet" (no binary executed, no egress), G′ "every compute se
 
 Entry: none. Size S–M. Repos: all three.
 
-- [ ] **W9.1** ADRs A–L (core) and F′, G′ (fleet), each with `## Options` and, for L, `Revisit
+- [x] **W9.1** ADRs A–L (core) and F′, G′ (fleet), each with `## Options` and, for L, `Revisit
       when:`. Update `docs/decisions/CURRENT.md`. The owner signs off each before its wave.
+      *(Accepted in #632 and Chemclaw3-mcp #170. E withdrawn: the role file decided entitlement.)*
 - [x] **W9.2 Fix D1.** *(Done in #630: `JobTerms`, filled once by `job_terms`, inherited by every
       launcher's carrier; the tournament launcher had the same gap and is fixed too. The
       `composed.py` refusal was not added, since the per-call approval now applies on every path.)* `durable/template_job.py::_run_job_step` passes `effect_system`,
@@ -93,7 +94,9 @@ Entry: none. Size S–M. Repos: all three.
       declaring `effect: {reversal: irreversible}` run as a template step: it must suspend on
       `{job_id}:approval`. Also make `templates/composed.py::authored_problems` refuse a `job`
       step whose job declares any `effect` (an agent-authored document must not launch one).
-- [ ] **W9.3 Baselines** (extends W0.1): committed to `docs/planning/`:
+- [ ] **W9.3 Baselines** (extends W0.1): committed to `docs/planning/`. *(Offline half done in
+      #633, `sources-and-compute-baseline-2026-10-22.md`; the eval scores and TTFT wait for a
+      gateway.)*
       - prefix tokens per profile (current `_floor` output), TTFT with all bundles bound;
       - a **source eval** `data/evals/probes/sources.yaml`: 20 questions needing structured
         filters over ingested ELN rows (yield ranges, solvent, reagent, date, project) and 10
@@ -112,7 +115,7 @@ Exit: ADRs accepted; D1 fixed with a failing-first test; baselines committed.
 
 ## W10 — Data sources get a surface (G1, G2, G4, G5)
 
-Entry: W9; ADRs A, B, C, E. Track C needs W5.4 (build once, bind per turn) and W5.7 (one
+Entry: W9; ADRs A, B, C. Track C needs W5.4 (build once, bind per turn) and W5.7 (one
 `context/` module) merged, or lands inside W5.7. Size L. Repos: core, UI, mock.
 
 ### Track A — `SurfaceSpec` shared by both manifests
@@ -198,12 +201,10 @@ Entry: W9; ADRs A, B, C, E. Track C needs W5.4 (build once, bind per turn) and W
       measurement.
 
 ### Track D — Entitlement at the seam (G4)
-- [ ] **W10.16** `access:` block on `datasource.yaml` (`public: true` xor `roles: [...]`, same
-      shape as the share binding). `active_retrieve_sources()` and `source_tool_names()` filter by
-      `get_current_roles()`; an unentitled actor sees neither the source's chunks nor its tools
-      (the tool is withheld, not refused, so its schema costs nothing). `ShareDocumentRetriever`
-      keeps its check only on `read_document`. Test: a route-wide leak test over every source and
-      tool for an actor with no roles.
+- [ ] **W10.16** A source's own tools (Track A) and query tools (Track B) are granted through the
+      role file (`data/access/roles.yaml`, D-2026-10-20) like every other tool, and withheld from a
+      role that cannot call them (D-2026-10-23). Test: a leak test over every source tool for an
+      actor whose roles do not open the source.
 
 ### Track E — UI
 - [ ] **W10.17** `Chemclaw3_ui`: a `source-query` renderer above the generic `table` in
@@ -219,8 +220,8 @@ Exit (measured against W9.3):
   by a model other than the one under test, with no regression on the existing probe sets;
 - eager prefix below today's 73,450 with all fleet bundles reachable on demand; TTFT not worse.
 
-Rollback: `bind: on_demand` → `eager` per group; query tools are additive; `access:` defaults to
-the source's current behaviour during one release.
+Rollback: `bind: on_demand` → `eager` per group; query tools are additive; a source tool absent
+from the role file is withheld, as any ungranted tool is.
 
 ---
 

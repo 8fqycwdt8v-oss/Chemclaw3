@@ -214,27 +214,25 @@ async def _scan_notes(store: NoteStore, terms: Sequence[str], today: date, cap: 
     """
     # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced as
     # current fact (KM-7). It stays in the store and remains reachable by explicit id.
-    found = await store.search(terms, today)
-    return await asyncio.to_thread(_rank_matches, found, terms, cap)
+    found = await store.search(terms, today, cap)
+    return await asyncio.to_thread(_rank_matches, found, terms)
 
 
-def _rank_matches(found: SearchResult, terms: Sequence[str], cap: int) -> NoteSearch:
-    """Rank, cut and describe a search result: the part of `_scan_notes` after the read."""
+def _rank_matches(found: SearchResult, terms: Sequence[str]) -> NoteSearch:
+    """Choose and describe a search result: the part of `_scan_notes` after the read."""
+    # The store returns the best `cap` hits, most terms first and then in id order, so identical
+    # queries return identical lists. Notes holding every term are the answer when there are any;
+    # otherwise the partial hits are, ranked by coverage, and the result says it widened.
+    complete = found.coverages.get(len(terms), 0)
+    widened = not complete and bool(found.coverages)
+    chosen = [_ref(note) for coverage, note in found.matches if widened or coverage == len(terms)]
+    # The cut is declared in the result, so a capped list never reads as the whole corpus.
     # `searched` counts after the currency filter: that is the corpus this search can hit.
-    searched = found.searched
-    scored = [(coverage, _ref(note)) for coverage, note in found.matches]
-    complete = [pair for pair in scored if pair[0] == len(terms)]
-    widened = not complete and bool(scored)
-    # Widened results rank by coverage; complete ones stay in id order, so identical queries return
-    # identical lists.
-    chosen = sorted(scored, key=lambda pair: (-pair[0], pair[1].id)) if widened else complete
-    # Bound the hit list like every other retrieval surface, and declare the cut in the result so a
-    # capped list never reads as the whole corpus.
     return NoteSearch(
-        matches=[ref for _, ref in chosen[:cap]],
-        total_matches=len(chosen),
+        matches=chosen,
+        total_matches=sum(found.coverages.values()) if widened else complete,
         widened=widened,
-        corpus_notes=searched,
+        corpus_notes=found.searched,
     )
 
 
@@ -503,28 +501,19 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
 
 async def _expand_in_store(store: NoteStore, note_id: str, hops: int) -> NoteView:
     """`expand_note` over a note the store holds: its body and its current neighbourhood."""
-    note = await _require_note(store, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
     today = date.today()
-    # The reads are awaited; everything built from what they returned is one worker-thread pass,
-    # because a hub note has thousands of neighbours and that assembly must not stall the loop.
-    edges = await store.edges(note_id)
-    reached = await store.neighborhood(note_id, hops=hops)
-    found = await store.get_many(reached)
-    retired = await asyncio.to_thread(_retired_compounds, found, today)
-    successors = await store.current_successors(retired, today)
-    return await asyncio.to_thread(_assemble_view, note, edges, found, successors, today)
-
-
-def _retired_compounds(found: dict[str, Note | None], today: date) -> list[str]:
-    """The neighbours that are compounds no longer current: those a successor may stand in for."""
-    return [
-        nid
-        for nid, neighbor in found.items()
-        if neighbor is not None and neighbor.type == "compound" and not neighbor.is_current(today)
-    ]
+    # One read of the store, so a write in between cannot show a neighbour the note's links do not
+    # yet name; the assembly is one worker-thread pass, because a hub note has thousands of
+    # neighbours and building its view must not stall the loop.
+    around = await store.vicinity(note_id, hops, today)
+    if around is None:
+        raise ChemclawError(f"no note with id {note_id!r}")
+    return await asyncio.to_thread(
+        _assemble_view, around.note, around.edges, around.found, around.successors, today
+    )
 
 
 def _assemble_view(
@@ -548,7 +537,7 @@ def _assemble_view(
         if neighbor.is_current(today):
             neighbors.setdefault(nid, _neighbor_ref(index, note.id, neighbor))
             continue
-        replacement = successors.get(nid)
+        replacement = successors.get(nid) if neighbor.type == "compound" else None
         if replacement is not None and replacement.type == "compound" and replacement.id != note.id:
             neighbors.setdefault(
                 replacement.id, _neighbor_ref(index, note.id, replacement, via=nid)

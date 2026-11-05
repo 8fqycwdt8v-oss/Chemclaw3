@@ -252,7 +252,8 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     - `optionalKeys` exist because the Secret is operator-managed and predates a new chart version,
       so
       a required addition would break every pod on `helm upgrade`. They include the framing envelope
-      key (unset means a per-process tag, unshared across replicas), the connector bearers (fail
+      key (unset means a per-process tag, unshared across replicas), the role-claim key (unset
+      means a background report holds no roles), the connector bearers (fail
       closed with `MissingConnectorCredential` when unset), credentials for features off by default
       (LLM fallback, vector store, Temporal Cloud, a split session store), the MCP face bearer (the
       face refuses without it), and bearers for bundles that ship off.
@@ -271,12 +272,14 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_CALC_MCP_TOKEN",
         "CHEMCLAW_MOLFP_MCP_TOKEN",
         "CHEMCLAW_RXNFP_MCP_TOKEN",
+        "CHEMCLAW_ROLE_CLAIM_SECRET",
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
         "CHEMCLAW_CHEM_TOKEN",
         "CHEMCLAW_SAFETY_TOKEN",
         "CHEMCLAW_CALC_TOKEN",
         "CHEMCLAW_RXNPREDICT_TOKEN",
         "CHEMCLAW_RXNLABEL_TOKEN",
+        "CHEMCLAW_TEAMS_BOT_CREDENTIAL",
         "CHEMCLAW_LLM_FALLBACK_API_KEY",
         "CHEMCLAW_VECTOR_STORE_API_KEY",
         "CHEMCLAW_TEMPORAL_API_KEY",
@@ -286,6 +289,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_THERMALSAFETY_TOKEN",
         "CHEMCLAW_KINETICS_TOKEN",
         "CHEMCLAW_UNITOPS_TOKEN",
+        "CHEMCLAW_CHEMBL_TOKEN",
         "CHEMCLAW_SUITABILITY_TOKEN",
         "CHEMCLAW_PYEXEC_TOKEN",
     }
@@ -762,8 +766,7 @@ def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
 def _fleet_services(checkout: Path) -> tuple[dict[str, int], str]:
     """Every Service the sibling fleet actually creates, name onto port, and why if unreadable.
 
-    Read from the fleet's own chart render or, for a checkout that predates the chart,
-    `servers/*/deploy/service.yaml`, which it applies untransformed.
+    Read from the fleet's own chart render.
     """
     documents, reason = fleet_objects(checkout)
     services = {
@@ -799,7 +802,7 @@ def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> N
     if unreadable:
         pytest.skip(f"{SIBLING_SKIP} {unreadable}; NOT checked against the fleet's own Services")
     assert services, (
-        f"{checkout} declares no fleet Service (chart or servers/*/deploy) to compare against"
+        f"{checkout} declares no fleet Service (in its chart's render) to compare against"
     )
 
     wrong: list[str] = []

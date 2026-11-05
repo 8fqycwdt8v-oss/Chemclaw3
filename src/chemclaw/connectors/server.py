@@ -31,7 +31,7 @@ from starlette.types import ASGIApp
 
 from chemclaw.connectors.caller import bind_caller, reset_caller
 from chemclaw.core import backend_rpc, db
-from chemclaw.core.asgi import BodySizeLimit
+from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY, BodySizeLimit
 from chemclaw.core.call_identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
@@ -450,7 +450,9 @@ def connector_app(
                 if report is not None:
                     report.cancel()
 
-    app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
+    app = FastAPI(
+        title=f"chemclaw-connector-{name}", lifespan=lifespan, telemetry=NO_FRAMEWORK_TELEMETRY
+    )
     app.add_middleware(CallerLogMiddleware, connector=name)
     # Always installed; resolves the manifest's auth on first request and passes through for
     # `mode: none`, so no bundle can forget to wire it.

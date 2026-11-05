@@ -542,6 +542,30 @@ def test_a_connector_failure_is_recorded_as_an_error_however_it_is_streamed(
     assert "instrument is offline" in sink.events[0].detail
 
 
+def test_a_failure_carried_inside_a_command_is_recorded_as_an_error() -> None:
+    """`task` and the state-writing verbs return a `Command`, not a `ToolMessage`.
+
+    A failed `ToolMessage` in its `update["messages"]` is the call's answer, so the row must read
+    `error`, not `ok`.
+    """
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-4", actor="alice@corp", sink=sink)
+
+    async def _returns_command() -> Any:
+        failed = ToolMessage(
+            content="Error: the helper crashed", tool_call_id="c-1", status="error"
+        )
+        return Command(update={"messages": [failed], "model_calls": 2})
+
+    _drive_mw(mw, _ctx("task", {}), _returns_command)
+
+    assert [event.outcome for event in sink.events] == ["error"]
+    assert "helper crashed" in sink.events[0].detail
+
+
 def test_a_log_only_trail_is_announced_at_startup(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

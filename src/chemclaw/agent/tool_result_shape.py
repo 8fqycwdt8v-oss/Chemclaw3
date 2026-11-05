@@ -57,6 +57,23 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
 
 
+def tool_messages(result: Any) -> list[ToolMessage]:
+    """Every `ToolMessage` in `result`, for the same shapes `rewritten_tool_messages` rewrites.
+
+    A bare `ToolMessage` is itself; a `Command` contributes those in its dict `update["messages"]`;
+    anything else has none. The reading twin of the rewrite, so an observer that asks "did this
+    call fail?" sees the same messages a rewriting middleware would touch.
+    """
+    if isinstance(result, ToolMessage):
+        return [result]
+    if not isinstance(result, Command) or not isinstance(result.update, dict):
+        return []
+    messages = result.update.get("messages")
+    if not isinstance(messages, list):
+        return []
+    return [m for m in messages if isinstance(m, ToolMessage)]
+
+
 #: Where the one entry naming a dropped set lands: a single notice for the whole set keeps the total
 #: bounded, where a marker per file would not.
 _DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"

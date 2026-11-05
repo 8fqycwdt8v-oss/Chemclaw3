@@ -40,6 +40,7 @@ from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobResult,
     ConnectorJobWorkflow,
+    JobTerms,
     envelope_from_result,
     failure_reason,
 )
@@ -319,6 +320,24 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     return payload
 
 
+def job_terms(job: JobSpec) -> JobTerms:
+    """The manifest and configuration facts every launcher of `job` hands the job wrapper.
+
+    The one place they are read, so the chat tool, a template step and a tournament check launch
+    the same job identically. Read at launch rather than in the workflow: a `settings` read in
+    workflow code would change the scheduled approval child on replay.
+    """
+    return JobTerms(
+        publish_to_graph=job.publish_to_graph,
+        timeout_seconds=job.timeout_seconds,
+        effect_system=job.effect.system if job.effect else "",
+        effect_reversal=job.effect.reversal if job.effect else "",
+        effect_approver=settings.effect_approval_role,
+        effect_approval_days=settings.effect_approval_deadline_days,
+        awaits_answer=job.awaits_answer,
+    )
+
+
 def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
@@ -369,24 +388,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     # cannot author an audit join key. Empty off the harness path.
                     plan_step=plan_step,
                     plan_hash=plan_hash,
-                    publish_to_graph=job.publish_to_graph,
-                    # The job's declared ceiling, or `None`; the worker starting the child clamps it
-                    # to the deployment maximum
-                    # (`durable/connector_job.py::child_execution_timeout`).
-                    timeout_seconds=job.timeout_seconds,
-                    # Copied from the manifest because a workflow may not read `connector.yaml` off
-                    # disk.
-                    awaits_answer=job.awaits_answer,
-                    # What this job changes outside this deployment, copied from the manifest for
-                    # the same reason.
-                    effect_system=job.effect.system if job.effect else "",
-                    effect_reversal=job.effect.reversal if job.effect else "",
-                    # Read here, not in the workflow: a config read in workflow code would change
-                    # the scheduled approval child on replay.
-                    effect_approver=settings.effect_approval_role,
-                    # Read here for the same replay reason; `open_pending_request_activity` applies
-                    # the ceiling.
-                    effect_approval_days=settings.effect_approval_deadline_days,
+                    **job_terms(job).terms(),
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,

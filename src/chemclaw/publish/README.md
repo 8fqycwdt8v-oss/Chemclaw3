@@ -44,16 +44,20 @@ distinction every species distribution turns on (`Subject.subject_id` carries th
 
 **A calculation's identity excludes who asked for it.** Two chemists running the same calculation
 share one `calc_ref` and produce two publication rows. Putting the actor on the calculation would
-make identical science collide.
+make identical science collide. A live hook names the caller its context is attributed to
+(`core/logging.py::attributed_caller`), and the outbox adds a publication its row does not hold
+yet rather than dropping the second request.
 
 **Nothing here may fail a calculation.** Every entry point runs *after* the science is durable, so
 enqueue is best-effort by construction and a destination being unreachable is counted and logged,
 never raised. `SinkUnavailableError` is a `ConnectionError` (retryable) while `SinkRejectedError` is
-a `ChemclawError` (not) — that split is the retry contract, not a taxonomy preference.
+a `ChemclawError` (not) — that split is the retry contract, not a taxonomy preference. The drain
+retires a refused record at once; its subclass `SinkMisconfiguredError` (a schema, credential or
+address the sink refuses every record for) is booked batch-wide like an outage and retires nothing.
 
 ## What deliberately does not publish
 
-Two things reach a publish hook and are dropped on purpose. Both are written down here because a
+Three things reach a publish hook and are dropped on purpose. All are written down here because a
 hook that drops silently is otherwise indistinguishable from a defect.
 
 **A BO campaign.** `connectors/bo/workflows.py` stamps `payload_kind="CampaignResult"`, and no
@@ -75,6 +79,13 @@ frequency in any case — a wavenumber is an eigenvalue of the *mass-weighted* m
 carries no elements. The frequencies reach a store through the third hook instead, as part of
 `ThermochemistryResult`.
 
+**A tool composite whose enqueue failed.** A `ThermochemistryResult` or `LogdResult` has no cache
+row and no job record, so the backfill cannot find one whose enqueue failed
+(`D-2026-10-23-a-lost-tool-composite-is-recovered-by-asking-again`). The failure is counted
+(`chemclaw_result_publish_failures_total` or `chemclaw_result_projection_failures_total`), and the
+recovery is to call the tool again once the cause is fixed: both recompose from cached primitives,
+so the identical record is re-queued at no SCF cost.
+
 ## The three hooks
 
 Every record reaches the outbox through exactly one of them, and which one is a property of the
@@ -82,7 +93,7 @@ result rather than of the calculator that produced it:
 
 | Hook | Where | What it can see |
 | --- | --- | --- |
-| the cache | `science/calc/store.py::publish_stored_result` | a **primitive**, on a cache miss, routed by the `calc_type` the calculation server stamped |
+| the cache | `science/calc/store.py::publish_stored_result` | a **primitive**, on a miss, a hit or a joined computation, routed by the `calc_type` the calculation server stamped |
 | the job | `ConnectorJobWorkflow._publish_result`, in `durable/connector_job.py` | a **job composite**, off the envelope a finished Temporal job returns, routed by the `payload_kind` it carries |
 | the tool | `connectors/server.py::_publish_tool_results` -> `publish/hooks.py` | a **tool composite** — assembled in one turn, so it has no cache row (its key would name its own output) and no envelope |
 

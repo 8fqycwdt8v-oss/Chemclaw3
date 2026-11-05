@@ -464,8 +464,9 @@ class TemplateWorkflow:
             step = wave[0]
             try:
                 return [(step, await self._run_step(step, scope, identity, timeout, template))]
-            except asyncio.CancelledError:
-                # Re-raised, not wrapped: a cancellation is not a failure at a step.
+            except (asyncio.CancelledError, GeneratorExit):
+                # Re-raised, not wrapped: a cancellation, or the close of an evicted run's
+                # coroutine, is not a failure at a step.
                 raise
             except BaseException as exc:
                 raise _StepFailed(step, exc) from exc
@@ -590,13 +591,10 @@ class TemplateWorkflow:
                     # a job with no session, and the correlation id joins the job back to this run.
                     session_id=identity.session_id,
                     correlation_id=identity.correlation_id,
-                    # The job's own declared ceiling, as on the chat path.
-                    timeout_seconds=resolved.timeout_seconds,
-                    # A job that waits on a person gets no child ceiling
-                    # (`child_execution_timeout`). The wrapper's `execution_timeout` below is a
-                    # separate, step-level bound (`wrapper_execution_timeout`).
-                    awaits_answer=resolved.awaits_answer,
-                    publish_to_graph=resolved.publish_to_graph,
+                    # The job's manifest and configuration terms, as on the chat path: its
+                    # ceiling, its declared effect and whether it waits on a person. The wrapper's
+                    # `execution_timeout` below is a separate, step-level bound.
+                    **resolved.terms(),
                 ),
                 # Named from the run's execution, not just its id: `ALLOW_DUPLICATE_FAILED_ONLY`
                 # re-executes under the same id, and a step-id-only child id would collide. See

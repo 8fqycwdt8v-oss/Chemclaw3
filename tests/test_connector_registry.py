@@ -20,6 +20,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.connectors.registry import (
     ConnectorError,
+    connector_spec,
     connector_tool_names,
     declared_connector_tool_names,
     declared_note_types,
@@ -32,6 +33,7 @@ from chemclaw.connectors.registry import (
     job_tools,
     server_tools_module,
     skills_dirs,
+    unusable,
 )
 from chemclaw.core.tool_registry import _REGISTRY
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
@@ -681,13 +683,45 @@ def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allo
         "endpoint:\n  transport: stdio\n  command: /bin/sh\n  args: ['-c', 'true']\n"
         "  tools:\n    - compute\n  read_only:\n    - compute\n",
     )
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
 
+    assert [spec.name for spec in connector_specs()] == ["alpha"], (
+        "a refused stdio bundle is skipped, not raised out of every turn"
+    )
+    assert "disabled by default" in unusable()["local"]
     with pytest.raises(ConnectorError, match="disabled by default"):
-        connector_specs()
+        connector_spec("local")
 
     monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
-    assert [spec.name for spec in connector_specs()] == ["local"]
+    assert [spec.name for spec in connector_specs()] == ["alpha", "local"]
+    assert unusable() == {}
+
+
+def test_a_malformed_bundle_breaks_only_the_deployment_that_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed manifest no enable-list names leaves every other bundle usable, and is reported.
+
+    The validators still see it (`discovered` raises), and a deployment that names it fails loudly.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _bundle(tmp_path, "broken", "name: [unclosed\n")
+
+    _use(monkeypatch, tmp_path, enabled_list="alpha")
+    assert [manifest.name for manifest in enabled()] == ["alpha"]
+    assert [spec.name for spec in connector_specs()] == ["alpha"]
+    assert unusable() == {}, "a bundle the enable-list leaves out is no loss to report"
+
+    _use(monkeypatch, tmp_path)
+    assert [manifest.name for manifest in enabled()] == ["alpha"]
+    assert "broken/connector.yaml" in unusable()["broken"]
+    with pytest.raises(ConnectorError, match="broken/connector.yaml"):
+        discovered()
+
+    _use(monkeypatch, tmp_path, enabled_list="alpha:broken")
+    with pytest.raises(ConnectorError, match="broken/connector.yaml"):
+        enabled()
 
 
 def test_an_opt_in_bundle_is_discovered_and_not_enabled_by_silence(

@@ -421,9 +421,83 @@ async def test_one_refused_record_does_not_retire_its_neighbours(
     assert rows == {
         "a-1": "delivered",
         "a-2": "delivered",
-        "poison": "pending",
+        "poison": "failed",
         "z-1": "delivered",
-    }, f"a row committed at the far end must never be booked failed; got {rows}"
+    }, (
+        "a row committed at the far end must never be booked failed, and a refused one is "
+        f"retired at once rather than re-sent until its budget is spent; got {rows}"
+    )
+
+
+async def test_a_record_that_errored_without_a_refusal_keeps_its_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a `SinkRejectedError` retires a row early; any other per-record error is retried.
+
+    The refusal is the driver's statement that a retry cannot help; an unclassified error is not.
+    """
+    from chemclaw.durable import publish_results
+
+    class _FlakySink:
+        async def deliver(self, records: Any) -> None:
+            if any(record.calc_ref == "odd" for record in records):
+                raise RuntimeError("driver bug, not a verdict on the content")
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    assert await outbox.enqueue([_record(ref) for ref in ("fine", "odd")]) == 2
+
+    outcome = await publish_results._drain_one("alpha", _FlakySink(), 10)
+
+    assert (outcome.delivered, outcome.failed) == (1, 1)
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
+        )
+        rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
+    assert rows == {"fine": ("delivered", 1), "odd": ("pending", 1)}, rows
+
+
+async def test_a_misconfigured_sink_spends_one_attempt_and_retires_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal of the sink itself (schema behind, credential unset) is booked like an outage.
+
+    Retiring on it would dead-letter every claimed row for a fault an operator fixes once; the rows
+    keep their budget and deliver on the pass after the fix.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.driver import SinkMisconfiguredError
+
+    attempts: list[int] = []
+
+    class _UnseededSink:
+        async def deliver(self, records: Any) -> None:
+            attempts.append(len(records))
+            raise SinkMisconfiguredError("property_definition is empty")
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(ref) for ref in ("m-1", "m-2")])
+
+    outcome = await publish_results._drain_one("alpha", _UnseededSink(), 10)
+
+    assert attempts == [2], f"a sink-wide refusal is not replayed per record: {attempts}"
+    assert outcome.failed == 2
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute("SELECT DISTINCT state FROM result_publications")
+        states = {row[0] for row in await cursor.fetchall()}
+    assert states == {"pending"}, states
 
 
 async def test_an_unreachable_destination_still_fails_the_whole_batch(
@@ -493,6 +567,30 @@ def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
         "nothing was queued and nothing was delivered, so the publish counter must not move — "
         "it is what an operator reads to decide whether a destination is unhealthy"
     )
+
+
+def test_a_payload_no_projector_reads_is_counted_on_the_live_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shape with no projector is counted, labelled by its `calc_type`, and queues nothing.
+
+    `tests/test_publish_reaches_the_hooks.py` pins the in-repo shapes; a new bundle's composite is
+    caught only by this series.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    before = METRICS.value("chemclaw_results_unprojected_total")
+    written = asyncio.run(
+        outbox.enqueue_payload(
+            calc_ref="newbundle@v1:x",
+            calc_type="newbundle.job",
+            payload_kind="NoSuchResult",
+            payload={"anything": 1},
+        )
+    )
+    assert written == 0
+    assert METRICS.value("chemclaw_results_unprojected_total") == before + 1
 
 
 async def test_two_workers_claiming_at_once_split_the_queue(
@@ -611,6 +709,34 @@ async def test_a_claim_takes_its_limit_and_no_more_whatever_plan_runs_it(
     claimed = await _rows_one_claim_takes(outbox._CLAIM, 2, planner_off=off)
 
     assert len(claimed) == 2, f"a claim with LIMIT 2 took {len(claimed)} rows"
+
+
+async def test_rows_enqueued_together_are_claimed_in_the_order_they_were_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One enqueue's rows share `enqueued_at`, so the claim breaks the tie by `id`, not the heap.
+
+    The last two rows are given the lowest ids, which rewrites their tuples behind the others: the
+    order a scan without the tie-break hands out is then the opposite of the id order.
+    """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(f"tie-{index}") for index in range(4)])
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT count(DISTINCT enqueued_at) FROM result_publications WHERE sink = 'alpha'"
+        )
+        assert await cursor.fetchone() == (1,), "the batch no longer shares a timestamp"
+        await conn.execute(
+            "UPDATE result_publications SET id = id - 1000000 WHERE calc_ref IN ('tie-2', 'tie-3')"
+        )
+        await conn.commit()
+
+    claimed = await outbox.claim("alpha", 2)
+
+    assert [row.calc_ref for row in claimed] == ["tie-2", "tie-3"]
 
 
 async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
@@ -1160,3 +1286,108 @@ def test_project_payload_separates_a_projector_that_raised_from_a_payload_with_n
 async def _counting_enqueue(records: Any) -> int:
     """Stand in for the queue write: this pair of assertions is about the projection."""
     return len(records)
+
+
+async def test_every_requester_of_one_calculation_is_named_on_its_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second chemist's identical run adds a publication rather than being dropped.
+
+    Driven through `cached_compute`, the cache hook production calls: A computes, B hits, B hits
+    again in the same session, the record is delivered, then C hits. The set of actors the sink is
+    sent must be every requester, each once, and a delivered row returns to the queue for C alone.
+    """
+    from chemclaw.core.logging import bind_claimed_caller, reset_claimed_caller
+    from chemclaw.durable import publish_results
+    from chemclaw.science.calc.store import CalculationKey, InMemoryStore, cached_compute
+
+    sent: list[list[str]] = []
+
+    class _Sink:
+        async def deliver(self, records: Any) -> None:
+            sent.extend([p.actor for p in record.publications] for record in records)
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    store = InMemoryStore()
+    key = CalculationKey.build("pka", "v1", inputs={"smiles": "CCO"})
+
+    async def compute() -> dict[str, Any]:
+        return {"smiles": "CCO", "pka": 4.2}
+
+    async def ask(actor: str, session: str, turn: str) -> None:
+        token = bind_claimed_caller(actor, session, turn)
+        try:
+            await cached_compute(store, key, compute)
+        finally:
+            reset_claimed_caller(token)
+
+    async def row() -> tuple[str, int, list[str]]:
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts, document FROM result_publications WHERE sink = 'alpha'"
+            )
+            rows = await cursor.fetchall()
+        assert len(rows) == 1, rows
+        state, attempts, document = rows[0]
+        return state, attempts, [p["actor"] for p in document["publications"]]
+
+    await ask("alice", "s-a", "t-1")
+    await ask("bob", "s-b", "t-2")
+    await ask("bob", "s-b", "t-3")
+    assert await row() == ("pending", 0, ["alice", "bob"])
+
+    outcome = await publish_results._drain_one("alpha", _Sink(), 10)
+    assert outcome.delivered == 1 and sent == [["alice", "bob"]], (outcome, sent)
+
+    await ask("carol", "s-c", "t-4")
+    assert await row() == ("pending", 0, ["carol"]), (
+        "a delivered row returns to the queue carrying only the publication not yet sent"
+    )
+
+
+async def test_a_publication_added_mid_delivery_is_not_marked_delivered_unsent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass delivering the older document cannot mark delivered a row it did not fully send.
+
+    Adding a publication resets `attempts`, the lease's fence, so the in-flight pass's mark misses
+    and the row stays queued for the publication that pass never carried.
+    """
+    from chemclaw.publish.record import Publication
+
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+
+    def _for(actor: str) -> ResultRecord:
+        return ResultRecord(
+            calc_ref="shared",
+            calc_type="pka",
+            subject=Subject(
+                kind="molecule",
+                members=[SubjectMember(ordinal=0, role="subject", smiles="CCO")],
+                label="CCO",
+            ),
+            conditions=Conditions(),
+            level=TheoryLevel(method="GFN2-xTB"),
+            publications=[Publication(actor=actor, session_id=f"s-{actor}")],
+        )
+
+    assert await outbox.enqueue([_for("alice")]) == 1
+    claimed = await outbox.claim("alpha", 10)
+    assert await outbox.enqueue([_for("bob")]) == 1, "a new requester is added, not dropped"
+    assert await outbox.enqueue([_for("bob")]) == 0, "a repeat of one requester is dropped"
+    await outbox.mark_delivered([row.lease for row in claimed])
+
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute("SELECT state, document FROM result_publications")
+        state, document = (await cursor.fetchall())[0]
+    assert state == "pending"
+    assert [p["actor"] for p in document["publications"]] == ["alice", "bob"]

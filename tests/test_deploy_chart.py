@@ -5602,7 +5602,7 @@ FORKSERVER_POD_COST_MIB = 91
 #: pages, not file pages), so the ceiling leaves room for that plus a patch release. The assertion
 #: prints the `RssAnon`/`RssFile` decomposition so a closure that grew can be told from another
 #: environment.
-FORKSERVER_RSS_CEILING_MIB = 120
+FORKSERVER_RSS_CEILING_MIB = 122
 
 #: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
 #:

@@ -14,6 +14,7 @@ is; a note is never read through it.
 """
 
 import asyncio
+from collections import Counter
 from collections.abc import Collection, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -35,15 +36,18 @@ if TYPE_CHECKING:
 
 
 class SearchResult(NamedTuple):
-    """What a term search over the current notes found.
+    """What a term search over the current notes found, cut to the best `limit` hits.
 
     `searched` is how many notes were current on the date asked, whether or not they matched, so a
-    caller can tell an empty corpus from a miss. `matches` is `(coverage, note)` for every note that
-    matches at least one term, in note id order; `coverage` is how many of the terms matched.
+    caller can tell an empty corpus from a miss. `matches` is `(coverage, note)` for at most `limit`
+    notes that match at least one term, highest coverage first and then in note id order; `coverage`
+    is how many of the terms matched. `coverages` maps each coverage to how many notes have it,
+    over every hit and not only those returned, so a caller can say what the cut left out.
     """
 
     searched: int
     matches: list[tuple[int, Note]]
+    coverages: dict[int, int]
 
 
 class Edge(NamedTuple):
@@ -56,6 +60,26 @@ class Edge(NamedTuple):
     src: str
     dst: str
     relations: tuple[Relation, ...]
+
+
+class Vicinity(NamedTuple):
+    """A note and what lies around it, from one read of the store, so the parts agree.
+
+    `edges` are the note's own links (`NoteStore.edges`); `found` maps every node within the hops
+    asked to its note, or `None` for an id no note defines (`NoteStore.get_many`); `successors`
+    maps each found note not current on the date to its current successor, or `None`
+    (`NoteStore.current_successors`).
+    """
+
+    note: Note
+    edges: list[Edge]
+    found: dict[str, Note | None]
+    successors: dict[str, Note | None]
+
+
+def ranked(scored: Sequence[tuple[int, Note]], limit: int) -> list[tuple[int, Note]]:
+    """`scored` in search order (highest coverage, then note id), cut to `limit`."""
+    return sorted(scored, key=lambda pair: (-pair[0], pair[1].id))[:limit]
 
 
 class NoteWriteError(ChemclawError):
@@ -222,8 +246,17 @@ class NoteStore(CorpusState, Protocol):
     async def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
         """Node ids within `hops` of `note_id`, following links both ways, `note_id` excluded.
 
-        Empty for `hops` below 1. The store applies no ceiling of its own; callers bound `hops`
-        (`graph_max_hops`).
+        Empty for `hops` below 1. The walk stops early once nothing new is reached, so a small graph
+        costs its size and not `hops`; callers still bound `hops` (`graph_max_hops`).
+        """
+        ...
+
+    async def vicinity(self, note_id: str, hops: int, as_of: date) -> Vicinity | None:
+        """`note_id`'s note, its edges, its neighbourhood and their successors from one read.
+
+        `None` when no note defines `note_id`. The parts are those `get`, `edges`, `neighborhood`,
+        `get_many` and `current_successors` give, read together so that a write between them
+        cannot show a neighbour the note's links do not yet name.
         """
         ...
 
@@ -245,8 +278,8 @@ class NoteStore(CorpusState, Protocol):
         """`current_successor` for each id from one read of the corpus, so the answers agree."""
         ...
 
-    async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
-        """The notes current on `as_of` that contain at least one of `terms`, as substrings."""
+    async def search(self, terms: Sequence[str], as_of: date, limit: int) -> SearchResult:
+        """The best `limit` notes current on `as_of` containing any of `terms`, as substrings."""
         ...
 
     async def graph(self) -> nx.DiGraph:
@@ -348,7 +381,10 @@ class GitNoteStore:
         return await asyncio.to_thread(self._edges, note_id)
 
     def _edges(self, note_id: str) -> list[Edge]:
-        graph = corpus.build_graph(self._dir)
+        return self._edges_in(corpus.build_graph(self._dir), note_id)
+
+    @staticmethod
+    def _edges_in(graph: nx.DiGraph, note_id: str) -> list[Edge]:
         if note_id not in graph:
             return []
         found: dict[tuple[str, str], Edge] = {}
@@ -376,25 +412,44 @@ class GitNoteStore:
         graph = corpus.build_graph(self._dir)
         return {note_id: corpus.current_successor(graph, note_id, as_of) for note_id in note_ids}
 
-    async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
-        """Substring-match `terms` over the notes current on `as_of`, in note id order.
+    async def vicinity(self, note_id: str, hops: int, as_of: date) -> Vicinity | None:
+        """Every part from one assembled graph, which `kg.graph.build_graph` freezes."""
+        return await asyncio.to_thread(self._vicinity, note_id, hops, as_of)
+
+    def _vicinity(self, note_id: str, hops: int, as_of: date) -> Vicinity | None:
+        graph = corpus.build_graph(self._dir)
+        note = corpus.note_in(graph, note_id)
+        if note is None:
+            return None
+        reached = corpus.neighborhood(graph, note_id, hops=hops) if hops >= 1 else set()
+        found = {nid: corpus.note_in(graph, nid) for nid in reached}
+        successors = {
+            nid: corpus.current_successor(graph, nid, as_of)
+            for nid, neighbor in found.items()
+            if neighbor is not None and not neighbor.is_current(as_of)
+        }
+        return Vicinity(note, self._edges_in(graph, note_id), found, successors)
+
+    async def search(self, terms: Sequence[str], as_of: date, limit: int) -> SearchResult:
+        """Substring-match `terms` over the notes current on `as_of`; the best `limit` of them.
 
         Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced as
         current fact, and stays reachable by explicit id.
         """
-        return await asyncio.to_thread(self._search, terms, as_of)
+        return await asyncio.to_thread(self._search, terms, as_of, limit)
 
-    def _search(self, terms: Sequence[str], as_of: date) -> SearchResult:
+    def _search(self, terms: Sequence[str], as_of: date, limit: int) -> SearchResult:
         matches: list[tuple[int, Note]] = []
         searched = 0
-        for note in sorted(self._notes(), key=lambda candidate: candidate.id):
+        for note in self._notes():
             if not note.is_current(as_of):
                 continue
             searched += 1
             coverage = term_coverage(note, terms)
             if coverage:
                 matches.append((coverage, note))
-        return SearchResult(searched=searched, matches=matches)
+        coverages = Counter(coverage for coverage, _ in matches)
+        return SearchResult(searched, ranked(matches, limit), dict(coverages))
 
     async def graph(self) -> nx.DiGraph:
         """The assembled graph, cached and frozen by `kg.graph.build_graph`."""

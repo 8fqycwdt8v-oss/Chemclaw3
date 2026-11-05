@@ -10,6 +10,11 @@ services:
     # pgvector image so the fingerprint store (Phase 3) and QM cache (step 1.10)
     # share one database. `bit(2048)` + HNSW needs pgvector >= 0.7.
     image: pgvector/pgvector:pg16
+    # The release's own sizing, not the stock 100 (`deploy/README.md` § Postgres: "a stock
+    # `max_connections=100` refuses this release at full scale"). The live lane's connectors,
+    # workers and front door, a second front door for an evaluation, and Temporal's pools hold ~90
+    # idle connections between them, so at 100 the next process is refused with "too many clients".
+    command: ["postgres", "-c", "max_connections=400"]
     environment:
       POSTGRES_USER: chemclaw
       POSTGRES_PASSWORD: chemclaw

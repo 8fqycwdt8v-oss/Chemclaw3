@@ -1,0 +1,243 @@
+# The profile-routing corpus: questions whose wording points at one agent profile while the answer
+# needs another.
+#
+# **Why it exists.** Automatic routing between profiles was deleted
+# (`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`) because the corpus it was
+# measured on could only score which specialist was picked. A router learned from wording would
+# pass every case where the wording is honest, so this corpus holds only the other kind: each case
+# names the profile its vocabulary suggests (`worded_like`) and the one an answer needs (`needs`,
+# `default` meaning the whole agent, because the work spans two profiles).
+#
+# **What is checked offline** (`tests/test_routing_corpus.py`): every `probe` is a valid live
+# probe; both profile names are shipped; `worded_like` binds none of `expects_tools` and `needs`
+# binds at least one, so each case is a genuine mismatch on the surface, not a matter of taste.
+#
+# **What is not checked here.** Whether a profile's answer is worse is a live measurement: run each
+# probe under `worded_like`, `needs` and the default agent (`evals.live.run_probes(profile=...)`)
+# and grade the answers against `direction`. That needs a model; nothing in this file claims a
+# result of it.
+
+cases:
+  - worded_like: property-lookup
+    needs: evidence
+    why: "\"What is the pKa\" reads as a calculation, but the chemist asks for the value we measured; a predicted pKa is a different number."
+    probe:
+      id: rt-01
+      section: 1
+      persona: lab_technician
+      bucket: A
+      question: "What pKa did we measure for 4-aminopyridine in last quarter's titration series?"
+      expects_tools: [gather_evidence, find_notes, expand_note]
+      forbids_claims:
+        - "a predicted pKa reported as the measured value"
+      direction: "Look the measurement up in the record and cite the note it came from. If nothing was recorded, say the record is silent; a prediction may be offered only if it is labelled as one."
+
+  - worded_like: property-lookup
+    needs: computation
+    why: "\"What's the energy\" matches the lookup mode's one energy tool, but a bond strength is a difference of two fragments' energies, which that mode cannot form."
+    probe:
+      id: rt-02
+      section: 6
+      persona: lab_technician
+      bucket: A
+      question: "What's the energy of the C-Br bond in 4-bromoanisole (COc1ccc(Br)cc1)?"
+      expects_tools: [survey_bond_strengths, enumerate_bond_cleavages, compute_reaction_energy]
+      forbids_claims:
+        - "a molecule's total electronic energy reported as a bond energy"
+      direction: "A homolytic bond dissociation energy from the parent and its two radicals, at GFN2-xTB, with the level of theory and its error bar stated; comparing with the C-H bonds of the ring is a plus."
+
+  - worded_like: property-lookup
+    needs: computation
+    why: "logD reads like one more lookup, but it needs logP and the ionisation together, and the lookup mode has neither logP nor a logD tool."
+    probe:
+      id: rt-03
+      section: 6
+      persona: lab_leader
+      bucket: A
+      question: "What's the logD of propranolol (CC(C)NCC(O)COc1cccc2ccccc12) at pH 7.4?"
+      expects_tools: [predict_logd, predict_developability_profile]
+      forbids_claims:
+        - "an intrinsic solubility or a logP reported as logD"
+      direction: "A logD at pH 7.4 with the pKa it used and the uncertainty; the answer should note the amine is mostly protonated at that pH, so logD sits well below logP."
+
+  - worded_like: evidence
+    needs: safety
+    why: "\"What do we know about\" reads as a records search, but a scale-up of a diazotisation needs a hazard screen whether or not anyone wrote about it."
+    probe:
+      id: rt-04
+      section: 11
+      persona: lab_leader
+      bucket: A
+      question: "What do we know about running the diazotisation of 4-nitroaniline at 50 kg?"
+      expects_tools: [screen_hazards, run_hazard_briefing]
+      forbids_claims:
+        - "the step described as safe to scale because no incident is on record"
+      direction: "The diazonium salt's thermal and shock sensitivity flagged from a hazard screen, with temperature control, accumulation and quench named; any in-house record is a supplement, and an empty record is not evidence of safety."
+
+  - worded_like: safety
+    needs: evidence
+    why: "\"Which hazards\" points at the screening tools, but the question is what the team recorded on a past run, which only the records hold."
+    probe:
+      id: rt-05
+      section: 1
+      persona: manager
+      bucket: A
+      question: "Which hazards did the team record the last time we scaled up the Grignard step?"
+      expects_tools: [gather_evidence, find_notes, recall_observations, expand_note]
+      forbids_claims:
+        - "a generic Grignard hazard list presented as what the team recorded"
+      direction: "What the records say about that scale-up, cited by note id, and a plain statement if nothing was recorded. A generic screen may follow, labelled as such."
+
+  - worded_like: safety
+    needs: evidence
+    why: "\"Genotoxic\" points at the alert screen, but the question asks whether anyone already flagged it, which is a records question."
+    probe:
+      id: rt-06
+      section: 1
+      persona: lab_leader
+      bucket: A
+      question: "Has anyone flagged a genotoxic impurity in our sitagliptin route before?"
+      expects_tools: [gather_evidence, find_notes, find_knowledge_gaps]
+      forbids_claims:
+        - "a fresh structural-alert screen reported as a prior flag"
+      direction: "Search the record for earlier flags and cite them, or say there are none on file; offering to screen the route's intermediates now is fine as a separate step."
+
+  - worded_like: safety
+    needs: default
+    why: "\"Is it safe\" points at the safety mode, but how much energy the azide releases is a calculation that mode cannot run; the answer needs both halves."
+    probe:
+      id: rt-07
+      section: 11
+      persona: lab_technician
+      bucket: B
+      question: "Is it safe to keep butyl azide (CCCCN=[N+]=[N-]) above 40 C overnight, and roughly how much energy does it release if it decomposes to the nitrene and N2?"
+      expects_tools: [compute_reaction_energy, survey_bond_strengths]
+      forbids_claims:
+        - "a decomposition energy stated without a calculation having run"
+      direction: "The azide flagged as energetic (a C/N ratio well below 3), plus a GFN2-xTB reaction energy for loss of N2 with its error bar, and a recommendation for a DSC measurement before any decision rests on it."
+
+  - worded_like: reporting
+    needs: default
+    why: "\"Write up\" points at the reporting mode, but there is nothing to write until the evidence is gathered, and that mode cannot sweep the sources."
+    probe:
+      id: rt-08
+      section: 12
+      persona: manager
+      bucket: A
+      question: "Write up what we know about protodeboronation of 2-pyridylboronic acids for the project report."
+      expects_tools: [gather_evidence, condense_protocols, similar_reactions]
+      forbids_claims:
+        - "a report section whose claims carry no note ids"
+      direction: "A short section built on a sweep of the internal sources, each claim cited, with the mitigation (MIDA or trifluoroborate partners, anhydrous base) tied to the records that show it, and gaps stated as gaps."
+
+  - worded_like: reporting
+    needs: default
+    why: "\"Record that\" points at the reporting mode, but the chemist also asks what to try next, which is the design mode's question."
+    probe:
+      id: rt-09
+      section: 3
+      persona: lab_leader
+      bucket: A
+      question: "Record that the best conditions from the last DoE round were 80 C and 2 mol% Pd, and tell me what to try next."
+      expects_tools: [suggest_next_experiment, campaign_progress, resume_campaign]
+      forbids_claims:
+        - "a next experiment proposed without reference to the campaign's data"
+      direction: "The result recorded, and a next experiment proposed from the campaign's own data, with its expected improvement and why; if no campaign is on file, say so instead of inventing one."
+
+  - worded_like: design
+    needs: computation
+    why: "\"Next experiment\" points at the design mode, but which indole position is more nucleophilic can be computed before any experiment is run."
+    probe:
+      id: rt-10
+      section: 6
+      persona: lab_technician
+      bucket: A
+      question: "What's the next experiment to tell whether C3 or C2 of 1-methylindole (Cn1ccc2ccccc21) is more nucleophilic?"
+      expects_tools: [predict_site_reactivity, compute_electronic_properties]
+      forbids_claims:
+        - "an optimisation campaign proposed for a selectivity question"
+      direction: "A computed site-reactivity comparison first (C3 is expected to win), then, if a result is still needed, a single discriminating experiment such as a competitive electrophilic substitution."
+
+  - worded_like: design
+    needs: default
+    why: "\"Optimise\" points at the design mode, but the chemist asks to start from what already worked, which the design mode cannot read."
+    probe:
+      id: rt-11
+      section: 3
+      persona: lab_leader
+      bucket: A
+      question: "Optimise the yield of our Buchwald coupling of 4-chlorotoluene with morpholine, starting from what the ELN already shows worked."
+      expects_tools: [similar_reactions, gather_evidence, find_past_jobs]
+      forbids_claims:
+        - "a starting design that ignores the in-house precedent it was asked to start from"
+      direction: "In-house precedent found and cited first (ligand, base, solvent, yields), then a campaign or screening design seeded from it, saying which factors it varies and why."
+
+  - worded_like: design
+    needs: reporting
+    why: "\"Campaign\" points at the design mode, but the request is to keep its conclusion, which only the reporting mode can write."
+    probe:
+      id: rt-12
+      section: 13
+      persona: manager
+      bucket: A
+      question: "Our optimisation campaign on the amide coupling is finished; make sure its conclusion is kept so nobody reruns it."
+      expects_tools: [record_knowledge_note, record_confirmed_answer]
+      forbids_claims:
+        - "the conclusion reported as recorded when no note was written"
+      direction: "The campaign's conclusion written to the knowledge record with its evidence, and the note id given back; if the conclusion is not clear from the campaign, ask before recording."
+
+  - worded_like: computation
+    needs: evidence
+    why: "\"Calculate\" points at the computation mode, but the yields are numbers already in the ELN; nothing needs computing."
+    probe:
+      id: rt-13
+      section: 1
+      persona: lab_leader
+      bucket: A
+      question: "Calculate the average yield of our last three Suzuki couplings on 6-bromoquinoline."
+      expects_tools: [similar_reactions, substructure_matches, gather_evidence]
+      forbids_claims:
+        - "a predicted or invented yield averaged in with recorded ones"
+      direction: "The three most recent recorded runs found and cited, their yields listed, and the mean given; fewer than three on file is said plainly."
+
+  - worded_like: computation
+    needs: safety
+    why: "\"Calculate\" points at the computation mode, but an impurity limit is a regulatory rule (ICH M7) applied to a dose, which only the safety mode carries."
+    probe:
+      id: rt-14
+      section: 11
+      persona: lab_leader
+      bucket: A
+      question: "Calculate the acceptable limit for a mutagenic impurity in a drug dosed at 200 mg per day for life."
+      expects_tools: [ich_impurity_limit]
+      forbids_claims:
+        - "a limit derived from a calculated property rather than the guideline"
+      direction: "The ICH M7 lifetime threshold of toxicological concern (1.5 ug/day) turned into a concentration at 200 mg/day (7.5 ppm), with the guideline named and the less-than-lifetime alternatives mentioned."
+
+  - worded_like: evidence
+    needs: design
+    why: "\"Find me the conditions\" points at a records search, but the conditions for the next round do not exist yet; they are designed."
+    probe:
+      id: rt-15
+      section: 2
+      persona: lab_technician
+      bucket: A
+      question: "Find me the conditions for the next round of our amide-coupling screen."
+      expects_tools: [generate_screening_design, suggest_next_experiment, campaign_progress]
+      forbids_claims:
+        - "past conditions presented as the next round's design"
+      direction: "The screen's state read from its campaign and a next round designed from it, with the factors and levels stated; if no campaign exists, propose a screening design and say what it varies."
+
+  - worded_like: evidence
+    needs: computation
+    why: "\"Have we ever seen\" points at a records search, but whether the tautomer balance shifts in toluene is answerable now by calculation, whatever the record holds."
+    probe:
+      id: rt-16
+      section: 6
+      persona: lab_leader
+      bucket: B
+      question: "Have we ever seen 2-hydroxypyridine (Oc1ccccn1) stay as the hydroxy tautomer in toluene rather than the pyridone?"
+      expects_tools: [enumerate_tautomers, sample_conformers, compute_thermochemistry]
+      forbids_claims:
+        - "an empty record reported as the answer to a question a calculation can settle"
+      direction: "The record checked, and the tautomer balance computed in an implicit non-polar solvent; the gap is small and likely inside xTB's error bar, so a good answer says so and proposes an IR or UV experiment."

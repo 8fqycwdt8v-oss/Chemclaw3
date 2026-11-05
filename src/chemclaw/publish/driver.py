@@ -26,7 +26,16 @@ class SinkRejectedError(ChemclawError):
     """The sink refused this content and will refuse it identically on every retry.
 
     A `ChemclawError`, which `durable/publish.py` marks non-retryable, so an operator sees the
-    message without a retry budget being burned first.
+    message without a retry budget being burned first. The drain retires the refused record at
+    once (`durable/publish_results.py`).
+    """
+
+
+class SinkMisconfiguredError(SinkRejectedError):
+    """The sink as configured refuses every record: its schema, credential or address is wrong.
+
+    About the destination, not the record, so the drain books it batch-wide like an outage and
+    retires nothing early: the rows deliver once an operator fixes the sink.
     """
 
 
@@ -37,9 +46,10 @@ class ResultSink(Protocol):
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """Write `records`, idempotently.
 
-        Raises `SinkUnavailableError` when the attempt is worth repeating and `SinkRejectedError`
-        when the content is the problem. Returning normally means every record is durable at the far
-        end; a driver that cannot promise that for a partial batch must raise.
+        Raises `SinkUnavailableError` when the attempt is worth repeating, `SinkRejectedError`
+        when the content is the problem and `SinkMisconfiguredError` when the sink itself is.
+        Returning normally means every record is durable at the far end; a driver that cannot
+        promise that for a partial batch must raise.
         """
         ...
 

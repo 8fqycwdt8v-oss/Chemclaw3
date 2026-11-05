@@ -1023,6 +1023,30 @@ def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.Mon
     assert "4.76" in prompt[1].content
 
 
+def test_a_judge_call_the_gateway_refuses_is_ungraded_rather_than_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway error from the judge (a 400 for a spent usage limit) is `ungraded`, not raised.
+
+    Raised, it ended a model-text evaluation in its ninth run and took the eight graded runs before
+    it with it.
+    """
+    from langchain_core.exceptions import ModelInvalidRequestError
+
+    from chemclaw.evals import live_judge
+
+    class _RefusingJudge:
+        async def ainvoke(self, messages: object) -> object:
+            raise ModelInvalidRequestError("You have reached your specified API usage limits")
+
+    monkeypatch.setattr(live_judge, "_judge_client", lambda: _RefusingJudge())
+
+    judgement = asyncio.run(live_judge.judge_outcome(*_graded_probe()))
+
+    assert judgement.verdict == "ungraded"
+    assert "usage limits" in judgement.reason
+
+
 @pytest.mark.parametrize(
     "body",
     [

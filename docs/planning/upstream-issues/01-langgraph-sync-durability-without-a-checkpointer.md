@@ -1,6 +1,6 @@
 # langgraph: `durability="sync"` raises inside a subgraph that has no checkpointer
 
-**File against:** `langchain-ai/langgraph`. **Status:** draft, not filed. **Reproduced on:**
+**File against:** `langchain-ai/langgraph`. **Status:** not filed — a duplicate of [langgraph#9267](https://github.com/langchain-ai/langgraph/issues/9267) (another reporter, 2026-10-09; open). Still reproduces on langgraph 1.2.17. **Reproduced on:**
 langgraph 1.2.11 (installed here) and 1.2.15 (latest on PyPI, 2026-10-12).
 
 ## Title

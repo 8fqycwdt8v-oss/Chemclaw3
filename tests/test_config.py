@@ -1704,3 +1704,18 @@ def test_zero_is_the_off_switch_and_is_never_refused() -> None:
         service_max_concurrent_turns_per_actor=4,
     )
     assert ok.service_max_concurrent_turns_per_actor == 4
+
+
+def test_the_socket_budget_is_exactly_what_the_connection_validator_demands() -> None:
+    """`Settings.socket_budget` is the validator's own threshold: one below it is refused.
+
+    A caller that varies the turn cap (the storm's admission sweep) takes its connection limit from
+    this, so the two cannot drift: the sweep once asked for a cap whose sockets the default limit
+    did not cover and `Settings` refused to load, with the front door already killed.
+    """
+    base = Settings(_env_file=None)  # type: ignore[call-arg]
+    budget = base.socket_budget()
+    assert Settings(_env_file=None, service_max_connections=budget)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="service_max_connections"):
+        Settings(_env_file=None, service_max_connections=budget - 1)  # type: ignore[call-arg]
+    assert base.socket_budget(2 * base.service_max_concurrent_turns) > budget
