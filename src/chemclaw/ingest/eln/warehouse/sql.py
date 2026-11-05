@@ -8,13 +8,17 @@ with a query builder so tests can assert the exact statement sent.
 """
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
     CorpusBinding,
     EntryBinding,
+    QueryBinding,
+    QueryOp,
     RelatedBinding,
     VectorBinding,
 )
@@ -249,3 +253,118 @@ def normalise_score(metric: str, raw: float) -> float:
     if metric == "l2":
         return 1.0 / (1.0 + max(raw, 0.0))
     return max(0.0, min(1.0, raw))
+
+
+#: The most values one `in` filter may bind, so a generated call cannot approach a driver's bind
+#: limit.
+MAX_IN_VALUES = 100
+
+# The escape character for `contains`. Not a backslash: dialects disagree on whether a string
+# literal's backslash is itself an escape, and a `!` means the same thing in all of them.
+_LIKE_ESCAPE = "!"
+
+
+class QueryFilter(BaseModel):
+    """One condition a caller asks for: a declared filter name, an operator, and its value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    op: QueryOp
+    value: str | float | date | list[str | float | date]
+
+
+class QuerySpec(BaseModel):
+    """A structured question: the conditions (all must hold), the order and the row cap."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filters: list[QueryFilter] = Field(default_factory=list)
+    order_by: str | None = None
+    descending: bool | None = None
+    limit: int | None = Field(default=None, ge=1)
+
+
+def _like_pattern(text: str) -> str:
+    """`text` as a substring pattern whose own `%`, `_` and escape character match literally."""
+    escaped = (
+        text.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", f"{_LIKE_ESCAPE}%")
+        .replace("_", f"{_LIKE_ESCAPE}_")
+    )
+    return f"%{escaped}%"
+
+
+def _predicate(query: QueryBinding, placeholder: str, wanted: QueryFilter) -> tuple[str, list[Any]]:
+    """One condition as SQL over a declared column, refusing what the binding did not declare."""
+    declared = query.columns.get(wanted.name)
+    if declared is None:
+        raise BindingError(
+            f"{wanted.name!r} is not a filter this source declares; "
+            f"declared: {sorted(query.columns)}"
+        )
+    if wanted.op not in declared.ops:
+        raise BindingError(
+            f"filter {wanted.name!r} does not take {wanted.op!r}; it takes {declared.ops}"
+        )
+    values = wanted.value if isinstance(wanted.value, list) else [wanted.value]
+    if declared.type == "enum":
+        unknown = sorted(str(v) for v in values if v not in declared.enum_values)
+        if unknown:
+            raise BindingError(
+                f"filter {wanted.name!r} has no value {unknown}; it takes {declared.enum_values}"
+            )
+    column = declared.column
+    if wanted.op == "in":
+        if not isinstance(wanted.value, list) or not 1 <= len(values) <= MAX_IN_VALUES:
+            raise BindingError(
+                f"filter {wanted.name!r} 'in' needs a list of 1 to {MAX_IN_VALUES} values"
+            )
+        return f"{column} IN ({', '.join(placeholder for _ in values)})", values
+    if wanted.op == "between":
+        if not isinstance(wanted.value, list) or len(values) != 2:
+            raise BindingError(f"filter {wanted.name!r} 'between' needs exactly [low, high]")
+        return f"{column} BETWEEN {placeholder} AND {placeholder}", values
+    if isinstance(wanted.value, list):
+        raise BindingError(f"filter {wanted.name!r} {wanted.op!r} takes one value, not a list")
+    if wanted.op == "contains":
+        return (
+            f"LOWER({column}) LIKE LOWER({placeholder}) ESCAPE '{_LIKE_ESCAPE}'",
+            [_like_pattern(str(wanted.value))],
+        )
+    comparison = {"eq": "=", "gte": ">=", "lte": "<="}[wanted.op]
+    return f"{column} {comparison} {placeholder}", values
+
+
+def query_statement(
+    query: QueryBinding, placeholder: str, spec: QuerySpec
+) -> tuple[str, list[Any], int]:
+    """A typed question as one bounded statement; returns the SQL, its parameters and the row cap.
+
+    Only declared columns and operators are written, and every value is a parameter. The order ends
+    on the key so equal values page deterministically. `LIMIT` is one over the cap, so a caller can
+    say the answer was truncated rather than present the first page as all of it.
+    """
+    predicates: list[str] = []
+    params: list[Any] = []
+    for wanted in spec.filters:
+        sql, values = _predicate(query, placeholder, wanted)
+        predicates.append(sql)
+        params.extend(values)
+    if query.where:
+        predicates.append(f"({query.where})")
+    order_name = spec.order_by or query.default_order
+    ordered = query.columns.get(order_name)
+    if ordered is None:
+        raise BindingError(f"cannot order by {order_name!r}; declared: {sorted(query.columns)}")
+    descending = query.descending if spec.descending is None else spec.descending
+    direction = "DESC" if descending else "ASC"
+    cap = min(spec.limit or query.max_rows, query.max_rows)
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    sql = (
+        # identifiers checked by `binding._check_identifier`
+        f"SELECT * FROM {query.relation}{where} "
+        f"ORDER BY {ordered.column} {direction}, {query.key} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, [*params, cap + 1], cap

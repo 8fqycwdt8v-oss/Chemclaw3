@@ -23,7 +23,13 @@ config:
     connection: {driver: <module:callable>, <that driver's own keyword arguments>}
     ingest: {entry: ..., related: [...], reaction: {...}, components: [...], provenance: ...}
     vector: {relation: ..., vector_column: ..., content_columns: [...]}
+    query: {relation: ..., key: ..., citation: {path: root.ID}, columns: {...}, default_order: ...}
 ```
+
+A `query:` block declares the columns a structured question may filter on, each with its type and
+operators (`string`: `eq`/`in`/`contains`; `number` and `date`: `eq`/`in`/`gte`/`lte`/`between`;
+`enum` and `smiles`: `eq`/`in`). `sql.query_statement` writes only those columns and operators and
+binds every value; a filter on anything else is refused before a statement exists.
 
 `src/chemclaw/ingest/sources/eln-databricks/datasource.yaml` is a complete worked example, exercised
 against a fixture row by `tests/test_warehouse_binding.py` so it cannot rot into something that only
@@ -57,7 +63,7 @@ halves and so validates the binding itself rather than just its keyword name.
 |---|---|
 | `binding.py` | The document's schema. `extra="forbid"` everywhere but `connection:`, which is the driver's. Validated when a half is built. |
 | `expr.py` | Paths (`root.COL`, `charges[0].COL`) and the closed transform vocabulary. |
-| `sql.py` | Statement construction. Checked identifiers written, every value bound. |
+| `sql.py` | Statement construction, including a typed question's (`query_statement`). Checked identifiers written, every value bound. |
 | `driver.py` | The `Warehouse`/`WarehouseCursor`/`VectorDialect` Protocols. No third-party import. |
 | `connect.py` | The `Warehouse` contract over `chemclaw.core.connect`, under this seam's error. |
 | `adapter.py` | The ingest half — an `ElnAdapter`. |
