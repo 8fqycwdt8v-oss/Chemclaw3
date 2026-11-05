@@ -14,7 +14,7 @@ members.
 """
 
 import re
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -729,13 +729,102 @@ class CorpusBinding(BaseModel):
         return frozenset(groups)
 
 
+QueryOp = Literal["eq", "in", "gte", "lte", "between", "contains"]
+QueryColumnType = Literal["string", "number", "date", "enum", "smiles"]
+
+#: The operators each column type admits. A range needs an order (`number`, `date`); a substring
+#: needs text; a SMILES matches exactly, because structure search is `molfp`/`rxnfp`'s, not SQL's.
+OPS_BY_TYPE: dict[str, frozenset[str]] = {
+    "string": frozenset({"eq", "in", "contains"}),
+    "number": frozenset({"eq", "in", "gte", "lte", "between"}),
+    "date": frozenset({"eq", "in", "gte", "lte", "between"}),
+    "enum": frozenset({"eq", "in"}),
+    "smiles": frozenset({"eq", "in"}),
+}
+
+
+class QueryColumn(BaseModel):
+    """One filterable column: its type, the operators it admits, and what it means to a chemist.
+
+    `description` and `unit` become the generated tool's field description, so they are written
+    for the model that will choose the filter, not for the operator who mapped the column.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    column: Identifier
+    type: QueryColumnType
+    ops: list[QueryOp] = Field(min_length=1)
+    description: str = Field(min_length=1, max_length=300)
+    unit: str = Field(default="", max_length=20)
+    enum_values: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def _ops_fit_the_type(self) -> Self:
+        """An operator the type cannot honour fails here, not as a warehouse error mid-turn."""
+        _check_identifier(self.column, "query column")
+        foreign = sorted(set(self.ops) - OPS_BY_TYPE[self.type])
+        if foreign:
+            raise BindingError(
+                f"query column {self.column!r} of type {self.type!r} cannot take {foreign}; "
+                f"it admits {sorted(OPS_BY_TYPE[self.type])}"
+            )
+        if (self.type == "enum") != bool(self.enum_values):
+            raise BindingError(
+                f"query column {self.column!r}: enum_values are required for type 'enum' and "
+                "meaningless for any other"
+            )
+        return self
+
+
+class QueryBinding(BaseModel):
+    """The relation a source answers structured questions from, and the filters it admits.
+
+    The generated query tool exposes exactly `columns`: a filter on anything else is refused before
+    a statement exists, so no model-written SQL ever reaches the warehouse.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    relation: Identifier
+    key: Identifier = Field(description="The column carrying the stable per-row id.")
+    citation: FieldBinding = Field(
+        description="Template over the row naming the source and the record, e.g. a URL or id."
+    )
+    columns: dict[str, QueryColumn] = Field(min_length=1, max_length=30)
+    default_order: str = Field(
+        description="The filter name rows are ordered by when none is asked."
+    )
+    descending: bool = True
+    max_rows: int = Field(default=50, ge=1, le=200)
+    where: str = Field(default="", description="An extra literal predicate, as on the entry query.")
+
+    @model_validator(mode="after")
+    def _names_resolve(self) -> Self:
+        """Filter names are tool argument names; the order names one of them."""
+        _check_identifier(self.relation, "query relation")
+        _check_identifier(self.key, "query key")
+        for name in self.columns:
+            if not re.match(r"^[a-z][a-z0-9_]*$", name):
+                raise BindingError(
+                    f"query filter name {name!r} must be lower_snake_case — it becomes a tool "
+                    "argument name"
+                )
+        if self.default_order not in self.columns:
+            raise BindingError(
+                f"default_order {self.default_order!r} names no declared column; "
+                f"declared: {sorted(self.columns)}"
+            )
+        return self
+
+
 class WarehouseBinding(BaseModel):
-    """One warehouse, and whichever of the three sections this source declares.
+    """One warehouse, and whichever of the four sections this source declares.
 
     `ingest` reassembles an ELN run from several relations and ends at its `reaction_records`
     transcription; `corpus` walks a bulk reaction table into the label index as cited evidence;
-    `vector` is similarity search over an embedding the warehouse already holds. A source may
-    declare any combination, and most declare one.
+    `vector` is similarity search over an embedding the warehouse already holds; `query` answers
+    typed filters over one relation. A source may declare any combination, and most declare one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -744,13 +833,20 @@ class WarehouseBinding(BaseModel):
     ingest: IngestBinding | None = None
     corpus: CorpusBinding | None = None
     vector: VectorBinding | None = None
+    query: QueryBinding | None = None
 
     @model_validator(mode="after")
     def _declares_something(self) -> Self:
-        """A binding with neither half configures a connection that nothing would ever open."""
-        if self.ingest is None and self.corpus is None and self.vector is None:
+        """A binding with no section configures a connection that nothing would ever open."""
+        if (
+            self.ingest is None
+            and self.corpus is None
+            and self.vector is None
+            and self.query is None
+        ):
             raise BindingError(
-                "a warehouse binding must declare an 'ingest', a 'corpus' or a 'vector' section"
+                "a warehouse binding must declare an 'ingest', a 'corpus', a 'vector' or a "
+                "'query' section"
             )
         return self
 
