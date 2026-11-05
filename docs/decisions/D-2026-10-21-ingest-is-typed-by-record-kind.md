@@ -1,6 +1,6 @@
 # D-2026-10-21-ingest-is-typed-by-record-kind — an ingest half declares the kind of record it produces, and each kind owns its model, store and query
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

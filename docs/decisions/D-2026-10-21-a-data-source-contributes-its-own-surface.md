@@ -1,6 +1,6 @@
 # D-2026-10-21-a-data-source-contributes-its-own-surface — a data source may ship read-only tools, skills and profiles, declared beside its halves
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

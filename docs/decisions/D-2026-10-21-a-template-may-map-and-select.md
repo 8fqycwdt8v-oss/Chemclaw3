@@ -1,8 +1,8 @@
 # D-2026-10-21-a-template-may-map-and-select — templates gain a bounded fan-out step and a deterministic top-k step; until-converged loops stay in job specs
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
-**Supersedes (in part, on acceptance):** [D-2026-08-25-the-loop-is-a-composite-not-a-template](D-2026-08-25-the-loop-is-a-composite-not-a-template.md), its placement of every fan-out in `connectors/calc/compose.py`. Its rule that a loop whose stopping depends on results lives in the job spec stands.
+**Supersedes (in part):** [D-2026-08-25-the-loop-is-a-composite-not-a-template](D-2026-08-25-the-loop-is-a-composite-not-a-template.md), its placement of every fan-out in `connectors/calc/compose.py`. Its rule that a loop whose stopping depends on results lives in the job spec stands.
 
 ## Context
 
@@ -49,7 +49,7 @@ memory and report jobs.
   - `template_step_ceilings()`;
   - `templates/composed.py::authored_problems`.
 - A shipped `screen-then-refine.yaml` runs end to end on the mock backend.
-- **On acceptance**, D-2026-08-25 gains `**Superseded-by:**` naming this ADR `(in part)`.
+- D-2026-08-25 carries `**Superseded-by:**` naming this ADR `(in part)`.
 - Plan item: W13 Track A.
 
 Revisit when: a shipped template needs a branch on a step's result. That is the line this decision

@@ -1,6 +1,6 @@
 # D-2026-10-21-entitlement-is-declared-on-the-source-manifest — who may read a source is an `access:` block the registry enforces, not a check each half writes
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

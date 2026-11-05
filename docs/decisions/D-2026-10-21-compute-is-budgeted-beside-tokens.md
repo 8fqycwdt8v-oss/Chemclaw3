@@ -1,6 +1,6 @@
 # D-2026-10-21-compute-is-budgeted-beside-tokens — compute spend is reserved before a job starts and settled from what the backend reports, under per-actor and per-project limits
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

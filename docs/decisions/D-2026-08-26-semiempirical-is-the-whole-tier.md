@@ -2,6 +2,8 @@
 
 ## Status
 
+**Superseded-by:** [D-2026-10-21-long-running-compute-runs-on-a-backend-seam](D-2026-10-21-long-running-compute-runs-on-a-backend-seam.md) (in part)
+
 Accepted. Supersedes the deployment half of **D-010** (HPC/DFT deferred, lead with fast local
 calculators) and all of **D-048** (F5: real HPC execution via a Nextflow launcher behind the QM
 activities). Closes and deletes three `DEFERRED.md` rows: *HPC/DFT real integration*, *No converged

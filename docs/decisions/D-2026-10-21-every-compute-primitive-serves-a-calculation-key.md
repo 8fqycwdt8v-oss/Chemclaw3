@@ -1,6 +1,6 @@
 # D-2026-10-21-every-compute-primitive-serves-a-calculation-key — a compute server derives its own cache key with the kit's function, and the key names the engine build
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

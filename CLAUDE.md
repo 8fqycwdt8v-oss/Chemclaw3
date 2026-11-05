@@ -33,10 +33,12 @@ Knowledge is written directly (`created_by: agent`) and corrected, not pre-appro
 changes only by blast radius (`skills/` by reviewed commit, the organisation tier by
 `POST /skills/org`, a chemist's own by `POST /skills/mine`). An ELN transcription is data.
 
-**Not in this system** (each a decision; re-adding is a new ADR): HPC, DFT, any cluster tier, a
-local shell or exec path (`pyexec` is a sandboxed MCP server), web search/fetch (no egress),
-LangSmith, a specialist router. Every calculation is GFN2-xTB or CREST in a `Chemclaw3-mcp` pod;
-when a decision turns on a difference inside xTB's error bar, say so and propose an experiment.
+**Not in this system** (each a decision; re-adding is a new ADR): a local shell or exec path
+(`pyexec` is a sandboxed MCP server), web search/fetch (no egress), LangSmith, a specialist router,
+a per-engine HPC or DFT bundle, a remote per-source agent. Cluster and DFT compute arrive only
+behind the compute backend seam (`D-2026-10-21-long-running-compute-runs-on-a-backend-seam`); until
+it ships, every calculation is GFN2-xTB or CREST in a `Chemclaw3-mcp` pod. When a decision turns on
+a difference inside xTB's error bar, say so and propose an experiment.
 
 ## Where code goes
 

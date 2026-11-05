@@ -1,6 +1,6 @@
 # D-2026-10-21-a-bo-objective-is-declared-not-registered — a campaign's objective is a spec over any keyed primitive or a measurement, not an entry in a code registry
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

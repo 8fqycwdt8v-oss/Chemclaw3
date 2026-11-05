@@ -1,6 +1,6 @@
 # D-2026-10-21-a-job-ending-may-wake-a-follow-up-turn — a launcher may opt a job into one read-only agent turn on its failure or completion, run under the identity pinned at launch
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

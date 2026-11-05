@@ -1,6 +1,6 @@
 # D-2026-10-21-a-source-is-queried-through-typed-generated-tools — structured questions go to tools generated from a declared `query:` binding, never to model-written SQL
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 

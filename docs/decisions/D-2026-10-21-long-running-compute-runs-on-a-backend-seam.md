@@ -1,8 +1,8 @@
 # D-2026-10-21-long-running-compute-runs-on-a-backend-seam — cluster and other long-running compute return as driver manifests behind one external-job workflow, with engine preparation in the fleet
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
-**Supersedes (in part, on acceptance):** [D-2026-08-26-semiempirical-is-the-whole-tier](D-2026-08-26-semiempirical-is-the-whole-tier.md), its scope line "the calculation tier is semiempirical and complete as it stands". Its findings about what the deleted tier cost stand, and are what this design answers.
+**Supersedes (in part):** [D-2026-08-26-semiempirical-is-the-whole-tier](D-2026-08-26-semiempirical-is-the-whole-tier.md), its scope line "the calculation tier is semiempirical and complete as it stands". Its findings about what the deleted tier cost stand, and are what this design answers.
 
 ## Context
 
@@ -54,7 +54,7 @@ What remains:
 - **Rules that change.** CLAUDE.md's "Not in this system" loses HPC, DFT and the cluster tier, and
   "every calculation is GFN2-xTB or CREST" becomes a tiering rule. The fleet needs its own ADR: a
   prepare/parse server is not a DFT tier in the fleet.
-- **On acceptance**, D-2026-08-26 gains `**Superseded-by:**` naming this ADR `(in part)`.
+- D-2026-08-26 carries `**Superseded-by:**` naming this ADR `(in part)`.
 - **Plan item:** W12. Depends on W6.2–W6.4 and W2.
 
 Revisit when: a backend's lifecycle cannot be expressed as `submit`/`status`/`fetch`/`cancel` (an

@@ -1,6 +1,6 @@
 # D-2026-10-21-a-source-or-backend-is-not-reached-through-a-remote-agent — data sources and compute backends are integrated as governed tools and durable jobs, not as agents behind MCP
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ## Context
 
