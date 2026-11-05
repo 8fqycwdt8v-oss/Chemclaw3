@@ -90,3 +90,27 @@ def test_postgres_sink_allows_loopback_discrete_form_under_entra(
     monkeypatch.setattr(settings, "entra_required", True)
     driver = PostgresWarehouse(host="localhost", user="u", password="pw", database="results")
     assert driver is not None
+
+
+def test_a_sink_manifest_cannot_turn_tls_verification_off() -> None:
+    """`verify_tls: false` in an HTTP sink's `config:` fails the sink gate, not a docstring.
+
+    The gate binds `config:` against the driver's signature, so the switch is refused by having no
+    parameter to bind to; construction refuses it the same way.
+    """
+    from chemclaw.cli.validate_sinks import _driver_problems
+    from chemclaw.publish.manifest import ResultSinkManifest
+
+    def _manifest(**config: object) -> ResultSinkManifest:
+        return ResultSinkManifest(
+            name="lims",
+            description="a site LIMS results endpoint",
+            driver="chemclaw.publish.drivers.http:HttpResultSink",
+            config={"url": "https://lims.internal/api/results", **config},
+        )
+
+    assert _driver_problems(_manifest()) == []
+    refused = _driver_problems(_manifest(verify_tls=False))
+    assert refused and "verify_tls" in refused[0], refused
+    with pytest.raises(TypeError, match="verify_tls"):
+        HttpResultSink(name="lims", tenant_id="site", url="https://x", verify_tls=False)  # type: ignore[call-arg]

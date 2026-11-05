@@ -1,6 +1,6 @@
 # deepagents: `import deepagents` eagerly imports three provider SDKs
 
-**File against:** `langchain-ai/deepagents`. **Status:** draft, not filed. **Observed on:**
+**File against:** `langchain-ai/deepagents`. **Status:** not filed — fixed upstream: `import deepagents` 0.7.32 loads none of the anthropic, openai or google-genai SDKs. **Observed on:**
 deepagents 0.7.25 (latest on PyPI, 2026-10-14) and 0.7.8 (installed here).
 
 ## Title

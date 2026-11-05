@@ -17,7 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from chemclaw.agent.audit import AuditEvent
-from chemclaw.agent.authz import AuthorizationError, authorize_tool
+from chemclaw.agent.authz import DEFAULT_WRITE_TOOL_GATES, AuthorizationError, authorize_tool
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.tool_authz import (
@@ -46,16 +46,29 @@ def _enforced(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
 
 
 def test_dev_mode_gate_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With enforcement off, every tool is callable (local dev, no tenant)."""
+    """With enforcement off, every tool is callable (local dev, no tenant).
+
+    The control turns enforcement on under the same policy, so this passes only while the switch,
+    not a missing gate, is what opens the tool.
+    """
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "tool_authz_default", "deny")  # ignored in dev
     authorize_tool("sample_conformers")  # does not raise
+    monkeypatch.setattr(settings, "entra_required", True)
+    with pytest.raises(AuthorizationError):
+        authorize_tool("sample_conformers")
 
 
 def test_allow_default_lets_ungated_tools_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tool with no gate entry is allowed under the default 'allow' policy (today's behavior)."""
+    """A tool with no gate entry is allowed under the default 'allow' policy (today's behavior).
+
+    The control flips only the default, so the allowance is the policy's and not a missing gate's.
+    """
     _enforced(monkeypatch, tool_role_gates={}, tool_authz_default="allow")
     authorize_tool("find_notes")  # ungated → allowed
+    monkeypatch.setattr(settings, "tool_authz_default", "deny")
+    with pytest.raises(AuthorizationError):
+        authorize_tool("find_notes")
 
 
 def test_gated_tool_requires_a_permitted_role(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,25 +139,38 @@ def test_default_write_gate_fails_closed_without_privileged_roles(
 def test_explicit_operator_gate_overrides_the_default_write_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `tool_role_gates` entry for a write tool replaces the built-in privileged-role gate."""
+    """A `tool_role_gates` entry for a write tool replaces the built-in privileged-role gate.
+
+    The control removes the entry, under which the built-in gate refuses the same user.
+    """
     _enforced(
         monkeypatch,
-        tool_role_gates={"sample_conformers": ["reader"]},
+        tool_role_gates={"record_knowledge_note": ["reader"]},
         entra_privileged_roles="process-chemist",
     )
     token = set_current_identity("u-9", frozenset({"reader"}))
     try:
-        authorize_tool("sample_conformers")  # operator opened it to 'reader' → allowed
+        authorize_tool("record_knowledge_note")  # operator opened it to 'reader' → allowed
+        monkeypatch.setattr(settings, "tool_role_gates", {})
+        with pytest.raises(AuthorizationError):
+            authorize_tool("record_knowledge_note")
     finally:
         reset_current_identity(token)
 
 
 def test_dev_mode_leaves_write_tools_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With enforcement off, the built-in write gates are no-ops (local dev unchanged)."""
+    """With enforcement off, the built-in write gates are no-ops (local dev unchanged).
+
+    The control turns enforcement on with nobody signed in, under which each of them is refused.
+    """
+    assert DEFAULT_WRITE_TOOL_GATES, "no built-in write gate, so this asserts nothing"
     monkeypatch.setattr(settings, "entra_required", False)
-    authorize_tool("sample_conformers")
-    authorize_tool("record_knowledge_note")
-    authorize_tool("record_confirmed_answer")
+    for name in DEFAULT_WRITE_TOOL_GATES:
+        authorize_tool(name)
+    _enforced(monkeypatch, tool_role_gates={}, tool_authz_default="allow")
+    for name in DEFAULT_WRITE_TOOL_GATES:
+        with pytest.raises(AuthorizationError):
+            authorize_tool(name)
 
 
 def test_deny_default_blocks_ungated_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,6 +552,45 @@ async def test_the_failing_exception_still_propagates_untouched() -> None:
 
     with pytest.raises(ValueError, match="unrelated failure"):
         await run_middleware(announce_tool_failures, _ctx("predict_pka"), _handler)
+
+
+def _failed_command() -> Any:
+    """What `task` would return if its report were a failure: a `Command` carrying spend too."""
+    from langgraph.types import Command
+
+    failed = ToolMessage(content="Error: the helper crashed", tool_call_id="c-1", status="error")
+    return Command(update={"messages": [failed], "model_calls": 2})
+
+
+def test_a_failure_carried_inside_a_command_is_announced() -> None:
+    """A `Command`'s failed `ToolMessage` reaches the stream like a bare one does."""
+
+    async def _returns_command() -> Any:
+        return _failed_command()
+
+    (signal,) = _drive_announcing(_ctx("task"), _returns_command)
+    assert isinstance(signal, ToolFailureSignal)
+    assert "helper crashed" in signal.message
+
+
+async def test_a_failure_inside_a_command_loses_the_retry_flag_but_keeps_the_spend() -> None:
+    """The converter rewrites the message in place; the command's other channels survive.
+
+    Replacing the `Command` with the bare message would drop the helper's `model_calls` from the
+    caller's runaway counter.
+    """
+    from langgraph.types import Command
+
+    async def _handler(_request: Any) -> Any:
+        return _failed_command()
+
+    answered = await run_middleware(surface_domain_errors, _ctx("task"), _handler)
+    assert isinstance(answered, Command)
+    assert isinstance(answered.update, dict)
+    assert answered.update["model_calls"] == 2
+    (message,) = answered.update["messages"]
+    assert message.status == "success"
+    assert "helper crashed" in message.text
 
 
 def test_a_successful_call_announces_nothing() -> None:

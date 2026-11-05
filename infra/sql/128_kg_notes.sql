@@ -31,8 +31,10 @@
 -- schema grows lands there without a migration. `created_by`, the validity window and the type are
 -- columns because they are filtered on and constrained.
 --
--- `content_sha` is `sha256:<hex>` of the canonical render: `render_note` with this process's
--- credentials redacted, which is the text `kg.record` writes to a file (`kg/rows.py`). It is NOT
+-- `content_sha` is `sha256:<hex>` of the canonical render: `render_note` of the note as its
+-- redacted file text reads back (`kg/rows.py`). That is the text `kg.record` writes to a file
+-- unless reading the file back changes the note (edge whitespace, CRLF, U+2028), so stores are
+-- compared by canonical note and never by this digest (`kg/compare.py`). It is NOT
 -- the fingerprint `note_index` holds today, which is the digest of a file's bytes and so also
 -- depends on how a person laid the file out: the two agree for a note the writer produced and
 -- differ for a hand-formatted one. A database store's `fingerprints()` answers with this column,

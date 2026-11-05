@@ -2251,7 +2251,8 @@ def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration
 
     A same-width model switch raises nothing at insert, and old-model vectors still score positive
     against new-model queries, returning arbitrary text with a real path until the re-embed drain
-    runs. Asserted on both backends, so the reference keeps answering as production does.
+    runs. Asserted on every backend, the external store's included (it keeps no key of its own), so
+    the reference keeps answering as production does.
     """
 
     async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2278,7 +2279,9 @@ def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration
             embedding=vector,
         )
 
-        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+        external = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
+        backends = (PostgresDocumentIndex(), InMemoryDocumentIndex(), external)
+        for index in backends:
             await index.upsert([file_row], [chunk], stale)
             found = await index.search_dense(SOURCE, vector, 5, DocumentFilter())
             assert found, f"{type(index).__name__}: sanity, findable under its own key"
@@ -2286,11 +2289,56 @@ def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration
         with monkeypatch.context() as swapped:
             swapped.setattr(settings, "embedding_model", "another-model-of-the-same-width")
             assert embedding_config_key() != stale
-            for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            for index in backends:
                 hits = await index.search_dense(SOURCE, vector, 5, DocumentFilter())
                 assert hits == [], (
                     f"{type(index).__name__} cited a model-A chunk against a model-B query: {hits}"
                 )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(_run(monkeypatch))
+
+
+def test_an_external_store_drops_a_draining_chunk_of_a_partly_re_embedded_cutting() -> None:
+    """A cutting half re-embedded under a new model serves its live chunk, never its stale one.
+
+    The cutting is eligible (one chunk is live), so the store ranks both points; the catalogue's
+    key on each chunk row is what keeps the old-model one out of the evidence.
+    """
+
+    async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        texts = ["palladium catalyst deactivation", "palladium catalyst loading"]
+        vectors = await asyncio.to_thread(embed_texts, texts)
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=ordinal,
+                content=text,
+                coordinate="page 1",
+                embedding=vector,
+            )
+            for ordinal, (text, vector) in enumerate(zip(texts, vectors, strict=True))
+        ]
+        index = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
+        await index.upsert([file_row], chunks, embedding_config_key())
+
+        monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+        await index.store_embeddings(chunks[1:], embedding_config_key())
+        hits = await index.search_dense(SOURCE, vectors[0], 5, DocumentFilter())
+        assert [hit.ordinal for hit in hits] == [1], f"served a still-draining chunk: {hits}"
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         asyncio.run(_run(monkeypatch))

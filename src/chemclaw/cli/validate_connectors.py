@@ -46,6 +46,7 @@ from chemclaw.connectors.registry import (
     discovered,
     enabled,
     job_tools,
+    request_timeout_ceiling,
     server_tools_module,
 )
 from chemclaw.core.config import settings
@@ -320,6 +321,24 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
     return problems
 
 
+def _request_timeout_problems(manifest: ConnectorManifest) -> list[str]:
+    """Refuse a `request_timeout` above `request_timeout_ceiling`.
+
+    The registry clamps it anyway, so this is not a safety net but honesty: a manifest must not
+    claim a bound the deployment will not grant.
+    """
+    endpoint = manifest.endpoint
+    declared = getattr(endpoint, "request_timeout", None)
+    ceiling = request_timeout_ceiling()
+    if declared is None or declared <= ceiling:
+        return []
+    return [
+        f"connector {manifest.name!r}: `request_timeout` is {declared}s, above the {ceiling}s "
+        f"ceiling below the {settings.service_turn_timeout_seconds}s turn timeout — the call "
+        "would race the turn's deadline and its timeout error might never reach the model"
+    ]
+
+
 def _queued_problems(manifest: ConnectorManifest) -> list[str]:
     """Check a queued endpoint's inline wait against the deployment's turn timeout.
 
@@ -369,6 +388,7 @@ def validate_connectors() -> list[str]:
         problems.extend(_served_tool_problems(manifest))
         problems.extend(_job_problems(manifest))
         problems.extend(_queued_problems(manifest))
+        problems.extend(_request_timeout_problems(manifest))
     # Check that connector_urls configuration is valid (rule 6).
     problems.extend(_connector_urls_problems(discovered_names))
     problems.extend(_orphan_content_problems(discovered_names))

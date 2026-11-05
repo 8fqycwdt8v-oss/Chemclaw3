@@ -2,9 +2,10 @@
 
 `PostgresNoteStore` answers every `NoteStore` and `CorpusState` question from the tables of
 `infra/sql/128_kg_notes.sql` and `129_kg_note_search.sql` with indexed statements: `related` and
-`current_successor` look edges up, `neighborhood` is a recursive CTE bounded by its hop count, and
-`search` selects on the stored lowercased haystack. Nothing is cached, so a replica sees a write at
-once and holds no copy of the corpus. `put` writes a `NoteUnit` in one transaction.
+`current_successor` look edges up, `neighborhood` is one statement per hop that stops when nothing
+new is reached, and `search` ranks and cuts on the stored lowercased haystack. Nothing is cached, so
+a replica sees a write at once and holds no copy of the corpus. `put` writes a
+`NoteUnit` in one transaction.
 
 Invariants: every statement names the store's tenant; the write order is the unit's (dependencies,
 subject, retirements); a revision row is inserted, never changed; identical content writes no
@@ -48,6 +49,8 @@ from chemclaw.kg.store import (
     PutOutcome,
     Role,
     SearchResult,
+    Vicinity,
+    ranked,
 )
 
 log = logging.getLogger(__name__)
@@ -90,26 +93,14 @@ SELECT EXISTS (SELECT 1 FROM kg_notes WHERE tenant_id = %(tenant)s AND id = %(id
     OR EXISTS (SELECT 1 FROM kg_edges WHERE tenant_id = %(tenant)s AND dst = %(id)s)
 """
 
-# Breadth-first over edges followed both ways. `UNION` drops a (node, depth) pair already reached,
-# which ends a cycle; `depth < hops` ends everything else. The lateral union keeps the recursive
-# term a single reference to `walk` and lets each arm use its own index (primary key for out-edges,
-# `kg_edges_dst_idx` for in-edges).
-_NEIGHBORHOOD = """
-WITH RECURSIVE walk(node, depth) AS (
-    SELECT %(id)s::text, 0
-  UNION
-    SELECT next.node, walk.depth + 1
-      FROM walk
-     CROSS JOIN LATERAL (
-         SELECT e.dst AS node FROM kg_edges e
-          WHERE e.tenant_id = %(tenant)s AND e.src = walk.node
-         UNION ALL
-         SELECT e.src FROM kg_edges e
-          WHERE e.tenant_id = %(tenant)s AND e.dst = walk.node
-     ) next
-     WHERE walk.depth < %(hops)s
-)
-SELECT DISTINCT node FROM walk WHERE node <> %(id)s
+# One level of a breadth-first walk: the nodes one link from a frontier, following links both ways.
+# The walker keeps the visited set, which a recursive CTE cannot see, so a node is expanded once and
+# the walk ends when a level reaches nothing new rather than at `hops`. Each arm uses its own index
+# (primary key for out-edges, `kg_edges_dst_idx` for in-edges).
+_NEXT_LEVEL = """
+SELECT e.dst FROM kg_edges e WHERE e.tenant_id = %(tenant)s AND e.src = ANY(%(frontier)s::text[])
+UNION
+SELECT e.src FROM kg_edges e WHERE e.tenant_id = %(tenant)s AND e.dst = ANY(%(frontier)s::text[])
 """
 
 _EDGES_OF = f"""
@@ -143,17 +134,26 @@ SELECT f.node, c.cand, {", ".join(f"n.{name}" for name in _NOTE_FIELDS)}
  ORDER BY f.node {_BYTEWISE}, c.cand {_BYTEWISE}
 """
 
-# How many notes were current on the date, and those of them that contain any term. One statement,
-# so the two agree; `LEFT JOIN ... ON true` keeps the count when nothing matches.
+# How many notes were current on the date, how many hits there are at each coverage, and the best
+# `limit` hits (most terms, then id). One statement, so the three agree; only the returned hits
+# leave the database. `LEFT JOIN ... ON true` keeps the counts when nothing matches. `{coverage}`
+# adds one per term the haystack contains, `kg.search.term_coverage` in SQL.
 _SEARCH = f"""
-SELECT counted.n, {", ".join(f"hit.{name}" for name in _NOTE_FIELDS)}
+WITH hits AS (
+    SELECT {_NOTE_COLUMNS}, ({{coverage}}) AS coverage FROM kg_notes
+     WHERE tenant_id = %(tenant)s AND validity @> %(as_of)s::date AND ({{any_term}})
+), tally AS (
+    SELECT coalesce(jsonb_object_agg(coverage, n), '{{{{}}}}'::jsonb) AS by_coverage
+      FROM (SELECT coverage, count(*) AS n FROM hits GROUP BY coverage) grouped
+), best AS (
+    SELECT * FROM hits ORDER BY coverage DESC, id {_BYTEWISE} LIMIT %(limit)s
+)
+SELECT counted.n, tally.by_coverage, {", ".join(f"best.{name}" for name in _NOTE_FIELDS)}
   FROM (SELECT count(*) AS n FROM kg_notes
          WHERE tenant_id = %(tenant)s AND validity @> %(as_of)s::date) counted
-  LEFT JOIN (
-      SELECT {_NOTE_COLUMNS} FROM kg_notes
-       WHERE tenant_id = %(tenant)s AND validity @> %(as_of)s::date AND ({{any_term}})
-  ) hit ON true
- ORDER BY hit.id {_BYTEWISE}
+ CROSS JOIN tally
+  LEFT JOIN best ON true
+ ORDER BY best.coverage DESC, best.id {_BYTEWISE}
 """
 
 _LOCK_IDS = (
@@ -363,11 +363,14 @@ class PostgresNoteStore:
 
     async def get_many(self, note_ids: Collection[str]) -> dict[str, Note | None]:
         """`get` for each id from one statement, so the answers agree with each other."""
-        wanted = list(dict.fromkeys(note_ids))
         async with self._read() as conn:
-            cursor = await conn.execute(_SELECT_SOME, (self._tenant, wanted))
-            rows = await cursor.fetchall()
-        found = {row[0]: _note_or_none(row) for row in rows}
+            return await self._get_many_on(conn, note_ids)
+
+    async def _get_many_on(
+        self, conn: psycopg.AsyncConnection[TupleRow], note_ids: Collection[str]
+    ) -> dict[str, Note | None]:
+        cursor = await conn.execute(_SELECT_SOME, (self._tenant, list(dict.fromkeys(note_ids))))
+        found = {row[0]: _note_or_none(row) for row in await cursor.fetchall()}
         return {note_id: found.get(note_id) for note_id in note_ids}
 
     async def notes(self) -> list[Note]:
@@ -389,23 +392,53 @@ class PostgresNoteStore:
 
     async def neighborhood(self, note_id: str, hops: int = 1) -> set[str]:
         """Node ids within `hops` of `note_id`, following links both ways, `note_id` excluded."""
-        params = {"tenant": self._tenant, "id": note_id, "hops": hops}
         async with self._read(consistent=True) as conn:
-            cursor = await conn.execute(_IS_A_NODE, params)
+            cursor = await conn.execute(_IS_A_NODE, {"tenant": self._tenant, "id": note_id})
             known = await cursor.fetchone()
             if known is None or not known[0]:
                 raise KeyError(f"unknown note id: {note_id!r}")
-            if hops < 1:
-                return set()
-            cursor = await conn.execute(_NEIGHBORHOOD, params)
-            return {row[0] for row in await cursor.fetchall()}
+            return await self._walk(conn, note_id, hops)
+
+    async def _walk(
+        self, conn: psycopg.AsyncConnection[TupleRow], note_id: str, hops: int
+    ) -> set[str]:
+        """Breadth-first from `note_id`, one statement per level, until `hops` or nothing new."""
+        seen = {note_id}
+        frontier = [note_id]
+        for _ in range(hops):
+            if not frontier:
+                break
+            cursor = await conn.execute(_NEXT_LEVEL, {"tenant": self._tenant, "frontier": frontier})
+            frontier = sorted({row[0] for row in await cursor.fetchall()} - seen)
+            seen.update(frontier)
+        return seen - {note_id}
 
     async def edges(self, note_id: str) -> list[Edge]:
         """Every link out of `note_id` and then every link into it; a self-link once."""
         async with self._read() as conn:
-            cursor = await conn.execute(_EDGES_OF, {"tenant": self._tenant, "id": note_id})
-            rows = await cursor.fetchall()
-        return _grouped(rows)
+            return await self._edges_on(conn, note_id)
+
+    async def _edges_on(self, conn: psycopg.AsyncConnection[TupleRow], note_id: str) -> list[Edge]:
+        cursor = await conn.execute(_EDGES_OF, {"tenant": self._tenant, "id": note_id})
+        return _grouped(await cursor.fetchall())
+
+    async def vicinity(self, note_id: str, hops: int, as_of: date) -> Vicinity | None:
+        """Every part read in one REPEATABLE READ transaction, so they share one snapshot."""
+        async with self._read(consistent=True) as conn:
+            cursor = await conn.execute(_SELECT_NOTE, (self._tenant, note_id))
+            row = await cursor.fetchone()
+            note = None if row is None else _note_or_none(row)
+            if note is None:
+                return None
+            edges = await self._edges_on(conn, note_id)
+            found = await self._get_many_on(conn, await self._walk(conn, note_id, hops))
+            retired = [
+                nid
+                for nid, near in found.items()
+                if near is not None and not near.is_current(as_of)
+            ]
+            successors = await self._successors_on(conn, retired, as_of)
+        return Vicinity(note, edges, found, successors)
 
     async def current_successor(self, note_id: str, as_of: date) -> Note | None:
         """The first note current on `as_of` that a chain of supersede links leads to."""
@@ -420,28 +453,31 @@ class PostgresNoteStore:
         `kg.graph.current_successor` gives; a cycle ends a walk and an id is never its own answer.
         The statements share one snapshot, and their number is the longest chain, not the ids.
         """
+        async with self._read(consistent=True) as conn:
+            return await self._successors_on(conn, note_ids, as_of)
+
+    async def _successors_on(
+        self, conn: psycopg.AsyncConnection[TupleRow], note_ids: Collection[str], as_of: date
+    ) -> dict[str, Note | None]:
         answers: dict[str, Note | None] = dict.fromkeys(note_ids)
         seen = {origin: {origin} for origin in answers}
         frontier = {origin: [origin] for origin in answers}
-        async with self._read(consistent=True) as conn:
-            while frontier:
-                nodes = sorted({node for walk in frontier.values() for node in walk})
-                cursor = await conn.execute(
-                    _REPLACEMENTS, {"tenant": self._tenant, "frontier": nodes}
+        while frontier:
+            nodes = sorted({node for walk in frontier.values() for node in walk})
+            cursor = await conn.execute(_REPLACEMENTS, {"tenant": self._tenant, "frontier": nodes})
+            level: dict[str, dict[str, Note | None]] = {}
+            for row in await cursor.fetchall():
+                level.setdefault(row[0], {})[row[1]] = (
+                    None if row[2] is None else _note_or_none(row[2:])
                 )
-                level: dict[str, dict[str, Note | None]] = {}
-                for row in await cursor.fetchall():
-                    level.setdefault(row[0], {})[row[1]] = (
-                        None if row[2] is None else _note_or_none(row[2:])
-                    )
-                following: dict[str, list[str]] = {}
-                for origin, walk in frontier.items():
-                    step = self._step(level, walk, seen[origin], as_of)
-                    if isinstance(step, Note):
-                        answers[origin] = step
-                    elif step:
-                        following[origin] = step
-                frontier = following
+            following: dict[str, list[str]] = {}
+            for origin, walk in frontier.items():
+                step = self._step(level, walk, seen[origin], as_of)
+                if isinstance(step, Note):
+                    answers[origin] = step
+                elif step:
+                    following[origin] = step
+            frontier = following
         return answers
 
     @staticmethod
@@ -460,28 +496,33 @@ class PostgresNoteStore:
                 following.append(candidate)
         return following
 
-    async def search(self, terms: Sequence[str], as_of: date) -> SearchResult:
-        """The notes current on `as_of` that contain at least one of `terms`, in id order.
+    async def search(self, terms: Sequence[str], as_of: date, limit: int) -> SearchResult:
+        """The best `limit` notes current on `as_of` containing any of `terms`, and the tally.
 
-        The database selects the candidates by substring on the stored haystack; coverage is then
-        counted by `kg.search.term_coverage`, the one definition, so a note is a hit here exactly
-        when it is in the git store.
+        The database counts, ranks and cuts on the stored haystack, so a common term returns
+        `limit` notes and not the corpus. A term counts once per occurrence in `terms`, as in
+        `kg.search.term_coverage`, which re-scores the returned notes as the one definition.
         """
-        patterns = [_like(term) for term in terms if _storable(term)]
-        params: dict[str, Any] = {"tenant": self._tenant, "as_of": as_of}
-        clause = " OR ".join(f"search_text LIKE %(p{i})s" for i in range(len(patterns))) or "false"
-        params.update({f"p{i}": pattern for i, pattern in enumerate(patterns)})
+        storable = [term for term in terms if _storable(term)]
+        params: dict[str, Any] = {"tenant": self._tenant, "as_of": as_of, "limit": limit}
+        params.update({f"p{i}": _like(term) for i, term in enumerate(storable)})
+        likes = [f"search_text LIKE %(p{i})s" for i in range(len(storable))]
+        statement = _SEARCH.format(
+            any_term=" OR ".join(likes) or "false",
+            coverage=" + ".join(f"({like})::int" for like in likes) or "0",
+        )
         async with self._read() as conn:
-            cursor = await conn.execute(_SEARCH.format(any_term=clause), params)
+            cursor = await conn.execute(statement, params)
             rows = await cursor.fetchall()
         matches: list[tuple[int, Note]] = []
         for row in rows:
-            if row[1] is None:
+            if row[2] is None:
                 continue
-            note = _note_or_none(row[1:])
+            note = _note_or_none(row[2:])
             if note is not None and (coverage := term_coverage(note, terms)):
                 matches.append((coverage, note))
-        return SearchResult(searched=int(rows[0][0]), matches=matches)
+        coverages = {int(coverage): int(n) for coverage, n in rows[0][1].items()}
+        return SearchResult(int(rows[0][0]), ranked(matches, limit), coverages)
 
     async def graph(self) -> nx.DiGraph:
         """The whole note graph, built from both tables in one snapshot, frozen."""
@@ -588,8 +629,8 @@ class PostgresNoteStore:
         The subject is refused (`HumanNoteProtected`) when it is agent-authored and a human's note
         holds the id, and an `expected_revision` that differs from the stored one raises
         `NoteRevisionConflict`. `created_by` is taken as given: whoever calls `put` has
-        authenticated the author. Either refusal raises before any row changes: the transaction
-        rolls back whole.
+        authenticated the author (`tests/test_note_writers.py` names every caller). Either
+        refusal raises before any row changes: the transaction rolls back whole.
 
         `unit.arrived` dates the subject's first appearance (an import); other notes arrive now.
 

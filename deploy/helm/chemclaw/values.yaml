@@ -467,6 +467,15 @@ connectors:
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
     worker: true
+    # **This worker's own workflow-cache ceiling** (`CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS` on this
+    # Deployment only; the fleet-wide 750 stays for every other worker). A cached
+    # `BoCampaignWorkflow` costs about 284 + 31.5 R + 0.21 R^2 KiB for R rounds (measured, mostly
+    # native SDK-core state: D-2026-10-24-a-cached-bo-campaign-grows-with-its-rounds-in-the-sdk-core),
+    # so 750 only fits a 1Gi request up to ~12 rounds. 360 is half the request over a 30-round
+    # campaign (512 MiB / 1,418 KiB = 369, rounded down); `tests/test_workers.py` holds it at 30 and
+    # at the spec's default `n_rounds`. A campaign evicted past it replays from history on its next
+    # task: CPU and broker traffic, never a wrong answer.
+    maxCachedWorkflows: 360
     # `predict_outcome` is queued (`connector.yaml` `queued:`); its surrogate fit runs on this
     # bundle's one server pod, so two in flight is what that pod serves without thrashing.
     interactive:
@@ -553,6 +562,18 @@ connectors:
     enabled: false
     server: true
     url: http://chemclaw-mcp-suitability:8892/mcp
+  chembl:
+    # Compound identity and aggregated bioactivity from a vendored subset of ChEMBL release 37
+    # (`Chemclaw3-mcp`'s `servers/chembl`, port 8862). **The data is CC BY-SA 3.0** and every
+    # answer carries the credit, release and licence as a structured `attribution` field; an
+    # answer derived from it must keep that. Off like the bundles above: enabling it is a
+    # deployment decision, and the same two operator obligations apply (a
+    # `networkPolicy.egressDestinations` entry for the host, and `CHEMCLAW_CHEMBL_TOKEN`). A
+    # release image carries the full subset, a bare build the fixture (`attribution.data_tier`
+    # says which; `docs/guides/deployment.md`).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-chembl:8862/mcp
   pyexec:
     # The fleet's bounded, offline Python sandbox (`Chemclaw3-mcp`'s `servers/pyexec`, port 8899).
     # Its manifest arrives with the others through `chemclaw-contracts` and declares
@@ -622,6 +643,7 @@ extraConnectors:
     - bo
     - calc
     - chem
+    - chembl
     - kinetics
     - molfp
     - props
@@ -1168,8 +1190,7 @@ config:
   # `connectors.chem`/`safety`/`rxnpredict` and `CHEMCLAW_RXNLABEL_SERVER_URL` carried the same
   # spelling. A comment restating a rule cannot check a value against it, so
   # `tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
-  # reads the Services the sibling checkout creates (its chart's render, or `servers/*/deploy/service.yaml`
-  # for a checkout that predates the chart) and compares names and ports
+  # reads the Services the sibling checkout's chart renders and compares names and ports
   # — skipping, and naming every address it therefore did not check, where there is no checkout.
   #
   # **The bare short name is the address, not an abbreviation of a longer one.** The fleet's own
@@ -1499,6 +1520,9 @@ secrets:
     # (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
     # The `BACKLOG.md` row this used to point at is gone.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+    # Signs the roles a background report carries (`core/role_claim.py`); the API and every worker
+    # must hold the same value. Unset, a policy-gated deployment's background sweeps ask no source.
+    roleClaimSecret: "CHEMCLAW_ROLE_CLAIM_SECRET"
     # The bearer token the read-only MCP face requires on `/mcp`
     # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
     # A Secret slot rather than a `config` entry for the reason above: `config` renders into a
@@ -1532,8 +1556,8 @@ secrets:
     # a degraded one.
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
     # The same kind again, for the fleet bundles that ship **off**: the five process-development
-    # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and
-    # `pyexec`. Each name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
+    # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`), `chembl`
+    # and `pyexec`. Each name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
     # although every one of those bundles is disabled by default, because `optional: true` makes an
     # absent key harmless — the variable is simply unset in a pod that never dials the bundle —
     # while a missing slot made "enable a bundle" a Secret-plumbing edit too: without it the bearer
@@ -1545,6 +1569,7 @@ secrets:
     kineticsToken: "CHEMCLAW_KINETICS_TOKEN"
     unitopsToken: "CHEMCLAW_UNITOPS_TOKEN"
     suitabilityToken: "CHEMCLAW_SUITABILITY_TOKEN"
+    chemblToken: "CHEMCLAW_CHEMBL_TOKEN"
     pyexecToken: "CHEMCLAW_PYEXEC_TOKEN"
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
@@ -1571,6 +1596,10 @@ secrets:
     # `ingest/labels/labeller.py`). Same shape as `calcToken` one hop away: a credential this
     # release *presents* to a server it does not run.
     rxnlabelToken: "CHEMCLAW_RXNLABEL_TOKEN"
+    # The Teams room bridge's client secret (`settings.teams_bot_credential_token_env`, read per
+    # call by `rooms/identity.py`). The bridge is not a chart role: it runs as its own Deployment
+    # (`docs/guides/teams-room-bridge.md`), and this slot only keeps the secret out of the ConfigMap.
+    teamsBotCredential: "CHEMCLAW_TEAMS_BOT_CREDENTIAL"
     # **Four credentials that had no slot at all**, and therefore exactly one chart seam left:
     # `.Values.config`, which renders a ConfigMap the OpenShift `view` role can read and which
     # `helm get values` prints. Each has a live reader, and each is optional in the sense the four
@@ -2191,6 +2220,9 @@ networkPolicy:
     kinetics: 8852
     unitops: 8853
     suitability: 8892
+    # `chembl` (`connectors.chembl` above), on the same terms as the five: a port for a disabled
+    # bundle opens nothing, and its absence is the failure that looks like the server being down.
+    chembl: 8862
     # `pyexec`, the fleet's Python sandbox (`connectors.pyexec` above), on the same terms.
     pyexec: 8899
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means

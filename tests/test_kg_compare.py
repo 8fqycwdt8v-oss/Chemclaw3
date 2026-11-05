@@ -36,7 +36,7 @@ from chemclaw.kg.importer import import_notes
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.postgres_store import PostgresNoteStore
 from chemclaw.kg.render import render_note
-from chemclaw.kg.rows import content_sha
+from chemclaw.kg.rows import canonical_note, content_sha
 from chemclaw.kg.store import GitNoteStore, NoteUnit
 from tests.kg_repo import write_notes
 from tests.note_store_harness import corpus, empty_note_tables
@@ -110,6 +110,22 @@ async def test_a_file_laid_out_by_hand_is_the_same_note_with_another_digest(
     laid_out = render_note(note).replace("\n", "\r\n") + "\r\n\r\n\r\n"
     path.write_bytes(laid_out.encode())
     assert content_sha(note) != f"sha256:{hashlib.sha256(laid_out.encode()).hexdigest()}"
+    assert await _differences(pair) == {}
+
+
+async def test_the_digest_is_of_the_canonical_note_not_of_the_text_the_writer_renders(
+    pair: tuple[GitNoteStore, PostgresNoteStore, Path],
+) -> None:
+    """Edge whitespace is in the rendered file and not in the note read back: one note, two digests.
+
+    So `content_sha` is not the digest of the file the writer commits, and the stores are compared
+    by canonical note, which finds nothing different.
+    """
+    note = _note("edged", "\n\n  Indented first line.\n\n\n")
+    rendered = render_note(note)
+    assert content_sha(canonical_note(note)) != content_sha(note)
+    assert content_sha(note) == f"sha256:{hashlib.sha256(rendered.encode()).hexdigest()}"
+    await _fill(pair, note)
     assert await _differences(pair) == {}
 
 

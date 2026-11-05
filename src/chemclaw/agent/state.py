@@ -112,8 +112,9 @@ class ChemclawState(PlanningState):
 
     # How many model calls this turn has *authorised* — the runaway guard's counter
     # (`spend/guard.py`). The increment is written in `before_model`, so a later `before_model`
-    # hook that ends the run (`guard.enforce_spend_cap`) leaves one increment for a call never
-    # made; the cap can bind one call early, never late (pinned by `tests/test_spend_cap.py`).
+    # hook that ends the run (`guard.enforce_spend_cap`'s second arrival) leaves one increment for
+    # a call never made; the cap can bind one call early, never late (pinned by
+    # `tests/test_spend_cap.py`).
     #
     # Counted in `before_model` because an `after_model` count can be skipped by any middleware
     # jumping from `after_model`. Untracked, so a new run on the same thread starts at 0. Not
@@ -133,9 +134,10 @@ class ChemclawState(PlanningState):
     # `wrap_model_call` as an absolute total, which is what `TurnTotal`'s fold is defined against.
     billed_tokens: NotRequired[Annotated[int, TurnTotal(int)]]
 
-    # Whether the spend guard stopped this turn, written on the stopping branch. The count alone
-    # cannot answer it: the stopping branch bills nothing, so a capped turn and one that finished at
-    # its last allowed token end at the same number.
+    # Whether the spend guard cut this turn short, written on the branch that fires (the first
+    # arrival over budget, which grants the wrap-up call, and the second, which ends the turn). The
+    # count alone cannot answer it: a capped turn and one that finished at its last allowed token
+    # end at the same number.
     spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
     # Whether *this graph* has spent its one tool-less call at the loop cap — the per-branch half of
@@ -162,21 +164,24 @@ class ChemclawState(PlanningState):
     handoffs: NotRequired[Annotated[int, TurnTotal(int)]]
 
 
-def turn_input(message: str, message_id: str | None = None) -> dict[str, Any]:
-    """The graph input that starts one turn: the user's message.
+def turn_input(message: str | HumanMessage, message_id: str | None = None) -> dict[str, Any]:
+    """The graph input that starts one turn (the user's message) or continues it (a system note).
 
     Per-turn reset comes from the untracked channels, not from here. Kept as a function so the
     turn's input shape (the `("user", message)` tuple the graph coerces) is written once for its
     callers.
 
     Args:
-        message: The user's message for this turn.
+        message: The user's message for this turn, or an already-built message (a
+            `compaction.system_note` the runner continues the turn with), passed through unchanged.
         message_id: The id to give the message in the thread, so the turn's start can be found
             again (`agent/turn_resume.py`); the graph mints one when omitted.
 
     Returns:
         The mapping to pass to `ainvoke`/`astream`.
     """
+    if isinstance(message, HumanMessage):
+        return {"messages": [message]}
     if message_id is None:
         return {"messages": [("user", message)]}
     return {"messages": [HumanMessage(content=message, id=message_id)]}

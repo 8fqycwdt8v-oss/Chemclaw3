@@ -971,8 +971,8 @@ def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> 
     from chemclaw.skills.backends import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
 
     def subclasses(cls: type) -> set[type]:
-        found = set(cls.__subclasses__())
-        return found | {sub for child in cls.__subclasses__() for sub in subclasses(child)}
+        children: list[type] = cls.__subclasses__()
+        return set(children) | {sub for child in children for sub in subclasses(child)}
 
     families = subclasses(AuthorizationError)
     assert len(families) >= 4, f"only {sorted(c.__name__ for c in families)} — re-check the claim"

@@ -227,14 +227,13 @@ _NOT_COPIED: dict[str, str] = {
 def _effective_also_copy() -> list[str]:
     """`also_copy` as mutmut resolves it: ours plus the defaults upstream appends.
 
-    Read through `Config`, the accessor `mutmut.__main__.copy_also_copy_files` uses, so upstream
+    Read through `config()`, the accessor `mutmut.__main__.copy_also_copy_files` uses, so upstream
     dropping a default shows up here.
     """
     probe = (
         "import json\n"
-        "from mutmut.configuration import Config\n"
-        "Config.ensure_loaded()\n"
-        "print(json.dumps([str(p) for p in Config.get().also_copy]))\n"
+        "from mutmut.configuration import config\n"
+        "print(json.dumps([str(p) for p in config().also_copy]))\n"
     )
     result = subprocess.run(
         [sys.executable, "-"], input=probe, capture_output=True, text=True, cwd=_ROOT
@@ -356,6 +355,10 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_note_visibility.py",
     "tests/test_org_skills.py",
     "tests/test_plan_gate.py",
+    "tests/test_plan_inbox.py",
+    "tests/test_plan_link.py",
+    "tests/test_plan_scope.py",
+    "tests/test_plan_state.py",
     "tests/test_postgres_store.py",
     "tests/test_properties_core.py",
     "tests/test_publish_end_to_end.py",

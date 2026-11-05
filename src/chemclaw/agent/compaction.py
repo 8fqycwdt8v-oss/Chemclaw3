@@ -78,27 +78,29 @@ def _placeholder(extra: str = "") -> str:
 
 TOOL_RESULT_PLACEHOLDER = _placeholder()
 
-# The `response_metadata` key that marks a `HumanMessage` as a note a middleware appended to *this
-# request* rather than a message the thread holds. Nothing reads it but `_opens_a_group`.
-_REQUEST_NOTE = "chemclaw_request_note"
+# The `response_metadata` key that marks a `HumanMessage` as written by this system, not the
+# chemist. Nothing reads it but `_opens_a_group`; it survives the checkpointer's serializer.
+_SYSTEM_NOTE = "chemclaw_system_note"
 
 
-def request_note(text: str) -> HumanMessage:
-    """A human-role note for one request, which the conversation window will not treat as a turn.
+def system_note(text: str) -> HumanMessage:
+    """A human-role note this system wrote, which the conversation window will not treat as a turn.
 
-    A group is a chemist's message and what answers it; treating a request-only note (e.g.
-    `guard.AnswerAtTheCap`'s wrap-up) as the newest group would let the window cut the chemist's
-    actual question. Marked in `response_metadata`, which is never sent to the provider.
+    A group is a chemist's message and what answers it. A note in the user position — one request's
+    (`guard.AnswerAtTheCap`'s wrap-up) or one the runner adds to the thread mid-turn (the revision
+    round, the job resume) — would otherwise be the newest group, and the window, which never cuts
+    past the newest group, could cut the chemist's question and send the note alone. Marked in
+    `response_metadata`, which is never sent to the provider.
     """
-    return HumanMessage(text, response_metadata={_REQUEST_NOTE: True})
+    return HumanMessage(text, response_metadata={_SYSTEM_NOTE: True})
 
 
 def _opens_a_group(message: AnyMessage) -> bool:
-    """Whether `message` starts a conversation group: a human message the thread holds.
+    """Whether `message` starts a conversation group: a human message the chemist wrote.
 
-    A `request_note` starts nothing, so the newest group is always the chemist's latest message.
+    A `system_note` starts nothing, so the newest group is always the chemist's latest message.
     """
-    return isinstance(message, HumanMessage) and not message.response_metadata.get(_REQUEST_NOTE)
+    return isinstance(message, HumanMessage) and not message.response_metadata.get(_SYSTEM_NOTE)
 
 
 # Note ids inside a cleared result, read from `EvidenceChunk.source_note_id` in this repository's
@@ -347,7 +349,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         budget = effective_trigger(self.trigger)
         if count_tokens(messages) <= budget:
             return
-        # Only human messages the thread holds start groups; a `request_note` does not.
+        # Only the chemist's messages start groups; a `system_note` does not.
         starts = [index for index, message in enumerate(messages) if _opens_a_group(message)]
         if not starts:
             # No group boundary to cut on, so no cut this edit can take without stranding a pairing.

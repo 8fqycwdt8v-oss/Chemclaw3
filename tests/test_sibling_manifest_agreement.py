@@ -142,7 +142,7 @@ def test_no_fleet_checkout_manifest_is_a_different_major_from_the_installed_pack
 #: The packaged connectors this tree relies on being off until a deployment names them: their
 #: schemas ride on every model call (`tests/test_context_floor.py`), and `pyexec` runs model-written
 #: code. Their `default_enabled: false` is the fleet's to keep, and this tree's to notice losing.
-_OPT_IN = ("kinetics", "props", "pyexec", "suitability", "thermalsafety", "unitops")
+_OPT_IN = ("chembl", "kinetics", "props", "pyexec", "suitability", "thermalsafety", "unitops")
 
 
 @pytest.mark.parametrize("name", _OPT_IN)

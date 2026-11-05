@@ -73,7 +73,23 @@ print(last + 1)
 PY
 }
 
-free_gb() { df -BG --output=avail "$REPO_ROOT" | tail -1 | tr -dc '0-9'; }
+# Whole GiB available to the checkout. POSIX `df -Pk` (KiB, one line per filesystem), because GNU
+# `-BG --output` is refused by BSD `df`, and an unread value must stop the run loudly, not read as 0.
+free_gb() {
+  df -Pk "$REPO_ROOT" | awk 'NR == 2 { print int($4 / 1048576) }'
+}
+
+# Run "$@" with a deadline of $1 seconds; at the deadline the child is killed and the status is 124,
+# as GNU `timeout` reports it. Not `timeout` itself: BSD userland (macOS) has none.
+bounded() {
+  "$python" -c '
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+' "$@"
+}
 
 # Every sample is optional: a scrape that times out must cost its own field, never the round.
 # `|| true` throughout, and the line builder treats an empty value as null.
@@ -113,7 +129,8 @@ run() {
 
   while [ "$round" -le "$limit" ]; do
     local disk; disk="$(free_gb)"
-    if [ "${disk:-0}" -lt "$DISK_FLOOR_GB" ]; then
+    [ -n "$disk" ] || die "could not read the free disk space under $REPO_ROOT"
+    if [ "$disk" -lt "$DISK_FLOOR_GB" ]; then
       printf '{"stop":"disk %sGB below floor %sGB","round":null}\n' "$disk" "$DISK_FLOOR_GB" >>"$RECORD"
       log "stopping: ${disk}GB free is below the ${DISK_FLOOR_GB}GB floor"
       return 0
@@ -123,7 +140,7 @@ run() {
     local storm_out; storm_out="$LIVE_DIR/soak-round.md"
     CHEMCLAW_LLM_BASE_URL="$mock_base" \
     CHEMCLAW_LLM_MODEL=mock \
-      timeout 1800 "$python" -m chemclaw.cli.live_storm \
+      bounded 1800 "$python" -m chemclaw.cli.live_storm \
         --families "$FAMILIES" \
         --sweep-turns "$SWEEP_TURNS" --collide "$COLLIDE" --report "$storm_out" \
         >"$LIVE_DIR/soak-round.log" 2>&1

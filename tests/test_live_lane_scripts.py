@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -319,6 +320,74 @@ def test_wait_for_pollers_passes_on_a_polled_queue_and_names_an_unpolled_one(
     assert "connector-fixture-interactive" in polled.stdout
     assert unpolled.returncode != 0
     assert "worker-ghost (connector-ghost)" in unpolled.stderr
+
+
+def test_wait_for_pollers_rides_out_a_rate_limited_broker(tmp_path: Path) -> None:
+    """A broker that refuses with `RESOURCE_EXHAUSTED` is asked again, not reported as a failure.
+
+    A dev server under its namespace rate limit answers the lane's own describe calls that way; a
+    restart that died on it killed the front door and never started it again. A burst of describe
+    calls holds the limiter shut while the check starts, then stops so the broker recovers.
+    """
+    import asyncio
+
+    from temporalio.worker import Worker
+
+    from chemclaw.connectors.queued_call import call_queued_tool
+    from chemclaw.connectors.queued_workflow import QueuedToolWorkflow
+    from tests.temporal_env import start_local_env_or_skip
+
+    async def _measure() -> tuple[Any, int]:
+        env = await start_local_env_or_skip(
+            dynamic_config=("frontend.namespaceRPS=5", "frontend.namespaceBurstRatio=1")
+        )
+        async with env:
+            address = env.client.service_client.config.target_host
+            async with Worker(
+                env.client,
+                task_queue="connector-fixture-interactive",
+                workflows=[QueuedToolWorkflow],
+                activities=[call_queued_tool],
+            ):
+                burst = asyncio.create_task(_burst(env.client, seconds=3.0))
+                result = await asyncio.to_thread(
+                    _wait_for_pollers, tmp_path, address, "interactive-worker-fixture"
+                )
+                refused = await burst
+            return result, refused
+
+    result, refused = asyncio.run(_measure())
+    assert refused > 0, "the broker never rate-limited during the check, so it was not tested"
+    assert result.returncode == 0, result.stderr
+    assert "connector-fixture-interactive" in result.stdout
+
+
+async def _burst(client: Any, *, seconds: float) -> int:
+    """Hold the namespace limiter shut for `seconds`; how many calls it refused meanwhile."""
+    import asyncio
+    import time
+
+    from temporalio.api.enums.v1 import TaskQueueType
+    from temporalio.api.taskqueue.v1 import TaskQueue
+    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+    from temporalio.service import RPCError, RPCStatusCode
+
+    refused = 0
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            await client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=client.namespace,
+                    task_queue=TaskQueue(name="connector-fixture-interactive"),
+                    task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+                )
+            )
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.RESOURCE_EXHAUSTED:
+                refused += 1
+        await asyncio.sleep(0.01)
+    return refused
 
 
 def test_wait_for_pollers_reports_a_dead_worker_at_once(tmp_path: Path) -> None:
@@ -846,3 +915,164 @@ def test_restarting_the_labeller_is_sent_to_the_script_that_owns_it(tmp_path: Pa
     )
     assert done.returncode != 0
     assert "bash infra/live/processes.sh restart rxnlabel" in done.stdout
+
+
+# ---------------------------------------------------------------- restarts and the lane secret
+
+
+@pytest.mark.parametrize(("script", "prefix"), [(_PROCESSES, ""), (_UP, "e2e-")])
+def test_a_restarted_process_keeps_the_log_of_the_one_it_replaced(
+    tmp_path: Path, script: Path, prefix: str
+) -> None:
+    """`start` twice under one name leaves both runs' output, each under its own marker.
+
+    `restart` is kill-then-start; a truncating start erased the log of the process whose death
+    the storm's chaos family was checking.
+    """
+    live, run = tmp_path / ".live", tmp_path / ".live/run"
+    run.mkdir(parents=True)
+    driver = (
+        f"LIVE_DIR={live}\nRUN_DIR={run}\n"
+        "log() { :; }\nrunning() { return 1; }\n"
+        f"{_function(script, 'start')}"
+        "start probe sh -c 'echo first-run'\nwait\n"
+        "start probe sh -c 'echo second-run'\nwait\n"
+    )
+    _bash(driver, _clean_env())
+    text = (live / f"{prefix}probe.log").read_text(encoding="utf-8")
+    assert "first-run" in text and "second-run" in text, text
+    assert text.index("first-run") < text.index("second-run")
+    assert text.count("probe starting at") == 2, text
+
+
+def test_every_lane_process_frames_with_one_persisted_envelope_secret() -> None:
+    """`up` exports one envelope secret before it starts anything, and persists it for a restart.
+
+    Unset, each process picks its own nonce, so two processes frame the same content differently
+    and a restarted one matches neither.
+    """
+    body = _function(_PROCESSES, "up")
+    exported = body.index("export CHEMCLAW_FRAMING_ENVELOPE_SECRET\n")
+    first_start = min(body.index(verb) for verb in ("start_fleet_bundles", "start connectors"))
+    assert exported < first_start, "a process starts before the lane's secret is exported"
+    written = re.search(r"\( umask 077\n(.*?)\} > \"\$RUN_DIR/connector-env\.sh\"", body, re.S)
+    assert written is not None, "`up` no longer writes connector-env.sh in one block"
+    assert "export CHEMCLAW_FRAMING_ENVELOPE_SECRET=%q" in written.group(1)
+
+
+def test_the_lane_env_hands_a_later_shell_the_run_dir_the_lane_keeps_its_pids_in() -> None:
+    """`up` writes `CHEMCLAW_LIVE_RUN_DIR=$RUN_DIR` into the env file `processes.sh env` prints.
+
+    That is what lets `make live-jobs` (whose `--run-dir` default reads it) find the lane's pid
+    files when the lane's state is not under the working directory.
+    """
+    body = _function(_PROCESSES, "up")
+    assert "export CHEMCLAW_LIVE_RUN_DIR=%q" in body
+    line = next(row for row in body.splitlines() if "CHEMCLAW_LIVE_RUN_DIR" in row)
+    assert '"$RUN_DIR"' in line, "the exported value is not the lane's run dir"
+
+
+def test_restart_refuses_before_killing_when_the_settings_it_would_use_do_not_load(
+    tmp_path: Path,
+) -> None:
+    """`processes.sh restart` checks `Settings` first, so a refused start leaves the process alive.
+
+    The storm's admission sweep restarted the front door with a cap its connection limit was not
+    sized for: `up` died on the `Settings` error after the kill and the lane had no front door. A
+    stand-in process stays up, and its pid file stays, when the settings are invalid.
+    """
+    run = tmp_path / "run"
+    run.mkdir()
+    standin = subprocess.Popen(["sleep", "60"])
+    try:
+        (run / "api.pid").write_text(f"{standin.pid}\n", encoding="utf-8")
+        env = _clean_env(
+            CHEMCLAW_LIVE_DIR=str(tmp_path),
+            CHEMCLAW_MCP_REPO=str(tmp_path),  # present, so the checkout precondition passes
+            CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS="32",  # 552 sockets needed, 512 allowed
+        )
+        result = subprocess.run(
+            ["bash", str(_PROCESSES), "restart", "api"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "refusing to restart api" in result.stderr, result.stderr
+        assert "service_max_connections" in result.stderr, result.stderr
+        assert standin.poll() is None, (
+            "the process was killed although its replacement cannot start"
+        )
+        assert (run / "api.pid").exists()
+    finally:
+        standin.kill()
+        standin.wait()
+
+
+def test_restart_refuses_before_killing_when_postgres_does_not_answer(tmp_path: Path) -> None:
+    """`up` dies on a Postgres it cannot reach, so `restart` asks first and leaves the process up.
+
+    A shell without `pg_isready` on its PATH, or a stopped database, killed the front door and
+    then refused to start it: a lane with no front door, from a restart.
+    """
+    with socket.socket() as probe:  # a port nothing listens on once this closes
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    run = tmp_path / "run"
+    run.mkdir()
+    standin = subprocess.Popen(["sleep", "60"])
+    try:
+        (run / "api.pid").write_text(f"{standin.pid}\n", encoding="utf-8")
+        env = _clean_env(
+            CHEMCLAW_LIVE_DIR=str(tmp_path),
+            CHEMCLAW_MCP_REPO=str(tmp_path),
+            CHEMCLAW_LIVE_PGPORT=str(closed_port),
+        )
+        result = subprocess.run(
+            ["bash", str(_PROCESSES), "restart", "api"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "refusing to restart api" in result.stderr, result.stderr
+        assert standin.poll() is None, "the process was killed although `up` cannot start"
+        assert (run / "api.pid").exists()
+    finally:
+        standin.kill()
+        standin.wait()
+
+
+def test_the_soak_reads_the_free_disk_space_the_filesystem_reports(tmp_path: Path) -> None:
+    """`free_gb` prints whole GiB free under the checkout, on GNU and BSD `df` alike.
+
+    A `df` flag one platform refuses printed nothing, which the loop read as zero and stopped the
+    soak at round 1 for want of disk on a machine with tens of GB free.
+    """
+    script = _LIVE / "soak.sh"
+    out = _bash(
+        f"REPO_ROOT={shlex.quote(str(tmp_path))}\n{_function(script, 'free_gb')}free_gb",
+        {"PATH": os.environ["PATH"]},
+    )
+    expected = shutil.disk_usage(tmp_path).free // 2**30
+    assert abs(int(out.strip()) - expected) <= 1, out
+
+
+def test_a_soak_round_is_killed_at_its_deadline_and_reads_as_timeout_did() -> None:
+    """`bounded` passes the child's own status through, and is 124 once the deadline passes.
+
+    `timeout` is GNU coreutils; on BSD userland every round exited 127 in no time at all.
+    """
+    defined = f"python={shlex.quote(sys.executable)}\n{_function(_LIVE / 'soak.sh', 'bounded')}"
+    env = {"PATH": os.environ["PATH"]}
+    assert _bash(f"{defined}bounded 30 sh -c 'echo ran'", env).strip() == "ran"
+    passed = _bash(f"{defined}rc=0; bounded 30 sh -c 'exit 3' || rc=$?; echo $rc", env)
+    assert passed.strip() == "3"
+    killed = _bash(f"{defined}rc=0; bounded 0.5 sleep 30 || rc=$?; echo $rc", env)
+    assert killed.strip() == "124"

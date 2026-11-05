@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from chemclaw.connectors.calc.remote import CalcBusyError, CalcToolError
-from chemclaw.core import db
+from chemclaw.core import db, notify
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.retry import _BAD_DATA_TYPES
@@ -284,16 +284,16 @@ async def test_a_claim_won_while_the_caller_is_cancelled_is_not_stranded(
     key = _key()
     await _dead_claim(key.as_str(), lapses_in=0.3)
     exiting = asyncio.Event()
-    original: Any = flight._Listener.unsubscribe
+    original: Any = notify.Listener.unsubscribe
 
-    async def stuck_exit(self: flight._Listener, topic: str, event: asyncio.Event) -> None:
+    async def stuck_exit(self: notify.Listener, topic: str, event: asyncio.Event) -> None:
         try:
             exiting.set()
             await asyncio.sleep(3600)
         finally:
             await original(self, topic, event)
 
-    monkeypatch.setattr(flight._Listener, "unsubscribe", stuck_exit)
+    monkeypatch.setattr(notify.Listener, "unsubscribe", stuck_exit)
     task = asyncio.create_task(cached_compute(PostgresStore(), key, _never, wait_seconds=60))
     await asyncio.wait_for(exiting.wait(), 20)  # the waiter has the claim and is leaving its wait
     task.cancel()

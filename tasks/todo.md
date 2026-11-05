@@ -421,7 +421,7 @@ Entry: W3.1 (shared substrate), W0 KG baselines. W1.10's `kg/` pass done (smalle
       → retirements), now in **one transaction**. That gives the order a stronger guarantee than git
       gave it.
 - [ ] **W4.5 Graph queries in SQL.** `related` and `current_successor` are indexed lookups;
-      `neighborhood(hops)` is a recursive CTE with a hop limit. Keep NetworkX only for the analytics
+      `neighborhood(hops)` walks one level per statement up to a hop limit. Keep NetworkX only for the analytics
       that need a whole-graph algorithm (`kg/analytics.py`, `hypotheses/`), loaded on demand in the
       background worker and never per request.
 - [ ] **W4.6 Backfill and dual-write.** A `cli/kg_import` command loads the git corpus (42 notes
@@ -783,3 +783,10 @@ the parallel gate is W3.10–W3.12, the model-facing text is W2.13–W2.17, and 
 | Settings fields | 540 | ≤200 | |
 | Background worker replicas | 1 (pinned) | ≥2 | |
 | Per-process limits/correctness state | 6+ | 0 | |
+
+## Role-keyed access policy
+- [x] `core/access_policy.py` + `access_policy_file` setting
+- [x] enforce in `authorize_tool`, fan-out, session profiles, reviewer check; startup validation
+- [x] shipped `data/access/roles.yaml` (viewer, chemist-development, chemist-medchem, admin)
+- [x] tests, ADR, docs
+- [x] hide unauthorized tools from the model's surface; durable roles (signed payload)

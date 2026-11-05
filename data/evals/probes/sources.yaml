@@ -1,0 +1,327 @@
+# Live-test probes — the source eval (W9.3 of docs/planning/sources-and-compute-programme.md).
+#
+# **What this measures.** Whether a chemist can ask the reaction record a question that needs a
+# structured filter (`sq-*`: a yield range, a reagent, a date, a temperature, a solvent) or names
+# one source (`ns-*`: the free-text ELN, the structured ORD export, the knowledge notes), and get
+# the right answer. Every probe is bucket B today: the record is ingested and retrievable, but no
+# tool filters or aggregates it, so a good answer today says what it could not compute. The
+# measurement is the score against the answer key, before and after the source surface lands.
+#
+# **The answers are known.** The corpus is what `Chemclaw3_mock` seeds into the live lane at full
+# scale (`infra/live/e2e-full-stack/up.sh` sets no cap): 24 curated and 9,987 published-HTE ORD
+# records, and 32 free-text entries. `app/eln/source_eval.py` there computes each answer from the
+# same records, reading only fields this repository's adapters keep, and
+# `tests/test_source_eval.py` pins them. Each `direction:` quotes its probe's answer, so the judge
+# grades against a fact rather than a reading. A change to the mock's data that moves an answer
+# fails there first; this file then moves with it.
+#
+# **The failure the forbidden claims name** is the one retrieval invites: a count or mean computed
+# over the handful of records a search returned, stated as if it covered the whole record.
+#
+# Buckets: A = capability exists · B = partial · C = absent. `expects_tools` is ANY-OF and every
+# name is from the agent-callable surface.
+
+probes:
+  # ------------------------------------------------------------------ structured filters, HTE
+  - id: sq-01
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "In the Buchwald-Hartwig amination HTE data we imported, how many wells coupled 4-bromoanisole (BrC1=CC=C(OC)C=C1) with 4-methylaniline, and how many of those gave at least 50% yield?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent]
+    forbids_claims:
+      - "a count of wells presented as exhaustive when it was taken from a sample of retrieved records"
+    direction: "The record holds 264 such wells, 19 of them at or above 50% yield. A correct answer gives both numbers. An answer that cannot filter the whole record says so, reports what it did see and how many records that was, and does not extrapolate a count."
+
+  - id: sq-02
+    section: 4
+    persona: lab_leader
+    bucket: B
+    question: "Across the 4-bromoanisole + 4-methylaniline amination wells in our HTE imports, which of the four Buchwald ligands (XPhos, tBuXPhos, tBuBrettPhos, AdBrettPhos) gave the highest mean yield?"
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency, substrate_precedent]
+    forbids_claims:
+      - "a mean yield per ligand computed from a sample of retrieved records but presented as the record's mean"
+      - "a literature ranking of the ligands offered as what the record shows"
+    direction: "Mean yields over the 264 wells: tBuXPhos 34.2%, tBuBrettPhos 30.0%, AdBrettPhos 28.2%, XPhos 11.1%. tBuXPhos is highest, and XPhos is far behind the other three. A good answer ranks all four from the record. One that cannot aggregate says so and does not substitute general knowledge for the record."
+
+  - id: sq-03
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "For the 2-chloropyridine (ClC1=NC=CC=C1) aminations with 4-methylaniline in the HTE record, what was the best yield, and how many wells beat 10%?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent]
+    forbids_claims:
+      - "a claim that 2-chloropyridine does not couple under these conditions, made without reading the record"
+    direction: "The best well gave 91.39%, and 236 of the 264 wells exceeded 10%. The answer should give both and not lean on the textbook expectation that 2-halopyridines couple poorly, since the record says otherwise here."
+
+  - id: sq-04
+    section: 4
+    persona: lab_leader
+    bucket: B
+    question: "In our Buchwald-Hartwig amination HTE data, how do aryl chlorides, bromides and iodides compare? Give me the median yield for each."
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency]
+    forbids_claims:
+      - "median yields presented as the record's when computed from a sample of retrieved records"
+    direction: "Median yields across all 3,955 wells: iodide 44.4%, bromide 35.7%, chloride 6.0%. The chlorides are far worse; iodides edge bromides. A correct answer gives the three medians from the whole record."
+
+  - id: sq-05
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "For 4-iodobenzotrifluoride (IC1=CC=C(C(F)(F)F)C=C1) with 4-methylaniline in the amination HTE record, which base (P2Et, MTBD or BTMG) gave the best mean yield?"
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency, substrate_precedent]
+    forbids_claims:
+      - "a base ranking taken from general knowledge and presented as what the record shows"
+    direction: "MTBD 41.8%, BTMG 34.2%, P2Et 25.2% (means over that aryl halide's wells). MTBD is best. A partial answer says it cannot aggregate and names the records it read."
+
+  - id: sq-06
+    section: 4
+    persona: lab_leader
+    bucket: B
+    question: "How many of the Buchwald-Hartwig amination HTE wells with 4-methylaniline gave no product at all (0% yield)?"
+    expects_tools: [gather_evidence, similar_reactions]
+    forbids_claims:
+      - "a count of failed wells extrapolated from a sample"
+    direction: "236 wells recorded exactly 0%. Most are aryl chlorides; 4-chloroanisole alone accounts for 108. A correct answer gives 236."
+
+  - id: sq-07
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "In the Suzuki-Miyaura flow HTE we imported, what was the single best yield for 6-chloroquinoline, and with which coupling partner, ligand, base and solvent?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent, conditions_for_similar_reaction]
+    forbids_claims:
+      - "a best condition set taken from general Suzuki knowledge rather than the record"
+    direction: "93.67% UV yield with the boronic acid partner (2a), XPhos, NaOH, in MeCN. The solvent is only in the procedure notes, so a correct answer has read them. Partial: names the best record it found and says the search was not exhaustive."
+
+  - id: sq-08
+    section: 4
+    persona: lab_leader
+    bucket: B
+    question: "Across the whole Suzuki-Miyaura flow HTE import, how much did adding XPhos help compared with running with no ligand? Mean yields, please."
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency]
+    forbids_claims:
+      - "a mean yield computed over a sample presented as the dataset mean"
+    direction: "No ligand averages 29.6%; XPhos averages 46.8% (over all 5,760 reactions). A correct answer gives both means."
+
+  - id: sq-09
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "How many reactions in the Suzuki-Miyaura flow HTE import gave more than 50% yield in DMF, and how many in MeCN?"
+    expects_tools: [gather_evidence, similar_reactions]
+    forbids_claims:
+      - "counts presented as exhaustive when taken from retrieved records"
+    direction: "DMF 371, MeCN 542. Solvent is recorded only in the procedure notes; an answer that cannot filter on it says so."
+
+  - id: sq-10
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "For 6-iodoquinoline with the boronic acid partner (2a) in the Suzuki flow HTE, which base gives the best mean yield, and how much does running without base cost?"
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency, conditions_for_similar_reaction]
+    forbids_claims:
+      - "a base ranking from general knowledge offered as the record's"
+    direction: "NaOH is best at 83.9%, then LiOtBu 82.4% and KOH 77.9%; no base gives 63.2%. The full set: NaOH 83.9, LiOtBu 82.4, KOH 77.9, NaHCO3 75.0, Et3N 74.2, CsF 70.9, K3PO4 68.1, none 63.2."
+
+  - id: sq-11
+    section: 4
+    persona: lab_technician
+    bucket: B
+    question: "In the 3-bromopyridine + benzamide N-arylation screen we imported, how many of the 96 precatalyst/base wells gave any product, and which pair was best?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent, read_plate_results]
+    forbids_claims:
+      - "a count of productive wells extrapolated from a sample"
+    direction: "35 of the 96 wells gave product. The best was AdBrettPhos Pd G3 with BTMG at 47.47%. A correct answer gives the count and the pair."
+
+  - id: sq-12
+    section: 4
+    persona: lab_leader
+    bucket: B
+    question: "Compare the benzamide and benzenesulfonamide N-arylation screens of 3-bromopyridine in our record: what was the best precatalyst, base and yield for each?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent]
+    forbids_claims:
+      - "a best condition from general knowledge rather than the record"
+    direction: "Amidation: AdBrettPhos Pd G3 with BTMG, 47.47%. Sulfonamidation: tBuBrettPhos Pd G3 with P2Et, 27.65%. The two nucleophiles want different conditions, which a good answer points out."
+
+  - id: sq-13
+    section: 6
+    persona: lab_technician
+    bucket: B
+    question: "For deoxyfluorination of 4-phenylbutan-2-ol (c1ccccc1CCC(O)C) in our record, which sulfonyl fluoride and base gave the highest yield?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent, conditions_for_similar_reaction]
+    forbids_claims:
+      - "a claim that PyFluor is best taken from the literature rather than read from the record"
+    direction: "4-(Trifluoromethyl)benzenesulfonyl fluoride with MTBD, 69%. Not PyFluor, which a literature-led answer would guess."
+
+  - id: sq-14
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Across all the deoxyfluorination reactions in our record, what is the mean yield with each base?"
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency]
+    forbids_claims:
+      - "mean yields computed over a sample presented as the record's"
+    direction: "BTPP 50.2%, BTMG 46.8%, MTBD 40.9%, DBU 32.1% (80 reactions, 20 per base)."
+
+  - id: sq-15
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Which of the four alcohols in our deoxyfluorination record was hardest to fluorinate, judging by mean yield?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent]
+    forbids_claims:
+      - "a ranking from steric or electronic reasoning offered in place of the record's numbers"
+    direction: "cis-3-(Benzyloxy)cyclobutanol, 21.2% mean. The others: 4-phenylbutan-2-ol 54.0%, 4-biphenylmethanol 52.0%, the N-Boc hydroxyproline methyl ester 42.7%."
+
+  # ------------------------------------------------------------------ structured filters, dates and conditions
+  - id: sq-16
+    section: 6
+    persona: manager
+    bucket: B
+    question: "How many reactions were recorded in June 2023, and how many of them reached at least 70% yield?"
+    expects_tools: [gather_evidence, similar_reactions, review_activity]
+    forbids_claims:
+      - "a count for the month taken from a sample of records"
+    direction: "80 reactions were recorded in June 2023 (the deoxyfluorination set), 12 of them at or above 70%."
+
+  - id: sq-17
+    section: 6
+    persona: manager
+    bucket: B
+    question: "What was the mean yield of everything recorded in May 2023, and how many reactions is that?"
+    expects_tools: [gather_evidence, similar_reactions, review_activity]
+    forbids_claims:
+      - "a mean presented as the month's when computed from a sample"
+    direction: "192 reactions (the two N-arylation screens), mean yield 5.5%. A good answer notes that most wells gave nothing."
+
+  - id: sq-18
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Across every reaction in our record, how many used MTBD (CN1CCCN2C1=NCCC2) as a reagent, and how many of those reached 80% yield?"
+    expects_tools: [gather_evidence, similar_reactions, reagent_frequency, reactions_making_substructure]
+    forbids_claims:
+      - "counts presented as covering the whole record when taken from retrieved records"
+    direction: "1,370 reactions used MTBD, 213 of them at or above 80%. They span three datasets (the amination plates, both N-arylation screens and the deoxyfluorinations), so a correct answer has not stopped at one."
+
+  - id: sq-19
+    section: 6
+    persona: lab_technician
+    bucket: B
+    question: "Which of our reactions ran above 70 °C and still gave more than 85% yield?"
+    expects_tools: [gather_evidence, similar_reactions, conditions_for_similar_reaction]
+    forbids_claims:
+      - "a list presented as complete when taken from a sample"
+    direction: "Eight records: ord-suzuki-biphenyl-1 and -2 (82 °C), ord-fischer-esterification-1 and -2 (78 °C), ord-snar-piperidine-1 and -2 (90 °C), ord-buchwald-hartwig-1 and -2 (100 °C). Most HTE imports carry no temperature, which a careful answer mentions."
+
+  - id: sq-20
+    section: 6
+    persona: lab_leader
+    bucket: B
+    question: "Which structured reaction records from 2024 came in below 75% yield?"
+    expects_tools: [gather_evidence, similar_reactions, review_activity]
+    forbids_claims:
+      - "a list presented as complete when taken from a sample"
+    direction: "Four: ord-grignard-benzhydrol-1 (72%) and -2 (74%), ord-wittig-styrene-1 (68%) and -2 (70%). The epoxide openings at 75% and 77% are not below 75."
+
+  # ------------------------------------------------------------------ named sources
+  - id: ns-01
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "In the free-text ELN only, list every PROJ-BETA entry with its yield."
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "an entry from the structured ORD export presented as a free-text ELN entry"
+    direction: "Six entries: uspto-suzuki-biphenyl-2 92.5%, uspto-reductive-amination-2 79.5%, uspto-grignard-benzhydrol-2 74.5%, uspto-wittig-styrene-2 70.5%, uspto-buchwald-hartwig-2 88.5%, uspto-epoxide-opening-2 77.5%. A correct answer restricts itself to that source and that project."
+
+  - id: ns-02
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "How many free-text ELN entries did K. Fischer record, and did any of them fail? If so, why?"
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "a failure reason not recorded in the entry"
+    direction: "Five entries. One failed: uspto-boc-deprotection-failed, 'TFA cleavage stalled; starting material recovered by TLC/LCMS.' A good answer quotes the recorded reason."
+
+  - id: ns-03
+    section: 1
+    persona: lab_technician
+    bucket: B
+    question: "Looking only at our own structured ORD records, not the published HTE imports, what is our best Buchwald-Hartwig yield and which record is it?"
+    expects_tools: [gather_evidence, similar_reactions, substrate_precedent]
+    forbids_claims:
+      - "an HTE-import well offered as one of our own records"
+    direction: "ord-buchwald-hartwig-2 at 88%. Telling our records from the imports needs the provenance (the imports carry a DOI and 'Real HTE dataset import'), and the thousands of imported amination wells must not be counted."
+
+  - id: ns-04
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "The 4-methoxybiphenyl Suzuki appears in both the free-text ELN and the structured ORD export. What yields does each source report?"
+    expects_tools: [gather_evidence, similar_reactions]
+    forbids_claims:
+      - "a single merged yield that does not say which source it came from"
+    direction: "Free-text ELN: 89.5% and 92.5%. ORD export: 90% and 92%. A good answer keeps the sources apart and notes they agree to within a point."
+
+  - id: ns-05
+    section: 1
+    persona: manager
+    bucket: B
+    question: "How many records in our system come from the Ahneman/Doyle amination dataset (DOI 10.1126/science.aar5169), and what is their mean yield?"
+    expects_tools: [gather_evidence, similar_reactions]
+    forbids_claims:
+      - "a record count extrapolated from a sample"
+    direction: "3,955 records, mean yield 33.1%."
+
+  - id: ns-06
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "Are there any free-text ELN entries reporting a yield above 100%? Which ones?"
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "a claim that none exist made without searching the source"
+    direction: "One: santanilla-orgsyn-boronate-well-Y36 at 119.43%. A good answer flags it as a data-quality issue, likely an assay or calibration artefact, rather than repeating the number."
+
+  - id: ns-07
+    section: 1
+    persona: manager
+    bucket: B
+    question: "From the free-text ELN, how many PROJ-ALPHA entries are there and what is their mean yield?"
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "a mean presented as the project's when computed from a sample"
+    direction: "Six entries, mean yield 77.5%."
+
+  - id: ns-08
+    section: 1
+    persona: manager
+    bucket: B
+    question: "Leaving out all the published-dataset imports, how many structured ORD records of our own do we hold, and what is their mean yield?"
+    expects_tools: [gather_evidence, similar_reactions]
+    forbids_claims:
+      - "imported HTE records counted as our own"
+    direction: "24 records, mean yield 83.2%."
+
+  - id: ns-09
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "Which free-text ELN entries have no project assigned?"
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "a list presented as complete when taken from a sample"
+    direction: "Seven: uspto-amide-coupling-2, uspto-boc-deprotection-2, uspto-boc-deprotection-failed, uspto-fischer-esterification-2, uspto-friedel-crafts-acylation-2, uspto-snar-piperidine-2, uspto-sonogashira-2. The real Org. Synth. and Science procedures carry their citation in the project field and are not unassigned."
+
+  - id: ns-10
+    section: 1
+    persona: lab_technician
+    bucket: B
+    question: "Which free-text ELN entries come from the Org. Synth. procedure (DOI 10.15227/orgsyn.095.0080), and what yields do they report?"
+    expects_tools: [gather_evidence, review_activity]
+    forbids_claims:
+      - "a yield not recorded in the entry"
+    direction: "Three, all by Richard Y. Liu: liu-orgsyn-procedure-1 93.5%, -2 86.0%, -3 87.0%."

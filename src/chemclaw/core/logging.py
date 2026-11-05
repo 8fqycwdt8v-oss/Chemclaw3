@@ -383,6 +383,8 @@ def _trace_config(trace_config: Any) -> Any:
         hide_choices=True,
         hide_llm_invocation_parameters=True,
         hide_llm_tools=True,
+        # A retrieved document is a note's body, the same content a prompt carries.
+        hide_retrieval_documents=True,
         # `hide_embeddings_text` matters most: embedded text is a chemist's question or a note's
         # body. `hide_embedding_vectors` and `hide_embeddings_vectors` are upstream's spelling and
         # its alias; both are set because a given release may read either.
@@ -411,6 +413,8 @@ _SECRET_SETTINGS = (
     # The HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from. Anyone who learns it can close a
     # retrieval envelope from inside and have their text read as instructions.
     "framing_envelope_secret",
+    # The key that signs the roles a background job carries; whoever knows it can mint any role.
+    "role_claim_secret",
 )
 
 # Settings holding a credential's variable *name* (for example `calc_server_token_env`), whose named
@@ -932,7 +936,7 @@ def bind_claimed_caller(actor: str, session_id: str, correlation_id: str) -> obj
     A connector pod learns who it serves from `X-Chemclaw-*` headers; binding them here lets its log
     lines carry the turn's ids. A separate variable from the core identity ones on purpose: those
     are read by authorization gates, and an unauthenticated header must never become an identity.
-    Only the log filter reads this.
+    Read only for attribution: the log filter and `attributed_caller`.
     """
     return _claimed_caller.set((actor, session_id, correlation_id))
 
@@ -940,6 +944,21 @@ def bind_claimed_caller(actor: str, session_id: str, correlation_id: str) -> obj
 def reset_claimed_caller(token: object) -> None:
     """Undo the matching `bind_claimed_caller`."""
     _claimed_caller.reset(token)  # type: ignore[arg-type]
+
+
+def attributed_caller() -> tuple[str, str, str]:
+    """The `(actor, session_id, correlation_id)` this context's work is attributed to.
+
+    The precedence `ContextFilter` stamps: an identity this process bound, else a connector's
+    claimed caller, else empty. For attribution in records and logs only, never a gate: the claimed
+    half arrived on an unauthenticated header.
+    """
+    actor, session_id, correlation_id = _claimed_caller.get() or ("", "", "")
+    return (
+        get_current_actor() or actor,
+        get_current_session_id() or session_id,
+        get_current_correlation_id() or correlation_id,
+    )
 
 
 def structured_fields(record: logging.LogRecord) -> dict[str, object]:

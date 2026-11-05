@@ -19,9 +19,14 @@ from urllib.parse import urlsplit
 import httpx
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.logging import log_event, register_secret_env
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
+from chemclaw.publish.driver import (
+    SinkMisconfiguredError,
+    SinkRejectedError,
+    SinkUnavailableError,
+)
 from chemclaw.publish.record import ResultRecord
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,10 @@ def _refuse_plaintext_sink(name: str, url: str, token_env: str) -> None:
 # Everything else in 4xx is a statement about the content, which a retry cannot change.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+# Statuses that refuse the credential or the address rather than the content: every record would
+# be refused identically, so they are the sink's fault, not the batch's.
+_MISCONFIGURED_STATUSES = frozenset({401, 403, 404, 405})
+
 
 class HttpResultSink:
     """POSTs published records as a JSON document to a configured endpoint."""
@@ -68,7 +77,6 @@ class HttpResultSink:
         token_env: str = "",
         timeout_seconds: float = 30.0,
         writer_version: str = "",
-        verify_tls: bool = True,
     ) -> None:
         """Hold the endpoint and the *name* of the variable its credential lives in.
 
@@ -82,8 +90,9 @@ class HttpResultSink:
             timeout_seconds: Per-request ceiling.
             writer_version: The ChemClaw release stamped on each record; defaults to this
                 deployment's revision.
-            verify_tls: Never set false: an unverified TLS connection to a results store is an
-                unauthenticated one.
+
+        There is no TLS-verification switch: an unverified connection to a results store is an
+        unauthenticated one, so a manifest naming `verify_tls` fails `make sink-validate`.
         """
         if not url:
             raise ValueError(
@@ -97,7 +106,6 @@ class HttpResultSink:
         self._timeout = timeout_seconds
         # Defaults to the revision the audit trail stamps, so provenance is never recorded blank.
         self._writer_version = writer_version or settings.deployment_revision
-        self._verify = verify_tls
         if token_env:
             # Registered before it is ever read, so a traceback that echoes configuration cannot
             # put the token into a log line.
@@ -109,7 +117,7 @@ class HttpResultSink:
         if self._token_env:
             token = os.environ.get(self._token_env)
             if not token:
-                raise SinkRejectedError(
+                raise SinkMisconfiguredError(
                     f"result sink {self._name!r} needs a bearer token in ${self._token_env}, "
                     "but that variable is unset or empty"
                 )
@@ -182,7 +190,7 @@ class HttpResultSink:
         started = time.perf_counter()
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, verify=self._verify, trust_env=False
+                timeout=self._timeout, verify=default_ssl_context(), trust_env=False
             ) as client:
                 response = await client.post(
                     self._url, json=self._document(records), headers=self._headers()
@@ -214,15 +222,20 @@ class HttpResultSink:
             # A redirect is a refusal, never a success: the batch did not land where the manifest
             # addressed it. Rejected rather than retried (the fix is the `url`) and never followed,
             # since the records and the bearer token must not reach an address no manifest named.
-            raise SinkRejectedError(
+            raise SinkMisconfiguredError(
                 f"result sink {self._name!r} answered {response.status_code} "
                 f"(Location: {response.headers.get('location', '') or 'unset'}); this client does "
                 "not follow a redirect, so the batch was not delivered. Point the sink's `url` at "
                 "the final address."
             )
-        # The receiver's body explains what was wrong with the content; bounded so an HTML error
-        # page cannot flood a log line.
-        raise SinkRejectedError(
+        # The receiver's body explains what was wrong; bounded so an HTML error page cannot flood
+        # a log line.
+        refusal = (
+            SinkMisconfiguredError
+            if response.status_code in _MISCONFIGURED_STATUSES
+            else SinkRejectedError
+        )
+        raise refusal(
             f"result sink {self._name!r} refused the batch with {response.status_code}: "
             f"{response.text[:500]}"
         )

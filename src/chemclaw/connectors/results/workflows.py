@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import ActivityClass, durable_activity, durable_workflow
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
     from chemclaw.publish.registry import ResultSinkError, unpublishable_reason
+    from chemclaw.science.calc.store import CALCULATION_EPOCH
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import connector_queue_wait_timeout
@@ -51,7 +52,7 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
     if reason is not None:
         raise ResultSinkError(reason)
     requeued = await requeue_failed() if spec.requeue_failed else 0
-    cached = await backfill_cached(dry_run=False, batch=spec.batch)
+    cached = await backfill_cached(dry_run=False, batch=spec.batch, current_epoch=CALCULATION_EPOCH)
     jobs = await backfill_jobs(dry_run=False, batch=spec.batch)
     # Flat, because `ConnectorJobResult.data` is `dict[str, int]`. `_failed` is separate from
     # `_skipped` because they need different actions (see `WalkCounts`).

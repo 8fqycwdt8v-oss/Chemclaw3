@@ -205,16 +205,16 @@ _SPEND_GOLDEN: list[Any] = [
     (None, False, 0, False),
     (None, False, 0, False),
     (None, False, 0, False),
-    ({"jump_to": "end", "spend_capped": True}, True, 1000, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
-    ({"jump_to": "end", "spend_capped": True}, True, 1500, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
-    ({"jump_to": "end", "spend_capped": True}, True, 1500, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1000, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1500, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1500, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
     (None, False, 0, False),
     (None, False, 0, False),
-    ({"jump_to": "end", "spend_capped": True}, True, 1000, True),
-    ({"jump_to": "end", "spend_capped": True}, False, 0, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, True, 1000, True),
+    ({"spend_capped": True, "loop_wrap_up": True}, False, 0, True),
 ]
 
 
@@ -241,7 +241,7 @@ def _spend_decisions(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 def test_the_spend_cap_decides_each_row_as_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The billed-token cap ends the turn at the larger of its two readings, as recorded."""
+    """The billed-token cap grants its wrap-up at the larger of its two readings, as recorded."""
     assert _spend_decisions(monkeypatch) == _SPEND_GOLDEN
 
 

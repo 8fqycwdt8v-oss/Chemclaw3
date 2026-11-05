@@ -39,6 +39,7 @@ from chemclaw.agent.subagents import refuse_an_unknown_roster
 from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
+from chemclaw.api.access_check import refuse_an_unknown_access_policy
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
 from chemclaw.api.contract import API_CONTRACT_VERSION, payload_schemas
 from chemclaw.api.deps import CurrentUser
@@ -70,6 +71,7 @@ from chemclaw.api.routes import (
     skills,
     streams,
     turns,
+    watches,
     workflows,
 )
 from chemclaw.api.schemas import _TRANSCRIPT_ARG_CHARS, _transcript
@@ -88,7 +90,8 @@ from chemclaw.api.turn_relay import TurnRelay
 from chemclaw.connectors import session_pool as connector_sessions
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
-from chemclaw.core import backend_rpc, bookkeeping, db
+from chemclaw.core import backend_rpc, bookkeeping, db, heap
+from chemclaw.core.asgi import NO_FRAMEWORK_TELEMETRY
 from chemclaw.core.config import settings
 from chemclaw.core.deployment import (
     bind_deployment_gauges,
@@ -211,6 +214,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Likewise the peer roster: one typo can make the mesh indistinguishable from the feature being
     # off.
     refuse_an_unknown_peer_roster(registered_profile_names())
+    # A policy naming a tool, source or profile nobody has grants nothing there, silently.
+    refuse_an_unknown_access_policy()
     # A candidate arm's overlay that applies nowhere would make it a second control.
     refuse_a_misapplied_overlay()
     # After logging is configured and profiles load, so a malformed profile fails first.
@@ -241,6 +246,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
         await warming
+        # Last before serving: everything above is built and lives as long as the process.
+        heap.freeze_startup_heap("front-door")
         relay: TurnRelay | None = app.state.turn_relay
         serving = asyncio.create_task(relay.run(), name="turn-relay") if relay else None
         try:
@@ -306,6 +313,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
         lifespan=_lifespan,
+        telemetry=NO_FRAMEWORK_TELEMETRY,
     )
     # First, which makes it innermost (`add_middleware` prepends): inside `_SecurityHeaders`, so its
     # 500 carries them, and outside FastAPI's `ExceptionMiddleware`, so handler 4xx responses are
@@ -465,6 +473,7 @@ def create_app(
         members,
         exhibits,
         calc_artifacts,
+        watches,
     ):
         module.register(app)
 

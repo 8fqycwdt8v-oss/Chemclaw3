@@ -13,14 +13,27 @@ The expectation is an ordinary eval case, `CASE_ID`, written by `--emit` and com
 `eval_drift_epsilon`; refreshing it is as deliberate as `make eval-baseline`. The arithmetic
 fixture stays, as the only case exercising cache weighting and unanswered turns.
 
-Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached (never
-counted as a pass).
+A turn's bill follows the tool surface it was sent, and a connector whose handshake outlasts
+`connector_open_timeout_seconds` is left off that surface for `connector_breaker_window_seconds`
+while `/readyz` stays green (measured: one 4-bundle process answering past the bound drops 31 of
+128 tools, 85 KB of schema, and the same three questions bill 737,892 instead of 997,912). The
+front door counts each such absence (`chemclaw_connectors_unreachable_total`), so a run during
+which that counter moved scored a different surface and is not compared.
+
+The case also records that surface as the mock gateway saw it (`/__mock/stats`' `last_surface`:
+tool count and schema bytes), and a run sent a different one is not compared either: the score
+follows the lane's configuration (connectors enabled, profiles), not only the code.
+
+Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached or the
+run was degraded (never counted as a pass).
 """
 
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 
@@ -128,14 +141,36 @@ async def _recorded(session_id: str) -> list[TurnCost]:
     ]
 
 
-async def _drive(base_url: str) -> str:
-    """Ask every question in `WORKLOAD` on one session and return its id.
+class Driven(NamedTuple):
+    """What one run of `WORKLOAD` left behind: the session, and the connectors it ran without."""
+
+    session_id: str
+    absent: tuple[str, ...]
+
+
+_ABSENCE = re.compile(r'^chemclaw_connectors_unreachable_total\{connector="([^"]+)"\} (\S+)$')
+
+
+async def _absences(client: httpx.AsyncClient) -> dict[str, float]:
+    """The front door's per-connector count of turns that ran without that connector.
+
+    A family with no increment has no line, so a connector absent from the text has a count of 0.
+    """
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    found = (_ABSENCE.match(line) for line in response.text.splitlines())
+    return {m.group(1): float(m.group(2)) for m in found if m}
+
+
+async def _drive(base_url: str) -> Driven:
+    """Ask every question in `WORKLOAD` on one session; return its id and the connectors it lacked.
 
     The event stream is drained and discarded — this grades nothing — but `open_session` is reused
     so session opening cannot diverge from the probes.
     """
     timeout = httpx.Timeout(settings.live_probe_timeout_seconds)
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout, trust_env=False) as client:
+        before = await _absences(client)
         session_id = await open_session(client)
         for question in WORKLOAD:
             async with client.stream(
@@ -144,7 +179,9 @@ async def _drive(base_url: str) -> str:
                 response.raise_for_status()
                 async for _ in response.aiter_lines():
                     pass
-        return session_id
+        after = await _absences(client)
+        absent = tuple(sorted(name for name, count in after.items() if count > before.get(name, 0)))
+        return Driven(session_id, absent)
 
 
 def _case(turns: list[TurnCost]) -> EvalCase:
@@ -157,20 +194,36 @@ def _case(turns: list[TurnCost]) -> EvalCase:
     )
 
 
-def _recorded_value() -> float | None:
-    """The committed case's score, or None when it has not been emitted yet."""
+def _recorded_case() -> EvalCase | None:
+    """The committed case, or None when it has not been emitted yet."""
     cases = {case.id: case for case in load_eval_cases(settings.eval_case_dir)}
-    case = cases.get(CASE_ID)
-    return None if case is None else get_metric("turn_cost_ratio")(case).value
+    return cases.get(CASE_ID)
 
 
-def _emit(turns: list[TurnCost], path: Path) -> None:
+async def _mock_surface() -> dict[str, int] | None:
+    """The tool surface the mock gateway last saw, or None from a gateway that keeps no stats."""
+    stats_url = settings.llm_base_url.rstrip("/").removesuffix("/v1") + "/__mock/stats"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            response = await client.get(stats_url)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    surface = response.json().get("last_surface")
+    return surface if isinstance(surface, dict) else None
+
+
+def _emit(turns: list[TurnCost], path: Path, surface: dict[str, int] | None) -> None:
     """Write the measured turns out as the recorded case, front matter and prose together."""
+    reference: dict[str, object] = {"baseline_tokens": BASELINE_TOKENS}
+    if surface is not None:
+        reference["surface"] = surface
     body = {
         "id": CASE_ID,
         "metrics": ["turn_cost_ratio"],
         "output": {"turns": [turn.model_dump(include=set(_EMITTED)) for turn in turns]},
-        "reference": {"baseline_tokens": BASELINE_TOKENS},
+        "reference": reference,
     }
     path.write_text(
         "---\n"
@@ -213,8 +266,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        session_id = asyncio.run(_drive(args.base_url))
-        turns = asyncio.run(_recorded(session_id))
+        driven = asyncio.run(_drive(args.base_url))
+        turns = asyncio.run(_recorded(driven.session_id))
+        surface = asyncio.run(_mock_surface())
     except (httpx.HTTPError, OSError) as exc:
         # `httpx.HTTPError` is the front door; `OSError` is the database (`core/db` raises
         # `ConnectionError`). Other driver errors are deliberately not caught, so a malformed query
@@ -223,6 +277,13 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     if not turns:
         print(f"the lane ran {len(WORKLOAD)} turn(s) and the ledger holds none of them")
+        return 3
+    if driven.absent:
+        print(
+            f"degraded run, not scored: {', '.join(driven.absent)} did not come up for these "
+            "turns, so they were sent a smaller tool surface than the recorded case — see the "
+            "front door's log for the cause"
+        )
         return 3
 
     result = get_metric("turn_cost_ratio")(_case(turns))
@@ -237,14 +298,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.emit:
         path = Path(settings.eval_case_dir) / f"{CASE_ID}.md"
-        _emit(turns, path)
+        _emit(turns, path, surface)
         print(f"recorded {len(turns)} measured turn(s) to {path}")
         return 0
 
-    recorded = _recorded_value()
-    if recorded is None:
+    case = _recorded_case()
+    if case is None:
         print(f"no recorded case {CASE_ID!r} to compare against; run with --emit first")
         return 3
+    recorded_surface = (case.reference or {}).get("surface")
+    if recorded_surface is not None and surface is not None and surface != recorded_surface:
+        print(
+            f"not comparable, not scored: the recorded case was sent {recorded_surface} and these "
+            f"turns {surface}; run it on the lane the case was recorded on, or re-record (--emit)"
+        )
+        return 3
+    recorded = get_metric("turn_cost_ratio")(case).value
     band = drift_band(recorded, settings.eval_drift_epsilon)
     delta = result.value - recorded
     print(f"recorded {recorded:.6g}, delta {delta:+.4g}, band {band:.4g}")

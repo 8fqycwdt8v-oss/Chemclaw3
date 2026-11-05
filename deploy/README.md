@@ -98,9 +98,11 @@ The chart **names** Secrets and never fills them; populate them with an
 | the knowledge-repo push token (`secrets.keys.knowledgeRepoToken`) | **yes once `knowledge.sync.repoUrl` is set**; with no remote it is mounted `optional: true` and may be absent | the token `deploy/knowledge-sync.sh` clones with and the note writer pushes with — both through the image's `chemclaw-git-askpass` helper, so it never lands in a URL, `.git/config` or argv |
 | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | optional, migrate Job only | the owner's DSN when the principal is split |
 | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | optional, **set it** | HMAC key for the retrieved-content envelope; unset, each process picks its own and replicas disagree |
+| `CHEMCLAW_ROLE_CLAIM_SECRET` | optional, **set it with an access policy** | HMAC key that signs the roles a background report carries; unset, background sweeps hold no roles and ask no source |
 | `CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`, `CHEMCLAW_CALC_TOKEN`, `CHEMCLAW_RXNLABEL_TOKEN` | optional to the chart, **required by the capability** | bearers this release presents to the fleet servers; unset, every call to that server is refused |
 | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | optional to the chart, **required by the capability** | bearers for the connector servers this release runs itself (both ends read the same variable) |
 | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and `pyexec`'s (`secrets.optionalKeys.pyexecToken`) | only when that bundle is enabled | bearers for the fleet bundles that ship off; slotted already, so enabling one is the `connectors:` line plus this key |
+| `CHEMCLAW_TEAMS_BOT_CREDENTIAL` | only with the Teams room bridge | the bot registration's client secret, read by the bridge's own Deployment; unset, it signs nobody in |
 | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the read-only MCP face's bearer; unset, it answers 401 |
 | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | optional | the failover gateway, a non-pgvector store, Temporal Cloud, a split session database |
 
@@ -166,6 +168,8 @@ site's own) additionally needs its manifest mounted — see "Attaching a connect
 this image does not ship". The five process-development bundles (`props`, `thermalsafety`,
 `kinetics`, `unitops`, `suitability`) ship `enabled: false`: each one enabled costs prompt prefix
 on every model call.
+`chembl` (compounds and aggregated bioactivity from a CC BY-SA 3.0 subset of ChEMBL) ships
+`enabled: false` on the same terms; its egress port and `CHEMCLAW_CHEMBL_TOKEN` slot are in the chart.
 
 ### 6. Write the values file — what the chart refuses to render without
 

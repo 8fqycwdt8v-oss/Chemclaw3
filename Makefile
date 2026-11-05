@@ -268,8 +268,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 
 kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml + the fleet, schema-check all of it.
 	@# Strict, without -ignore-missing-schemas: a kind cluster has no CRD the default schemas lack.
-	@# The fleet is rendered by render-fleet.sh from the sibling's chart when it has one, else from its
-	@# per-server files; the checks below are the same either way.
+	@# The fleet is rendered by render-fleet.sh from the sibling's chart.
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v kubectl >/dev/null || { echo "kubectl not installed (render-fleet.sh uses kubectl kustomize)"; exit 1; }
@@ -431,7 +430,7 @@ live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
 	bash infra/live/e2e-full-stack/up.sh status
 
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
-	uv run python -m chemclaw.cli.live_jobs
+	uv run python -m chemclaw.cli.live_jobs $(ARGS)
 
 live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)

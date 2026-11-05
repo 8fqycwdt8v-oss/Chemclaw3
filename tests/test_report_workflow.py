@@ -269,8 +269,8 @@ async def test_a_report_carries_its_requester_into_retrieval() -> None:
         )
 
     # The actor crosses into the activity but the roles do not: a workflow payload is relayed data,
-    # not a verified claim, so roles bind to the empty set (fail closed). Role-scoped durable
-    # retrieval would need a signed payload.
+    # not a verified claim, so unsigned roles bind to the empty set (fail closed). The signed case
+    # is `tests/test_role_claim.py`.
     assert seen == [("alice@corp", frozenset())]
 
 

@@ -448,10 +448,12 @@ class ConnectorJobWorkflow:
             )
             return await self._finish(job, result, started_at)
         except BaseException as exc:
-            # An eviction (terminate, cache eviction, worker shutdown) closes the coroutine from
-            # outside the workflow event loop; nothing below can run there, and the run is not lost
-            # (another worker replays it), so leave.
-            if not workflow.in_workflow():
+            # An eviction (terminate, cache eviction, worker shutdown) closes the coroutine, and the
+            # run is not lost (another worker replays it), so leave. `GeneratorExit` is that close
+            # even when `in_workflow()` is true: an evicted run's coroutine can be collected while
+            # *another* workflow's loop is current, and a record or push-back scheduled here would
+            # then be sent from that workflow about this one.
+            if isinstance(exc, GeneratorExit) or not workflow.in_workflow():
                 raise
             # Settle the ledger first: a failed effect left `attempting` would read as "may have
             # changed the far side".

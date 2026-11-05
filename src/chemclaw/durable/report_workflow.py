@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.core.logging import log_event
     from chemclaw.core.metrics_bridge import degraded
+    from chemclaw.core.role_claim import verified_roles
     from chemclaw.core.turn_signals import ExhibitSignal
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.observation_jobs import workflow_safe_today
@@ -95,10 +96,11 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
     """
     if not request.requested_by:
         return await gather_section(request.section, default_retrievers())
-    # Empty roles, never `request.requested_roles`: a workflow payload is relayed data, not a
-    # verified claim. The actor is bound for attribution; authorization fails closed on the empty
-    # set.
-    token = set_current_identity(request.requested_by, frozenset())
+    # Roles only if the launch-time signature verifies: a workflow payload is relayed data, not a
+    # verified claim. Without one the actor is bound for attribution alone and authorization fails
+    # closed on the empty set.
+    roles = verified_roles(request.requested_by, request.requested_roles, request.roles_claim)
+    token = set_current_identity(request.requested_by, roles)
     try:
         return await gather_section(request.section, default_retrievers())
     finally:
@@ -374,6 +376,7 @@ class DevelopmentReportWorkflow:
                     section=section,
                     requested_by=request.requested_by,
                     requested_roles=request.requested_roles,
+                    roles_claim=request.roles_claim,
                     correlation_id=request.correlation_id,
                 )
                 for section in request.sections

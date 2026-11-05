@@ -23,6 +23,8 @@ from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
 from chemclaw.connectors.contract import forget_contract_findings as _forget_contract_findings
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
+from chemclaw.core import heap
+from chemclaw.core.access_policy import active_policy
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
 from chemclaw.kg.record import NoteWrite, WriteOutcome
@@ -151,9 +153,11 @@ def _fresh_derived_tool_sets() -> Iterator[None]:
     """
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
+    active_policy.cache_clear()
     yield
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
+    active_policy.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -196,6 +200,9 @@ def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
     monkeypatch.setattr(settings, "worker_allow_unauthenticated", True)
+    # A freeze is process-wide and permanent: a lifespan run in one test would move every later
+    # test's survivors out of the collector's reach. `tests/test_heap.py` puts the real one back.
+    monkeypatch.setattr(heap, "freeze_startup_heap", lambda component: None)
 
 
 def timeout_scale() -> float:

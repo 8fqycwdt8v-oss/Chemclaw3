@@ -173,7 +173,7 @@ async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Pa
     store = InMemoryVectorStore()
     index = await _fresh_index(store)
     await index.upsert(
-        [_record("reaction-a", [1.0, 0.0]), _record("reaction-b", [0.0, 1.0])], "key-1"
+        [_record("reaction-a", [1.0, 0.0]), _record("reaction-b", [0.0, 1.0])], await _key()
     )
 
     hits = await index.search_dense([1.0, 0.0], 5)
@@ -185,11 +185,34 @@ async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Pat
     store = InMemoryVectorStore()
     index = await _fresh_index(store)
     await index.upsert(
-        [_record(f"reaction-{n}", [1.0 - n / 100, n / 100]) for n in range(20)], "key-1"
+        [_record(f"reaction-{n}", [1.0 - n / 100, n / 100]) for n in range(20)], await _key()
     )
 
     hits = await index.search_dense([0.0, 1.0], 1, within={"reaction-1"})
     assert [hit.note_id for hit in hits] == ["reaction-1"]
+
+
+async def test_a_model_swap_does_not_rank_the_old_model_s_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store keeps no embedding key, so the catalogue's decides what a dense read may cite.
+
+    A same-width model swap leaves every old vector in the store, scoring positive against a
+    new-model query, until the reindex drains: those notes must not be served meanwhile.
+    """
+    store = InMemoryVectorStore()
+    index = await _fresh_index(store)
+    old = await _key()
+    await index.upsert([_record("reaction-a", [1.0, 0.0])], old)
+    assert [hit.note_id for hit in await index.search_dense([1.0, 0.0], 5)] == ["reaction-a"]
+
+    monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+    assert await _key() != old
+    assert await index.search_dense([1.0, 0.0], 5) == [], "cited an old-model vector"
+
+    await index.upsert([_record("reaction-b", [0.9, 0.1])], await _key())
+    hits = await index.search_dense([1.0, 0.0], 5)
+    assert [hit.note_id for hit in hits] == ["reaction-b"], "a re-embedded note is served again"
 
 
 async def test_a_zero_query_vector_costs_no_round_trip(tmp_path: Path) -> None:
@@ -211,6 +234,23 @@ async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     assert [match.id for match in await store.search(COLLECTION, [0.0, 1.0], 5)] == [], (
         "the retired note's vector is gone from the store, not just from the catalogue"
     )
+
+
+async def test_an_empty_keep_set_retires_nothing_from_either_durable_index() -> None:
+    """The empty-`keep` guard, on the shared SQL half both durable indexes go through.
+
+    `DELETE … WHERE NOT (note_id = ANY('{}'))` matches every row, so without the guard a public
+    call with an empty set would wipe the index and, for the external one, its points too.
+    """
+    store = InMemoryVectorStore()
+    external = await _fresh_index(store)
+    await external.upsert([_record("reaction-a", [1.0, 0.0])], "key-1")
+    plain = PostgresNoteIndex()
+
+    for index in (plain, external):
+        assert await index.retire_absent(set()) == 0, type(index).__name__
+    assert set(await external.fingerprints("key-1")) == {"reaction-a"}
+    assert [match.id for match in await store.search(COLLECTION, [1.0, 0.0], 5)] == ["reaction-a"]
 
 
 async def test_switching_provider_re_embeds_rather_than_returning_nothing(tmp_path: Path) -> None:

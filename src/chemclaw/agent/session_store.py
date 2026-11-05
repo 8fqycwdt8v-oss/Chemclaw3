@@ -505,6 +505,10 @@ _TURN_REFRESH = (
     "WHERE session_id = %s AND holder = %s AND expires_at > now()"
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
+#: The `LISTEN` channel a session's line is woken on (`agent/session_queue.py`), topic the session
+#: id. A released claim is notified in the release's transaction: the head of the line may now run.
+TURN_QUEUE_CHANNEL = "session_turn_queue"
+_TURN_RELEASED = "SELECT pg_notify(%s, session_id) FROM unnest(%s::text[]) AS released(session_id)"
 # Whether this holder's claim is live now, on the database's clock, and whether it has `margin`
 # seconds still to run: what a turn asks before it acts. No row is a claim that is gone, taken or
 # lapsed. A healthy holder refreshes every third of its lease, so it always has two thirds left; a
@@ -1000,6 +1004,7 @@ class PostgresHistoryProvider:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_RELEASE, (session_id, holder))
                 await cur.execute(_UNRESUME_MARK, (row_id, session_id))
+                await cur.execute(_TURN_RELEASED, (TURN_QUEUE_CHANNEL, [session_id]))
             await conn.commit()
 
     async def latest_turn_status(
@@ -1339,6 +1344,7 @@ class SessionTurnClaims:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_RELEASE, (session_id, holder))
+                await cur.execute(_TURN_RELEASED, (TURN_QUEUE_CHANNEL, [session_id]))
             await conn.commit()
 
     async def claim_many(
@@ -1390,6 +1396,7 @@ class SessionTurnClaims:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_RELEASE_MANY, (holder, list(session_ids)))
+                await cur.execute(_TURN_RELEASED, (TURN_QUEUE_CHANNEL, list(session_ids)))
             await conn.commit()
 
     async def other_holders(self, session_ids: Sequence[str], holder: str) -> set[str]:

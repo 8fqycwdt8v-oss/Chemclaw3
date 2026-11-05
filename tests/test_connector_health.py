@@ -242,6 +242,32 @@ def test_a_polled_queue_clears_the_same_gate(
     assert _states(asyncio.run(check_connectors_at_startup())) == {"durable": "healthy"}
 
 
+def test_a_bundle_the_deployment_cannot_use_is_refused_and_gates_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stdio bundle with stdio off, and a malformed manifest, are `refused` and count as down.
+
+    Turns skip both (`registry.mcp_connections`), so the sweep is where the loss shows; calling the
+    stdio one `unprobed` would hide a capability that can never come up.
+    """
+    stdio = (
+        "name: local\ndescription: a local capability\n"
+        "endpoint:\n  transport: stdio\n  command: /bin/sh\n  args: ['-c', 'true']\n"
+        "  tools:\n    - compute\n  read_only:\n    - compute\n"
+    )
+    _bundles(tmp_path, monkeypatch, local=stdio, broken="name: [unclosed\n")
+    _broker(monkeypatch, pollers=0)
+
+    health = asyncio.run(probe_connectors())
+
+    assert _states(health) == {"broken": "refused", "local": "refused"}
+    assert all(item.unhealthy for item in health)
+    assert "CHEMCLAW_CONNECTOR_STDIO_ENABLED" in next(i for i in health if i.name == "local").detail
+    monkeypatch.setattr(settings, "connectors_required", True)
+    with pytest.raises(ConnectorsUnavailable, match="local"):
+        asyncio.run(check_connectors_at_startup())
+
+
 def test_a_bundle_with_no_durable_work_and_no_health_route_stays_unprobed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

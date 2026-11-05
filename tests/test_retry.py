@@ -86,7 +86,8 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     _import_first_party_tree()
 
     def names(cls: type) -> set[str]:
-        return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
+        subs: list[type] = cls.__subclasses__()
+        return {cls.__name__}.union(*(names(sub) for sub in subs), set())
 
     registered = set(_BAD_DATA_TYPES) | _DECLARED_RETRYABLE
 
@@ -109,7 +110,8 @@ def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
     """
 
     def names(cls: type) -> set[str]:
-        return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
+        subs: list[type] = cls.__subclasses__()
+        return {cls.__name__}.union(*(names(sub) for sub in subs), set())
 
     _import_first_party_tree()
     missing = names(AuthorizationError) - set(_BAD_DATA_TYPES)
@@ -126,7 +128,8 @@ def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
     _import_first_party_tree()
 
     def names(cls: type) -> set[str]:
-        return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
+        subs: list[type] = cls.__subclasses__()
+        return {cls.__name__}.union(*(names(sub) for sub in subs), set())
 
     listed = set(_BAD_DATA_TYPES)
     registered = names(SubsystemUnavailableError) & listed
