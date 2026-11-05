@@ -4,6 +4,9 @@ Source: the read-only architecture review of 2026-10-07 across Chemclaw3, Chemcl
 Chemclaw3_ui. This file is the plan for implementing **every** finding of that review, in waves.
 The previous task (deep documentation pass, 2026-10-04) shipped and its record is in git history.
 
+The follow-on waves W9–W15 (data sources and long-running compute) are planned in
+`docs/planning/sources-and-compute-programme.md` and sequenced against the waves below.
+
 ## Decisions taken (2026-10-07, by the owner)
 
 - **Knowledge graph: Postgres only, no git.** Not a mirror, not an export target: git leaves the
