@@ -4,6 +4,8 @@
 `D-2026-08-16-the-physics-leaves-the-cache-stays` (primitives move, composites are decomposed) and
 `D-2026-08-21-a-geometry-is-an-address-not-a-payload` (a geometry crosses as a handle).
 
+**Superseded-by:** [D-2026-10-21-a-template-may-map-and-select](D-2026-10-21-a-template-may-map-and-select.md) (in part)
+
 **Superseded-by:** [D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire](D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire.md) (in part)
 
 ## Context
