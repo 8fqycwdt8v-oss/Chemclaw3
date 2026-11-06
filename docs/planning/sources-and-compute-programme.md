@@ -105,7 +105,7 @@ Entry: none. Size S–M. Repos: all three.
       - a **compute eval** `data/evals/probes/compute.yaml`: 10 tasks needing a conformer-then-
         refine funnel or a recovery from a failed job (mock backend), baseline = today;
       - the number of files touched to add a source of a new shape (commitments: count from git).
-- [ ] **W9.4 Mock services** (`Chemclaw3_mock`): a `slurmrestd`-compatible mock (submit, status
+- [x] **W9.4 Mock services** *(Done in Chemclaw3_mock #18.)* (`Chemclaw3_mock`): a `slurmrestd`-compatible mock (submit, status
       with a configurable failure mode, accounting, cancel, artifact directory) and a DuckDB
       warehouse fixture with a `query:`-able reactions view. Both used by the live lane.
 
@@ -144,12 +144,12 @@ Entry: W9; ADRs A, B, C. Track C needs W5.4 (build once, bind per turn) and W5.7
       (`pistachio`, `eln-databricks`, `sharedrive`) into shipped `SKILL.md` files.
 
 ### Track B — Structured queries (G2)
-- [ ] **W10.5** `query:` block in `WarehouseBinding` (`ingest/eln/warehouse/binding.py`):
+- [x] **W10.5** *(Done in #703.)* `query:` block in `WarehouseBinding` (`ingest/eln/warehouse/binding.py`):
       `QueryBinding{relation, key, citation: FieldBinding, columns: dict[str, QueryColumn],
       default_order, max_rows ≤ 200}`, `QueryColumn{column, type: string|number|date|enum|smiles,
       ops: list[eq|in|gte|lte|between|contains], unit, description, enum_values}`. Identifiers
       through `_check_identifier`; `contains` compiles to a bound `LIKE` with escaping.
-- [ ] **W10.6** `sql.query_statement(binding, spec)` (`ingest/eln/warehouse/sql.py`): `WHERE`
+- [x] **W10.6** *(Done in #703.)* `sql.query_statement(binding, spec)` (`ingest/eln/warehouse/sql.py`): `WHERE`
       from declared columns and operators only, every value a positional bind via
       `warehouse.placeholder`, deterministic `ORDER BY` ending in the key, `LIMIT max_rows + 1` to
       report truncation. Dialect differences (`ILIKE`, date literals) go on `Warehouse` beside

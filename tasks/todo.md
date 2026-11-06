@@ -7,6 +7,24 @@ The previous task (deep documentation pass, 2026-10-04) shipped and its record i
 The follow-on waves W9–W15 (data sources and long-running compute) are planned in
 `docs/planning/sources-and-compute-programme.md` and sequenced against the waves below.
 
+### Executing W9–W15 (owner: "finish all open points", 2026-11-06)
+
+Tracks run in parallel where their files do not overlap; each is one PR per repo, merged when CI is
+green, and its items are ticked in the programme document in the same PR.
+
+- [ ] Track 1, sources: W10.1–W10.4, W10.7–W10.9, W10.16 (source surface, generated query tools,
+      `query_reaction_records`, `gather_evidence(sources=)`, role-file grants).
+- [ ] Track 2, compute seam: W12.4–W12.11 (`compute/`, drivers, `ExternalJobWorkflow`,
+      `JobSpec.compute`, per-job ceilings, worker component, identity).
+- [ ] Track 3, fleet: W12.1–W12.3 (kit-owned keys, `chemclaw_contracts.compute`) and W12.12 (`qm`).
+- [ ] Track 4, templates: W13.1–W13.4 (`map`/`select`, screen-then-refine template).
+- [ ] Track 5, record kinds: W11.1–W11.9.
+- [ ] Track 6, on-demand binding: W10.11–W10.15 (after Track 1, which it shares files with).
+- [ ] Track 7, BO and compute budget: W13.5–W13.9 (after Track 2).
+- [ ] Track 8, follow-up turns: W14.1–W14.5 (after Track 2).
+- [ ] Track 9, UI: W10.17, W12.15 (after Tracks 1 and 2).
+- [ ] Close-out: W10.10, W15.1–W15.3; W9.3 scores, W14.6 and W15.4 need a model gateway.
+
 ## Decisions taken (2026-10-07, by the owner)
 
 - **Knowledge graph: Postgres only, no git.** Not a mirror, not an export target: git leaves the
