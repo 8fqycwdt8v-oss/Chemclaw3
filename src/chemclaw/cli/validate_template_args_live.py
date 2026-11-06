@@ -33,7 +33,7 @@ from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
-from chemclaw.templates.manifest import Template, ToolStep
+from chemclaw.templates.manifest import Template, ToolStep, dispatched
 from chemclaw.templates.registry import discovered
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def check_live_arguments(
     checked: list[str] = []
     unreached: dict[str, list[str]] = {}
     for template in templates:
-        for step in template.steps:
+        for step in map(dispatched, template.steps):
             if not isinstance(step, ToolStep):
                 continue
             connector = owners.get(step.tool)
@@ -140,7 +140,12 @@ async def run() -> LiveReport:
     """
     templates = list(discovered().values())
     owners = connector_owners()
-    named = {step.tool for t in templates for step in t.steps if isinstance(step, ToolStep)}
+    named = {
+        step.tool
+        for t in templates
+        for step in map(dispatched, t.steps)
+        if isinstance(step, ToolStep)
+    }
     actor, roles = resolve_identity(admin=True, actor=None)
     token = set_current_identity(actor, roles)
     try:

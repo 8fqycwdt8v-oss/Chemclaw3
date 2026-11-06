@@ -1,9 +1,9 @@
 """When a template's steps may run at the same time — **derived** from the file, never declared.
 
-Not a loop (that is a composite on the MCP side,
-`D-2026-08-25-the-loop-is-a-composite-not-a-template`): this only asks which already-declared steps
-wait on each other. `${steps.<id>.result}` is a dependency edge, and forward references are refused,
-so the declared order is a topological order and needs no new syntax.
+Not a loop (a `map` fans out inside its one step; a loop that stops on a result is a job spec):
+this only asks which already-declared steps wait on each other. `${steps.<id>.result}` is a
+dependency edge, and forward references are refused, so the declared order is a topological order
+and needs no new syntax.
 
 Waves rather than a general DAG scheduler: a wave is every step whose dependencies have completed,
 and the next starts when the whole wave is done. A per-step scheduler would add replay-hazardous

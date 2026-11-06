@@ -41,7 +41,7 @@ steps:
       Summarize these hazard flags for a chemist: ${steps.hazards.result}
 ```
 
-Three step kinds:
+Five step kinds:
 
 - **`tool`** — call any tool on the agent's surface (in-process or a connector's) with resolved
   arguments. The step's result is whatever the tool returned.
@@ -50,6 +50,35 @@ Three step kinds:
 - **`agent`** — run one agent turn with a rendered prompt, optionally under a named profile. The
   result is the answer text. This is what keeps a template *agentic*: the sequence is fixed, the
   reasoning inside a step is not.
+- **`map`** — run one `tool` or `job` step once per item of a list (`over`), the item bound to a
+  name (`as`) the inner arguments use as `${<as>}`. Bounded by `max_items` (at most
+  `template_map_max_items`) and run `concurrency` at a time (at most
+  `orchestrator_max_parallel_children`); a job item is a child through `durable/orchestrator.fan_out`
+  with its index in its id. The result is `{index, item, result}` per item that succeeded; a failed
+  item is dropped and named in the run's degradations. A map cannot wrap a map.
+- **`select`** — keep a list's items that pass `where` (field, `lt|le|gt|ge|eq|ne`, literal),
+  sorted by the field path `by` in `order`, the first `top`. Arithmetic, not judgment: ties keep
+  list order and a null field drops the item.
+
+```yaml
+  - id: screen
+    kind: map
+    over: "${inputs.candidates}"
+    as: candidate
+    max_items: 32
+    concurrency: 8
+    step: {kind: tool, tool: compute_electronic_properties, arguments: {smiles: "${candidate}"}}
+  - id: shortlist
+    kind: select
+    from: "${steps.screen.result}"
+    by: result.homo_ev
+    order: desc
+    top: 3
+```
+
+`data/templates/screen-then-refine.yaml` is the funnel this pair exists for
+(`D-2026-10-21-a-template-may-map-and-select`). A loop that stops on a result (convergence, BO)
+is still a job spec, not a template.
 
 ## An agent step is read-only
 
@@ -85,13 +114,14 @@ advertise: a step can only ever narrow what its profile already offered.
 
 ## Substitution
 
-`${inputs.<name>}` and `${steps.<id>.result}`, and nothing else. A whole-string reference
+`${inputs.<name>}` and `${steps.<id>.result}`, and inside a map the item it binds; nothing else. A whole-string reference
 (`"${inputs.smiles}"`) substitutes the *value*, preserving its type; a reference inside a larger
 string interpolates its text. A reference to an unknown input or to a step that has not run yet is a
 validation error, not an empty string — a template that silently passed `None` into a calculation
 would be worse than one that refused to start.
 
-Deliberately not a template language: no conditionals, no loops, no expressions. Those are what
+Deliberately not a template language: no conditionals, no loops that stop on a result, no
+expressions. Those are what
 makes a "simple config format" become a programming language with no debugger, and the moment a
 procedure needs them it wants an agent (a profile) or real code (a connector workflow), not more
 YAML.
@@ -136,7 +166,8 @@ whatever the connector set, and refuses at launch what it cannot run.
 resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
 and no forward references. It also checks that the **run** can finish the steps the file declares —
 `template_run_timeout_seconds` against the sum of the per-kind step ceilings — and
-`unrunnable_reason` asks the same question again at launch, so a procedure that cannot complete is
+`unrunnable_reason` asks the same question again at launch (a map costs its inner step's ceiling
+once per batch, ⌈`max_items` / `concurrency`⌉ of them), so a procedure that cannot complete is
 refused before a workflow id exists rather than terminated hours later. That second check is not
 redundant with `core/config`'s: a `Settings` object cannot see this directory, so it can only
 require that *one* step fits, and one `job` step is 39,330 s against a run ceiling of 45,330 s.

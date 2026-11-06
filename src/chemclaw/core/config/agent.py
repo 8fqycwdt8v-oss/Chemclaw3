@@ -317,6 +317,9 @@ class AgentSettings(BaseSettings):
     # `_the_template_run_ceiling_covers_one_step` requires it to exceed the longest step's ceiling
     # (`template_step_ceilings`), usually a `job` step's `wrapper_execution_timeout()`.
     template_run_timeout_seconds: float = Field(default=45330.0, gt=0)
+    # The most items a template `map` step may declare (`max_items`), so no file can fan out over an
+    # unbounded list. A map's concurrency is bounded by `orchestrator_max_parallel_children`.
+    template_map_max_items: int = Field(default=64, ge=1)
 
     @property
     def templates_dirs(self) -> list[str]:

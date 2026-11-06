@@ -15,6 +15,7 @@ Read-only; touches nothing.
 
 import importlib
 import inspect
+import math
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
@@ -26,7 +27,15 @@ from chemclaw.connectors.registry import enabled as enabled_connectors
 from chemclaw.connectors.registry import server_tools_module
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
-from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
+from chemclaw.templates.manifest import (
+    AgentStep,
+    JobStep,
+    MapStep,
+    Step,
+    Template,
+    ToolStep,
+    dispatched,
+)
 from chemclaw.templates.schedule import batches, schedule
 
 
@@ -68,9 +77,9 @@ def unbound_opt_in_references(template: Template) -> list[str]:
 
     unbound = set(declared_connector_tool_names()) - set(connector_tool_names())
     named = {
-        step.tool if isinstance(step, ToolStep) else step.job
-        for step in template.steps
-        if isinstance(step, ToolStep | JobStep)
+        target.tool if isinstance(target, ToolStep) else target.job
+        for target in map(dispatched, template.steps)
+        if isinstance(target, ToolStep | JobStep)
     }
     return sorted(named & unbound)
 
@@ -263,7 +272,10 @@ def step_problems(template: Template, surface: TemplateSurface | None = None) ->
     jobs = surface.jobs
     profiles = surface.profiles
     signatures = surface.signatures
-    for step in template.steps:
+    for declared in template.steps:
+        if isinstance(declared, MapStep):
+            problems.extend(map_bound_problems(template, declared))
+        step = dispatched(declared)
         if isinstance(step, ToolStep) and step.tool not in tools:
             problems.append(
                 f"template {template.name!r} step {step.id!r} calls unknown tool "
@@ -289,6 +301,39 @@ def step_problems(template: Template, surface: TemplateSurface | None = None) ->
     return problems
 
 
+def map_bound_problems(template: Template, step: MapStep) -> list[str]:
+    """Check one map against this deployment's bounds: how many items, and how many at once.
+
+    Here rather than on `MapStep`, so lowering a bound refuses new launches without making a run
+    already in flight fail to deserialize its pinned template.
+    """
+    problems: list[str] = []
+    where = f"template {template.name!r} map step {step.id!r}"
+    if step.max_items > settings.template_map_max_items:
+        problems.append(
+            f"{where} declares max_items={step.max_items}, above template_map_max_items="
+            f"{settings.template_map_max_items}; a map fans out over a bounded list only"
+        )
+    if step.concurrency > settings.orchestrator_max_parallel_children:
+        problems.append(
+            f"{where} declares concurrency={step.concurrency}, above "
+            f"orchestrator_max_parallel_children={settings.orchestrator_max_parallel_children}"
+        )
+    return problems
+
+
+def step_ceiling(step: Step, ceilings: dict[str, tuple[float, str]]) -> float:
+    """The longest one step may take; a map pays its inner step's ceiling once per batch.
+
+    A map's batches are ⌈max_items / concurrency⌉, sized from the declared bound because the list's
+    real length is known only at run time, where a longer list is refused before anything starts.
+    """
+    if isinstance(step, MapStep):
+        batches_needed = math.ceil(step.max_items / step.concurrency)
+        return ceilings[step.step.kind][0] * batches_needed
+    return ceilings[step.kind][0]
+
+
 def _wave_ceiling(
     wave: tuple[Any, ...], ceilings: dict[str, tuple[float, str]], limit: int
 ) -> float:
@@ -308,7 +353,9 @@ def _wave_ceiling(
     Returns:
         The wave's ceiling in seconds.
     """
-    return sum(max(ceilings[step.kind][0] for step in batch) for batch in batches(wave, limit))
+    return sum(
+        max(step_ceiling(step, ceilings) for step in batch) for batch in batches(wave, limit)
+    )
 
 
 #: How many of a wave's members the refusal names before stating the width instead; for a very wide
@@ -332,7 +379,7 @@ def _wave_reason(wave: tuple[Any, ...], ceilings: dict[str, tuple[float, str]], 
         The wave as one term of the total.
     """
     named = wave[:_NAMED_MEMBERS]
-    members = " | ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in named)
+    members = " | ".join(f"{step.id}={step_ceiling(step, ceilings):,.0f}s" for step in named)
     if len(wave) == 1:
         return members
     if len(wave) > len(named):

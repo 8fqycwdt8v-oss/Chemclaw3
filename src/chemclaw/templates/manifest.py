@@ -4,11 +4,11 @@ Everything here makes a bad template impossible to start, rather than discovered
 durable run. References are strict for the same reason: a `${steps.missing.result}` that became
 "None" would feed a null into a calculation.
 
-Deliberately not a template language: no conditionals, loops or expressions, only `${inputs.x}`,
-`${steps.id.result}` and a dotted field path into that result. The field path is addressing, not
-computation; it lets a `job` step's computed value reach the next step without an `agent` step
-re-typing it (`D-2026-08-21-a-geometry-is-an-address-not-a-payload`). Branching belongs in an agent
-or a connector workflow.
+Deliberately not a template language: no conditionals or expressions, only `${inputs.x}`,
+`${steps.id.result}`, a map's item variable, and a dotted field path into any of them. A `map` is a
+bounded fan-out and a `select` a fixed top-k, neither a loop that stops on a result
+(`D-2026-10-21-a-template-may-map-and-select`). Branching belongs in an agent or a connector
+workflow.
 """
 
 import re
@@ -19,12 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
-# A reference to an input, an earlier step's result, or a field inside that result. Anchored and
-# closed; the field path is a dotted attribute walk only.
-_REFERENCE = re.compile(
-    r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result(?:\.[a-z][a-z0-9_]*)*)\}"
+# A reference to an input, an earlier step's result, a map's item variable, or a field inside a
+# result or an item. Closed; the field path is a dotted attribute walk only. Shared with
+# `templates/resolve.py`, so what validates is what resolves.
+REFERENCE = re.compile(
+    r"\$\{(inputs\.[a-z][a-z0-9_]*"
+    r"|steps\.[a-z][a-z0-9_-]*\.result(?:\.[a-z][a-z0-9_]*)*"
+    r"|(?!inputs\b|steps\b)[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)\}"
 )
-# Anything shaped like a reference, well-formed or not. `_REFERENCE` only finds valid references, so
+# A whole-string reference: what `over` and `from` must be.
+_WHOLE_REFERENCE = re.compile(f"^{REFERENCE.pattern}$")
+# Anything shaped like a reference, well-formed or not. `REFERENCE` only finds valid references, so
 # a typo would pass as a literal string; `_references_are_well_formed` refuses the difference
 # between the two patterns.
 _ANY_REFERENCE = re.compile(r"\$\{[^}]*\}")
@@ -111,7 +116,110 @@ class AgentStep(_Step):
     write_tools: list[str] = Field(default_factory=list)
 
 
-Step = Annotated[ToolStep | JobStep | AgentStep, Field(discriminator="kind")]
+#: What a `map` may run once per item: a call, never a reasoning turn or another map, so nesting
+#: is refused by the type rather than by a depth counter.
+MappedStep = Annotated[ToolStep | JobStep, Field(discriminator="kind")]
+
+#: The two scopes an item name would shadow.
+_SCOPES = ("inputs", "steps")
+#: A dotted field path into a result or an item.
+_FIELD_PATH = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$"
+
+
+def _whole_reference(value: str, what: str) -> str:
+    """`value` if it is exactly one `${inputs.x}` or `${steps.id.result…}` reference, else raise."""
+    whole = _WHOLE_REFERENCE.match(value)
+    if whole is None or not whole.group(1).startswith(("inputs.", "steps.")):
+        raise ValueError(
+            f"{what} must be exactly one ${{inputs.<name>}} or ${{steps.<id>.result}} reference "
+            f"naming a list, not {value!r}"
+        )
+    return value
+
+
+class MapStep(_Step):
+    """Run one `tool` or `job` step once per item of a list, at most `concurrency` at a time.
+
+    `over` names the list; `as` names the item inside `step.arguments` (`${<as>}`, with an optional
+    field path). The result is one `{index, item, result}` entry per item that succeeded, in item
+    order; an item that fails is dropped and named in the run's degradations. `max_items` bounds the
+    list at run time and sizes the run ceiling before it starts; the deployment's upper bounds are
+    checked where the surface is (`agent/template_surface.step_problems`), not here, so a run in
+    flight never fails to deserialize after an operator lowers them.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_name=True)
+
+    kind: Literal["map"] = "map"
+    over: str
+    as_: str = Field(alias="as", pattern=r"^[a-z][a-z0-9_]*$")
+    step: MappedStep
+    max_items: int = Field(ge=1)
+    concurrency: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _inner_step_shares_the_id(cls, data: Any) -> Any:
+        """Give the inner step the map's id; it is never referenced on its own."""
+        if isinstance(data, dict) and isinstance(data.get("step"), dict):
+            data = {**data, "step": {"id": data.get("id"), **data["step"]}}
+        return data
+
+    @model_validator(mode="after")
+    def _over_is_one_reference(self) -> Self:
+        """Refuse an `over` that is not one whole reference to an input or an earlier result."""
+        _whole_reference(self.over, f"map step {self.id!r}'s `over`")
+        if self.as_ in _SCOPES:
+            raise ValueError(f"map step {self.id!r} may not name its item {self.as_!r}")
+        return self
+
+
+class Condition(BaseModel):
+    """One `where` comparison of a select: a field of the item against a literal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    field: str = Field(pattern=_FIELD_PATH)
+    op: Literal["lt", "le", "gt", "ge", "eq", "ne"]
+    # A literal: a `${…}` here is refused by the well-formedness check, since it would be compared
+    # as text.
+    value: bool | float | str
+
+
+class SelectStep(_Step):
+    """Keep the items of a list that pass `where`, sorted by `by`, the first `top` of them.
+
+    Deterministic and model-free: ties keep their list order, and an item whose `by` or `where`
+    field is null is left out. The result is the kept items, unchanged, so a later `map` still sees
+    each one's `item`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_name=True)
+
+    kind: Literal["select"] = "select"
+    from_: str = Field(alias="from")
+    by: str = Field(pattern=_FIELD_PATH)
+    order: Literal["asc", "desc"] = "desc"
+    # `None` keeps every item that passes `where`, sorted.
+    top: int | None = Field(default=None, ge=1)
+    where: list[Condition] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _from_is_one_reference(self) -> Self:
+        """Refuse a `from` that is not one whole reference to an input or an earlier result."""
+        _whole_reference(self.from_, f"select step {self.id!r}'s `from`")
+        return self
+
+
+Step = Annotated[ToolStep | JobStep | AgentStep | MapStep | SelectStep, Field(discriminator="kind")]
+
+
+def dispatched(step: Step) -> ToolStep | JobStep | AgentStep | SelectStep:
+    """The step that names what runs: a map's inner step, otherwise the step itself.
+
+    One answer for every reader asking which tool or job a template calls.
+    """
+    return step.step if isinstance(step, MapStep) else step
 
 
 def _strings(value: Any) -> Iterator[str]:
@@ -131,19 +239,27 @@ def _strings(value: Any) -> Iterator[str]:
 
 def references(value: Any) -> set[str]:
     """Every well-formed `${…}` reference inside a value."""
-    return {ref for text in _strings(value) for ref in _REFERENCE.findall(text)}
+    return {ref for text in _strings(value) for ref in REFERENCE.findall(text)}
 
 
-def malformed_references(value: Any) -> set[str]:
-    """Every `${…}` span inside a value that is *not* a legal reference.
+def _foreign_item(reference: str, item: str) -> bool:
+    """Whether `reference` is an item variable other than `item`, the one bound here (if any)."""
+    if reference.startswith(("inputs.", "steps.")):
+        return False
+    return reference.split(".", 1)[0] != item
 
-    The complement of `references`: what validation would otherwise never see.
+
+def malformed_references(value: Any, item: str = "") -> set[str]:
+    """Every `${…}` span inside a value that is *not* a legal reference where it stands.
+
+    The complement of `references`: what validation would otherwise never see. An item variable is
+    legal only inside the map that binds it, so `item` names the one in scope.
     """
     return {
         span
         for text in _strings(value)
         for span in _ANY_REFERENCE.findall(text)
-        if not _REFERENCE.fullmatch(span)
+        if not REFERENCE.fullmatch(span) or _foreign_item(span[2:-1], item)
     }
 
 
@@ -184,12 +300,13 @@ class Template(BaseModel):
         one is found by nothing; it would otherwise reach the tool as literal text.
         """
         for step in self.steps:
-            malformed = sorted(malformed_references(_step_value(step)))
+            malformed = sorted(_malformed_in(step))
             if malformed:
                 raise ValueError(
                     f"template {self.name!r} step {step.id!r} has malformed reference(s) "
                     f"{malformed}; the only legal forms are ${{inputs.<name>}} and "
-                    "${steps.<id>.result} with an optional dotted field path"
+                    "${steps.<id>.result} with an optional dotted field path, and inside a map "
+                    "step the item it binds with `as`"
                 )
         return self
 
@@ -219,14 +336,38 @@ class Template(BaseModel):
 
 
 def _step_value(step: Step) -> Any:
-    """The part of a step that may carry references — its prompt, or its arguments."""
-    return step.prompt if isinstance(step, AgentStep) else step.arguments
+    """The part of a step that may carry run-wide references: prompt, arguments or list."""
+    if isinstance(step, AgentStep):
+        return step.prompt
+    if isinstance(step, MapStep):
+        return step.over
+    if isinstance(step, SelectStep):
+        return step.from_
+    return step.arguments
+
+
+def _malformed_in(step: Step) -> set[str]:
+    """Every malformed reference in one step; a map's inner arguments may name its own item."""
+    malformed = malformed_references(_step_value(step))
+    if isinstance(step, MapStep):
+        malformed |= malformed_references(step.step.arguments, item=step.as_)
+    if isinstance(step, SelectStep):
+        # A `where` value is a literal: a reference there would be compared as text.
+        malformed |= {
+            span
+            for condition in step.where
+            for span in _ANY_REFERENCE.findall(str(condition.value))
+        }
+    return malformed
 
 
 def step_references(step: Step) -> set[str]:
-    """Every reference one step makes, whichever kind it is.
+    """Every run-wide reference one step makes (inputs and step results), whichever kind it is.
 
     Public because it is the dependency graph `templates/schedule.py` reads; the validators make the
-    declared order a topological order of it.
+    declared order a topological order of it. A map's item variable is local, so it is left out.
     """
-    return references(_step_value(step))
+    found = references(_step_value(step))
+    if isinstance(step, MapStep):
+        found |= references(step.step.arguments)
+    return {ref for ref in found if ref.startswith(("inputs.", "steps."))}

@@ -9,11 +9,12 @@ unknown name lists the ones that exist.
 """
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.agent.authz import require_actor, side_effecting_tools
+from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.templates.composed import (
     MAX_PER_OWNER,
@@ -39,20 +40,28 @@ class WorkflowStep(BaseModel):
     id: str = Field(min_length=1, description="Unique within the workflow; later steps use it.")
     tool: str = Field(
         default="",
-        description="A read-only tool to call. Leave empty for a reasoning step.",
+        description="A read-only tool to call.",
     )
     job: str = Field(
         default="",
-        description="A durable job to run and wait for. Needs the owner's approval before it runs.",
+        description="A durable job to run and await; it needs the owner's approval.",
     )
     arguments: dict[str, Any] = Field(
         default_factory=dict,
-        description="Arguments for `tool`. Use ${inputs.x} and ${steps.id.result} to refer back.",
+        description="Arguments for the tool or job, with ${...} references.",
     )
     prompt: str = Field(
         default="",
-        description="For a reasoning step: what to work out, referring to earlier steps.",
+        description="A reasoning step: what to work out from earlier steps.",
     )
+    # Map and select, explained once in `compose_workflow`'s docstring: per-field descriptions
+    # would be paid on every turn's prefix.
+    over: str = ""
+    max_items: int = Field(default=0, ge=0)
+    select: str = ""
+    by: str = ""
+    top: int = Field(default=0, ge=0)
+    order: Literal["asc", "desc"] = "desc"
 
 
 class WorkflowInput(BaseModel):
@@ -75,15 +84,16 @@ def _document(
     contradictory = [
         step.id
         for step in steps
-        if sum(1 for field in (step.tool, step.job, step.prompt) if field) != 1
+        if sum(1 for field in (step.tool, step.job, step.prompt, step.select) if field) != 1
+        or (step.over and not (step.tool or step.job))
     ]
     if contradictory:
         # Refused rather than resolved by precedence: the branch below would silently drop the tool,
         # and the approver sees only the rendered document.
         raise ComposedWorkflowError(
             f"step(s) {contradictory} each have to be exactly one thing: a `tool` to call, a `job` "
-            "to run, or a `prompt` to reason with. Split them, or drop the fields that do not "
-            "belong."
+            "to run, a `prompt` to reason with, or a list to `select` from; `over` goes only with "
+            "a `tool` or a `job`. Split them, or drop the fields that do not belong."
         )
     return Template.model_validate(
         {
@@ -93,23 +103,49 @@ def _document(
                 {"name": item.name, "type": "string", "description": item.description or item.name}
                 for item in inputs
             ],
-            "steps": [
-                (
-                    {"id": step.id, "kind": "job", "job": step.job, "arguments": step.arguments}
-                    if step.job
-                    else {"id": step.id, "kind": "agent", "prompt": step.prompt}
-                    if not step.tool
-                    else {
-                        "id": step.id,
-                        "kind": "tool",
-                        "tool": step.tool,
-                        "arguments": step.arguments,
-                    }
-                )
-                for step in steps
-            ],
+            "steps": [_step_document(step) for step in steps],
         }
     )
+
+
+#: The name a composed map binds each item to; fixed, so the tool's schema needs no `as` field.
+_COMPOSED_ITEM = "item"
+
+
+def _step_document(step: WorkflowStep) -> dict[str, Any]:
+    """One declared step as the manifest's dict: a call, a reasoning turn, a select or a map.
+
+    A composed map runs as many items at once as the deployment's fan-out bound allows, and an
+    omitted `max_items` takes the deployment's upper bound, which the run-ceiling check then sizes.
+    """
+    if step.select:
+        return {
+            "id": step.id,
+            "kind": "select",
+            "from": step.select,
+            "by": step.by,
+            "order": step.order,
+            "top": step.top or None,
+        }
+    if not (step.tool or step.job):
+        return {"id": step.id, "kind": "agent", "prompt": step.prompt}
+    call: dict[str, Any] = (
+        {"kind": "job", "job": step.job, "arguments": step.arguments}
+        if step.job
+        else {"kind": "tool", "tool": step.tool, "arguments": step.arguments}
+    )
+    if not step.over:
+        return {"id": step.id, **call}
+    max_items = step.max_items or settings.template_map_max_items
+    return {
+        "id": step.id,
+        "kind": "map",
+        "over": step.over,
+        "as": _COMPOSED_ITEM,
+        "step": call,
+        "max_items": max_items,
+        "concurrency": min(max_items, settings.orchestrator_max_parallel_children),
+    }
 
 
 @tool
@@ -121,23 +157,21 @@ async def compose_workflow(
 ) -> str:
     """Write down a repeatable multi-step procedure so it runs as one durable job from now on.
 
-    Use this when the same sequence of reads keeps coming up and the order matters. Afterwards
-    `run_composed_workflow` runs the whole thing in one call, with no model turn between steps, and
-    a run that fails resumes rather than starting over. Composing the same name again replaces it.
+    Use it when the same sequence of reads recurs; `run_composed_workflow` then runs it in one call
+    and a failed run resumes. Composing a name again replaces it.
 
-    **No step may call a tool that changes anything**, because the run has no conversation to
-    approve a plan in — ask for the change in the conversation, where a person can see it.
+    **No step may call a tool that changes anything**: ask for a change in the conversation.
 
-    **A durable job step is allowed and will not run until a person approves this workflow.** Say so
-    when you hand the name back: its owner approves it where they are — `/approve-workflow` at a
-    terminal, the workflow screen on the front door — and it covers the steps exactly as they
-    stand, so composing it again needs approving again. Two jobs that do
-    not read each other are fine; one that waits for another will not fit, because a job's budget is
-    most of the whole run's — split that into two workflows.
+    **A durable job step will not run until the owner approves this exact version** — say so when
+    you hand the name back (`/approve-workflow` at a terminal, the workflow screen on the front
+    door). Two independent jobs fit one run; a job waiting on another does not, so split those.
 
-    Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}`. A
-    step naming no earlier step runs at the same time as its neighbours, so do not chain steps that
-    do not need each other.
+    Refer back with `${inputs.<name>}` and `${steps.<id>.result}`; steps naming no earlier step run
+    together.
+
+    To screen a list, `over` (a `${...}` list of at most `max_items`) runs a tool or job per
+    `${item}`, giving `{index, item, result}` each; `select` (a list) keeps the `top` by `by`
+    (e.g. `result.gap_ev`) in `order`.
 
     Args:
         name: What to call it. Lowercase words joined by hyphens.

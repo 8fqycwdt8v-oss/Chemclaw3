@@ -1,0 +1,81 @@
+# The multi-fidelity funnel: screen many candidates cheaply, keep the best few, and spend the
+# expensive treatment only on those (`D-2026-10-21-a-template-may-map-and-select`).
+#
+# Why a template: the selection is the step a model must not do. Ranking by a field is arithmetic,
+# and an agent carrying eight results in context and "picking the top three" can silently re-rank
+# by something else. Here the cut is a `select`, recorded in the run with every screened value,
+# so the chemist can see exactly which candidates were carried forward and why.
+#
+# The criterion is fixed by the file: the highest-lying HOMO first (the most electron-rich, most
+# easily oxidised, most nucleophilic of the set). A funnel on another property is another file.
+summary: Screen SMILES by xTB HOMO energy; refine the top three as free-energy ensembles.
+description: >-
+  Keeps the three candidates (of up to 32) with the highest GFN2-xTB HOMO, the most electron-rich,
+  and runs free-energy-weighted conformer ensembles on those only. The screen is one geometry per
+  candidate, so a HOMO gap inside xTB's error bar is not a ranking.
+
+inputs:
+  - name: candidates
+    type: string[]
+    description: Candidate SMILES, at most 32.
+  - name: solvent
+    type: string
+    description: Implicit solvent name; omit for gas phase.
+    required: false
+
+steps:
+  - id: screen
+    kind: map
+    purpose: One cheap electronic-structure single point per candidate; a candidate that fails is dropped and named.
+    over: "${inputs.candidates}"
+    as: candidate
+    max_items: 32
+    concurrency: 8
+    step:
+      kind: tool
+      tool: compute_electronic_properties
+      arguments:
+        smiles: "${candidate}"
+        solvent: "${inputs.solvent}"
+
+  - id: shortlist
+    kind: select
+    purpose: The cut, made by arithmetic rather than judgment — highest HOMO first, ties in input order.
+    from: "${steps.screen.result}"
+    by: result.homo_ev
+    order: desc
+    top: 3
+
+  - id: refine
+    kind: map
+    purpose: Free-energy-weighted ensembles for the shortlisted three only — the expensive tier.
+    over: "${steps.shortlist.result}"
+    as: hit
+    max_items: 3
+    concurrency: 3
+    step:
+      kind: job
+      job: refine_ensemble
+      arguments:
+        smiles: "${hit.item}"
+        solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Show the screen, say which three went forward and why, then what refinement changed.
+    prompt: >-
+      Report a screening funnel over ${inputs.candidates}.
+
+      Screen (GFN2-xTB single point per candidate; each entry pairs the candidate with its
+      result): ${steps.screen.result}
+      Shortlist (top three by HOMO energy, highest first): ${steps.shortlist.result}
+      Refinement (free-energy-weighted conformer ensemble per shortlisted candidate):
+      ${steps.refine.result}
+
+      First give the screening table — every candidate with its HOMO energy in eV — and name any
+      candidate that is missing because its calculation failed. Then say which three were carried
+      forward and that the cut was by HOMO energy alone. Then report the refined ensembles: the
+      population covered and the ensemble correction for each. Say plainly that a HOMO difference
+      smaller than about 0.2 eV between neighbours is inside the semiempirical error bar, so such a
+      cut is not a ranking, and propose the measurement that would settle it (oxidation potential
+      by cyclic voltammetry, or a competition experiment).

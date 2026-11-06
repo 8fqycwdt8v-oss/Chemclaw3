@@ -821,7 +821,8 @@ class Settings(
         One definition for two readers: the validator below takes the maximum (one step must fit),
         and `cli/validate_templates.py` sums over the steps a template file declares. Keyed by the
         manifest's `kind` values, so a new kind missing here raises `KeyError` rather than counting
-        as free.
+        as free; a `map` is costed through its inner step's kind
+        (`agent/template_surface.step_ceiling`).
 
         A `job` step is not an activity: it starts `ConnectorJobWorkflow` under
         `durable/connector_job.wrapper_execution_timeout()`, the child ceiling plus the wrapper's
@@ -832,6 +833,8 @@ class Settings(
             `{kind: (seconds, why)}`, where `why` is phrased to be read inside a refusal.
         """
         return {
+            # Workflow code alone, no activity: a sort over a list already in hand.
+            "select": (0.0, "nothing: a select runs no activity"),
             "tool": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
             "agent": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
             "job": (

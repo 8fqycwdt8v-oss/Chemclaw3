@@ -55,7 +55,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.note import Note, as_cell, strip_links
     from chemclaw.kg.record import record_note
-    from chemclaw.templates.manifest import Template
+    from chemclaw.templates.manifest import Template, dispatched
 
 from chemclaw.durable.publish import (
     light_write_queue_wait_timeout,
@@ -477,18 +477,20 @@ def _dispatchable_templates() -> str:
     """The templates a check may name, read off this deployment rather than written down.
 
     Derived from the same `enabled()` set and guards the grounding activity uses, so what the model
-    is offered and what it may run agree.
+    is offered and what it may run agree — including the one structure input a check can fill.
     """
     from chemclaw.agent.authz import STATE_CHANGING_TOOLS
+    from chemclaw.hypotheses.dispatch import TEMPLATE_STRUCTURE_INPUT
     from chemclaw.templates.registry import enabled as enabled_templates
 
     names = sorted(
         template.name
         for template in enabled_templates()
-        if any(getattr(step, "kind", "") == "job" for step in template.steps)
+        if any(item.name == TEMPLATE_STRUCTURE_INPUT for item in template.inputs)
+        and any(getattr(dispatched(step), "kind", "") == "job" for step in template.steps)
         and not any(
             getattr(step, "write_tools", None)
-            or getattr(step, "tool", None) in STATE_CHANGING_TOOLS
+            or getattr(dispatched(step), "tool", None) in STATE_CHANGING_TOOLS
             for step in template.steps
         )
     )
@@ -860,10 +862,10 @@ async def ground_check_template(
         # templates.
         writes = any(
             getattr(step, "write_tools", None)
-            or getattr(step, "tool", None) in STATE_CHANGING_TOOLS
+            or getattr(dispatched(step), "tool", None) in STATE_CHANGING_TOOLS
             for step in template.steps
         )
-        computes = any(getattr(step, "kind", "") == "job" for step in template.steps)
+        computes = any(getattr(dispatched(step), "kind", "") == "job" for step in template.steps)
         inputs, input_refusal = ground_template_inputs(declared, smiles, writes, computes)
         if input_refusal is not None or inputs is None:
             code = input_refusal.code if input_refusal else "template-cannot-be-grounded"

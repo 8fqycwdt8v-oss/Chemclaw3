@@ -22,15 +22,15 @@
   "overlay": null,
   "profile": "default",
   "prefix": {
-    "tool_schemas": 64622,
+    "tool_schemas": 64945,
     "instructions": 3934,
     "skill_descriptions": 3283,
-    "total": 71839
+    "total": 72162
   },
   "totals": {
     "every-request": {
-      "entries": 180,
-      "tokens": 72483
+      "entries": 181,
+      "tokens": 72806
     },
     "conditional": {
       "entries": 18,
@@ -680,9 +680,9 @@
       "kind": "tool-docstring",
       "owner": "src/chemclaw/agent/workflow_tools.py:compose_workflow",
       "residence": "every-request",
-      "tokens": 498,
-      "chars": 1975,
-      "sha256": "b8336e0e14eb7ef6",
+      "tokens": 416,
+      "chars": 1645,
+      "sha256": "33d9beb7c5a364e4",
       "also_counted_in": [
         "tool:compose_workflow"
       ]
@@ -1465,6 +1465,18 @@
       ]
     },
     {
+      "id": "doc:run_screen_then_refine",
+      "kind": "tool-docstring",
+      "owner": "src/chemclaw/templates/registry.py:run_screen_then_refine",
+      "residence": "every-request",
+      "tokens": 204,
+      "chars": 798,
+      "sha256": "e052354f13f98164",
+      "also_counted_in": [
+        "tool:run_screen_then_refine"
+      ]
+    },
+    {
       "id": "doc:run_stereoisomer_ranking",
       "kind": "tool-docstring",
       "owner": "src/chemclaw/templates/registry.py:run_stereoisomer_ranking",
@@ -1760,6 +1772,18 @@
       "tokens": 383,
       "chars": 1513,
       "sha256": "8a243e8ef82cf8b0"
+    },
+    {
+      "id": "doc:template:run_screen_then_refine",
+      "kind": "tool-docstring",
+      "owner": "data/templates/screen-then-refine.yaml",
+      "residence": "every-request",
+      "tokens": 204,
+      "chars": 798,
+      "sha256": "e052354f13f98164",
+      "also_counted_in": [
+        "tool:run_screen_then_refine"
+      ]
     },
     {
       "id": "doc:template:run_stereoisomer_ranking",
@@ -2647,9 +2671,9 @@
       "kind": "schema-class",
       "owner": "src/chemclaw/agent/workflow_tools.py:WorkflowStep",
       "residence": "every-request",
-      "tokens": 103,
-      "chars": 396,
-      "sha256": "c9430e95efa6a093",
+      "tokens": 83,
+      "chars": 313,
+      "sha256": "460a17d18a4db0b7",
       "also_counted_in": [
         "tool:compose_workflow"
       ]
@@ -3241,6 +3265,18 @@
       "sha256": "d59bfd49743281f5",
       "also_counted_in": [
         "tool:run_regioselectivity_in_conformer"
+      ]
+    },
+    {
+      "id": "schema:chemclaw.templates.registry.ScreenThenRefineInputs",
+      "kind": "schema-class",
+      "owner": "data/templates/screen-then-refine.yaml",
+      "residence": "every-request",
+      "tokens": 39,
+      "chars": 139,
+      "sha256": "79ab37184ff227db",
+      "also_counted_in": [
+        "tool:run_screen_then_refine"
       ]
     },
     {
@@ -4157,9 +4193,9 @@
       "kind": "tool-schema",
       "owner": "src/chemclaw/agent/workflow_tools.py:compose_workflow",
       "residence": "every-request",
-      "tokens": 888,
-      "chars": 3536,
-      "sha256": "de342d88cd5ed334"
+      "tokens": 858,
+      "chars": 3414,
+      "sha256": "2e30a0730ff9dd22"
     },
     {
       "id": "tool:compute_atomic_descriptors",
@@ -4844,6 +4880,15 @@
       "tokens": 408,
       "chars": 1615,
       "sha256": "224726b32d06bc51"
+    },
+    {
+      "id": "tool:run_screen_then_refine",
+      "kind": "tool-schema",
+      "owner": "data/templates/screen-then-refine.yaml",
+      "residence": "every-request",
+      "tokens": 353,
+      "chars": 1396,
+      "sha256": "d7650e704009d7ab"
     },
     {
       "id": "tool:run_stereoisomer_ranking",

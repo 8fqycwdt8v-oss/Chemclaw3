@@ -112,8 +112,29 @@ async def fan_out(
         The results of the children that succeeded, in input order. A child that fails after its
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
+    settled = await fan_out_indexed(child, inputs, id_prefix=id_prefix, max_parallel=max_parallel)
+    return [result for _index, result in settled]
+
+
+async def fan_out_indexed(
+    child: Any,
+    inputs: Sequence[Any],
+    *,
+    id_prefix: str,
+    max_parallel: int | None = None,
+    execution_timeout: timedelta | None = None,
+) -> list[tuple[int, Any]]:
+    """`fan_out`, keeping each surviving result's input index, for a caller that must pair them.
+
+    A template `map` pairs every result with its item, which a short list alone cannot do once a
+    child was dropped. `execution_timeout` replaces `fan_out_child_timeout_seconds` for a child
+    that owns its own, longer ceiling (a connector job wrapper). Arguments are `fan_out`'s.
+
+    Returns:
+        `(index, result)` for each child that succeeded, in input order.
+    """
     # Read once so every child of one fan-out gets the same bound.
-    child_timeout = timedelta(seconds=settings.fan_out_child_timeout_seconds)
+    child_timeout = execution_timeout or timedelta(seconds=settings.fan_out_child_timeout_seconds)
     if max_parallel is not None:
         limit = max_parallel
     else:
@@ -128,7 +149,7 @@ async def fan_out(
     _refuse_a_child_that_cannot_fail(child)
     parent_id = workflow.info().workflow_id
     indexed = list(enumerate(inputs))
-    results: list[Any] = []
+    results: list[tuple[int, Any]] = []
     # Batches rather than a semaphore: deterministic under replay, same concurrency bound.
     #
     # Children run on core's `background-jobs` queue, once each: a child's activities carry its
@@ -168,5 +189,5 @@ async def fan_out(
                     outcome,
                 )
             else:
-                results.append(outcome)
+                results.append((index, outcome))
     return results

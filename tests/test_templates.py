@@ -1571,7 +1571,10 @@ def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
     move, rather than by asserting a transcribed total.
     """
     ceilings = settings.template_step_ceilings()
-    assert set(ceilings) == {"tool", "agent", "job"}, "a step kind sized nowhere counts as free"
+    # `map` is sized through its inner step's kind (`template_surface.step_ceiling`).
+    assert set(ceilings) == {"tool", "agent", "job", "select"}, (
+        "a step kind sized nowhere counts as free"
+    )
     before = ceilings["job"][0]
     one_job = _template(steps=_job_steps(1))
     assert run_ceiling_problems(one_job) == []

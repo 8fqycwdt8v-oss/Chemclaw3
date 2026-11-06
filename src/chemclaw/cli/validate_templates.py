@@ -32,7 +32,7 @@ from chemclaw.agent.template_surface import (
     step_problems,
 )
 from chemclaw.core.config import settings
-from chemclaw.templates.manifest import ToolStep
+from chemclaw.templates.manifest import ToolStep, dispatched
 from chemclaw.templates.registry import TemplateError, discovered, enabled
 
 # Re-exported for `validate_template_args_live`, so both lanes share one `argument_problems`. The
@@ -64,7 +64,7 @@ def unchecked_arguments(surface: TemplateSurface | None = None) -> dict[str, lis
         names = sorted(
             {
                 step.tool
-                for step in template.steps
+                for step in map(dispatched, template.steps)
                 if isinstance(step, ToolStep) and step.tool not in signatures
             }
         )

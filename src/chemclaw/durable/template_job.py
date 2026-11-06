@@ -10,6 +10,7 @@ requester exactly as a chat turn is.
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
@@ -22,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.connector_job import (
         ConnectorJobInput,
         ConnectorJobResult,
+        ConnectorJobWorkflow,
         child_workflow_id,
         ended_state,
         failure_reason,
@@ -29,10 +31,12 @@ with workflow.unsafe.imports_passed_through():
     )
     from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.notify import notify_session_best_effort
+    from chemclaw.durable.orchestrator import fan_out_indexed
     from chemclaw.durable.template_activities import (
         AgentStepInput,
         AgentStepResult,
         JobStepInput,
+        ResolvedJob,
         ResumeRequest,
         StepIdentity,
         ToolStepInput,
@@ -41,8 +45,15 @@ with workflow.unsafe.imports_passed_through():
         run_agent_step,
         run_tool_step,
     )
-    from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
-    from chemclaw.templates.resolve import resolve
+    from chemclaw.templates.manifest import (
+        AgentStep,
+        JobStep,
+        MapStep,
+        SelectStep,
+        Template,
+        ToolStep,
+    )
+    from chemclaw.templates.resolve import resolve, select
     from chemclaw.templates.schedule import batches, schedule
 
 from chemclaw.core.ids import stable_hash
@@ -100,6 +111,18 @@ class _StepFailed(Exception):
         super().__init__(f"template step {getattr(step, 'id', '?')!r} failed")
         self.step = step
         self.cause = cause
+
+
+@dataclass(frozen=True)
+class _Mapped:
+    """A map step's outcome before it is folded: the entries, and which items were dropped.
+
+    Workflow-local, like `AgentStepResult`'s unwrapping: the fold keeps `entries` as the step's
+    result and names `dropped` in the run's degradations.
+    """
+
+    entries: list[dict[str, Any]]
+    dropped: list[int]
 
 
 # On the light queue: the sequencer only substitutes and dispatches; the weight is in the steps.
@@ -319,6 +342,12 @@ class TemplateWorkflow:
                     if result.degraded:
                         degradations[step.id] = result.notice()
                     result = result.step_value()
+                elif isinstance(result, _Mapped):
+                    if result.dropped:
+                        degradations[step.id] = (
+                            f"map dropped item(s) {result.dropped}, which failed; the rest ran"
+                        )
+                    result = result.entries
                 results[step.id] = result
                 scope[f"steps.{step.id}.result"] = result
 
@@ -540,7 +569,165 @@ class TemplateWorkflow:
             )
         if isinstance(step, JobStep):
             return await self._run_job_step(step, scope, identity, timeout)
+        if isinstance(step, MapStep):
+            return await self._run_map(step, scope, identity, timeout)
+        if isinstance(step, SelectStep):
+            # Pure and in workflow code: a sort over a list already in history needs no activity.
+            return select(resolve(step.from_, scope), step)
         raise ValueError(f"unknown template step kind {type(step).__name__}")
+
+    async def _run_map(
+        self,
+        step: MapStep,
+        scope: dict[str, Any],
+        identity: StepIdentity,
+        timeout: timedelta,
+    ) -> _Mapped:
+        """Run the inner step once per item, at most `step.concurrency` at a time.
+
+        Poison-tolerant: a failed item is dropped and named, its siblings run on. A list longer than
+        `max_items` is refused before anything starts, since the run ceiling was sized from it; a
+        map whose every item failed fails the step. No patch marker: a `map` step cannot occur in a
+        history written before this kind existed, and the other kinds dispatch as before.
+        """
+        items = resolve(step.over, scope)
+        if not isinstance(items, list):
+            raise ValueError(
+                f"map step {step.id!r} runs over {step.over!r}, which is a "
+                f"{type(items).__name__}, not a list"
+            )
+        if len(items) > step.max_items:
+            raise ValueError(
+                f"map step {step.id!r} was given {len(items)} items, above its max_items="
+                f"{step.max_items}; the run ceiling was sized for at most that many"
+            )
+        scopes = [{**scope, step.as_: item} for item in items]
+        if isinstance(step.step, JobStep):
+            settled = await self._map_jobs(step, step.step, scopes, identity, timeout)
+        else:
+            settled = await self._map_tools(step, step.step, scopes, identity, timeout)
+        if items and not settled:
+            raise ValueError(f"map step {step.id!r} failed for every one of its {len(items)} items")
+        survived = {index for index, _result in settled}
+        return _Mapped(
+            entries=[
+                {"index": index, "item": items[index], "result": result}
+                for index, result in settled
+            ],
+            dropped=[index for index in range(len(items)) if index not in survived],
+        )
+
+    async def _map_tools(
+        self,
+        step: MapStep,
+        inner: ToolStep,
+        scopes: list[dict[str, Any]],
+        identity: StepIdentity,
+        timeout: timedelta,
+    ) -> list[tuple[int, Any]]:
+        """One tool activity per item, in fixed batches of `concurrency`, failures dropped.
+
+        Batches rather than a semaphore, as `_run_wave` does, so dispatch is replay-deterministic.
+        """
+        settled: list[tuple[int, Any]] = []
+        indexed = list(enumerate(scopes))
+        for batch in batches(tuple(indexed), step.concurrency):
+            outcomes = await asyncio.gather(
+                *(
+                    self._run_step(inner, item_scope, identity, timeout, "")
+                    for _, item_scope in batch
+                ),
+                return_exceptions=True,
+            )
+            for (index, _scope), outcome in zip(batch, outcomes, strict=True):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                if isinstance(outcome, BaseException):
+                    workflow.logger.warning(
+                        "map step %s dropped item %d: %s", step.id, index, failure_reason(outcome)
+                    )
+                    continue
+                settled.append((index, outcome))
+        return settled
+
+    async def _map_jobs(
+        self,
+        step: MapStep,
+        inner: JobStep,
+        scopes: list[dict[str, Any]],
+        identity: StepIdentity,
+        timeout: timedelta,
+    ) -> list[tuple[int, Any]]:
+        """One connector job child per item through `fan_out`, ids suffixed by item index.
+
+        Every item is authorized first, so a refusal (an unknown job, a missing role) fails the step
+        before any compute starts. The child id is `child_workflow_id(f"{step.id}-{index}")`, which
+        `fan_out` builds from its prefix; the ceiling is the job wrapper's own, as for a `job` step.
+        """
+        authorized = await asyncio.gather(
+            *(self._authorize(inner, item_scope, identity, timeout) for item_scope in scopes),
+            return_exceptions=True,
+        )
+        resolved: list[ResolvedJob] = []
+        # The first refusal in item order, never in completion order, so the failure replays.
+        for outcome in authorized:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            resolved.append(outcome)
+        info = workflow.info()
+        return await fan_out_indexed(
+            ConnectorJobWorkflow,
+            [
+                self._job_input(
+                    job,
+                    identity,
+                    step.purpose or f"template map step {step.id!r} item {index} (job {inner.job})",
+                )
+                for index, job in enumerate(resolved)
+            ],
+            id_prefix=f"{info.run_id}-{step.id}",
+            max_parallel=step.concurrency,
+            execution_timeout=wrapper_execution_timeout(),
+        )
+
+    async def _authorize(
+        self, step: JobStep, scope: dict[str, Any], identity: StepIdentity, timeout: timedelta
+    ) -> ResolvedJob:
+        """Resolve and authorize one job step as the requester, recorded in history.
+
+        A local activity because resolving reads bundles off disk, and an unknown job name raised in
+        workflow code would suspend the run forever instead of failing it. It returns the validated
+        payload, which is what the child is started with.
+        """
+        return await workflow.execute_local_activity(
+            authorize_job_step,
+            JobStepInput(job=step.job, arguments=resolve(step.arguments, scope), identity=identity),
+            start_to_close_timeout=timeout,
+            retry_policy=retry_for(authorize_job_step),
+        )
+
+    @staticmethod
+    def _job_input(
+        resolved: ResolvedJob, identity: StepIdentity, rationale: str
+    ) -> ConnectorJobInput:
+        """The wrapper's input for one authorized job, as the chat path would launch it."""
+        return ConnectorJobInput(
+            connector=resolved.connector,
+            job=resolved.job,
+            workflow=resolved.workflow,
+            task_queue=resolved.task_queue,
+            # The validated payload the authorizing activity returned, never the raw arguments.
+            payload=resolved.payload,
+            rationale=rationale,
+            requested_by=identity.actor,
+            # Both ids are required downstream: `ConnectorJobWorkflow._notify_failure` skips a job
+            # with no session, and the correlation id joins the job back to this run.
+            session_id=identity.session_id,
+            correlation_id=identity.correlation_id,
+            # The job's manifest and configuration terms, as on the chat path: its ceiling, its
+            # declared effect and whether it waits on a person.
+            **resolved.terms(),
+        )
 
     async def _run_job_step(
         self,
@@ -555,46 +742,20 @@ class TemplateWorkflow:
         `ConnectorJobWorkflow` keeps the job's cross-cutting concerns (note write, attribution) in
         one place.
         """
-        # Resolved by a local activity so the answer is recorded in history: resolving reads bundles
-        # off disk, and an unknown job name raised in workflow code would suspend the run forever
-        # instead of failing it. The activity also authorizes the step as the requester and returns
-        # the validated payload, which is what the child is started with.
-        resolved = await workflow.execute_local_activity(
-            authorize_job_step,
-            JobStepInput(
-                job=step.job,
-                arguments=resolve(step.arguments, scope),
-                identity=identity,
-            ),
-            start_to_close_timeout=timeout,
-            retry_policy=retry_for(authorize_job_step),
-        )
+        resolved = await self._authorize(step, scope, identity, timeout)
         # Addressed by type name, so the child's return is untyped at the call site; `result_type`
         # is what actually decodes it into a `ConnectorJobResult`.
         return cast(
             ConnectorJobResult,
             await workflow.execute_child_workflow(
                 "ConnectorJobWorkflow",
-                ConnectorJobInput(
-                    connector=resolved.connector,
-                    job=resolved.job,
-                    workflow=resolved.workflow,
-                    task_queue=resolved.task_queue,
-                    # The validated payload the authorizing activity returned, never the raw
-                    # arguments.
-                    payload=resolved.payload,
-                    # The step's declared purpose is the rationale; a step without one gets a
-                    # non-blank deterministic fallback, since `ConnectorJobInput` requires one.
-                    rationale=step.purpose or f"template step {step.id!r} (job {step.job})",
-                    requested_by=identity.actor,
-                    # Both ids are required downstream: `ConnectorJobWorkflow._notify_failure` skips
-                    # a job with no session, and the correlation id joins the job back to this run.
-                    session_id=identity.session_id,
-                    correlation_id=identity.correlation_id,
-                    # The job's manifest and configuration terms, as on the chat path: its
-                    # ceiling, its declared effect and whether it waits on a person. The wrapper's
-                    # `execution_timeout` below is a separate, step-level bound.
-                    **resolved.terms(),
+                # The step's declared purpose is the rationale; a step without one gets a non-blank
+                # deterministic fallback, since `ConnectorJobInput` requires one. The wrapper's
+                # `execution_timeout` below is a separate, step-level bound.
+                self._job_input(
+                    resolved,
+                    identity,
+                    step.purpose or f"template step {step.id!r} (job {step.job})",
                 ),
                 # Named from the run's execution, not just its id: `ALLOW_DUPLICATE_FAILED_ONLY`
                 # re-executes under the same id, and a step-id-only child id would collide. See

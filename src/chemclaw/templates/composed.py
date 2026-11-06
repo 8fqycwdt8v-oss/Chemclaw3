@@ -23,7 +23,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.jsonb import json_column
-from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
+from chemclaw.templates.manifest import (
+    AgentStep,
+    JobStep,
+    MapStep,
+    SelectStep,
+    Template,
+    ToolStep,
+    dispatched,
+)
 
 #: How many workflows one owner may keep. A bound rather than a policy: the listing is read into a
 #: tool result, and an unbounded one is the shape `agent/tool_result_size.py` exists to cut.
@@ -68,7 +76,8 @@ def authored_problems(template: Template, side_effecting: frozenset[str]) -> lis
     - a step kind this function does not recognise, refused so a new kind fails closed.
 
     An `agent` step is allowed: with no writes declared its surface is narrowed to reads, so
-    reasoning stays free while the procedure cannot act.
+    reasoning stays free while the procedure cannot act. A `map` is judged by the step it wraps (a
+    read-only tool, or a job that then needs approval like any other), and a `select` runs nothing.
 
     Args:
         template: The document to check.
@@ -80,7 +89,8 @@ def authored_problems(template: Template, side_effecting: frozenset[str]) -> lis
         One line per problem, empty when nothing here refuses the document.
     """
     problems: list[str] = []
-    for step in template.steps:
+    for declared in template.steps:
+        step = dispatched(declared)
         if isinstance(step, ToolStep):
             if step.tool in side_effecting:
                 problems.append(
@@ -96,7 +106,7 @@ def authored_problems(template: Template, side_effecting: frozenset[str]) -> lis
                     "reviewed template in `data/templates/` may declare those; a workflow you "
                     "composed may not hand a model a write to spend."
                 )
-        elif not isinstance(step, JobStep):
+        elif not isinstance(step, JobStep | SelectStep):
             # Unknown step kinds are refused: here "allowed" means "exempt from the plan gate", so
             # this must fail closed.
             problems.append(
@@ -115,19 +125,26 @@ def step_call(step: object) -> tuple[str, dict[str, object], str]:
     `/approve-workflow`. Reads fields by `getattr` rather than branching on step classes, so a new
     step kind still renders (and `authored_problems` refuses it).
     """
+    if isinstance(step, SelectStep):
+        return ("", step.model_dump(by_alias=True, include={"from_", "by", "order", "top"}), "")
+    inner = step.step if isinstance(step, MapStep) else step
+    arguments = dict(getattr(inner, "arguments", {}) or {})
+    if isinstance(step, MapStep):
+        # The list and the item's name, beside the per-item arguments that use it.
+        arguments = {"over": step.over, "as": step.as_, **arguments}
     return (
-        str(getattr(step, "tool", "") or getattr(step, "job", "")),
-        dict(getattr(step, "arguments", {}) or {}),
-        str(getattr(step, "prompt", "") or ""),
+        str(getattr(inner, "tool", "") or getattr(inner, "job", "")),
+        arguments,
+        str(getattr(inner, "prompt", "") or ""),
     )
 
 
 def job_steps(template: Template) -> list[str]:
-    """The ids of every `job` step in `template`, in declared order.
+    """The ids of every `job` step in `template`, a map over a job included, in declared order.
 
     Shared by the enforcement and the route that shows a person what an approval would authorize.
     """
-    return [step.id for step in template.steps if isinstance(step, JobStep)]
+    return [step.id for step in template.steps if isinstance(dispatched(step), JobStep)]
 
 
 def unapproved_jobs(template: Template, approved_fingerprint: str, fingerprint: str) -> list[str]:

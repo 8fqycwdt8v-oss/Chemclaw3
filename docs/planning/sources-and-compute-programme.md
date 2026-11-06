@@ -376,22 +376,29 @@ Rollback: no backend enabled = today's system; `qm` is off until `CHEMCLAW_COMPU
 Entry: W12 Track A/B; ADRs H, I, J; W5.6 merged for Track C. Size M–L. Repo: core (+ UI).
 
 ### Track A — Template `map` and `select`
-- [ ] **W13.1** `templates/manifest.py`: `MapStep{over: ref to a list, as: str, step: ToolStep |
+- [x] **W13.1** `templates/manifest.py`: `MapStep{over: ref to a list, as: str, step: ToolStep |
       JobStep, max_items ≤ template_map_max_items, concurrency}` and `SelectStep{from: ref,
       by: field path, order: asc|desc, top: int, where: list of {field, op, value}}`
       (deterministic, no expressions). Update `_step_value`, `step_references`,
-      `templates/resolve.py` (the item variable), `templates/schedule.py`.
-- [ ] **W13.2** `durable/template_job.py`: dispatch for both kinds; `map` uses
+      `templates/resolve.py` (the item variable), `templates/schedule.py`. *(Done in this PR. The
+      deployment bounds are checked by `template_surface.step_problems`, not the model, so lowering
+      one never fails a pinned run's deserialization.)*
+- [x] **W13.2** `durable/template_job.py`: dispatch for both kinds; `map` uses
       `durable/orchestrator.py::fan_out` (bounded, poison-tolerant) with child ids
       `child_workflow_id(f"{step.id}-{index}")`; patch marker and `tests/test_workflow_replay.py`
       coverage; `template_step_ceilings()` and `agent/template_surface.py::run_ceiling_problems`
-      know the new kinds (ceiling = per-item ceiling × ⌈items / concurrency⌉).
-- [ ] **W13.3** `templates/composed.py::authored_problems`: an agent-authored `map` may wrap only
+      know the new kinds (ceiling = per-item ceiling × ⌈items / concurrency⌉). *(Done in this PR,
+      without a patch marker: no recorded history can hold a `map` or `select` step, and the
+      existing kinds issue the same commands, which the archived `TemplateWorkflow` histories
+      still replay to prove.)*
+- [x] **W13.3** `templates/composed.py::authored_problems`: an agent-authored `map` may wrap only
       read-only tool steps or jobs already allowed for composed workflows; `select` is always
-      allowed; `agent/workflow_tools.py::compose_workflow` learns both.
+      allowed; `agent/workflow_tools.py::compose_workflow` learns both. *(Done in this PR.)*
 - [ ] **W13.4** Shipped template `data/templates/screen-then-refine.yaml`: map xTB properties over
       candidates → select top-k → map DFT single points (W12) → select top-3 → agent write-up.
-      Live-lane probe with the mock backend.
+      Live-lane probe with the mock backend. *(Template shipped in this PR with an xTB refine stage
+      (`refine_ensemble` over the top three by HOMO); open: the DFT stage, which waits on W12
+      Track C, and the live-lane probe on the mock backend.)*
 
 ### Track B — Declarative BO objectives
 - [ ] **W13.5** `science/bo/objectives.py`: `ObjectiveSpec = Computed{primitive, field, direction,

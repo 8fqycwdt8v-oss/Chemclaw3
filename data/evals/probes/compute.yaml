@@ -38,12 +38,12 @@ probes:
     persona: lab_leader
     bucket: B
     question: "Screen these eight amines by the HOMO energy of their lowest-energy conformer, then refine only the top three with free-energy-weighted ensembles: morpholine C1COCCN1, piperidine C1CCNCC1, pyrrolidine C1CCNC1, N-methylpiperazine CN1CCNCC1, 4-methoxyaniline COc1ccc(N)cc1, 4-methylaniline Cc1ccc(N)cc1, 3-aminopyridine Nc1cccnc1, benzylamine NCc1ccccc1."
-    expects_tools: [sample_conformers, compute_electronic_properties, refine_ensemble, run_conformer_refinement, compose_workflow, run_composed_workflow]
+    expects_tools: [run_screen_then_refine, sample_conformers, compute_electronic_properties, refine_ensemble, run_conformer_refinement, compose_workflow, run_composed_workflow]
     expects_job: true
     forbids_claims:
       - "a HOMO energy for a molecule whose calculation did not run"
       - "free-energy results for more than the three selected amines, presented as part of the funnel"
-    direction: "Eight cheap screens, a selection of three by the stated criterion, and three refinements. A good answer shows the screening table, says which three were carried forward and why, and only then reports the refined results. Today no tool maps over a list and selects, so the agent either loops itself or says it cannot run the funnel in one go. Either is acceptable if what ran is reported exactly."
+    direction: "Eight cheap screens, a selection of three by the stated criterion, and three refinements. A good answer shows the screening table, says which three were carried forward and why, and only then reports the refined results. `run_screen_then_refine` runs this funnel as one durable job (screen by HOMO energy, keep the top three, free-energy-weighted ensembles for those); a composed map-and-select workflow or a step-by-step run is acceptable too if what ran is reported exactly. The screen uses one embedded geometry per amine, not the lowest conformer, and a good answer says so."
 
   - id: cp-03
     section: 6
