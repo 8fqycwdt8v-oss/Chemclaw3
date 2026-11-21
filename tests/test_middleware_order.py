@@ -27,7 +27,7 @@ from tests.fakes import scripted
 
 # The sequence as it compiles, outermost first. `create_agent` nests `wrap_tool_call` in list order,
 # so position is nesting depth. Recorded rather than derived so a change must be deliberate. Entries
-# 0-3 are upstream's core stack; ours land after the last core member. Positions worth explaining:
+# 0-4 are upstream's core stack; ours land after the last core member. Positions worth explaining:
 #
 # - `FilesystemMiddleware` is ours, occupying upstream's slot by sharing its name, which withholds
 #   `execute` and `delete`.
@@ -43,6 +43,9 @@ from tests.fakes import scripted
 _EXPECTED_ORDER = (
     "FilesystemMiddleware",
     "SubAgentMiddleware",
+    # Upstream's, on every deep agent: it reports to an Agent Server parent only when the run's
+    # config or metadata names one (`parent_thread_id`), which no run here carries, so it is inert.
+    "_ParentNotifierMiddleware",
     "SummarizationMiddleware",
     "PatchToolCallsMiddleware",
     # A capability middleware, not a gate: it owns the `todos` channel and contributes
@@ -111,6 +114,9 @@ _EXPECTED_ORDER = (
     "PromoteInvalidToolCalls",
     "RecordModelCalls",
     "AnthropicPromptCachingMiddleware",
+    # Upstream's, appended last by `deepagents.graph`: it swaps a content block the model's profile
+    # says it cannot accept (an image to a text-only model) for a text notice, request-side only.
+    "UnsupportedContentMiddleware",
 )
 
 

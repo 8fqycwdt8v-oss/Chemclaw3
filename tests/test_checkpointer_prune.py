@@ -24,8 +24,8 @@ from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 # One turn: a tool call, then the answer. `ls` is a `FilesystemMiddleware` verb, so the script needs
 # no connector and no server — what matters is that the turn takes two model calls and therefore
-# writes the thirteen checkpoints a real tool-calling turn writes.
-_TOOL_TURN: tuple[Any, ...] = ({"name": "ls", "args": {}}, "answered")
+# writes the checkpoints a real tool-calling turn writes.
+_TOOL_TURN: tuple[Any, ...] = ({"name": "ls", "args": {"path": "/"}}, "answered")
 
 
 def _script(turn: tuple[Any, ...], turns: int) -> ScriptedChatModel:
@@ -150,9 +150,12 @@ def test_a_thread_stops_growing_with_the_square_of_its_turns(
     assert unpruned["checkpoints"] > 100, (
         "the unpruned arm did not grow, so this fixture is not measuring what it claims to"
     )
-    assert pruned["checkpoints"] <= 20, (
+    # One turn's checkpoints, measured off the unpruned arm rather than written down: the count is
+    # the graph's superstep count, which moves whenever upstream adds a middleware node.
+    one_turn = unpruned["checkpoints"] // 12
+    assert pruned["checkpoints"] <= 3 + one_turn, (
         f"a pruned thread holds {pruned['checkpoints']} checkpoints after 12 turns; the bound is "
-        "the retained ones plus one turn's writes, and it must not grow with turn count"
+        f"the 3 retained plus one turn's {one_turn}, and it must not grow with turn count"
     )
     assert pruned["blob_bytes"] * 3 < unpruned["blob_bytes"], (
         f"pruning saved too little to be the fix: {pruned['blob_bytes']} against "

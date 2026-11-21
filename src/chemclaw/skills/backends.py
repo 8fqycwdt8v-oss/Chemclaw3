@@ -552,11 +552,11 @@ def org_skills_backend(store: Any, permits: Callable[[str], bool]) -> PermittedS
 class ReloadingSkillsState(SkillsState):
     """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
 
-    One redeclared field, and it is the whole reloading mechanism. Upstream annotates
-    `skills_metadata` with `PrivateStateAttr` only, so it resolves to a checkpointed `LastValue`;
+    One redeclared field, and it is the whole reloading mechanism. Upstream's `skills_metadata`
+    resolves to a checkpointed `LastValue` (a reload needs a caller to write `None` into it);
     `UntrackedValue` is never written to a checkpoint (`checkpoint()` returns `MISSING`), so the
     key is absent at the start of every run of the graph and upstream's own
-    `if "skills_metadata" in state: return None` short-circuit simply does not fire.
+    "already loaded" short-circuit simply does not fire.
 
     Measured over three turns on one thread, counting whether the key was already in state when
     `before_agent` ran: `[False, True, True]` on upstream's channel and `[False, False, False]` on
@@ -566,7 +566,9 @@ class ReloadingSkillsState(SkillsState):
     property of the channel, not of a caller who remembers to clear it.
     """
 
-    skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]
+    skills_metadata: NotRequired[
+        Annotated[list[SkillMetadata] | None, UntrackedValue, PrivateStateAttr]
+    ]
 
 
 class ReloadingSkillsMiddleware(SkillsMiddleware):

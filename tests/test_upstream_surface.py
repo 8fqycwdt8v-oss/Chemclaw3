@@ -306,8 +306,8 @@ def test_create_deep_agent_still_takes_the_parameters_the_harness_is_assembled_f
     )
 
 
-def test_the_filesystem_middleware_still_takes_its_permissions_under_a_private_name() -> None:
-    """The filesystem middleware still takes its permissions under the private `_permissions=`.
+def test_the_filesystem_middleware_takes_its_permissions_by_the_public_name() -> None:
+    """The filesystem middleware takes its permissions under the public `permissions=`.
 
     `agent/langgraph_agent._middleware` substitutes its own `FilesystemMiddleware` to withhold
     `execute`/`delete`, and the replacement must be handed the deny rules itself. The behaviour is
@@ -318,15 +318,10 @@ def test_the_filesystem_middleware_still_takes_its_permissions_under_a_private_n
     from deepagents.middleware.filesystem import FilesystemMiddleware
 
     parameters = inspect.signature(FilesystemMiddleware.__init__).parameters
-    assert "_permissions" in parameters, (
-        "FilesystemMiddleware no longer takes `_permissions`; agent/langgraph_agent._middleware "
+    assert "permissions" in parameters, (
+        "FilesystemMiddleware no longer takes `permissions`; agent/langgraph_agent._middleware "
         "passes the deny-rules to its replacement instance under that name, and without it the "
         "rules reach nothing"
-    )
-    assert "permissions" not in parameters, (
-        "FilesystemMiddleware now takes a *public* `permissions` — the underscored keyword this "
-        "repository reaches for has been promoted, so agent/langgraph_agent._middleware should "
-        "stop reaching past the API"
     )
 
 
@@ -1825,10 +1820,10 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
 
     assert producers == [
         # The two relays: a wrapped tool's own update, rebuilt with new messages.
-        "deepagents.middleware.filesystem:3422",
-        "deepagents.middleware.filesystem:3463",
+        "deepagents.middleware.filesystem:3801",
+        "deepagents.middleware.filesystem:3842",
         # The producer: `**state_update`, every key the subagent held that is not excluded.
-        "deepagents.middleware.subagents:507",
+        "deepagents.middleware.subagents:782",
     ], (
         f"the sites handing a caller a `Command` that can carry `files` are {producers}, and "
         "`agent/tool_result_size.py::batch_siblings` divides the helper file budget by the "
