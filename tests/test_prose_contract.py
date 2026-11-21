@@ -76,7 +76,7 @@ _A_REVIEW_PROMISE = re.compile(
 #: so a span assembled across flattened line breaks cannot exempt anything.
 #: `test_every_exemption_still_quotes_shipped_prose` fails when a quoted sentence is reworded.
 _TRUE_ABOUT_WHAT_IS_GONE: dict[tuple[str, str], str] = {
-    ("block:5", "never present one as if it were DFT"): (
+    ("block:6", "never present one as if it were DFT"): (
         "The system prompt telling the model not to overclaim the method. Actionable, and the "
         "opposite of describing a tier as reachable."
     ),
@@ -331,7 +331,7 @@ def test_an_exemption_cannot_form_across_a_line_break() -> None:
     The tail of one line plus the head of the next must not spell an exempted quote and swallow the
     offence that follows; the same offence one line later is the control.
     """
-    owner = "block:5"
+    owner = "block:6"
     swallowed = (
         "Report the method honestly and never present one as if it were\n"
         "DFT runs are dispatched to the cluster queue when GFN2 is not enough."
@@ -348,7 +348,7 @@ def test_an_exemption_cannot_form_across_a_line_break() -> None:
 def test_an_exemption_reaches_only_the_text_it_names() -> None:
     """A quote that is correct in one skill is not a licence in another."""
     borrowed = "Anywhere else: never present one as if it were DFT."
-    assert _first_offence(borrowed, _A_REMOVED_TIER, "block:5") is None
+    assert _first_offence(borrowed, _A_REMOVED_TIER, "block:6") is None
     assert _first_offence(borrowed, _A_REMOVED_TIER, "skill:deep-research") == "DFT"
 
 

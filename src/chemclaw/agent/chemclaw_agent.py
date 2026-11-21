@@ -126,6 +126,12 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         ),
     ),
     PromptBlock(
+        "find_calculations is the same check for one molecule: what has already been computed on "
+        "it, by SMILES or by the geometry a calculation reported, with the numbers — ask it "
+        "before computing a property again. ",
+        frozenset({"find_calculations"}),
+    ),
+    PromptBlock(
         "(2) For cross-learning by structure, similar_reactions gathers past runs of a "
         "transformation (a hit's id is the stem of its reaction-<id> note — expand_note it for the "
         "recipe), similar_molecules and substructure_matches find analogous substrates or a "
